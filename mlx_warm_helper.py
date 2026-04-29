@@ -1,0 +1,299 @@
+#!/usr/bin/env python3.11
+"""LTX warm helper — long-lived process holding MLX pipelines in memory.
+
+Reads JSON-line jobs from stdin, emits JSON-line events to stdout.
+
+Actions:
+  generate  — T2V or I2V (auto-resizes images to target dims via PIL cover-crop)
+  extend    — chain a clip by N latent frames (uses ExtendPipeline)
+  ping      — returns pong
+  exit      — graceful shutdown
+
+Auto-exits after LTX_IDLE_TIMEOUT seconds idle.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import random
+import sys
+import threading
+import time
+import traceback
+
+# ---- config ------------------------------------------------------------------
+# All paths come from env vars set by the panel. If LTX_GEMMA isn't set, the
+# pipeline falls back to downloading the HF model id, which works first-run.
+MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
+GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
+IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
+LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
+
+_real_stdout = sys.stdout
+_emit_lock = threading.Lock()
+
+
+def emit(event: dict) -> None:
+    try:
+        with _emit_lock:
+            _real_stdout.write(json.dumps(event) + "\n")
+            _real_stdout.flush()
+    except Exception:
+        pass
+
+
+class LineEmitter(io.TextIOBase):
+    def __init__(self):
+        self.buf = ""
+        self.lock = threading.Lock()
+
+    def writable(self):
+        return True
+
+    def write(self, s):
+        if not s:
+            return 0
+        with self.lock:
+            self.buf += s
+            while True:
+                idx_n = self.buf.find("\n")
+                idx_r = self.buf.find("\r")
+                idxs = [i for i in (idx_n, idx_r) if i != -1]
+                if not idxs:
+                    break
+                idx = min(idxs)
+                line = self.buf[:idx].strip()
+                self.buf = self.buf[idx + 1:]
+                if line:
+                    emit({"event": "log", "line": line})
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+sys.stdout = LineEmitter()
+sys.stderr = LineEmitter()
+
+# ---- idle reaper -------------------------------------------------------------
+_last_activity = time.time()
+_is_busy = False  # set during active generation; reaper skips while True
+
+
+def idle_reaper():
+    while True:
+        time.sleep(15)
+        if _is_busy:
+            continue
+        if time.time() - _last_activity > IDLE_TIMEOUT:
+            emit({"event": "exit", "reason": "idle"})
+            os._exit(0)
+
+
+threading.Thread(target=idle_reaper, daemon=True).start()
+
+# ---- pipelines (lazy) --------------------------------------------------------
+_t2v_pipe = None
+_i2v_pipe = None
+_extend_pipe = None
+_pipe_lock = threading.Lock()
+
+
+def get_pipe(kind: str):
+    """kind in {'t2v','i2v','extend'}"""
+    global _t2v_pipe, _i2v_pipe, _extend_pipe
+    from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+
+    with _pipe_lock:
+        if kind == "i2v":
+            if _i2v_pipe is None:
+                emit({"event": "log", "line": "Loading I2V pipeline (first job is the slow one)..."})
+                _i2v_pipe = ImageToVideoPipeline(
+                    model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                )
+            return _i2v_pipe
+        if kind == "extend":
+            if _extend_pipe is None:
+                emit({"event": "log", "line": "Loading Extend pipeline (heavier — uses dev transformer)..."})
+                _extend_pipe = ExtendPipeline(
+                    model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                )
+            return _extend_pipe
+        # t2v
+        if _t2v_pipe is None:
+            emit({"event": "log", "line": "Loading T2V pipeline (first job is the slow one)..."})
+            _t2v_pipe = TextToVideoPipeline(
+                model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+            )
+        return _t2v_pipe
+
+
+# ---- image preprocessing -----------------------------------------------------
+
+def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
+    """Cover-crop and resize to exactly w×h. Saves PNG and returns its path."""
+    from PIL import Image
+    out_path = f"/tmp/ltx_helper_image_{os.getpid()}_{int(time.time()*1000)}.png"
+    img = Image.open(src_path).convert("RGB")
+    src_w, src_h = img.size
+    if (src_w, src_h) == (w, h):
+        img.save(out_path)
+        return out_path
+    src_ratio = src_w / src_h
+    dst_ratio = w / h
+    if src_ratio > dst_ratio:
+        new_w = int(round(src_h * dst_ratio))
+        left = (src_w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, src_h))
+    elif src_ratio < dst_ratio:
+        new_h = int(round(src_w / dst_ratio))
+        top = (src_h - new_h) // 2
+        img = img.crop((0, top, src_w, top + new_h))
+    if img.size != (w, h):
+        img = img.resize((w, h), Image.LANCZOS)
+    img.save(out_path)
+    emit({"event": "log", "line": f"Resized image {src_w}x{src_h} → {w}x{h} (cover-crop)"})
+    return out_path
+
+
+# ---- ready -------------------------------------------------------------------
+emit({
+    "event": "ready",
+    "model": MODEL_ID,
+    "gemma": GEMMA_PATH,
+    "low_memory": LOW_MEMORY,
+    "idle_timeout_sec": IDLE_TIMEOUT,
+})
+
+
+# ---- main loop ---------------------------------------------------------------
+for line in sys.__stdin__:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception as exc:
+        emit({"event": "error", "error": f"bad json: {exc}"})
+        continue
+
+    _last_activity = time.time()
+    action = msg.get("action")
+
+    if action == "exit":
+        emit({"event": "exit", "reason": "shutdown"})
+        os._exit(0)
+
+    if action == "ping":
+        emit({"event": "pong"})
+        continue
+
+    if action == "generate":
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        mode = p.get("mode", "t2v")
+        if mode not in ("t2v", "i2v", "i2v_clean_audio"):
+            emit({"event": "error", "id": job_id, "error": f"unsupported mode: {mode}"})
+            continue
+        needs_image = mode != "t2v"
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+
+        _is_busy = True
+        try:
+            t0 = time.time()
+            pipe = get_pipe("i2v" if needs_image else "t2v")
+
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=int(p["frames"]),
+                seed=seed,
+                num_steps=int(p.get("steps", 8)),
+            )
+            if needs_image:
+                src_image = p.get("image")
+                if src_image:
+                    if not os.path.exists(src_image):
+                        raise RuntimeError(f"image not found: {src_image}")
+                    # Pass the source path straight through. The pipeline's
+                    # prepare_image_for_encoding does its own cover-crop + LANCZOS
+                    # at the target W×H. Our previous pre-resize round-tripped
+                    # through PNG and added quality loss for zero benefit.
+                    kwargs["image"] = src_image
+                    try:
+                        from PIL import Image as _Image
+                        _w, _h = _Image.open(src_image).size
+                        emit({"event": "log", "line": f"Image {_w}x{_h} → pipeline will cover-crop to {kwargs['width']}x{kwargs['height']}"})
+                    except Exception:
+                        pass
+                else:
+                    kwargs["image"] = None
+
+            out_path = pipe.generate_and_save(**kwargs)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    if action == "extend":
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            pipe = get_pipe("extend")
+            video_path = p["video_path"]
+            if not os.path.exists(video_path):
+                raise RuntimeError(f"source video not found: {video_path}")
+            video_lat, audio_lat = pipe.extend_from_video(
+                prompt=p["prompt"],
+                video_path=video_path,
+                extend_frames=int(p.get("extend_frames", 5)),
+                direction=p.get("direction", "after"),
+                seed=seed,
+                num_steps=int(p.get("steps", 30)),
+            )
+            # Decode + save (mirrors the CLI _decode_and_save)
+            from ltx_core_mlx.utils.memory import aggressive_cleanup
+            if pipe.low_memory:
+                pipe.dit = None
+                pipe.text_encoder = None
+                pipe.feature_extractor = None
+                pipe._loaded = False
+                aggressive_cleanup()
+            pipe._load_decoders()
+            pipe._decode_and_save_video(video_lat, audio_lat, p["output_path"])
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": p["output_path"], "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    emit({"event": "error", "error": f"unknown action: {action}"})
+
+emit({"event": "exit", "reason": "stdin_closed"})
