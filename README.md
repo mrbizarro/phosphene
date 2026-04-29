@@ -1,10 +1,16 @@
-<a href="https://x.com/AIBizarrothe">
-  <img src="assets/bizarro-avatar.jpg" align="right" width="84" height="84" style="border-radius: 50%;" alt="by Mr. Bizarro on X">
-</a>
+<p align="center">
+  <img src="assets/logo-readme.png" alt="LTX23MLX" width="600">
+</p>
 
-# LTX23MLX — local control panel for LTX Video 2.3 on Apple Silicon
+<p align="center">
+  <a href="https://x.com/AIBizarrothe">
+    <img src="assets/bizarro-avatar.jpg" width="48" height="48" style="border-radius: 50%;" alt="by Mr. Bizarro on X">
+  </a>
+  <br>
+  <em>by <a href="https://x.com/AIBizarrothe">Mr. Bizarro</a> — follow on X</em>
+</p>
 
-_by [Mr. Bizarro](https://x.com/AIBizarrothe) — follow on X_
+# Local control panel for LTX Video 2.3 on Apple Silicon
 
 A polished web panel that wraps the [`dgrauet/ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx) MLX port of LTX Video 2.3. Runs entirely locally on Apple Silicon Macs — no cloud, no API keys, no subscription. Persistent batch queue, warm pipeline subprocess, image-to-video with auto cover-crop, lossless h264 output, output gallery with hide/unhide, extend mode for longer clips, and crash-safe queue resume.
 
