@@ -512,6 +512,20 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
+    quality = p.get("quality", "standard")
+
+    # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
+    # sigma=0. Truncating below 8 steps leaves the image partially denoised
+    # (sigma=0.725 at 6 steps, sigma=0.975 at 4 steps) — i.e. literal noise.
+    # Block before the user wastes 7+ minutes producing static.
+    if mode != "extend" and quality != "high" and int(p.get("steps", 8)) < 8:
+        raise RuntimeError(
+            f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
+            "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
+            "the output (this is what you saw last run). Use steps=8 for standard "
+            "renders, or pick Quality=Draft for a faster smaller-resolution render at "
+            "the same 8 steps."
+        )
 
     if p["stop_comfy"]:
         kill_comfy()
@@ -1345,8 +1359,8 @@ HTML = r"""<!doctype html>
 
         <label>Quality</label>
         <select name="quality" id="quality" onchange="applyQuality()">
-          <option value="draft">Draft — Q4 · 4 steps · ~3 min for 5s</option>
-          <option value="standard" selected>Standard — Q4 · 8 steps · ~7 min for 5s</option>
+          <option value="draft">Draft — Q4 · smaller aspect · 8 steps · ~3 min for 5s</option>
+          <option value="standard" selected>Standard — Q4 · 1280×704 · 8 steps · ~7 min for 5s</option>
           <option value="high" id="qualityHigh" disabled>High — Q8 two-stage + TeaCache · ~12 min for 5s (Q8 not installed)</option>
         </select>
 
@@ -1510,13 +1524,26 @@ function setDuration(s) {
 
 function applyQuality() {
   const q = document.getElementById('quality').value;
-  if (q === 'draft')         document.getElementById('steps').value = 4;
-  else if (q === 'standard') document.getElementById('steps').value = 8;
-  else if (q === 'high') {
-    // High = Q8 two-stage HQ (stage1=15, stage2=3 internally). Steps field
-    // is informational only — the helper routes to a different action when
-    // quality=high (TBD, requires Q8 + helper update).
-    document.getElementById('steps').value = 18; // 15+3 for display purposes
+  // CRITICAL: Q4 distilled uses a hardcoded 9-sigma schedule. Fewer than 8 steps
+  // truncates the schedule and leaves the image at sigma=0.725+ — i.e. >70% noise.
+  // Speed for Draft comes from rendering at a smaller aspect, NOT fewer steps.
+  if (q === 'draft' || q === 'standard') {
+    document.getElementById('steps').value = 8;
+  } else if (q === 'high') {
+    // Q8 two-stage HQ uses stage1=15, stage2=3 internally — steps field is
+    // informational here. Helper routes to a different action.
+    document.getElementById('steps').value = 18;
+  }
+  // Draft also snaps the aspect to a smaller variant matching the current ratio.
+  if (q === 'draft') {
+    const w = parseInt(document.getElementById('width').value || 1280);
+    const h = parseInt(document.getElementById('height').value || 704);
+    const ratio = w / h;
+    if (ratio > 1.5)        { document.getElementById('width').value = 768; document.getElementById('height').value = 432; }
+    else if (ratio < 0.7)   { document.getElementById('width').value = 432; document.getElementById('height').value = 768; }
+    else                    { document.getElementById('width').value = 512; document.getElementById('height').value = 512; }
+    document.getElementById('aspect').value = 'custom';
+    document.getElementById('preset_label').value = 'Draft';
   }
   updateDerived();
 }
