@@ -1113,6 +1113,8 @@ HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LTX23MLX Studio</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png">
+  <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
       --bg: #0b0e13; --bg-2: #0d1117; --panel: #161b22; --panel-2: #1c2230;
@@ -1385,6 +1387,14 @@ HTML = r"""<!doctype html>
       padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
     }
     .tabs .spacer { flex: 1; }
+    .tabs .model-credit {
+      font-size: 11px; color: var(--muted); padding: 0 12px;
+      text-decoration: none; border-right: 1px solid var(--border);
+      align-self: stretch; display: inline-flex; align-items: center;
+      transition: 0.12s;
+    }
+    .tabs .model-credit:hover { color: var(--accent-bright); }
+    .tabs .model-credit::after { content: " ↗"; opacity: 0.6; margin-left: 4px; }
     .tabs .tab-collapse {
       width: auto; padding: 4px 8px; font-size: 11px; background: transparent;
       border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px;
@@ -1468,7 +1478,6 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand"><img src="/assets/logo-header.png" alt="LTX23MLX"></a>
-  <span class="tag" id="modelTag"></span>
   <span class="spacer"></span>
   <span id="memPill" class="pill">memory…</span>
   <span id="comfyPill" class="pill" style="display:none">comfy…</span>
@@ -1661,6 +1670,7 @@ HTML = r"""<!doctype html>
     <button data-tab="recent">Recent</button>
     <button data-tab="logs">Logs</button>
     <span class="spacer"></span>
+    <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
     <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">Collapse</button>
   </nav>
   <div class="bottom-body">
@@ -1714,7 +1724,17 @@ let activePath = null;
 let currentOutputs = [];
 let currentMode = 't2v';
 
-document.getElementById('modelTag').textContent = BOOT.model;
+// Model tag in the bottom-pane nav links to dgrauet's repo. Strip an
+// absolute filesystem path back to the HF repo id form for display
+// (the panel sets LTX_MODEL to a local path in Pinokio installs).
+(function () {
+  const m = String(BOOT.model || '');
+  let label = m;
+  const idx = m.indexOf('mlx_models/');
+  if (idx >= 0) label = m.slice(idx + 'mlx_models/'.length);
+  if (label.startsWith('/')) label = label.split('/').slice(-2).join('/');
+  document.getElementById('modelTag').textContent = label;
+})();
 document.getElementById('image').value = BOOT.default_image;
 document.getElementById('audio').value = BOOT.default_audio;
 
