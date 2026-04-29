@@ -22,13 +22,16 @@ module.exports = {
 
     // ---- Create venv + install MLX pipeline packages ----------------------
     // Pinokio creates ./ltx-2-mlx/env/ and activates it for the message commands.
+    // Non-editable install (no -e): packages get copied into env/lib/.../site-packages/
+    // which is where the codec patch script looks for video_vae.py. With -e the
+    // patch can't find its target file because the runtime imports from packages/.
     {
       method: "shell.run",
       params: {
         venv: "env",
         path: "ltx-2-mlx",
         message: [
-          "uv pip install -e packages/ltx-core-mlx packages/ltx-pipelines-mlx",
+          "uv pip install ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
           "uv pip install pillow numpy"
         ]
       }

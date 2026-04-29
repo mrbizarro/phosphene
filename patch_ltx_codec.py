@@ -16,8 +16,12 @@ import sys
 from pathlib import Path
 
 CANDIDATES = [
+    # Pinokio install: venv name is "env"
     "ltx-2-mlx/env/lib/python3.11/site-packages/ltx_core_mlx/model/video_vae/video_vae.py",
+    # Manual install: venv name is ".venv"
     "ltx-2-mlx/.venv/lib/python3.11/site-packages/ltx_core_mlx/model/video_vae/video_vae.py",
+    # Editable install (`pip install -e`): patch the source directly
+    "ltx-2-mlx/packages/ltx-core-mlx/src/ltx_core_mlx/model/video_vae/video_vae.py",
 ]
 
 OLD = 'cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])'
