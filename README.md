@@ -105,10 +105,17 @@ Same-seed re-roll is the workflow: pick a seed at Draft (cheap), confirm at Stan
 Q8 is a separate download. Run this one-time inside the Pinokio install dir (or the manual install dir):
 
 ```bash
+# Pinokio install: huggingface-cli is on PATH via the "ai" bundle
 huggingface-cli download dgrauet/ltx-2.3-mlx-q8 --local-dir mlx_models/ltx-2.3-mlx-q8
+
+# Manual install: use the Python API (works on any huggingface_hub version)
+ltx-2-mlx/.venv/bin/python3.11 -c \
+  "from huggingface_hub import snapshot_download; \
+   snapshot_download(repo_id='dgrauet/ltx-2.3-mlx-q8', \
+                     local_dir='mlx_models/ltx-2.3-mlx-q8', max_workers=8)"
 ```
 
-The panel auto-detects Q8 on disk and enables the High option in the dropdown.
+The panel auto-detects Q8 on disk and enables the High option in the dropdown within ~2 seconds.
 
 ## Configuration via env vars
 

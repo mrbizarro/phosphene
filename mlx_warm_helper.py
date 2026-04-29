@@ -97,6 +97,8 @@ threading.Thread(target=idle_reaper, daemon=True).start()
 _t2v_pipe = None
 _i2v_pipe = None
 _extend_pipe = None
+_hq_pipe = None          # TwoStageHQPipeline (Q8, res_2s + CFG, optional TeaCache)
+_hq_model_dir = None     # remember which model the HQ pipe was built against
 _pipe_lock = threading.Lock()
 
 
@@ -127,6 +129,26 @@ def get_pipe(kind: str):
                 model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
             )
         return _t2v_pipe
+
+
+def get_hq_pipe(model_dir: str):
+    """Returns the TwoStageHQPipeline lazily — Q8 model, res_2s sampler, CFG anchor.
+
+    Same class handles both T2V (image=None) and I2V via the `image` kwarg of
+    `generate_and_save`. We rebuild the pipe if the requested model_dir changes
+    (e.g. user swapped Q8 for a different quant).
+    """
+    global _hq_pipe, _hq_model_dir
+    from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
+
+    with _pipe_lock:
+        if _hq_pipe is None or _hq_model_dir != model_dir:
+            emit({"event": "log", "line": f"Loading HQ pipeline (Q8 dev model — {model_dir})..."})
+            _hq_pipe = TwoStageHQPipeline(
+                model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+            )
+            _hq_model_dir = model_dir
+        return _hq_pipe
 
 
 # ---- image preprocessing -----------------------------------------------------
@@ -285,6 +307,54 @@ for line in sys.__stdin__:
             emit({
                 "event": "done", "id": job_id,
                 "output": p["output_path"], "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    if action == "generate_hq":
+        # Q8 two-stage HQ + optional TeaCache. Same TwoStageHQPipeline handles
+        # T2V (image=None) and I2V via the `image` kwarg.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID  # fallback if user forgot
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            pipe = get_hq_pipe(model_dir)
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=int(p["frames"]),
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 15)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+                cfg_scale=float(p.get("cfg_scale", 3.0)),
+                stg_scale=float(p.get("stg_scale", 1.0)),
+                enable_teacache=bool(p.get("enable_teacache", True)),
+                teacache_thresh=float(p.get("teacache_thresh", 1.0)),
+            )
+            img = p.get("image")
+            if img:
+                if not os.path.exists(img):
+                    raise RuntimeError(f"image not found: {img}")
+                kwargs["image"] = img
+                emit({"event": "log", "line": f"HQ I2V — pipeline will cover-crop image to {kwargs['width']}x{kwargs['height']}"})
+            out_path = pipe.generate_and_save(**kwargs)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
                 "seed_used": seed,
             })
         except Exception as exc:

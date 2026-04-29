@@ -500,6 +500,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
+            "quality": f("quality", "standard"),  # draft / standard / high
         },
         "command": None,
         "raw_path": None,
@@ -564,28 +565,61 @@ def run_job_inner(job: dict) -> None:
     # T2V / I2V / I2V+clean_audio
     width, height = p["width"], p["height"]
     frames = p["frames"]
+    quality = p.get("quality", "standard")
     pad_w, pad_h, pad_filter = compute_pad(width, height)
     suffix = f"{pad_w}x{pad_h}" if mode == "i2v_clean_audio" and pad_filter else f"{width}x{height}"
-    raw_out = OUTPUT / f"mlx_{mode}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
-    final_out = OUTPUT / f"mlx_{mode}_{suffix}_{frames}f_{stamp}.mp4"
+    tag = f"{mode}_hq" if quality == "high" else mode
+    raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
+    final_out = OUTPUT / f"mlx_{tag}_{suffix}_{frames}f_{stamp}.mp4"
     job["raw_path"] = str(raw_out)
 
-    job_spec = {
-        "action": "generate",
-        "id": job["id"],
-        "params": {
-            "mode": mode,
-            "prompt": p["prompt"],
-            "output_path": str(raw_out),
-            "height": height,
-            "width": width,
-            "frames": frames,
-            "steps": p["steps"],
-            "seed": p["seed"],
-            "image": p["image"] if mode != "t2v" else None,
-        },
-    }
-    push(f"Run via helper: id={job['id']} mode={mode} {width}x{height} {frames}f")
+    if quality == "high":
+        # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
+        # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
+        if not Q8_LOCAL_PATH.exists() or not any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else []):
+            raise RuntimeError(
+                f"High quality requires Q8 model at {Q8_LOCAL_PATH}. "
+                f"Run: huggingface-cli download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+            )
+        job_spec = {
+            "action": "generate_hq",
+            "id": job["id"],
+            "params": {
+                "model_dir": str(Q8_LOCAL_PATH),
+                "prompt": p["prompt"],
+                "output_path": str(raw_out),
+                "height": height,
+                "width": width,
+                "frames": frames,
+                "seed": p["seed"],
+                "image": p["image"] if mode != "t2v" else None,
+                "stage1_steps": 15,
+                "stage2_steps": 3,
+                "cfg_scale": 3.0,
+                "stg_scale": 1.0,
+                "enable_teacache": True,
+                "teacache_thresh": 1.0,
+            },
+        }
+        push(f"Run HIGH via helper: id={job['id']} mode={mode} {width}x{height} {frames}f · Q8 two-stage HQ + TeaCache")
+    else:
+        # Draft / Standard — Q4 one-stage with steps from form.
+        job_spec = {
+            "action": "generate",
+            "id": job["id"],
+            "params": {
+                "mode": mode,
+                "prompt": p["prompt"],
+                "output_path": str(raw_out),
+                "height": height,
+                "width": width,
+                "frames": frames,
+                "steps": p["steps"],
+                "seed": p["seed"],
+                "image": p["image"] if mode != "t2v" else None,
+            },
+        }
+        push(f"Run via helper: id={job['id']} mode={mode} quality={quality} {width}x{height} {frames}f")
 
     result = HELPER.run(job_spec)
     if "seed_used" in result:
