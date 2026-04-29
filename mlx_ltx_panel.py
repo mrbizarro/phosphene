@@ -1392,8 +1392,8 @@ HTML = r"""<!doctype html>
 
       <h2>Quality</h2>
       <div class="pill-group cols-3" id="qualityGroup">
-        <button type="button" class="pill-btn" data-quality="draft"><span>Draft</span><span class="sub">small · ~3 min</span></button>
-        <button type="button" class="pill-btn active" data-quality="standard"><span>Standard</span><span class="sub">Q4 · ~7 min</span></button>
+        <button type="button" class="pill-btn" data-quality="draft"><span>Draft</span><span class="sub">half size · ~2 min</span></button>
+        <button type="button" class="pill-btn active" data-quality="standard"><span>Standard</span><span class="sub">full size · ~7 min</span></button>
         <button type="button" class="pill-btn disabled" data-quality="high" id="qualityHigh"><span>High</span><span class="sub" id="highSub">Q8 not installed</span></button>
       </div>
       <input type="hidden" name="quality" id="quality" value="standard">
@@ -1461,11 +1461,9 @@ HTML = r"""<!doctype html>
       <!-- Sizing for non-extend modes -->
       <div class="mode-only" id="sizingSection">
         <h2>Aspect</h2>
-        <div class="pill-group cols-4" id="aspectGroup">
-          <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">1280 × 704</span></button>
-          <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">704 × 1280</span></button>
-          <button type="button" class="pill-btn" data-aspect="square"><span>1 : 1</span><span class="sub">768 × 768</span></button>
-          <button type="button" class="pill-btn" data-aspect="test"><span>Test</span><span class="sub">512 × 288</span></button>
+        <div class="pill-group cols-2" id="aspectGroup">
+          <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">horizontal</span></button>
+          <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">vertical</span></button>
         </div>
         <input type="hidden" id="aspect" value="landscape">
 
@@ -1622,11 +1620,11 @@ document.getElementById('i2vMode').addEventListener('change', () => {
 });
 
 function applyAspect(key) {
-  const a = ASPECTS[key];
-  if (!a) return;
-  document.getElementById('width').value = a.w;
-  document.getElementById('height').value = a.h;
-  updateDerived();
+  if (!ASPECTS[key]) return;
+  document.getElementById('aspect').value = key;
+  // Defer the actual sizing to applyQuality — it reads aspect + quality and
+  // picks half-size (Draft) or full-size (Standard/High) of the chosen aspect.
+  applyQuality();
 }
 
 function applyQuality() {
@@ -1636,13 +1634,18 @@ function applyQuality() {
   } else if (q === 'high') {
     document.getElementById('steps').value = 18;
   }
+  // Draft and Standard both keep the same aspect ratio. Draft halves each
+  // dimension (1280×704 → 640×352 for 16:9; 704×1280 → 352×640 for 9:16).
+  // Same ratio, ~25% the pixel count, ~3× faster — a real preview of the
+  // final shot at draft cost. Standard restores full size.
+  const aspect = document.getElementById('aspect').value || 'landscape';
+  const a = ASPECTS[aspect] || ASPECTS.landscape;
   if (q === 'draft') {
-    const w = parseInt(document.getElementById('width').value || 1280);
-    const h = parseInt(document.getElementById('height').value || 704);
-    const ratio = w / h;
-    if (ratio > 1.5)        { document.getElementById('width').value = 768; document.getElementById('height').value = 432; }
-    else if (ratio < 0.7)   { document.getElementById('width').value = 432; document.getElementById('height').value = 768; }
-    else                    { document.getElementById('width').value = 512; document.getElementById('height').value = 512; }
+    document.getElementById('width').value = Math.round(a.w / 2 / 32) * 32;
+    document.getElementById('height').value = Math.round(a.h / 2 / 32) * 32;
+  } else if (q === 'standard' || q === 'high') {
+    document.getElementById('width').value = a.w;
+    document.getElementById('height').value = a.h;
   }
   updateDerived();
 }
