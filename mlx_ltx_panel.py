@@ -94,7 +94,7 @@ ASPECTS = {
 
 # One-click presets (fill aspect + duration in one button)
 PRESETS = [
-    {"key": "test_1s",    "label": "Quick test",    "sub": "512×288 · 1s",   "aspect": "test",      "dur": 1,  "steps": 8, "stop_comfy": False},
+    {"key": "test_1s",    "label": "Quick test",    "sub": "512×288 · 1s",   "aspect": "test",      "dur": 1,  "steps": 8, "stop_comfy": True},
     {"key": "land_5s",    "label": "Landscape 5s",  "sub": "1280×704 · 5s",  "aspect": "landscape", "dur": 5,  "steps": 8, "stop_comfy": True},
     {"key": "land_10s",   "label": "Landscape 10s", "sub": "1280×704 · 10s", "aspect": "landscape", "dur": 10, "steps": 8, "stop_comfy": True},
     {"key": "vert_5s",    "label": "Vertical 5s",   "sub": "704×1280 · 5s",  "aspect": "vertical",  "dur": 5,  "steps": 8, "stop_comfy": True},
@@ -1369,7 +1369,7 @@ HTML = r"""<!doctype html>
       </details>
 
       <label class="check">
-        <input type="checkbox" name="stop_comfy" id="stop_comfy"> Stop Comfy before render
+        <input type="checkbox" name="stop_comfy" id="stop_comfy" checked> Stop Comfy before render <span style="color:var(--muted);font-size:11px;">(default on — Comfy idle costs ~27 GB and thrashes 720p+ renders)</span>
       </label>
 
       <div class="actions">
