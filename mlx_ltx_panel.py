@@ -1364,7 +1364,7 @@ HTML = r"""<!doctype html>
 <body>
 
 <header>
-  <h1>⚡ LTX23MLX</h1>
+  <h1>LTX23MLX</h1>
   <span class="tag" id="modelTag"></span>
   <span class="spacer"></span>
   <span id="memPill" class="pill">memory…</span>
@@ -1373,7 +1373,6 @@ HTML = r"""<!doctype html>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
-  <button class="ghost-btn" onclick="api('/helper/restart', 'POST').then(()=>setTimeout(poll,500))">Restart helper</button>
 </header>
 
 <main class="layout">
@@ -1385,17 +1384,17 @@ HTML = r"""<!doctype html>
 
       <h2>Mode</h2>
       <div class="pill-group cols-3" id="modeGroup">
-        <button type="button" class="pill-btn" data-mode="t2v"><span class="ico">📝</span><span>Text → Video</span></button>
-        <button type="button" class="pill-btn" data-mode="i2v"><span class="ico">🖼</span><span>Image → Video</span></button>
-        <button type="button" class="pill-btn" data-mode="extend"><span class="ico">⏵</span><span>Extend clip</span></button>
+        <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
+        <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
+        <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
       </div>
       <input type="hidden" name="mode" id="mode" value="t2v">
 
       <h2>Quality</h2>
       <div class="pill-group cols-3" id="qualityGroup">
-        <button type="button" class="pill-btn" data-quality="draft"><span class="ico">🚀</span><span>Draft</span><span class="sub">small · 8 steps</span></button>
-        <button type="button" class="pill-btn active" data-quality="standard"><span class="ico">⭐</span><span>Standard</span><span class="sub">Q4 · 8 steps</span></button>
-        <button type="button" class="pill-btn disabled" data-quality="high" id="qualityHigh"><span class="ico">💎</span><span>High</span><span class="sub" id="highSub">Q8 not installed</span></button>
+        <button type="button" class="pill-btn" data-quality="draft"><span>Draft</span><span class="sub">small · ~3 min</span></button>
+        <button type="button" class="pill-btn active" data-quality="standard"><span>Standard</span><span class="sub">Q4 · ~7 min</span></button>
+        <button type="button" class="pill-btn disabled" data-quality="high" id="qualityHigh"><span>High</span><span class="sub" id="highSub">Q8 not installed</span></button>
       </div>
       <input type="hidden" name="quality" id="quality" value="standard">
 
@@ -1406,7 +1405,7 @@ HTML = r"""<!doctype html>
         <h2>Reference image</h2>
         <input name="image" id="image" placeholder="path or click Upload">
         <div class="img-row">
-          <button type="button" class="small" onclick="document.getElementById('imageFile').click()">📤 Upload</button>
+          <button type="button" class="small" onclick="document.getElementById('imageFile').click()">Upload…</button>
           <input type="file" id="imageFile" accept="image/*" onchange="uploadImage()">
           <span class="hint" id="imgHint">PIL cover-crop applied automatically to W×H</span>
         </div>
@@ -1463,10 +1462,10 @@ HTML = r"""<!doctype html>
       <div class="mode-only" id="sizingSection">
         <h2>Aspect</h2>
         <div class="pill-group cols-4" id="aspectGroup">
-          <button type="button" class="pill-btn active" data-aspect="landscape"><span class="ico">▭</span><span>16:9</span><span class="sub">1280×704</span></button>
-          <button type="button" class="pill-btn" data-aspect="vertical"><span class="ico">▯</span><span>9:16</span><span class="sub">704×1280</span></button>
-          <button type="button" class="pill-btn" data-aspect="square"><span class="ico">▢</span><span>1:1</span><span class="sub">768×768</span></button>
-          <button type="button" class="pill-btn" data-aspect="test"><span class="ico">🧪</span><span>Test</span><span class="sub">512×288</span></button>
+          <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">1280 × 704</span></button>
+          <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">704 × 1280</span></button>
+          <button type="button" class="pill-btn" data-aspect="square"><span>1 : 1</span><span class="sub">768 × 768</span></button>
+          <button type="button" class="pill-btn" data-aspect="test"><span>Test</span><span class="sub">512 × 288</span></button>
         </div>
         <input type="hidden" id="aspect" value="landscape">
 
@@ -1489,12 +1488,12 @@ HTML = r"""<!doctype html>
       <input type="hidden" name="stop_comfy" id="stop_comfy" value="on">
 
       <div class="actions">
-        <button type="submit" class="primary" id="genBtn">▶ Generate</button>
-        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">⏹ Stop</button>
+        <button type="submit" class="primary" id="genBtn">Generate</button>
+        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
       </div>
       <div class="row-actions" style="margin-top:8px">
-        <button type="button" class="small" onclick="openBatch()">📋 Batch paste</button>
-        <button type="button" class="small" id="pauseBtn" onclick="togglePause()">⏸ Pause queue</button>
+        <button type="button" class="small" onclick="openBatch()">Batch paste</button>
+        <button type="button" class="small" id="pauseBtn" onclick="togglePause()">Pause queue</button>
         <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
       </div>
     </form>
@@ -1503,15 +1502,15 @@ HTML = r"""<!doctype html>
   <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
   <section class="stage-pane">
     <div class="player-wrap empty" id="playerWrap">
-      <div class="dim-icon">🎬</div>
-      <div>No outputs yet — generate something to begin</div>
+      <div>No outputs yet</div>
+      <div style="font-size:11px;opacity:0.6">generate something on the left to begin</div>
     </div>
     <div class="player-meta" id="playerMeta" style="display:none">
       <div class="name" id="playerName"></div>
       <div class="actions-bar">
-        <button id="loadParamsBtn" onclick="loadParams()" disabled>↩ Load params</button>
-        <button onclick="useAsExtendSource()">⏭ Extend</button>
-        <button onclick="hideActive()">⊘ Hide</button>
+        <button id="loadParamsBtn" onclick="loadParams()" disabled>Load params</button>
+        <button onclick="useAsExtendSource()">Use as Extend</button>
+        <button onclick="hideActive()">Hide</button>
       </div>
     </div>
     <div class="carousel-wrap">
@@ -1530,12 +1529,12 @@ HTML = r"""<!doctype html>
 <!-- ============== BOTTOM TABBED PANE ============== -->
 <aside class="bottom-pane" id="bottomPane">
   <nav class="tabs">
-    <button data-tab="now" class="active">⚡ Now</button>
-    <button data-tab="queue">⏳ Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
-    <button data-tab="recent">📜 Recent</button>
-    <button data-tab="logs">📟 Logs</button>
+    <button data-tab="now" class="active">Now</button>
+    <button data-tab="queue">Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
+    <button data-tab="recent">Recent</button>
+    <button data-tab="logs">Logs</button>
     <span class="spacer"></span>
-    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">↕ Toggle</button>
+    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">Collapse</button>
   </nav>
   <div class="bottom-body">
     <div class="tab-content show" id="tab-now">
@@ -1792,7 +1791,7 @@ async function poll() {
     jp.className = 'pill';
   }
 
-  document.getElementById('pauseBtn').textContent = s.paused ? '▶ Resume queue' : '⏸ Pause queue';
+  document.getElementById('pauseBtn').textContent = s.paused ? 'Resume queue' : 'Pause queue';
 
   // Q8 / High enable
   const highBtn = document.getElementById('qualityHigh');
@@ -1887,11 +1886,11 @@ function renderCarousel() {
       <video src="/file?path=${encodeURIComponent(o.path)}#t=0.5" preload="metadata" muted></video>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
-        <div class="sub">${o.mtime.slice(11,16)} · ${o.size_mb.toFixed(1)} MB${o.has_sidecar ? ' · ↩' : ''}</div>
+        <div class="sub">${o.mtime.slice(11,16)} · ${o.size_mb.toFixed(1)} MB</div>
       </div>
       <div class="row-btns">
-        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}('${escapeHtml(o.path)}')">${o.hidden ? '👁 Show' : '⊘ Hide'}</button>
-        <button onclick="event.stopPropagation(); useAsExtendSourcePath('${escapeHtml(o.path)}')">⏭ Extend</button>
+        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}('${escapeHtml(o.path)}')">${o.hidden ? 'Show' : 'Hide'}</button>
+        <button onclick="event.stopPropagation(); useAsExtendSourcePath('${escapeHtml(o.path)}')">Extend</button>
       </div>
     </div>`).join('');
 }
