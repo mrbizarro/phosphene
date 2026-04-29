@@ -131,6 +131,22 @@ def iso_now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text to `path` via temp file + fsync + os.replace.
+
+    Plain Path.write_text() can leave a half-written file if macOS sleeps,
+    runs out of disk, or the panel crashes mid-write — corrupted queue or
+    sidecar files would lose the user's work-in-progress. Atomic replace
+    guarantees the file is either pre-write or fully post-write, never torn.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 # ---- caffeinate --------------------------------------------------------------
 
 def caffeinate_on() -> None:
@@ -234,25 +250,32 @@ def load_hidden() -> None:
 
 def persist_hidden() -> None:
     try:
-        HIDDEN_FILE.write_text(json.dumps(sorted(HIDDEN_PATHS), indent=2))
+        with LOCK:
+            snapshot = sorted(HIDDEN_PATHS)
+        atomic_write_text(HIDDEN_FILE, json.dumps(snapshot, indent=2))
     except Exception as exc:
         push(f"hidden persist failed: {exc}")
 
 
 def set_hidden(path: str, hidden: bool) -> None:
-    if hidden:
-        HIDDEN_PATHS.add(path)
-    else:
-        HIDDEN_PATHS.discard(path)
+    with LOCK:
+        if hidden:
+            HIDDEN_PATHS.add(path)
+        else:
+            HIDDEN_PATHS.discard(path)
     persist_hidden()
 
 
 def list_outputs(include_hidden: bool = False) -> list[dict]:
     files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
+    # Snapshot HIDDEN_PATHS under LOCK so concurrent hide/unhide from other
+    # threads can't tear the read.
+    with LOCK:
+        hidden_snap = set(HIDDEN_PATHS)
     out = []
     for p in files:
         path_s = str(p)
-        is_hidden = path_s in HIDDEN_PATHS
+        is_hidden = path_s in hidden_snap
         if is_hidden and not include_hidden:
             continue
         out.append({
@@ -271,7 +294,7 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
 
 def write_sidecar(path: Path, payload: dict) -> None:
     try:
-        path.write_text(json.dumps(payload, indent=2))
+        atomic_write_text(path, json.dumps(payload, indent=2))
     except Exception as exc:
         push(f"Sidecar write failed: {exc}")
 
@@ -287,7 +310,7 @@ def persist_queue() -> None:
             "paused": STATE["paused"],
         }
     try:
-        QUEUE_FILE.write_text(json.dumps(snapshot, indent=2))
+        atomic_write_text(QUEUE_FILE, json.dumps(snapshot, indent=2))
     except Exception as exc:
         push(f"Queue persist failed: {exc}")
 
@@ -441,12 +464,22 @@ def video_duration(frames: int) -> float:
 
 
 def stop_current_job(timeout: float = 5.0) -> None:
+    """Kill the warm helper (and any in-flight mux subprocess). Worker advances."""
     with LOCK:
         cur = STATE["current"]
+        mux_pgid = STATE.get("mux_pgid")
     if cur is not None:
         cur["cancel_requested"] = True
-    push("Stop requested — killing helper to abort current job.")
+    push("Stop requested — killing helper + mux to abort current job.")
     HELPER.kill()
+    # Mux runs in its own process group outside the helper's. Kill it too,
+    # otherwise ffmpeg keeps writing the (now-orphaned) output file.
+    if mux_pgid:
+        try:
+            os.killpg(mux_pgid, signal.SIGTERM)
+            push(f"SIGTERM sent to mux pgid {mux_pgid}")
+        except ProcessLookupError:
+            pass
 
 
 _JOB_COUNTER = 0
@@ -711,22 +744,42 @@ def run_job_inner(job: dict) -> None:
         duration = video_duration(frames)
         env = os.environ.copy()
         env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
+        # Match the helper's lossless codec defaults (overridable via the
+        # same env vars the upstream patch script reads). Previously this
+        # mux step hardcoded yuv420p crf 18, undoing the codec patch for
+        # i2v_clean_audio mode and re-introducing chroma-block artifacts.
+        mux_pix_fmt = os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
+        mux_crf = os.environ.get("LTX_OUTPUT_CRF", "0")
         mux_cmd = [str(FFMPEG), "-y", "-i", str(raw_out), "-i", audio,
                    "-map", "0:v:0", "-map", "1:a:0"]
         if pad_filter:
             mux_cmd += ["-vf", pad_filter]
         mux_cmd += [
             "-af", f"apad,atrim=0:{duration},asetpts=PTS-STARTPTS",
-            "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf, "-preset", "medium",
             "-c:a", "aac", "-b:a", "192k",
             "-t", f"{duration}",
             str(final_out),
         ]
         push("Mux: " + " ".join(shlex.quote(c) for c in mux_cmd))
-        mux = subprocess.run(mux_cmd, env=env, text=True, capture_output=True)
-        if mux.returncode != 0:
-            push((mux.stderr or "").strip())
-            raise RuntimeError(f"mux exited with code {mux.returncode}")
+        # Run mux in its own process group so /stop can SIGTERM the whole
+        # ffmpeg pipeline (it lives outside the helper's pgid). Track pgid
+        # in STATE for stop_current_job() to find.
+        mux_proc = subprocess.Popen(
+            mux_cmd, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        with LOCK:
+            STATE["mux_pgid"] = os.getpgid(mux_proc.pid)
+        try:
+            stdout, stderr = mux_proc.communicate()
+        finally:
+            with LOCK:
+                STATE["mux_pgid"] = None
+        if mux_proc.returncode != 0:
+            push((stderr or "").strip())
+            raise RuntimeError(f"mux exited with code {mux_proc.returncode}")
         final_target = final_out
 
     sidecar = {
@@ -827,16 +880,22 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/status":
             qs = parse_qs(parsed.query)
             include_hidden = qs.get("include_hidden", ["0"])[0] == "1"
+            # Deep-snapshot STATE under lock — payload built with refs only
+            # is racy when JSON serialization happens after lock release
+            # (worker thread could mutate current/queue mid-encode and we'd
+            # ship torn state to the browser).
+            import copy as _copy
             with LOCK:
                 avg = _avg_elapsed()
-                payload = {
+                payload = _copy.deepcopy({
                     "running": STATE["running"], "paused": STATE["paused"],
                     "current": STATE["current"], "queue": STATE["queue"],
                     "history": STATE["history"][:30], "log": STATE["log"],
                     "pid": STATE["pid"], "pgid": STATE["pgid"],
-                }
+                })
+                hidden_count = len(HIDDEN_PATHS)
             payload["outputs"] = list_outputs(include_hidden=include_hidden)
-            payload["hidden_count"] = len(HIDDEN_PATHS)
+            payload["hidden_count"] = hidden_count
             payload["memory"] = get_memory()
             payload["comfy_pids"] = find_comfy_pids()
             payload["server_now"] = time.time()
@@ -882,7 +941,14 @@ class Handler(BaseHTTPRequestHandler):
                 path = Path(qs.get("path", [""])[0]).resolve()
             except Exception:
                 self.send_error(400); return
-            if not str(path).startswith(str(OUTPUT.resolve())) or not path.exists():
+            # Strict containment via Path.is_relative_to — str.startswith
+            # would let "mlx_outputs_evil/" slip past since the prefix string
+            # match is true even though the directory is a sibling, not a child.
+            try:
+                _ = path.relative_to(OUTPUT.resolve())
+            except ValueError:
+                self.send_error(404); return
+            if not path.exists():
                 self.send_error(404); return
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
@@ -943,7 +1009,9 @@ class Handler(BaseHTTPRequestHandler):
                 path = Path(qs.get("path", [""])[0]).resolve()
             except Exception:
                 self.send_error(400); return
-            if not str(path).startswith(str(OUTPUT.resolve())):
+            try:
+                _ = path.relative_to(OUTPUT.resolve())
+            except ValueError:
                 self.send_error(404); return
             sidecar = path.with_suffix(path.suffix + ".json")
             if not sidecar.exists():
@@ -1062,8 +1130,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/output/show_all":
-            count = len(HIDDEN_PATHS)
-            HIDDEN_PATHS.clear()
+            with LOCK:
+                count = len(HIDDEN_PATHS)
+                HIDDEN_PATHS.clear()
             persist_hidden()
             self._json({"unhidden_count": count}); return
 
@@ -2135,6 +2204,7 @@ async function loadParams() {
   const data = await r.json();
   const p = data.params;
   if (p.mode === 'extend') setMode('extend');
+  else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
   else setMode('t2v');
   document.getElementById('prompt').value = p.prompt || '';
@@ -2145,6 +2215,11 @@ async function loadParams() {
   if (p.seed != null) document.getElementById('seed').value = p.seed;
   if (p.image) document.getElementById('image').value = p.image;
   if (p.audio) document.getElementById('audio').value = p.audio;
+  // Keyframe-specific: restore start + end frame paths
+  if (p.start_image) document.getElementById('start_image').value = p.start_image;
+  if (p.end_image) document.getElementById('end_image').value = p.end_image;
+  // Extend-specific: restore source video path
+  if (p.video_path) document.getElementById('video_path').value = p.video_path;
   if (p.label) document.getElementById('preset_label').value = p.label;
   for (const [k, a] of Object.entries(ASPECTS)) {
     if (a.w === p.width && a.h === p.height) { setAspect(k); break; }
