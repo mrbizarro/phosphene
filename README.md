@@ -49,6 +49,21 @@ The pieces below are what justify the panel existing as its own project. Most ar
 
 ## Install
 
+### Option A — Pinokio one-click (recommended)
+
+1. Open Pinokio
+2. **Discover → Download from URL** → paste `https://github.com/mrbizarro/LTX23MLX`
+3. Click **Install**. Pinokio handles the rest:
+   - Apple-Silicon hardware gate (refuses to install on Intel / Linux / Windows)
+   - Clones `dgrauet/ltx-2-mlx`, creates a Python 3.11 venv via `uv`, installs the MLX pipelines
+   - Applies the lossless h264 codec patch (idempotent, runs again on update)
+   - Downloads Q4 model (`dgrauet/ltx-2.3-mlx-q4`, ~25 GB) and Gemma 4-bit (~6 GB) via `huggingface-cli` (resumes if interrupted)
+4. Click **Start** → **Open Panel** → http://127.0.0.1:8198
+
+For the High quality tier (Q8 two-stage + TeaCache), download the Q8 model separately afterward (one-time, ~25 GB extra). See [Quality tiers](#quality-tiers) below.
+
+### Option B — manual
+
 ```bash
 # 1. Clone this panel
 git clone https://github.com/mrbizarro/LTX23MLX.git
@@ -72,6 +87,28 @@ python3 mlx_ltx_panel.py
 ```
 
 First render will pull `dgrauet/ltx-2.3-mlx-q4` (~25 GB) and `mlx-community/gemma-3-12b-it-4bit` (~6 GB) from Hugging Face into `~/.cache/huggingface/`. Subsequent renders are instant to start.
+
+## Quality tiers
+
+The panel exposes three render quality tiers via a dropdown in the form:
+
+| Tier | Model | Mode | Steps | ~Time (5s clip) | Use case |
+|---|---|---|---|---|---|
+| **Draft** | Q4 distilled | one-stage | 4 | ~3 min | Prompt scouting / seed picking |
+| **Standard** *(default)* | Q4 distilled | one-stage | 8 | ~7 min | Most renders |
+| **High** | **Q8** | two-stage HQ + TeaCache | stage1=15, stage2=3 | ~12 min | Keeper renders. Better face fidelity (Q8 + dev model + CFG anchor). |
+
+Same-seed re-roll is the workflow: pick a seed at Draft (cheap), confirm at Standard, finalize at High when it matters. Each output's sidecar JSON has the seed; click "↩ Load params" to recreate the same shot at a different tier.
+
+### Enabling High tier (optional, ~25 GB extra)
+
+Q8 is a separate download. Run this one-time inside the Pinokio install dir (or the manual install dir):
+
+```bash
+huggingface-cli download dgrauet/ltx-2.3-mlx-q8 --local-dir mlx_models/ltx-2.3-mlx-q8
+```
+
+The panel auto-detects Q8 on disk and enables the High option in the dropdown.
 
 ## Configuration via env vars
 

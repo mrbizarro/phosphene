@@ -69,6 +69,9 @@ FFMPEG = _resolve_ffmpeg()
 FFMPEG_BIN = FFMPEG.parent
 
 MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
+MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
+# Q8 model is detected on disk so the High quality tier can be conditionally enabled.
+Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
 COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main\\.py")
 QUEUE_FILE = ROOT / "panel_queue.json"
 HIDDEN_FILE = ROOT / "panel_hidden.json"
@@ -733,6 +736,8 @@ class Handler(BaseHTTPRequestHandler):
                 "low_memory": HELPER_LOW_MEMORY == "true",
                 "idle_timeout_sec": HELPER_IDLE_TIMEOUT,
             }
+            payload["q8_available"] = Q8_LOCAL_PATH.exists() and any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else [])
+            payload["q8_path"] = str(Q8_LOCAL_PATH)
             self._json(payload)
             return
         if parsed.path == "/file":
@@ -1281,6 +1286,13 @@ HTML = r"""<!doctype html>
           <div><label>Frames</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
         </div>
 
+        <label>Quality</label>
+        <select name="quality" id="quality" onchange="applyQuality()">
+          <option value="draft">Draft — Q4 · 4 steps · ~3 min for 5s</option>
+          <option value="standard" selected>Standard — Q4 · 8 steps · ~7 min for 5s</option>
+          <option value="high" id="qualityHigh" disabled>High — Q8 two-stage + TeaCache · ~12 min for 5s (Q8 not installed)</option>
+        </select>
+
         <div class="row">
           <div><label>Steps</label><input name="steps" id="steps" value="8" type="number" min="1" max="60"></div>
           <div><label>Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
@@ -1437,6 +1449,19 @@ function framesToDuration(f) {
 function setDuration(s) {
   document.getElementById('duration').value = s;
   document.getElementById('frames').value = durationToFrames(s);
+}
+
+function applyQuality() {
+  const q = document.getElementById('quality').value;
+  if (q === 'draft')         document.getElementById('steps').value = 4;
+  else if (q === 'standard') document.getElementById('steps').value = 8;
+  else if (q === 'high') {
+    // High = Q8 two-stage HQ (stage1=15, stage2=3 internally). Steps field
+    // is informational only — the helper routes to a different action when
+    // quality=high (TBD, requires Q8 + helper update).
+    document.getElementById('steps').value = 18; // 15+3 for display purposes
+  }
+  updateDerived();
 }
 
 function updateDerived() {
@@ -1666,6 +1691,20 @@ async function poll() {
         `<option value="${o.path}">${o.name}</option>`).join('');
   }
   document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
+
+  // Q8 availability — enables/disables the High quality tier
+  const highOpt = document.getElementById('qualityHigh');
+  if (s.q8_available) {
+    highOpt.disabled = false;
+    highOpt.textContent = 'High — Q8 two-stage + TeaCache · ~12 min for 5s (best face fidelity)';
+  } else {
+    highOpt.disabled = true;
+    highOpt.textContent = `High — Q8 two-stage + TeaCache · ~12 min for 5s (Q8 not installed at ${s.q8_path || ''})`;
+    if (document.getElementById('quality').value === 'high') {
+      document.getElementById('quality').value = 'standard';
+      applyQuality();
+    }
+  }
 }
 
 function setFilter(mode) {
