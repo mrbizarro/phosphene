@@ -496,6 +496,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "extend_frames": max(1, int(f("extend_frames", "5") or 5)),
             "extend_direction": f("extend_direction", "after"),
             "extend_steps": max(1, int(f("extend_steps", "30") or 30)),
+            # keyframe (FFLF) mode params
+            "start_image": f("start_image", ""),
+            "end_image": f("end_image", ""),
             "enhance": f("enhance", "off") == "on",
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
@@ -518,7 +521,10 @@ def run_job_inner(job: dict) -> None:
     # sigma=0. Truncating below 8 steps leaves the image partially denoised
     # (sigma=0.725 at 6 steps, sigma=0.975 at 4 steps) — i.e. literal noise.
     # Block before the user wastes 7+ minutes producing static.
-    if mode != "extend" and quality != "high" and int(p.get("steps", 8)) < 8:
+    # Modes that don't use the distilled `steps` field skip this check:
+    #   - extend / keyframe use stage1_steps + stage2_steps via two-stage path
+    #   - high quality uses two-stage HQ with its own schedule
+    if mode not in ("extend", "keyframe") and quality != "high" and int(p.get("steps", 8)) < 8:
         raise RuntimeError(
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
@@ -574,6 +580,63 @@ def run_job_inner(job: dict) -> None:
         push(f"Extend done in {sidecar['elapsed_sec']}s → {final_out.name}")
         if p.get("open_when_done"):
             subprocess.run(["open", str(final_out)], check=False)
+        return
+
+    # Keyframe (FFLF) — two images bookend the clip, model interpolates.
+    # Always uses Q8 dev transformer (the pipeline inherits two-stage), so we
+    # require Q8 on disk and route to generate_keyframe regardless of quality
+    # tier (which doesn't really apply — there's no "Q4 keyframe" path).
+    if mode == "keyframe":
+        if not Q8_LOCAL_PATH.exists() or not any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else []):
+            raise RuntimeError(
+                f"Keyframe mode requires Q8 model at {Q8_LOCAL_PATH}. "
+                f"Run: huggingface-cli download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+            )
+        if not p.get("start_image") or not Path(p["start_image"]).exists():
+            raise RuntimeError(f"start_image not found: {p.get('start_image')}")
+        if not p.get("end_image") or not Path(p["end_image"]).exists():
+            raise RuntimeError(f"end_image not found: {p.get('end_image')}")
+        width, height = p["width"], p["height"]
+        frames = p["frames"]
+        out_path = OUTPUT / f"mlx_keyframe_{width}x{height}_{frames}f_{stamp}.mp4"
+        job["raw_path"] = str(out_path)
+        job_spec = {
+            "action": "generate_keyframe",
+            "id": job["id"],
+            "params": {
+                "model_dir": str(Q8_LOCAL_PATH),
+                "prompt": p["prompt"],
+                "output_path": str(out_path),
+                "start_image": p["start_image"],
+                "end_image": p["end_image"],
+                "height": height,
+                "width": width,
+                "frames": frames,
+                "seed": p["seed"],
+                "stage1_steps": 15,
+                "stage2_steps": 3,
+                "cfg_scale": 3.0,
+            },
+        }
+        push(f"Run KEYFRAME via helper: id={job['id']} {width}x{height} {frames}f · Q8 two-stage")
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        sidecar = {
+            "output": str(out_path), "raw_output": str(out_path),
+            "params": {**p, "command": "keyframe"},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
+            "video_duration_sec": video_duration(frames),
+            "fps": FPS, "model": MODEL_ID_HQ, "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+        }
+        write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
+        job["output_path"] = str(out_path)
+        push(f"Keyframe done in {sidecar['elapsed_sec']}s → {out_path.name}")
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(out_path)], check=False)
         return
 
     # T2V / I2V / I2V+clean_audio
@@ -1383,9 +1446,10 @@ HTML = r"""<!doctype html>
       <input type="hidden" name="preset_label" id="preset_label" value="">
 
       <h2>Mode</h2>
-      <div class="pill-group cols-3" id="modeGroup">
+      <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
         <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
         <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
+        <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
         <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
       </div>
       <input type="hidden" name="mode" id="mode" value="t2v">
@@ -1410,6 +1474,27 @@ HTML = r"""<!doctype html>
           <span class="hint" id="imgHint">PIL cover-crop applied automatically to W×H</span>
         </div>
         <img id="imagePreview" class="img-preview" alt="">
+      </div>
+
+      <!-- Mode-specific: keyframe (FFLF) -->
+      <div class="mode-only" id="keyframeSection">
+        <h2>Start frame (frame 0)</h2>
+        <input name="start_image" id="start_image" placeholder="path or click Upload">
+        <div class="img-row">
+          <button type="button" class="small" onclick="document.getElementById('startImageFile').click()">Upload start…</button>
+          <input type="file" id="startImageFile" accept="image/*" onchange="uploadKeyframe('start')">
+        </div>
+        <img id="startImagePreview" class="img-preview" alt="">
+
+        <h2>End frame (last frame)</h2>
+        <input name="end_image" id="end_image" placeholder="path or click Upload">
+        <div class="img-row">
+          <button type="button" class="small" onclick="document.getElementById('endImageFile').click()">Upload end…</button>
+          <input type="file" id="endImageFile" accept="image/*" onchange="uploadKeyframe('end')">
+        </div>
+        <img id="endImagePreview" class="img-preview" alt="">
+
+        <div class="hint">FFLF needs Q8 (auto-selects High quality). Closeup as the end frame anchors face identity through the clip.</div>
       </div>
 
       <!-- Mode-specific: extend -->
@@ -1598,6 +1683,12 @@ function setMode(mode) {
   if (mode === 'i2v') {
     document.getElementById('mode').value = document.getElementById('i2vMode').value;
   }
+  // Keyframe REQUIRES Q8 (uses dev transformer); force quality=high.
+  // If Q8 isn't available the High pill stays disabled and the user gets the
+  // same "Q8 not installed" hint as elsewhere.
+  if (mode === 'keyframe') {
+    setQuality('high');
+  }
   updateDerived();
 }
 function setQuality(q) {
@@ -1683,18 +1774,30 @@ function updateDerived() {
   else banner.classList.remove('show');
 
   // Mode-aware visibility
-  document.getElementById('imageSection').classList.toggle('show', mode === 'i2v' || mode === 'i2v_clean_audio');
+  const inI2V = mode === 'i2v' || mode === 'i2v_clean_audio';
+  document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe');
   document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
+  document.getElementById('keyframeSection').classList.toggle('show', currentMode === 'keyframe');
   document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
 
-  // Image preview
+  // Image preview (single image — i2v modes)
   const imgPath = document.getElementById('image').value.trim();
   const preview = document.getElementById('imagePreview');
-  if ((mode === 'i2v' || mode === 'i2v_clean_audio') && imgPath) {
+  if (inI2V && currentMode !== 'keyframe' && imgPath) {
     preview.src = '/image?path=' + encodeURIComponent(imgPath);
     preview.classList.add('show');
   } else preview.classList.remove('show');
+
+  // Keyframe previews (start + end)
+  for (const which of ['start', 'end']) {
+    const path = document.getElementById(which + '_image').value.trim();
+    const p = document.getElementById(which + 'ImagePreview');
+    if (currentMode === 'keyframe' && path) {
+      p.src = '/image?path=' + encodeURIComponent(path);
+      p.classList.add('show');
+    } else p.classList.remove('show');
+  }
 }
 
 ['width','height','frames','duration'].forEach(id => {
@@ -1708,6 +1811,7 @@ function updateDerived() {
   }
 });
 document.getElementById('image').addEventListener('input', updateDerived);
+['start_image', 'end_image'].forEach(id => document.getElementById(id).addEventListener('input', updateDerived));
 
 async function uploadImage() {
   const f = document.getElementById('imageFile').files[0];
@@ -1718,6 +1822,18 @@ async function uploadImage() {
   if (data.ok) {
     document.getElementById('image').value = data.path;
     document.getElementById('imgHint').textContent = `Uploaded: ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
+    updateDerived();
+  } else alert('Upload failed: ' + (data.error || '?'));
+}
+
+async function uploadKeyframe(which) {
+  const f = document.getElementById(which + 'ImageFile').files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append('image', f);
+  const r = await fetch('/upload', { method: 'POST', body: fd });
+  const data = await r.json();
+  if (data.ok) {
+    document.getElementById(which + '_image').value = data.path;
     updateDerived();
   } else alert('Upload failed: ' + (data.error || '?'));
 }

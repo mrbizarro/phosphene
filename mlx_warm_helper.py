@@ -151,6 +151,27 @@ def get_hq_pipe(model_dir: str):
         return _hq_pipe
 
 
+# Keyframe (FFLF) pipeline — two images locked at frame 0 + frame N-1, model
+# interpolates between. Uses Q8 dev transformer + distilled LoRA stage 2.
+_kf_pipe = None
+_kf_model_dir = None
+
+
+def get_kf_pipe(model_dir: str):
+    """Returns the KeyframeInterpolationPipeline lazily."""
+    global _kf_pipe, _kf_model_dir
+    from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
+
+    with _pipe_lock:
+        if _kf_pipe is None or _kf_model_dir != model_dir:
+            emit({"event": "log", "line": f"Loading Keyframe pipeline (Q8 dev model — {model_dir})..."})
+            _kf_pipe = KeyframeInterpolationPipeline(
+                model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+            )
+            _kf_model_dir = model_dir
+        return _kf_pipe
+
+
 # ---- image preprocessing -----------------------------------------------------
 
 def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
@@ -349,6 +370,54 @@ for line in sys.__stdin__:
                     raise RuntimeError(f"image not found: {img}")
                 kwargs["image"] = img
                 emit({"event": "log", "line": f"HQ I2V — pipeline will cover-crop image to {kwargs['width']}x{kwargs['height']}"})
+            out_path = pipe.generate_and_save(**kwargs)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    if action == "generate_keyframe":
+        # FFLF — two images anchored at frame 0 and frame N-1, model interpolates.
+        # Like HQ this uses the Q8 dev transformer + two-stage refine.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            for k in ("start_image", "end_image"):
+                img = p.get(k)
+                if not img or not os.path.exists(img):
+                    raise RuntimeError(f"{k} not found: {img}")
+            pipe = get_kf_pipe(model_dir)
+            num_frames = int(p["frames"])
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                keyframe_images=[p["start_image"], p["end_image"]],
+                keyframe_indices=[0, num_frames - 1],
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=num_frames,
+                fps=24,
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 15)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+                cfg_scale=float(p.get("cfg_scale", 3.0)),
+            )
+            emit({"event": "log", "line": f"Keyframe FFLF — frames=[0, {num_frames-1}], pipeline cover-crops both to {kwargs['width']}x{kwargs['height']}"})
             out_path = pipe.generate_and_save(**kwargs)
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
