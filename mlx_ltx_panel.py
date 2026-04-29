@@ -1024,248 +1024,347 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LTX MLX Studio</title>
+  <title>LTX23MLX Studio</title>
   <style>
     :root {
-      --bg: #0d1117; --panel: #161b22; --panel-2: #1c2230;
-      --border: #30363d; --text: #c9d1d9; --muted: #8b949e;
-      --accent: #2f81f7; --accent-bright: #58a6ff;
+      --bg: #0b0e13; --bg-2: #0d1117; --panel: #161b22; --panel-2: #1c2230;
+      --border: #2a3038; --border-strong: #3a424d; --text: #e6edf3; --muted: #8b949e;
+      --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
       --success: #3fb950; --warning: #d29922; --danger: #f85149;
+      --radius: 10px;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; }
+    html, body { margin: 0; height: 100%; }
     body {
-      min-height: 100vh; background: var(--bg); color: var(--text);
+      background: var(--bg); color: var(--text);
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      display: flex; flex-direction: column; min-height: 100vh;
     }
+
+    /* ===== HEADER ===== */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      padding: 11px 18px; border-bottom: 1px solid var(--border);
-      background: var(--panel); position: sticky; top: 0; z-index: 10;
+      padding: 10px 18px; border-bottom: 1px solid var(--border);
+      background: var(--panel);
     }
-    header h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
-    .tag { color: var(--muted); font-size: 12px; }
+    header h1 {
+      margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .tag { color: var(--muted); font-size: 11px; }
     .pill {
-      padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500;
+      padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
       background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
       white-space: nowrap;
     }
-    .pill .dot {
-      display: inline-block; width: 7px; height: 7px; border-radius: 999px;
-      margin-right: 5px; background: currentColor; vertical-align: middle;
-    }
-    .pill-good { color: var(--success); border-color: rgba(63, 185, 80, 0.4); }
-    .pill-warn { color: var(--warning); border-color: rgba(210, 153, 34, 0.5); }
-    .pill-danger { color: var(--danger); border-color: rgba(248, 81, 73, 0.5); }
-    .pill-running {
-      color: var(--accent-bright); border-color: var(--accent);
-      animation: pulse 1.6s ease-in-out infinite;
-    }
+    .pill .dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; margin-right: 5px; background: currentColor; vertical-align: middle; }
+    .pill-good { color: var(--success); border-color: rgba(63,185,80,0.4); }
+    .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.5); }
+    .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.5); }
+    .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.7; } }
     .spacer { flex: 1; }
     .ghost-btn {
       background: transparent; border: 1px solid var(--border); color: var(--text);
-      padding: 5px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
     }
     .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
-    main {
-      display: grid; grid-template-columns: 460px 1fr; gap: 16px;
-      padding: 16px; max-width: 1700px; margin: 0 auto;
+
+    /* ===== MAIN LAYOUT ===== */
+    .layout {
+      flex: 1 1 auto; display: grid; grid-template-columns: 440px 1fr;
+      gap: 14px; padding: 14px; min-height: 0;
     }
-    section {
-      border: 1px solid var(--border); border-radius: 10px; padding: 18px;
-      background: var(--panel); margin-bottom: 16px;
+    .form-pane, .stage-pane {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+      display: flex; flex-direction: column; min-height: 0;
     }
-    .right-col > section:last-child { margin-bottom: 0; }
+    .form-pane { padding: 16px; overflow-y: auto; }
+    .stage-pane { padding: 0; }
+
+    /* ===== FORM ===== */
     h2 {
-      font-size: 11px; margin: 0 0 14px; color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
-      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      font-size: 10px; margin: 14px 0 8px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
     }
-    h2 .h2-meta { font-size: 11px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
-    h2 .h2-actions { display: flex; gap: 6px; }
-    h2.spaced { margin-top: 22px; }
-    label {
-      display: block; margin: 12px 0 4px; color: var(--muted);
-      font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500;
+    h2:first-child { margin-top: 0; }
+    label.lbl {
+      display: block; margin: 10px 0 4px; color: var(--muted);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
     }
     input, textarea, select, button {
-      width: 100%; padding: 9px 11px; font: inherit; color: inherit;
+      width: 100%; padding: 8px 11px; font: inherit; color: inherit;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
     }
-    input:focus, textarea:focus, select:focus {
-      outline: none; border-color: var(--accent); background: #161b22;
+    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); background: var(--bg-2); }
+    textarea { min-height: 84px; resize: vertical; font-family: inherit; }
+
+    /* Pill button groups (mode/quality/aspect) */
+    .pill-group {
+      display: grid; gap: 6px; margin-bottom: 6px;
     }
-    textarea { min-height: 84px; resize: vertical; font-family: -apple-system, system-ui, sans-serif; }
-    textarea.batch { min-height: 200px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
-    button { cursor: pointer; font-weight: 600; transition: 0.1s; }
-    button.primary {
-      background: var(--accent); border-color: var(--accent); color: white;
-      padding: 11px; font-size: 14px;
+    .pill-group.cols-2 { grid-template-columns: 1fr 1fr; }
+    .pill-group.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .pill-group.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+    .pill-btn {
+      width: 100%; padding: 9px 8px; border-radius: 8px;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+      cursor: pointer; transition: 0.12s; text-align: center;
+      font-size: 12px; font-weight: 500;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
     }
-    button.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
-    button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
-    button.danger { color: var(--danger); border-color: rgba(248, 81, 73, 0.4); background: transparent; }
-    button.danger:hover { background: rgba(248, 81, 73, 0.1); }
-    button.small {
-      width: auto; padding: 6px 10px; font-size: 12px;
-      background: var(--panel-2); font-weight: 500;
+    .pill-btn:hover { border-color: var(--accent); color: var(--text); }
+    .pill-btn.active {
+      background: var(--accent-dim); border-color: var(--accent);
+      color: var(--accent-bright); font-weight: 600;
     }
-    button.small:hover { border-color: var(--accent); }
-    button.tiny {
-      width: auto; padding: 3px 8px; font-size: 11px;
-      background: transparent; border: 1px solid var(--border); color: var(--muted);
-      font-weight: 500;
+    .pill-btn .ico { font-size: 16px; line-height: 1; }
+    .pill-btn .sub { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .pill-btn:disabled, .pill-btn.disabled {
+      opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
-    button.tiny:hover { color: var(--text); border-color: var(--accent); }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-    .preset-grid {
-      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 6px;
-    }
-    .preset {
-      padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
-      background: var(--panel-2); cursor: pointer; text-align: left; transition: 0.15s;
-    }
-    .preset:hover { border-color: var(--accent); transform: translateY(-1px); }
-    .preset .ttl { font-weight: 600; font-size: 12px; color: var(--text); }
-    .preset .sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
-    .check {
-      display: flex; align-items: center; gap: 8px; margin: 12px 0; cursor: pointer;
-      color: var(--text); font-size: 13px;
-    }
-    .check input { width: auto; margin: 0; }
-    .actions { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-top: 16px; }
-    .actions button { padding: 11px; }
-    .meta { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
-    .derived {
-      margin-top: 8px; padding: 10px 12px; border-radius: 6px;
-      background: var(--panel-2); border: 1px solid var(--border);
-      font-size: 12px; color: var(--muted);
-    }
-    .derived strong { color: var(--accent-bright); font-weight: 600; }
-    .warn-banner {
-      background: rgba(210, 153, 34, 0.08);
-      border: 1px solid rgba(210, 153, 34, 0.4);
-      color: var(--warning);
-      padding: 10px 12px; border-radius: 6px; margin-bottom: 12px;
-      font-size: 12px; display: none;
-    }
-    .warn-banner.show { display: block; }
-    pre.log {
-      white-space: pre-wrap; word-break: break-all;
-      min-height: 180px; max-height: 380px; overflow: auto;
-      background: #0a0e14; border: 1px solid var(--border); border-radius: 8px;
-      padding: 12px; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
-      color: #b0b8c4; margin: 0;
-    }
-    video.player {
-      width: 100%; max-height: 56vh; background: black; border-radius: 8px;
-      margin-top: 8px;
-    }
-    .now-card {
-      padding: 12px; border-radius: 8px; background: var(--panel-2);
-      border: 1px solid var(--border); margin-bottom: 12px;
-    }
-    .now-card.idle { opacity: 0.7; }
-    .now-card .ttl { font-weight: 600; font-size: 13px; }
-    .now-card .meta { margin-top: 6px; font-size: 12px; color: var(--muted); }
-    .progress-bar {
-      height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
-      margin: 8px 0;
-    }
-    .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; }
-    .queue-list { list-style: none; padding: 0; margin: 0; }
-    .queue-list li, .history-list li {
-      display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px;
-      align-items: center; padding: 9px 10px; border-radius: 6px;
-      border: 1px solid var(--border); background: var(--panel-2);
-      margin-bottom: 6px; font-size: 12px;
-    }
-    .queue-list li .pos { color: var(--muted); font-weight: 600; min-width: 22px; }
-    .queue-list li .ttl, .history-list li .ttl {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .queue-list li .params, .history-list li .params {
-      color: var(--muted); font-size: 11px; white-space: nowrap;
-    }
-    .queue-list li button, .history-list li button {
-      width: auto; background: transparent; border: 0; color: var(--muted);
-      cursor: pointer; padding: 2px 6px; font-size: 14px; line-height: 1;
-    }
-    .queue-list li button:hover { color: var(--danger); }
-    .history-list li.done .badge { color: var(--success); }
-    .history-list li.failed .badge { color: var(--danger); }
-    .history-list li.cancelled .badge { color: var(--muted); }
-    .badge {
-      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
-      padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor;
-      font-weight: 600;
-    }
-    .queue-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-    .empty { color: var(--muted); font-size: 12px; padding: 8px 0; text-align: center; }
-    details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
-    details summary:hover { color: var(--text); }
-    details[open] summary { margin-bottom: 8px; }
-    .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
-    .out-toolbar {
-      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px;
-    }
-    .out-toolbar .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-    .out-toolbar .seg button {
-      width: auto; padding: 6px 12px; font-size: 12px; background: transparent;
-      border: 0; border-right: 1px solid var(--border); border-radius: 0; color: var(--muted); font-weight: 500;
-    }
-    .out-toolbar .seg button:last-child { border-right: 0; }
-    .out-toolbar .seg button.active { background: var(--accent); color: white; }
-    .out-toolbar .seg button:hover:not(.active) { color: var(--text); background: rgba(255,255,255,0.04); }
-    .out-grid {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-      gap: 10px; margin-bottom: 12px;
-    }
-    .out-card {
-      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
-      background: var(--panel-2); cursor: pointer; transition: 0.12s;
-      display: flex; flex-direction: column;
-    }
-    .out-card:hover { border-color: var(--accent); transform: translateY(-1px); }
-    .out-card.active { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
-    .out-card video {
-      width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block;
-    }
-    .out-card .info { padding: 8px 10px; }
-    .out-card .name {
-      font-size: 11px; font-weight: 500; overflow: hidden; text-overflow: ellipsis;
-      white-space: nowrap; color: var(--text);
-    }
-    .out-card .sub { font-size: 10px; color: var(--muted); margin-top: 3px; }
-    .out-card .actions-row {
-      display: flex; justify-content: space-between; gap: 4px; padding: 0 8px 8px;
-    }
-    .out-card .actions-row button {
-      width: auto; padding: 3px 7px; font-size: 10px; background: transparent;
-      border: 1px solid var(--border); color: var(--muted); font-weight: 500;
-    }
-    .out-card .actions-row button:hover { color: var(--text); border-color: var(--accent); }
-    .out-card.hidden-card { opacity: 0.45; }
-    .out-card.hidden-card .name::after { content: " · hidden"; color: var(--muted); }
+
+    /* Mode-specific blocks (image/audio/extend sections) */
+    .mode-only { display: none; }
+    .mode-only.show { display: block; }
+
     /* Image preview */
+    .img-row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+    .img-row input[type="file"] { display: none; }
     .img-preview {
       display: none; margin-top: 8px; max-width: 100%;
       border-radius: 8px; border: 1px solid var(--border);
     }
     .img-preview.show { display: block; }
-    .img-row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-    .img-row label { margin: 0; flex: 0 0 auto; }
-    .img-row input[type="file"] { display: none; }
-    /* Mode-aware sections */
-    .mode-only { display: none; }
-    .mode-only.show { display: block; }
+
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .check { display: flex; align-items: center; gap: 8px; margin: 10px 0; cursor: pointer; color: var(--text); font-size: 12px; }
+    .check input { width: auto; margin: 0; }
+    .hint { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .derived {
+      margin-top: 8px; padding: 9px 11px; border-radius: 6px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      font-size: 12px; color: var(--muted);
+    }
+    .derived strong { color: var(--accent-bright); font-weight: 600; }
+    .warn-banner {
+      background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.4);
+      color: var(--warning); padding: 8px 11px; border-radius: 6px; margin: 8px 0;
+      font-size: 11px; display: none;
+    }
+    .warn-banner.show { display: block; }
+
+    button.primary {
+      background: var(--accent); border-color: var(--accent); color: white;
+      padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
+    button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.danger {
+      color: var(--danger); border-color: rgba(248,81,73,0.4); background: transparent;
+      padding: 11px; font-weight: 600; cursor: pointer;
+    }
+    button.danger:hover { background: rgba(248,81,73,0.1); }
+    .actions { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-top: 14px; }
+    button.small {
+      width: auto; padding: 6px 10px; font-size: 11px;
+      background: var(--panel-2); font-weight: 500; cursor: pointer;
+    }
+    button.small:hover { border-color: var(--accent); }
+
+    details summary { cursor: pointer; color: var(--muted); font-size: 11px; padding: 4px 0; }
+    details summary:hover { color: var(--text); }
+    details[open] summary { margin-bottom: 6px; }
+
+    /* ===== STAGE (PLAYER + CAROUSEL) ===== */
+    .stage-pane {
+      background: linear-gradient(180deg, #0a0d12 0%, var(--panel) 100%);
+    }
+    .player-wrap {
+      flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+      background: black; min-height: 0; position: relative;
+      overflow: hidden;
+    }
+    .player-wrap video {
+      max-width: 100%; max-height: 100%; width: auto; height: auto;
+      display: block;
+    }
+    .player-wrap.empty {
+      background: var(--panel-2); color: var(--muted); font-size: 13px;
+      flex-direction: column; gap: 6px; text-align: center;
+    }
+    .player-wrap.empty .dim-icon { font-size: 36px; opacity: 0.4; }
+    .player-meta {
+      flex: 0 0 auto; padding: 10px 16px;
+      background: var(--panel); border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      font-size: 12px; color: var(--muted);
+    }
+    .player-meta .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .player-meta .actions-bar { display: flex; gap: 6px; flex-shrink: 0; }
+    .player-meta button { width: auto; padding: 5px 10px; font-size: 11px; background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px; }
+    .player-meta button:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Carousel */
+    .carousel-wrap {
+      flex: 0 0 auto; padding: 10px 14px 14px;
+      background: var(--panel); border-top: 1px solid var(--border);
+    }
+    .carousel-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px; gap: 10px;
+    }
+    .carousel-head h3 {
+      margin: 0; font-size: 11px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+    }
+    .carousel-head .seg {
+      display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    }
+    .carousel-head .seg button {
+      width: auto; padding: 4px 10px; font-size: 11px; background: transparent;
+      border: 0; border-right: 1px solid var(--border); border-radius: 0;
+      color: var(--muted); font-weight: 500; cursor: pointer;
+    }
+    .carousel-head .seg button:last-child { border-right: 0; }
+    .carousel-head .seg button.active { background: var(--accent); color: white; }
+    .carousel {
+      display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+      scroll-snap-type: x proximity;
+    }
+    .carousel::-webkit-scrollbar { height: 8px; }
+    .carousel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    .car-card {
+      flex: 0 0 168px; scroll-snap-align: start;
+      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+      background: var(--panel-2); cursor: pointer; transition: 0.12s;
+      display: flex; flex-direction: column;
+    }
+    .car-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .car-card.active { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
+    .car-card.hidden-card { opacity: 0.4; }
+    .car-card video { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
+    .car-card .info { padding: 6px 8px; font-size: 10px; }
+    .car-card .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .car-card .sub { color: var(--muted); margin-top: 2px; }
+    .car-card .row-btns { display: flex; gap: 4px; padding: 0 6px 6px; }
+    .car-card .row-btns button {
+      flex: 1; padding: 3px 4px; font-size: 9px; background: transparent;
+      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 4px;
+    }
+    .car-card .row-btns button:hover { color: var(--text); border-color: var(--accent); }
+    .empty-msg { color: var(--muted); font-size: 12px; padding: 12px; text-align: center; width: 100%; }
+
+    /* ===== BOTTOM TABBED PANE ===== */
+    .bottom-pane {
+      flex: 0 0 auto; max-height: 280px;
+      background: var(--panel); border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .bottom-pane.collapsed .bottom-body { display: none; }
+    .bottom-pane.collapsed { max-height: 38px; }
+    .tabs {
+      display: flex; align-items: center; gap: 0; padding: 0 12px;
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .tabs button {
+      width: auto; padding: 9px 14px; font-size: 12px; background: transparent;
+      border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+      color: var(--muted); font-weight: 500; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .tabs button:hover { color: var(--text); }
+    .tabs button.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
+    .tabs button .badge {
+      background: var(--accent-dim); color: var(--accent-bright);
+      padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+    }
+    .tabs .spacer { flex: 1; }
+    .tabs .tab-collapse {
+      width: auto; padding: 4px 8px; font-size: 11px; background: transparent;
+      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px;
+      align-self: center;
+    }
+    .bottom-body {
+      flex: 1 1 auto; overflow-y: auto; padding: 12px 16px; min-height: 0;
+    }
+    .tab-content { display: none; }
+    .tab-content.show { display: block; }
+
+    /* Now panel */
+    .now-card {
+      padding: 10px 12px; border-radius: 8px; background: var(--panel-2);
+      border: 1px solid var(--border);
+    }
+    .now-card.idle { opacity: 0.7; }
+    .now-card .ttl { font-weight: 600; font-size: 13px; }
+    .now-card .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+    .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 7px 0; }
+    .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+
+    /* Queue/recent lists */
+    .row-list { list-style: none; padding: 0; margin: 0; }
+    .row-list li {
+      display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px;
+      align-items: center; padding: 7px 9px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel-2);
+      margin-bottom: 5px; font-size: 11px;
+    }
+    .row-list li .pos { color: var(--muted); font-weight: 600; min-width: 22px; }
+    .row-list li .ttl, .row-list li .params {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .row-list li .params { color: var(--muted); font-size: 10px; }
+    .row-list li .badge {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
+      font-weight: 600;
+    }
+    .row-list li.done .badge { color: var(--success); }
+    .row-list li.failed .badge { color: var(--danger); }
+    .row-list li.cancelled .badge { color: var(--muted); }
+    .row-list li button {
+      width: auto; background: transparent; border: 0; color: var(--muted);
+      cursor: pointer; padding: 2px 6px; font-size: 14px; line-height: 1;
+    }
+    .row-list li button:hover { color: var(--danger); }
+    .row-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+    /* Logs */
+    pre.log {
+      white-space: pre-wrap; word-break: break-all;
+      background: #06080c; border: 1px solid var(--border); border-radius: 6px;
+      padding: 10px; font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+      color: #b0b8c4; margin: 0; max-height: 220px; overflow-y: auto;
+    }
+
+    /* Modal */
+    .modal-bg {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+      display: none; align-items: center; justify-content: center;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: var(--panel); border: 1px solid var(--border-strong);
+      border-radius: var(--radius); padding: 18px; width: min(640px, 92vw);
+      max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .modal h3 { margin: 0 0 12px; font-size: 14px; }
+    .modal textarea.batch {
+      flex: 1 1 auto; min-height: 280px; font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+    /* Empty state */
+    .empty-state { color: var(--muted); font-size: 12px; padding: 14px 0; text-align: center; }
   </style>
 </head>
 <body>
+
 <header>
-  <h1>⚡ LTX MLX Studio</h1>
+  <h1>⚡ LTX23MLX</h1>
   <span class="tag" id="modelTag"></span>
   <span class="spacer"></span>
   <span id="memPill" class="pill">memory…</span>
@@ -1275,126 +1374,194 @@ HTML = r"""<!doctype html>
   <span id="jobPill" class="pill">idle</span>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
   <button class="ghost-btn" onclick="api('/helper/restart', 'POST').then(()=>setTimeout(poll,500))">Restart helper</button>
-  <button class="ghost-btn" onclick="api('/open_pinokio', 'POST').then(poll)">Open Pinokio</button>
 </header>
 
-<main>
-  <section>
-    <h2>Quick presets</h2>
-    <div class="preset-grid" id="presets"></div>
+<main class="layout">
 
-    <div id="warnBanner" class="warn-banner"></div>
-
-    <h2 class="spaced">Generate</h2>
+  <!-- ============== FORM PANE ============== -->
+  <aside class="form-pane">
     <form id="genForm">
       <input type="hidden" name="preset_label" id="preset_label" value="">
 
-      <label>Mode</label>
-      <select name="mode" id="mode">
-        <option value="t2v" selected>Text → video</option>
-        <option value="i2v">Image → video</option>
-        <option value="i2v_clean_audio">Image → video + clean audio mux</option>
-        <option value="extend">Extend (chain a clip — uses dev model, slower)</option>
-      </select>
+      <h2>Mode</h2>
+      <div class="pill-group cols-3" id="modeGroup">
+        <button type="button" class="pill-btn" data-mode="t2v"><span class="ico">📝</span><span>Text → Video</span></button>
+        <button type="button" class="pill-btn" data-mode="i2v"><span class="ico">🖼</span><span>Image → Video</span></button>
+        <button type="button" class="pill-btn" data-mode="extend"><span class="ico">⏵</span><span>Extend clip</span></button>
+      </div>
+      <input type="hidden" name="mode" id="mode" value="t2v">
 
-      <label>Prompt</label>
-      <textarea name="prompt" id="prompt"></textarea>
+      <h2>Quality</h2>
+      <div class="pill-group cols-3" id="qualityGroup">
+        <button type="button" class="pill-btn" data-quality="draft"><span class="ico">🚀</span><span>Draft</span><span class="sub">small · 8 steps</span></button>
+        <button type="button" class="pill-btn active" data-quality="standard"><span class="ico">⭐</span><span>Standard</span><span class="sub">Q4 · 8 steps</span></button>
+        <button type="button" class="pill-btn disabled" data-quality="high" id="qualityHigh"><span class="ico">💎</span><span>High</span><span class="sub" id="highSub">Q8 not installed</span></button>
+      </div>
+      <input type="hidden" name="quality" id="quality" value="standard">
 
-      <!-- Image input + upload + preview (i2v modes only) -->
+      <div id="warnBanner" class="warn-banner"></div>
+
+      <!-- Mode-specific: image -->
       <div class="mode-only" id="imageSection">
-        <label>Image (auto cover-cropped to width × height)</label>
-        <input name="image" id="image">
+        <h2>Reference image</h2>
+        <input name="image" id="image" placeholder="path or click Upload">
         <div class="img-row">
-          <button type="button" class="small" onclick="document.getElementById('imageFile').click()">Upload…</button>
+          <button type="button" class="small" onclick="document.getElementById('imageFile').click()">📤 Upload</button>
           <input type="file" id="imageFile" accept="image/*" onchange="uploadImage()">
-          <span class="hint" id="imgHint">PNG/JPG · any size · cover-crop applied</span>
+          <span class="hint" id="imgHint">PIL cover-crop applied automatically to W×H</span>
         </div>
         <img id="imagePreview" class="img-preview" alt="">
       </div>
 
-      <!-- Audio input (i2v_clean_audio only) -->
-      <div class="mode-only" id="audioSection">
-        <label>Audio (muxed in for clean audio mode)</label>
-        <input name="audio" id="audio">
-      </div>
-
-      <!-- Extend section (extend mode only) -->
+      <!-- Mode-specific: extend -->
       <div class="mode-only" id="extendSection">
-        <label>Source video</label>
+        <h2>Source video</h2>
         <select id="extendSrcSelect" onchange="document.getElementById('video_path').value=this.value"></select>
-        <input name="video_path" id="video_path" placeholder="/path/to/source.mp4">
-        <div class="row">
+        <input name="video_path" id="video_path" placeholder="/path/to/source.mp4" style="margin-top:6px">
+        <div class="row" style="margin-top:8px">
           <div>
-            <label>Extend by (latent frames)</label>
+            <label class="lbl">Extend by (latent frames)</label>
             <input name="extend_frames" id="extend_frames" type="number" value="5" min="1" max="32">
           </div>
           <div>
-            <label>Direction</label>
+            <label class="lbl">Direction</label>
             <select name="extend_direction" id="extend_direction">
-              <option value="after" selected>After (continue motion)</option>
-              <option value="before">Before (prepend)</option>
+              <option value="after" selected>After</option>
+              <option value="before">Before</option>
             </select>
           </div>
         </div>
-        <div><label>Stage-1 steps</label><input name="extend_steps" id="extend_steps" type="number" value="30" min="4" max="60"></div>
-        <div class="hint">Each latent ≈ 8 actual frames ≈ 0.33s. Try 5 for ~1.7s extension. Q4 model may not support extend — needs q8 weights for two-stage.</div>
+        <label class="lbl">Stage-1 steps</label>
+        <input name="extend_steps" id="extend_steps" type="number" value="30" min="4" max="60">
+        <div class="hint">Each latent ≈ 8 frames (~0.33s). Q8 weights recommended for two-stage extend.</div>
       </div>
 
-      <!-- T2V/I2V sizing -->
+      <h2>Prompt</h2>
+      <textarea name="prompt" id="prompt" placeholder="What should happen in the video..."></textarea>
+
+      <!-- Mode-specific: audio (i2v_clean_audio only — accessed via Advanced) -->
+      <details>
+        <summary>Advanced</summary>
+        <label class="lbl">I2V audio mode</label>
+        <select id="i2vMode">
+          <option value="i2v" selected>Joint audio (LTX generates audio synced with visual)</option>
+          <option value="i2v_clean_audio">Replace LTX audio with external file (mux)</option>
+        </select>
+        <div class="mode-only" id="audioSection">
+          <label class="lbl">Audio file</label>
+          <input name="audio" id="audio">
+        </div>
+        <label class="check">
+          <input type="checkbox" name="enhance" id="enhance"> Enhance prompt (Gemma rewrite — CLI only, ignored by helper)
+        </label>
+        <label class="check">
+          <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done
+        </label>
+      </details>
+
+      <!-- Sizing for non-extend modes -->
       <div class="mode-only" id="sizingSection">
-        <label>Aspect</label>
-        <select id="aspect" onchange="applyAspect(this.value)">
-          <option value="custom">Custom</option>
-        </select>
+        <h2>Aspect</h2>
+        <div class="pill-group cols-4" id="aspectGroup">
+          <button type="button" class="pill-btn active" data-aspect="landscape"><span class="ico">▭</span><span>16:9</span><span class="sub">1280×704</span></button>
+          <button type="button" class="pill-btn" data-aspect="vertical"><span class="ico">▯</span><span>9:16</span><span class="sub">704×1280</span></button>
+          <button type="button" class="pill-btn" data-aspect="square"><span class="ico">▢</span><span>1:1</span><span class="sub">768×768</span></button>
+          <button type="button" class="pill-btn" data-aspect="test"><span class="ico">🧪</span><span>Test</span><span class="sub">512×288</span></button>
+        </div>
+        <input type="hidden" id="aspect" value="landscape">
 
-        <div class="row">
-          <div><label>Width</label><input name="width" id="width" value="1280" type="number" min="32" step="32"></div>
-          <div><label>Height</label><input name="height" id="height" value="704" type="number" min="32" step="32"></div>
+        <div class="row3" style="margin-top:10px">
+          <div><label class="lbl">Width</label><input name="width" id="width" value="1280" type="number" min="32" step="32"></div>
+          <div><label class="lbl">Height</label><input name="height" id="height" value="704" type="number" min="32" step="32"></div>
+          <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
         </div>
 
-        <div class="row">
-          <div><label>Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
-          <div><label>Frames</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
+        <div class="row" style="margin-top:6px">
+          <div><label class="lbl">Frames (8k+1)</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
+          <div><label class="lbl">Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
         </div>
 
-        <label>Quality</label>
-        <select name="quality" id="quality" onchange="applyQuality()">
-          <option value="draft">Draft — Q4 · smaller aspect · 8 steps · ~3 min for 5s</option>
-          <option value="standard" selected>Standard — Q4 · 1280×704 · 8 steps · ~7 min for 5s</option>
-          <option value="high" id="qualityHigh" disabled>High — Q8 two-stage + TeaCache · ~12 min for 5s (Q8 not installed)</option>
-        </select>
-
-        <div class="row">
-          <div><label>Steps</label><input name="steps" id="steps" value="8" type="number" min="1" max="60"></div>
-          <div><label>Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
-        </div>
+        <input type="hidden" name="steps" id="steps" value="8">
 
         <div class="derived" id="derived"></div>
       </div>
 
-      <details>
-        <summary>Advanced</summary>
-        <label class="check">
-          <input type="checkbox" name="enhance" id="enhance"> Enhance prompt — currently CLI-only, ignored by warm helper
-        </label>
-        <label class="check">
-          <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done (off for batches)
-        </label>
-      </details>
-
-      <label class="check" id="stopComfyRow" style="display:none">
-        <input type="checkbox" name="stop_comfy" id="stop_comfy" checked> Stop Comfy before render <span style="color:var(--muted);font-size:11px;">(Comfy detected on this machine — kill it to free RAM for 720p+ renders)</span>
-      </label>
+      <input type="hidden" name="stop_comfy" id="stop_comfy" value="on">
 
       <div class="actions">
-        <button type="submit" class="primary" id="genBtn">▶ Add to queue</button>
-        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">⏹ Stop current</button>
+        <button type="submit" class="primary" id="genBtn">▶ Generate</button>
+        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">⏹ Stop</button>
+      </div>
+      <div class="row-actions" style="margin-top:8px">
+        <button type="button" class="small" onclick="openBatch()">📋 Batch paste</button>
+        <button type="button" class="small" id="pauseBtn" onclick="togglePause()">⏸ Pause queue</button>
+        <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
       </div>
     </form>
+  </aside>
 
-    <details style="margin-top: 16px" class="mode-only" id="batchDetails">
-      <summary>Batch paste — split prompts with <code>---</code> on its own line</summary>
-      <textarea class="batch" id="batchPrompts" placeholder="First prompt here.
+  <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
+  <section class="stage-pane">
+    <div class="player-wrap empty" id="playerWrap">
+      <div class="dim-icon">🎬</div>
+      <div>No outputs yet — generate something to begin</div>
+    </div>
+    <div class="player-meta" id="playerMeta" style="display:none">
+      <div class="name" id="playerName"></div>
+      <div class="actions-bar">
+        <button id="loadParamsBtn" onclick="loadParams()" disabled>↩ Load params</button>
+        <button onclick="useAsExtendSource()">⏭ Extend</button>
+        <button onclick="hideActive()">⊘ Hide</button>
+      </div>
+    </div>
+    <div class="carousel-wrap">
+      <div class="carousel-head">
+        <h3 id="carouselTitle">Outputs</h3>
+        <div class="seg">
+          <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
+          <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
+        </div>
+      </div>
+      <div class="carousel" id="carousel"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ============== BOTTOM TABBED PANE ============== -->
+<aside class="bottom-pane" id="bottomPane">
+  <nav class="tabs">
+    <button data-tab="now" class="active">⚡ Now</button>
+    <button data-tab="queue">⏳ Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
+    <button data-tab="recent">📜 Recent</button>
+    <button data-tab="logs">📟 Logs</button>
+    <span class="spacer"></span>
+    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">↕ Toggle</button>
+  </nav>
+  <div class="bottom-body">
+    <div class="tab-content show" id="tab-now">
+      <div class="now-card idle" id="nowCard">
+        <div class="ttl">Idle</div>
+        <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
+        <div class="meta" id="nowDetail">No job running</div>
+      </div>
+    </div>
+    <div class="tab-content" id="tab-queue">
+      <ul class="row-list" id="queueList"></ul>
+    </div>
+    <div class="tab-content" id="tab-recent">
+      <ul class="row-list" id="historyList"></ul>
+    </div>
+    <div class="tab-content" id="tab-logs">
+      <pre class="log" id="log">No log yet.</pre>
+    </div>
+  </div>
+</aside>
+
+<!-- ============== BATCH MODAL ============== -->
+<div class="modal-bg" id="batchModal" onclick="if(event.target===this)closeBatch()">
+  <div class="modal">
+    <h3>Batch paste — split prompts with <code>---</code> on its own line</h3>
+    <textarea class="batch" id="batchPrompts" placeholder="First prompt here.
 
 ---
 
@@ -1403,138 +1570,73 @@ Second prompt.
 ---
 
 Third prompt."></textarea>
-      <div class="hint">Each chunk between <code>---</code> lines becomes a queued job using the settings above. Auto-open is off for batches.</div>
-      <button class="small" style="margin-top: 8px" onclick="queueBatch()">Queue all</button>
-    </details>
-  </section>
-
-  <div class="right-col">
-    <section>
-      <h2>Now <span class="h2-meta" id="nowMeta"></span></h2>
-      <div class="now-card idle" id="nowCard">
-        <div class="ttl">Idle</div>
-        <div class="progress-bar"><div class="fill" id="progressFill" style="width: 0%"></div></div>
-        <div class="meta" id="nowDetail">No job running</div>
-      </div>
-      <pre class="log" id="log">No log yet.</pre>
-    </section>
-
-    <section>
-      <h2>Queue <span class="h2-meta" id="queueMeta"></span></h2>
-      <ul class="queue-list" id="queueList"></ul>
-      <div class="queue-actions">
-        <button class="small" id="pauseBtn" onclick="togglePause()">⏸ Pause</button>
-        <button class="small danger" onclick="if(confirm('Clear all queued jobs?'))api('/queue/clear','POST').then(poll)">Clear queued</button>
-      </div>
-    </section>
-
-    <section>
-      <h2>Recent jobs <span class="h2-meta" id="historyMeta"></span></h2>
-      <ul class="history-list" id="historyList"></ul>
-    </section>
-
-    <section>
-      <h2>
-        Outputs
-        <span class="h2-actions">
-          <div class="seg">
-            <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
-            <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
-          </div>
-          <button class="tiny" onclick="if(confirm('Unhide ALL hidden outputs?'))api('/output/show_all','POST').then(poll)">Unhide all</button>
-        </span>
-      </h2>
-      <div class="out-grid" id="outGrid"></div>
-      <video id="player" class="player" controls></video>
-      <div class="meta" id="outputMeta" style="margin-top:8px"></div>
-      <div style="margin-top:8px; display:flex; gap:8px;">
-        <button class="small" id="loadParamsBtn" onclick="loadParams()" disabled>↩ Load params from selected</button>
-        <button class="small" id="useAsExtendBtn" onclick="useAsExtendSource()">⏭ Use as Extend source</button>
-      </div>
-    </section>
+    <div class="hint" style="margin-top:6px">Each chunk between <code>---</code> lines becomes a queued job using the current form settings. Auto-open is forced off for batches.</div>
+    <div class="modal-actions">
+      <button class="small" onclick="closeBatch()">Cancel</button>
+      <button class="small primary" style="padding:6px 14px" onclick="queueBatch().then(closeBatch)">Queue all</button>
+    </div>
   </div>
-</main>
+</div>
 
 <script>
 const BOOT = __BOOTSTRAP__;
-const PRESETS = BOOT.presets;
 const ASPECTS = BOOT.aspects;
 const FPS = BOOT.fps;
 
 let filterMode = 'visible';
 let activePath = null;
 let currentOutputs = [];
+let currentMode = 't2v';
 
 document.getElementById('modelTag').textContent = BOOT.model;
 document.getElementById('image').value = BOOT.default_image;
 document.getElementById('audio').value = BOOT.default_audio;
 
-// Build presets
-const presetEl = document.getElementById('presets');
-for (const p of PRESETS) {
-  const btn = document.createElement('button');
-  btn.type = 'button'; btn.className = 'preset';
-  btn.innerHTML = `<div class="ttl">${p.label}</div><div class="sub">${p.sub}</div>`;
-  btn.onclick = () => applyPreset(p);
-  presetEl.appendChild(btn);
-}
-
-// Build aspect dropdown
-const aspectEl = document.getElementById('aspect');
-for (const [key, a] of Object.entries(ASPECTS)) {
-  const opt = document.createElement('option');
-  opt.value = key;
-  opt.textContent = a.label;
-  aspectEl.appendChild(opt);
-}
-aspectEl.value = 'landscape';
-applyAspect('landscape', /* don't trigger derived yet */ true);
-
-function applyPreset(p) {
-  applyAspect(p.aspect, true);
-  setDuration(p.dur);
-  document.getElementById('steps').value = p.steps;
-  document.getElementById('stop_comfy').checked = p.stop_comfy;
-  document.getElementById('preset_label').value = p.label;
+// ====== Pill-button group helpers ======
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById('mode').value = mode;
+  document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  // For i2v, switch the actual mode based on the i2vMode select
+  if (mode === 'i2v') {
+    document.getElementById('mode').value = document.getElementById('i2vMode').value;
+  }
   updateDerived();
 }
+function setQuality(q) {
+  document.getElementById('quality').value = q;
+  document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.quality === q));
+  applyQuality();
+}
+function setAspect(a) {
+  document.getElementById('aspect').value = a;
+  document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === a));
+  applyAspect(a);
+}
 
-function applyAspect(key, suppressDerived) {
-  if (key === 'custom') return;
+document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
+document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
+document.getElementById('i2vMode').addEventListener('change', () => {
+  document.getElementById('audioSection').classList.toggle('show', document.getElementById('i2vMode').value === 'i2v_clean_audio');
+  if (currentMode === 'i2v') document.getElementById('mode').value = document.getElementById('i2vMode').value;
+});
+
+function applyAspect(key) {
   const a = ASPECTS[key];
   if (!a) return;
   document.getElementById('width').value = a.w;
   document.getElementById('height').value = a.h;
-  document.getElementById('aspect').value = key;
-  if (!suppressDerived) updateDerived();
-}
-
-function durationToFrames(s) {
-  // 8k+1 snap
-  const k = Math.max(0, Math.round(s * FPS / 8));
-  return k * 8 + 1;
-}
-function framesToDuration(f) {
-  return ((f - 1) / FPS).toFixed(2);
-}
-function setDuration(s) {
-  document.getElementById('duration').value = s;
-  document.getElementById('frames').value = durationToFrames(s);
+  updateDerived();
 }
 
 function applyQuality() {
   const q = document.getElementById('quality').value;
-  // CRITICAL: Q4 distilled uses a hardcoded 9-sigma schedule. Fewer than 8 steps
-  // truncates the schedule and leaves the image at sigma=0.725+ — i.e. >70% noise.
-  // Speed for Draft comes from rendering at a smaller aspect, NOT fewer steps.
   if (q === 'draft' || q === 'standard') {
     document.getElementById('steps').value = 8;
   } else if (q === 'high') {
-    // Q8 two-stage HQ uses stage1=15, stage2=3 internally — steps field is
-    // informational here. Helper routes to a different action.
     document.getElementById('steps').value = 18;
   }
-  // Draft also snaps the aspect to a smaller variant matching the current ratio.
   if (q === 'draft') {
     const w = parseInt(document.getElementById('width').value || 1280);
     const h = parseInt(document.getElementById('height').value || 704);
@@ -1542,11 +1644,15 @@ function applyQuality() {
     if (ratio > 1.5)        { document.getElementById('width').value = 768; document.getElementById('height').value = 432; }
     else if (ratio < 0.7)   { document.getElementById('width').value = 432; document.getElementById('height').value = 768; }
     else                    { document.getElementById('width').value = 512; document.getElementById('height').value = 512; }
-    document.getElementById('aspect').value = 'custom';
-    document.getElementById('preset_label').value = 'Draft';
   }
   updateDerived();
 }
+
+function durationToFrames(s) {
+  const k = Math.max(0, Math.round(s * FPS / 8));
+  return k * 8 + 1;
+}
+function framesToDuration(f) { return ((f - 1) / FPS).toFixed(2); }
 
 function updateDerived() {
   const mode = document.getElementById('mode').value;
@@ -1561,8 +1667,7 @@ function updateDerived() {
   const padded = (pw !== w || ph !== h) && mode === 'i2v_clean_audio';
   const finalRes = padded ? `${w}×${h} → <strong>${pw}×${ph}</strong>` : `<strong>${w}×${h}</strong>`;
 
-  document.getElementById('derived').innerHTML =
-    `Duration <strong>${dur}s</strong> @ ${FPS}fps · Output ${finalRes}`;
+  document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps · ${finalRes} · Steps ${document.getElementById('steps').value}`;
 
   const warns = [];
   if (w % 32 !== 0) warns.push(`Width ${w} isn't a multiple of 32 (closest ${Math.round(w/32)*32})`);
@@ -1572,19 +1677,14 @@ function updateDerived() {
     warns.push(`Frames work best as 8k+1 (closest ${closest})`);
   }
   const banner = document.getElementById('warnBanner');
-  if (warns.length) {
-    banner.innerHTML = '⚠ ' + warns.join(' · ');
-    banner.classList.add('show');
-  } else {
-    banner.classList.remove('show');
-  }
+  if (warns.length) { banner.innerHTML = '⚠ ' + warns.join(' · '); banner.classList.add('show'); }
+  else banner.classList.remove('show');
 
-  // Mode-aware section visibility
+  // Mode-aware visibility
   document.getElementById('imageSection').classList.toggle('show', mode === 'i2v' || mode === 'i2v_clean_audio');
+  document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
+  document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
-  document.getElementById('extendSection').classList.toggle('show', mode === 'extend');
-  document.getElementById('sizingSection').classList.toggle('show', mode !== 'extend');
-  document.getElementById('batchDetails').classList.toggle('show', mode !== 'extend');
 
   // Image preview
   const imgPath = document.getElementById('image').value.trim();
@@ -1592,62 +1692,39 @@ function updateDerived() {
   if ((mode === 'i2v' || mode === 'i2v_clean_audio') && imgPath) {
     preview.src = '/image?path=' + encodeURIComponent(imgPath);
     preview.classList.add('show');
-  } else {
-    preview.classList.remove('show');
-  }
+  } else preview.classList.remove('show');
 }
 
-['width', 'height', 'mode'].forEach(id => {
-  document.getElementById(id).addEventListener('input', () => {
-    document.getElementById('preset_label').value = '';
-    updateDerived();
-  });
-});
-document.getElementById('aspect').addEventListener('change', e => applyAspect(e.target.value));
-document.getElementById('duration').addEventListener('input', e => {
-  document.getElementById('frames').value = durationToFrames(parseFloat(e.target.value) || 0);
-  document.getElementById('preset_label').value = '';
-  updateDerived();
-});
-document.getElementById('frames').addEventListener('input', e => {
-  document.getElementById('duration').value = framesToDuration(parseInt(e.target.value) || 0);
-  document.getElementById('preset_label').value = '';
-  updateDerived();
+['width','height','frames','duration'].forEach(id => {
+  const el = document.getElementById(id);
+  if (id === 'duration') {
+    el.addEventListener('input', e => { document.getElementById('frames').value = durationToFrames(parseFloat(e.target.value) || 0); updateDerived(); });
+  } else if (id === 'frames') {
+    el.addEventListener('input', e => { document.getElementById('duration').value = framesToDuration(parseInt(e.target.value) || 0); updateDerived(); });
+  } else {
+    el.addEventListener('input', updateDerived);
+  }
 });
 document.getElementById('image').addEventListener('input', updateDerived);
 
 async function uploadImage() {
   const f = document.getElementById('imageFile').files[0];
   if (!f) return;
-  const fd = new FormData();
-  fd.append('image', f);
+  const fd = new FormData(); fd.append('image', f);
   const r = await fetch('/upload', { method: 'POST', body: fd });
   const data = await r.json();
   if (data.ok) {
     document.getElementById('image').value = data.path;
-    document.getElementById('imgHint').textContent = `Uploaded: ${f.name} (${(f.size/1024).toFixed(0)} KB) → will be cover-cropped to ${document.getElementById('width').value}×${document.getElementById('height').value}`;
+    document.getElementById('imgHint').textContent = `Uploaded: ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
     updateDerived();
-  } else {
-    alert('Upload failed: ' + (data.error || 'unknown'));
-  }
+  } else alert('Upload failed: ' + (data.error || '?'));
 }
 
-function fmtMem(m) { return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} GB · swap ${m.swap_gb.toFixed(1)} GB`; }
-function fmtMin(s) {
-  if (!s || s < 0) return '—';
-  const m = Math.floor(s / 60);
-  const sec = Math.round(s % 60);
-  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
-}
-function snippet(s, n = 70) {
-  if (!s) return '';
-  s = s.replace(/\s+/g, ' ').trim();
-  return s.length > n ? s.slice(0, n - 1) + '…' : s;
-}
-function escapeHtml(s) {
-  if (!s) return '';
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
+// ====== Format helpers ======
+function fmtMem(m) { return `${m.used_gb.toFixed(1)} / ${m.total_gb.toFixed(0)} GB · swap ${m.swap_gb.toFixed(1)}`; }
+function fmtMin(s) { if (!s || s < 0) return '—'; const m = Math.floor(s/60); const sec = Math.round(s%60); return m > 0 ? `${m}m ${sec}s` : `${sec}s`; }
+function snippet(s, n = 70) { if (!s) return ''; s = s.replace(/\s+/g,' ').trim(); return s.length > n ? s.slice(0, n-1)+'…' : s; }
+function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function api(path, method = 'GET', body = null) {
   const opts = { method };
@@ -1660,11 +1737,13 @@ async function api(path, method = 'GET', body = null) {
   return r.status === 409 ? { error: 'busy' } : r.json().catch(() => ({}));
 }
 
+// ====== Poll ======
 async function poll() {
   let s;
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
   try { s = await (await fetch(url)).json(); } catch (e) { return; }
 
+  // Memory
   const m = s.memory;
   const memPill = document.getElementById('memPill');
   memPill.innerHTML = `<span class="dot"></span>${fmtMem(m)}`;
@@ -1673,38 +1752,36 @@ async function poll() {
   else if (m.swap_gb > 4 || m.pressure_pct > 75) memCls = 'pill-warn';
   memPill.className = 'pill ' + memCls;
 
-  // Comfy UI is hidden by default. It only appears when a Comfy process is
-  // detected on this machine — i.e. for the small subset of users who run
-  // ComfyUI alongside this panel and need to kill it before heavy renders.
-  // Fresh Pinokio installs of this panel never see this UI.
+  // Comfy (hidden when not running)
   const cp = document.getElementById('comfyPill');
   const stopBtn = document.getElementById('stopComfyBtn');
-  const stopRow = document.getElementById('stopComfyRow');
   if (s.comfy_pids.length) {
-    cp.innerHTML = `<span class="dot"></span>Comfy PID ${s.comfy_pids.join(', ')}`;
-    cp.className = 'pill pill-warn';
-    cp.style.display = '';
+    cp.innerHTML = `<span class="dot"></span>Comfy ${s.comfy_pids.join(', ')}`;
+    cp.className = 'pill pill-warn'; cp.style.display = '';
     stopBtn.style.display = '';
-    stopRow.style.display = '';
   } else {
     cp.style.display = 'none';
     stopBtn.style.display = 'none';
-    stopRow.style.display = 'none';
   }
 
+  // Helper
   const hp = document.getElementById('helperPill');
   if (s.helper && s.helper.alive) {
-    hp.innerHTML = `<span class="dot"></span>helper warm · PID ${s.helper.pid}`;
+    hp.innerHTML = `<span class="dot"></span>helper warm`;
     hp.className = 'pill pill-good';
   } else {
     hp.innerHTML = `<span class="dot"></span>helper cold`;
     hp.className = 'pill';
   }
 
+  // Queue pill + tab badge
   const qp = document.getElementById('queuePill');
   qp.innerHTML = `<span class="dot"></span>queue ${s.queue.length}${s.paused ? ' · paused' : ''}`;
   qp.className = 'pill ' + (s.paused ? 'pill-warn' : (s.queue.length ? 'pill-running' : ''));
+  const qb = document.getElementById('queueBadge');
+  if (s.queue.length) { qb.textContent = s.queue.length; qb.style.display = ''; } else { qb.style.display = 'none'; }
 
+  // Job pill
   const jp = document.getElementById('jobPill');
   if (s.running && s.current) {
     const elapsed = Math.max(0, Math.round(s.server_now - s.current.started_ts));
@@ -1715,8 +1792,22 @@ async function poll() {
     jp.className = 'pill';
   }
 
-  document.getElementById('pauseBtn').textContent = s.paused ? '▶ Resume' : '⏸ Pause';
+  document.getElementById('pauseBtn').textContent = s.paused ? '▶ Resume queue' : '⏸ Pause queue';
 
+  // Q8 / High enable
+  const highBtn = document.getElementById('qualityHigh');
+  const highSub = document.getElementById('highSub');
+  if (s.q8_available) {
+    highBtn.classList.remove('disabled');
+    highSub.textContent = 'Q8 + TeaCache';
+  } else {
+    highBtn.classList.add('disabled');
+    const missing = (s.q8_missing || []).length;
+    highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} files left` : 'Q8 not installed';
+    if (document.getElementById('quality').value === 'high') setQuality('standard');
+  }
+
+  // Now card
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
   if (s.running && s.current) {
@@ -1728,82 +1819,56 @@ async function poll() {
     const lastLog = s.log.slice(-1)[0] || '';
     nowCard.querySelector('.ttl').textContent = snippet(s.current.params.label || s.current.params.prompt, 80);
     nowCard.querySelector('.meta').innerHTML =
-      `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · ${s.current.params.steps} steps · <strong>${fmtMin(elapsed)}</strong> elapsed` +
-      (avg ? ` / ~${fmtMin(avg)} avg` : '') +
-      (lastLog ? `<br><span style="color:var(--muted)">${escapeHtml(lastLog.split(']').slice(1).join(']').trim().slice(0, 100))}</span>` : '');
+      `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · <strong>${fmtMin(elapsed)}</strong> elapsed${avg ? ' / ~'+fmtMin(avg)+' avg' : ''}` +
+      (lastLog ? `<br><span style="color:var(--muted)">${escapeHtml(lastLog.split(']').slice(1).join(']').trim().slice(0,100))}</span>` : '');
   } else {
     nowCard.classList.add('idle');
     fill.style.width = '0%';
     nowCard.querySelector('.ttl').textContent = s.paused ? 'Paused' : 'Idle';
     nowCard.querySelector('.meta').textContent = s.paused
       ? 'Worker paused — current job (if any) finishes, queue waits for resume.'
-      : (s.queue.length ? 'Worker about to pick up next queued job.' : 'No jobs queued.');
+      : (s.queue.length ? 'Worker about to pick up next queued job.' : 'No jobs queued. Generate something on the left.');
   }
-  document.getElementById('nowMeta').textContent = s.avg_elapsed_sec ? `avg ${fmtMin(s.avg_elapsed_sec)} per job` : '';
 
+  // Logs
   const log = document.getElementById('log');
   const wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
   log.textContent = s.log.length ? s.log.join('\n') : 'No log yet.';
   if (wasNearBottom) log.scrollTop = log.scrollHeight;
 
+  // Queue list
   const ql = document.getElementById('queueList');
-  if (!s.queue.length) {
-    ql.innerHTML = '<li class="empty"><span></span><span>Queue empty</span><span></span><span></span></li>';
-  } else {
-    ql.innerHTML = s.queue.map((j, i) => `
-      <li>
-        <span class="pos">#${i + 1}</span>
-        <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
-        <span class="params">${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f</span>
-        <button title="Remove" onclick="removeJob('${j.id}')">×</button>
-      </li>`).join('');
-  }
-  document.getElementById('queueMeta').textContent = s.queue.length ? `${s.queue.length} pending · ETA ${fmtMin(s.eta_sec)}` : '';
+  if (!s.queue.length) ql.innerHTML = '<li class="empty-state"><span></span><span>Queue empty</span><span></span><span></span></li>';
+  else ql.innerHTML = s.queue.map((j, i) => `
+    <li>
+      <span class="pos">#${i+1}</span>
+      <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
+      <span class="params">${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f</span>
+      <button title="Remove" onclick="removeJob('${j.id}')">×</button>
+    </li>`).join('');
 
+  // History
   const hl = document.getElementById('historyList');
-  if (!s.history.length) {
-    hl.innerHTML = '<li class="empty"><span></span><span>No history yet</span><span></span><span></span></li>';
-  } else {
-    hl.innerHTML = s.history.slice(0, 12).map(j => `
-      <li class="${j.status}">
-        <span class="badge">${j.status}</span>
-        <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
-        <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
-        <span></span>
-      </li>`).join('');
-  }
-  document.getElementById('historyMeta').textContent = s.history.length ? `last ${Math.min(12, s.history.length)}` : '';
+  if (!s.history.length) hl.innerHTML = '<li class="empty-state"><span></span><span>No history yet</span><span></span><span></span></li>';
+  else hl.innerHTML = s.history.slice(0, 20).map(j => `
+    <li class="${j.status}">
+      <span class="badge">${j.status}</span>
+      <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
+      <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
+      <span></span>
+    </li>`).join('');
 
+  // Outputs / carousel
   if (JSON.stringify(currentOutputs) !== JSON.stringify(s.outputs)) {
     currentOutputs = s.outputs;
-    renderOutputs();
+    renderCarousel();
     if (!activePath && currentOutputs.length) selectOutput(currentOutputs[0].path);
-    // Also refresh extend source dropdown
     const sel = document.getElementById('extendSrcSelect');
-    sel.innerHTML = '<option value="">— pick from outputs below or paste a path —</option>' +
-      currentOutputs.slice(0, 40).map(o =>
-        `<option value="${o.path}">${o.name}</option>`).join('');
+    sel.innerHTML = '<option value="">— pick an output below or paste a path —</option>' +
+      currentOutputs.slice(0, 40).map(o => `<option value="${o.path}">${o.name}</option>`).join('');
   }
   document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
-
-  // Q8 availability — enables/disables the High quality tier
-  const highOpt = document.getElementById('qualityHigh');
-  if (s.q8_available) {
-    highOpt.disabled = false;
-    highOpt.textContent = 'High — Q8 two-stage + TeaCache · ~12 min for 5s (best face fidelity)';
-  } else {
-    highOpt.disabled = true;
-    const missing = (s.q8_missing || []).length;
-    if (missing > 0 && missing < 6) {
-      highOpt.textContent = `High — Q8 downloading · ${missing} file${missing > 1 ? 's' : ''} still missing`;
-    } else {
-      highOpt.textContent = `High — Q8 not installed (need ~25 GB at ${s.q8_path || ''})`;
-    }
-    if (document.getElementById('quality').value === 'high') {
-      document.getElementById('quality').value = 'standard';
-      applyQuality();
-    }
-  }
+  document.getElementById('carouselTitle').textContent = filterMode === 'hidden' ? 'Hidden outputs' : `Outputs · ${currentOutputs.length}`;
 }
 
 function setFilter(mode) {
@@ -1813,110 +1878,116 @@ function setFilter(mode) {
   poll();
 }
 
-function renderOutputs() {
-  const grid = document.getElementById('outGrid');
-  if (!currentOutputs.length) {
-    grid.innerHTML = '<div class="empty" style="grid-column: 1/-1">No outputs in this view.</div>';
-    return;
-  }
-  grid.innerHTML = currentOutputs.map(o => `
-    <div class="out-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
-         data-path="${escapeHtml(o.path)}"
-         onclick="selectOutput('${escapeHtml(o.path)}')">
+function renderCarousel() {
+  const el = document.getElementById('carousel');
+  if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
+  el.innerHTML = currentOutputs.map(o => `
+    <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
+         data-path="${escapeHtml(o.path)}" onclick="selectOutput('${escapeHtml(o.path)}')">
       <video src="/file?path=${encodeURIComponent(o.path)}#t=0.5" preload="metadata" muted></video>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
         <div class="sub">${o.mtime.slice(11,16)} · ${o.size_mb.toFixed(1)} MB${o.has_sidecar ? ' · ↩' : ''}</div>
       </div>
-      <div class="actions-row">
+      <div class="row-btns">
         <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}('${escapeHtml(o.path)}')">${o.hidden ? '👁 Show' : '⊘ Hide'}</button>
         <button onclick="event.stopPropagation(); useAsExtendSourcePath('${escapeHtml(o.path)}')">⏭ Extend</button>
       </div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 function selectOutput(path) {
   activePath = path;
-  document.querySelectorAll('.out-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
-  document.getElementById('player').src = '/file?path=' + encodeURIComponent(path);
+  document.querySelectorAll('.car-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
+  const wrap = document.getElementById('playerWrap');
+  wrap.classList.remove('empty');
+  wrap.innerHTML = `<video controls autoplay src="/file?path=${encodeURIComponent(path)}"></video>`;
   const o = currentOutputs.find(x => x.path === path);
+  document.getElementById('playerMeta').style.display = '';
+  document.getElementById('playerName').innerHTML = o ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB` : '';
   document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar);
-  document.getElementById('outputMeta').innerHTML = o ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB` : '';
 }
 
-async function hide(path) { await fetch('/output/hide?path=' + encodeURIComponent(path), {method: 'POST'}); currentOutputs = []; poll(); }
-async function unhide(path) { await fetch('/output/show?path=' + encodeURIComponent(path), {method: 'POST'}); currentOutputs = []; poll(); }
+async function hide(path) { await fetch('/output/hide?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
+async function unhide(path) { await fetch('/output/show?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
+function hideActive() { if (activePath) hide(activePath); }
 
 function useAsExtendSourcePath(path) {
-  document.getElementById('mode').value = 'extend';
+  setMode('extend');
   document.getElementById('video_path').value = path;
   document.getElementById('extendSrcSelect').value = path;
   updateDerived();
-  window.scrollTo(0, 0);
+  document.querySelector('aside.form-pane').scrollTop = 0;
 }
-function useAsExtendSource() {
-  if (!activePath) { alert('Pick an output first.'); return; }
-  useAsExtendSourcePath(activePath);
-}
+function useAsExtendSource() { if (!activePath) return alert('Pick an output first.'); useAsExtendSourcePath(activePath); }
 
 async function loadParams() {
   if (!activePath) return;
-  const r = await fetch('/sidecar?path=' + encodeURIComponent(activePath));
+  const r = await fetch('/sidecar?path='+encodeURIComponent(activePath));
   if (!r.ok) return;
   const data = await r.json();
   const p = data.params;
-  document.getElementById('mode').value = p.mode || 't2v';
-  document.getElementById('prompt').value = p.prompt;
+  if (p.mode === 'extend') setMode('extend');
+  else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
+  else setMode('t2v');
+  document.getElementById('prompt').value = p.prompt || '';
   if (p.width) document.getElementById('width').value = p.width;
   if (p.height) document.getElementById('height').value = p.height;
-  if (p.frames) {
-    document.getElementById('frames').value = p.frames;
-    document.getElementById('duration').value = framesToDuration(p.frames);
-  }
+  if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
-  if (p.seed) document.getElementById('seed').value = p.seed;
+  if (p.seed != null) document.getElementById('seed').value = p.seed;
   if (p.image) document.getElementById('image').value = p.image;
   if (p.audio) document.getElementById('audio').value = p.audio;
-  document.getElementById('enhance').checked = !!p.enhance;
-  document.getElementById('stop_comfy').checked = !!p.stop_comfy;
-  document.getElementById('preset_label').value = p.label || '';
-  // Try to pick aspect that matches
+  if (p.label) document.getElementById('preset_label').value = p.label;
   for (const [k, a] of Object.entries(ASPECTS)) {
-    if (a.w === p.width && a.h === p.height) { document.getElementById('aspect').value = k; break; }
+    if (a.w === p.width && a.h === p.height) { setAspect(k); break; }
   }
   updateDerived();
 }
 
-async function removeJob(id) { await fetch('/queue/remove?id=' + encodeURIComponent(id), {method: 'POST'}); poll(); }
-
+async function removeJob(id) { await fetch('/queue/remove?id='+encodeURIComponent(id),{method:'POST'}); poll(); }
 async function togglePause() {
-  const r = await fetch('/status'); const s = await r.json();
-  await api(s.paused ? '/queue/resume' : '/queue/pause', 'POST'); poll();
+  const s = await (await fetch('/status')).json();
+  await api(s.paused ? '/queue/resume' : '/queue/pause', 'POST');
+  poll();
 }
 
+// ====== Tabs ======
+document.querySelectorAll('.tabs button[data-tab]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('show', t.id === 'tab-'+b.dataset.tab));
+});
+
+// ====== Batch modal ======
+function openBatch() { document.getElementById('batchModal').classList.add('show'); }
+function closeBatch() { document.getElementById('batchModal').classList.remove('show'); }
 async function queueBatch() {
   const fd = new FormData(document.getElementById('genForm'));
   fd.set('prompts', document.getElementById('batchPrompts').value);
-  const r = await api('/queue/batch', 'POST', fd);
-  if (r && r.error) { alert('Batch error: ' + r.error); return; }
+  const r = await api('/queue/batch','POST',fd);
+  if (r && r.error) { alert('Batch error: '+r.error); return; }
   if (r && r.added) { document.getElementById('batchPrompts').value = ''; poll(); }
 }
 
-document.getElementById('genForm').addEventListener('submit', async (e) => {
+// ====== Form submit ======
+document.getElementById('genForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
-  await api('/queue/add', 'POST', fd);
+  await api('/queue/add','POST',fd);
   poll();
 });
 
+// ====== Init ======
 setInterval(poll, 1500);
 poll();
+setMode('t2v');
+setQuality('standard');
+setAspect('landscape');
 updateDerived();
-setDuration(5); // initial duration
 </script>
 </body>
 </html>
+
 """
 
 
