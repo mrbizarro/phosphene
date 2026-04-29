@@ -5,7 +5,22 @@ module.exports = {
   icon: "icon.png",
   menu: async (kernel, info) => {
     const installed = info.exists("ltx-2-mlx/env") || info.exists("ltx-2-mlx/.venv")
-    const q8_installed = info.exists("mlx_models/ltx-2.3-mlx-q8/transformer-dev.safetensors")
+    // Treat Q8 as installed only when the heavy + downstream-required files
+    // are all present. transformer-dev alone is not enough: HQ stage-2 needs
+    // the distilled LoRA, two-stage upscale needs the spatial upscaler.
+    // A partial Q8 download otherwise hides the "Download Q8" menu item.
+    const q8_installed = (
+      info.exists("mlx_models/ltx-2.3-mlx-q8/transformer-dev.safetensors") &&
+      info.exists("mlx_models/ltx-2.3-mlx-q8/ltx-2.3-22b-distilled-lora-384.safetensors") &&
+      info.exists("mlx_models/ltx-2.3-mlx-q8/spatial_upscaler_x2_v1_1.safetensors") &&
+      info.exists("mlx_models/ltx-2.3-mlx-q8/connector.safetensors")
+    )
+    // User-content folders persist across Reset (which only removes the
+    // venv). Keep their shortcuts visible whenever they exist on disk
+    // so users can still recover their renders / models / uploads.
+    const has_outputs = info.exists("mlx_outputs")
+    const has_models  = info.exists("mlx_models")
+    const has_uploads = info.exists("panel_uploads")
     const running = {
       install:    info.running("install.js"),
       start:      info.running("start.js"),
@@ -27,7 +42,13 @@ module.exports = {
       return [{ default: true, icon: "fa-solid fa-download", text: "Downloading Q8 (~25 GB)", href: "download_q8.js" }]
     }
     if (!installed) {
-      return [{ default: true, icon: "fa-solid fa-plug", text: "Install", href: "install.js" }]
+      // Even when uninstalled, expose user-content folders if they survived
+      // a previous Reset so users can recover their work.
+      const m = [{ default: true, icon: "fa-solid fa-plug", text: "Install", href: "install.js" }]
+      if (has_outputs) m.push({ icon: "fa-solid fa-film",  text: "Outputs", href: "mlx_outputs?fs=true" })
+      if (has_models)  m.push({ icon: "fa-solid fa-cube",  text: "Models",  href: "mlx_models?fs=true" })
+      if (has_uploads) m.push({ icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" })
+      return m
     }
     if (running.start) {
       const local = info.local("start.js")

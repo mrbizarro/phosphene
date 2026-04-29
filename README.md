@@ -161,6 +161,16 @@ cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, "-crf", _crf, output_path])
 
 M-Max tier divides by ~3–4×. M-Ultra by ~6×.
 
+## Known issues
+
+Worth surfacing before you hit Install:
+
+- **High quality (Q8) and FFLF keyframing are opt-in**. The default install only pulls Q4 (~25 GB) + Gemma (~6 GB). Q8 is a separate menu action (~25 GB extra). On 64 GB Macs, Q8 two-stage HQ can OOM the helper subprocess mid-render — workaround is to render at lower resolution (e.g., Quality=Draft with the High pill) until we land the upstream cleanup PR.
+- **The panel binds to localhost (127.0.0.1) only.** Don't tunnel it onto a LAN or expose it through ngrok / similar — there's no auth, no CSRF, and `/image?path=` will serve any image file the user account can read. It's designed for single-user local use.
+- **Reset is intentionally non-destructive** for your work. It removes the `ltx-2-mlx/` clone (the venv) so a fresh Install rebuilds cleanly. It does NOT delete `mlx_models/`, `mlx_outputs/`, `panel_uploads/`, `panel_queue.json`, or `panel_hidden.json` — those are your generations and config. Delete them manually via the Models/Outputs/Uploads file-browser entries in the Pinokio sidebar if you want a true factory reset.
+- **The `Image → video + clean audio mux` mode currently re-encodes the final video as `yuv420p crf 18`** (subsampled chroma — same as the upstream default). Normal Image → Video and Text → Video modes use the patched lossless `yuv444p crf 0` output. If you need lossless on the audio-mux path, swap the mux step's codec args manually until we wire the env-var pass-through there too.
+- **A few performance levers exist that aren't in the UI yet**. Check `mlx_ltx_panel.py` for environment variables: `LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`, `LTX_HELPER_LOW_MEMORY`, `LTX_HELPER_IDLE_TIMEOUT`. Override via shell env when starting the panel (or via the Pinokio `start.js` env block).
+
 ## Roadmap
 
 - [ ] Submit the lossless-output patch as a PR upstream to `dgrauet/ltx-2-mlx`

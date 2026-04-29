@@ -848,18 +848,20 @@ class Handler(BaseHTTPRequestHandler):
                 "idle_timeout_sec": HELPER_IDLE_TIMEOUT,
             }
             # Q8 is "available" only when ALL critical safetensors are on disk.
-            # The HQ pipeline needs the dev transformer + connector + distilled
-            # LoRA + VAE + audio. A partially-downloaded model passes basic
-            # exists() checks but fails at load_safetensors mid-run, which is
-            # worse than reporting False. List the files actually consumed by
-            # ti2vid_two_stages_hq's loader.
+            # HQ + Keyframe pipelines need dev transformer + connector +
+            # distilled LoRA (used for stage-2 refine) + VAE + audio. A
+            # partially-downloaded model passes basic exists() checks but
+            # fails at load_safetensors mid-run, which is worse than
+            # reporting False.
             _Q8_REQUIRED = (
                 "connector.safetensors",
                 "transformer-dev.safetensors",
+                "ltx-2.3-22b-distilled-lora-384.safetensors",  # stage-2 refine
                 "vae_decoder.safetensors",
                 "vae_encoder.safetensors",
                 "audio_vae.safetensors",
                 "vocoder.safetensors",
+                "spatial_upscaler_x2_v1_1.safetensors",  # used by two-stage upscale
             )
             _q8_missing = []
             if Q8_LOCAL_PATH.exists() and Q8_LOCAL_PATH.is_dir():

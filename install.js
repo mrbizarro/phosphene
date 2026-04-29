@@ -25,6 +25,8 @@ module.exports = {
     // Non-editable install (no -e): packages get copied into env/lib/.../site-packages/
     // which is where the codec patch script looks for video_vae.py. With -e the
     // patch can't find its target file because the runtime imports from packages/.
+    // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still get
+    // the v1+ `hf` CLI used by the download steps below.
     {
       method: "shell.run",
       params: {
@@ -32,7 +34,7 @@ module.exports = {
         path: "ltx-2-mlx",
         message: [
           "uv pip install ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
-          "uv pip install pillow numpy"
+          "uv pip install pillow numpy 'huggingface-hub>=1.0'"
         ]
       }
     },
@@ -41,10 +43,12 @@ module.exports = {
     // Switches output codec from yuv420p crf 18 (visible chroma blocks on faces)
     // to yuv444p crf 0 (lossless, no chroma subsampling). Adds env-var override
     // so users can flip back via LTX_OUTPUT_PIX_FMT / LTX_OUTPUT_CRF.
+    // Use the venv's explicit Python so we don't depend on Pinokio's bundle
+    // shipping a `python3` symlink — what we know exists is env/bin/python3.11.
     {
       method: "shell.run",
       params: {
-        message: ["python3 patch_ltx_codec.py"]
+        message: ["./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py"]
       }
     },
 
