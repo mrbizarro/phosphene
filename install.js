@@ -46,14 +46,16 @@ module.exports = {
     },
 
     // ---- Download the Q4 LTX 2.3 model (~25 GB, resumable) ----------------
-    // huggingface-cli handles resume + verification natively.
+    // `hf download` is the v1+ name (huggingface_hub deprecated `huggingface-cli`).
+    // Both handle resume + verification natively; --local-dir avoids the HF cache
+    // store so the panel can point at the path directly with no symlink chase.
     {
       method: "shell.run",
       params: {
         venv: "env",
         path: "ltx-2-mlx",
         message: [
-          "huggingface-cli download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4"
+          "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4"
         ]
       }
     },
@@ -65,7 +67,7 @@ module.exports = {
         venv: "env",
         path: "ltx-2-mlx",
         message: [
-          "huggingface-cli download mlx-community/gemma-3-12b-it-4bit --local-dir ../mlx_models/gemma-3-12b-it-4bit"
+          "hf download mlx-community/gemma-3-12b-it-4bit --local-dir ../mlx_models/gemma-3-12b-it-4bit"
         ]
       }
     },
