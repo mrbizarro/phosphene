@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-readme.png" alt="LTX23MLX" width="600">
+  <img src="assets/logo-readme.png" alt="LTX23MLX" width="780">
 </p>
 
 <p align="center">

@@ -1139,8 +1139,8 @@ HTML = r"""<!doctype html>
       margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
       display: inline-flex; align-items: center; gap: 8px;
     }
-    .brand { display: inline-flex; align-items: center; height: 32px; flex-shrink: 0; }
-    .brand img { height: 28px; width: auto; display: block; }
+    .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
+    .brand img { height: 40px; width: auto; display: block; }
     .tag { color: var(--muted); font-size: 11px; }
     .pill {
       padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
