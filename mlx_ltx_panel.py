@@ -770,7 +770,30 @@ class Handler(BaseHTTPRequestHandler):
                 "low_memory": HELPER_LOW_MEMORY == "true",
                 "idle_timeout_sec": HELPER_IDLE_TIMEOUT,
             }
-            payload["q8_available"] = Q8_LOCAL_PATH.exists() and any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else [])
+            # Q8 is "available" only when ALL critical safetensors are on disk.
+            # The HQ pipeline needs the dev transformer + connector + distilled
+            # LoRA + VAE + audio. A partially-downloaded model passes basic
+            # exists() checks but fails at load_safetensors mid-run, which is
+            # worse than reporting False. List the files actually consumed by
+            # ti2vid_two_stages_hq's loader.
+            _Q8_REQUIRED = (
+                "connector.safetensors",
+                "transformer-dev.safetensors",
+                "vae_decoder.safetensors",
+                "vae_encoder.safetensors",
+                "audio_vae.safetensors",
+                "vocoder.safetensors",
+            )
+            _q8_missing = []
+            if Q8_LOCAL_PATH.exists() and Q8_LOCAL_PATH.is_dir():
+                for fname in _Q8_REQUIRED:
+                    fpath = Q8_LOCAL_PATH / fname
+                    if not fpath.exists() or fpath.stat().st_size < 1024:
+                        _q8_missing.append(fname)
+            else:
+                _q8_missing = list(_Q8_REQUIRED)
+            payload["q8_available"] = not _q8_missing
+            payload["q8_missing"] = _q8_missing
             payload["q8_path"] = str(Q8_LOCAL_PATH)
             self._json(payload)
             return
@@ -1733,7 +1756,12 @@ async function poll() {
     highOpt.textContent = 'High — Q8 two-stage + TeaCache · ~12 min for 5s (best face fidelity)';
   } else {
     highOpt.disabled = true;
-    highOpt.textContent = `High — Q8 two-stage + TeaCache · ~12 min for 5s (Q8 not installed at ${s.q8_path || ''})`;
+    const missing = (s.q8_missing || []).length;
+    if (missing > 0 && missing < 6) {
+      highOpt.textContent = `High — Q8 downloading · ${missing} file${missing > 1 ? 's' : ''} still missing`;
+    } else {
+      highOpt.textContent = `High — Q8 not installed (need ~25 GB at ${s.q8_path || ''})`;
+    }
     if (document.getElementById('quality').value === 'high') {
       document.getElementById('quality').value = 'standard';
       applyQuality();
