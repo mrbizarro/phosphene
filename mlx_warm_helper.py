@@ -102,12 +102,48 @@ _hq_model_dir = None     # remember which model the HQ pipe was built against
 _pipe_lock = threading.Lock()
 
 
+def release_pipelines(keep_kind=None):
+    """Free every loaded pipeline except the one matching keep_kind.
+
+    Each pipeline holds ~22 GB (Q4) or ~30 GB (Q8 dev) of weights. Holding
+    two or more simultaneously on a 64 GB Mac OOMs the helper. Only one
+    family stays resident at a time — switching mode reloads, but renders
+    actually finish instead of getting SIGKILL'd by macOS.
+
+    keep_kind ∈ {'t2v', 'i2v', 'extend', 'hq', 'keyframe'} or None (free all).
+    Caller must hold _pipe_lock.
+    """
+    global _t2v_pipe, _i2v_pipe, _extend_pipe, _hq_pipe, _kf_pipe, _hq_model_dir, _kf_model_dir
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup
+    except Exception:
+        aggressive_cleanup = lambda: None
+
+    freed = []
+    if keep_kind != "t2v" and _t2v_pipe is not None:
+        _t2v_pipe = None; freed.append("T2V")
+    if keep_kind != "i2v" and _i2v_pipe is not None:
+        _i2v_pipe = None; freed.append("I2V")
+    if keep_kind != "extend" and _extend_pipe is not None:
+        _extend_pipe = None; freed.append("Extend")
+    if keep_kind != "hq" and _hq_pipe is not None:
+        _hq_pipe = None; _hq_model_dir = None; freed.append("HQ")
+    if keep_kind != "keyframe" and _kf_pipe is not None:
+        _kf_pipe = None; _kf_model_dir = None; freed.append("Keyframe")
+    if freed:
+        aggressive_cleanup()
+        emit({"event": "log", "line": f"Released pipelines: {', '.join(freed)} (freeing RAM before next load)"})
+
+
 def get_pipe(kind: str):
     """kind in {'t2v','i2v','extend'}"""
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
 
     with _pipe_lock:
+        # Free any other pipelines before loading a new one — strict
+        # one-pipeline-at-a-time policy keeps memory bounded.
+        release_pipelines(keep_kind=kind)
         if kind == "i2v":
             if _i2v_pipe is None:
                 emit({"event": "log", "line": "Loading I2V pipeline (first job is the slow one)..."})
@@ -142,6 +178,7 @@ def get_hq_pipe(model_dir: str):
     from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
 
     with _pipe_lock:
+        release_pipelines(keep_kind="hq")
         if _hq_pipe is None or _hq_model_dir != model_dir:
             emit({"event": "log", "line": f"Loading HQ pipeline (Q8 dev model — {model_dir})..."})
             _hq_pipe = TwoStageHQPipeline(
@@ -169,6 +206,7 @@ def get_kf_pipe(model_dir: str):
     from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
 
     with _pipe_lock:
+        release_pipelines(keep_kind="keyframe")
         if _kf_pipe is None or _kf_model_dir != model_dir:
             emit({"event": "log", "line": f"Loading Keyframe pipeline (Q8 dev model — {model_dir})..."})
             _kf_pipe = KeyframeInterpolationPipeline(
