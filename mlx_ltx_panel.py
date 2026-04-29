@@ -1605,13 +1605,16 @@ HTML = r"""<!doctype html>
         </div>
         <input type="hidden" id="aspect" value="landscape">
 
-        <div class="row3" style="margin-top:10px">
+        <!-- Manual W/H fields only shown in T2V (where they're the primary
+             control). In image flows they're auto-set from aspect + quality
+             so the input image drives the framing without surprise crops. -->
+        <div id="dimsRow" class="row" style="margin-top:10px">
           <div><label class="lbl">Width</label><input name="width" id="width" value="1280" type="number" min="32" step="32"></div>
           <div><label class="lbl">Height</label><input name="height" id="height" value="704" type="number" min="32" step="32"></div>
-          <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
         </div>
 
-        <div class="row" style="margin-top:6px">
+        <div class="row3" style="margin-top:10px">
+          <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
           <div><label class="lbl">Frames (8k+1)</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
           <div><label class="lbl">Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
         </div>
@@ -1839,11 +1842,17 @@ function updateDerived() {
 
   // Mode-aware visibility
   const inI2V = mode === 'i2v' || mode === 'i2v_clean_audio';
+  const inImageFlow = inI2V || currentMode === 'keyframe';
   document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe');
   document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
   document.getElementById('keyframeSection').classList.toggle('show', currentMode === 'keyframe');
   document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
+  // In image flows the aspect picker is the only sizing control. Width/height
+  // auto-derive from aspect+quality so the source image drives the framing
+  // and we don't accidentally cover-crop a 16:9 photo into 9:16.
+  const dimsRow = document.getElementById('dimsRow');
+  if (dimsRow) dimsRow.style.display = inImageFlow ? 'none' : '';
 
   // Image preview (single image — i2v modes)
   const imgPath = document.getElementById('image').value.trim();
@@ -1877,6 +1886,18 @@ function updateDerived() {
 document.getElementById('image').addEventListener('input', updateDerived);
 ['start_image', 'end_image'].forEach(id => document.getElementById(id).addEventListener('input', updateDerived));
 
+// Auto-snap the aspect picker based on an image's actual dimensions.
+// Avoids the 16:9-source-cropped-to-9:16-strip footgun.
+function snapAspectToImage(path) {
+  const probe = new Image();
+  probe.onload = () => {
+    const r = probe.naturalWidth / probe.naturalHeight;
+    const target = r >= 1 ? 'landscape' : 'vertical';
+    if (document.getElementById('aspect').value !== target) setAspect(target);
+  };
+  probe.src = '/image?path=' + encodeURIComponent(path);
+}
+
 async function uploadImage() {
   const f = document.getElementById('imageFile').files[0];
   if (!f) return;
@@ -1886,6 +1907,7 @@ async function uploadImage() {
   if (data.ok) {
     document.getElementById('image').value = data.path;
     document.getElementById('imgHint').textContent = `Uploaded: ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
+    snapAspectToImage(data.path);
     updateDerived();
   } else alert('Upload failed: ' + (data.error || '?'));
 }
@@ -1898,6 +1920,9 @@ async function uploadKeyframe(which) {
   const data = await r.json();
   if (data.ok) {
     document.getElementById(which + '_image').value = data.path;
+    // FFLF anchors framing on the START frame — that's the one users see
+    // first, so its aspect drives the output dimensions.
+    if (which === 'start') snapAspectToImage(data.path);
     updateDerived();
   } else alert('Upload failed: ' + (data.error || '?'));
 }
