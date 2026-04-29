@@ -158,7 +158,13 @@ _kf_model_dir = None
 
 
 def get_kf_pipe(model_dir: str):
-    """Returns the KeyframeInterpolationPipeline lazily."""
+    """Returns the KeyframeInterpolationPipeline lazily.
+
+    Keyframe REQUIRES explicit dev_transformer + distilled_lora at init time.
+    The distilled-only path "hallucinates unrelated content during
+    interpolation" — pipeline raises if you skip these. Names match the files
+    inside dgrauet/ltx-2.3-mlx-q8.
+    """
     global _kf_pipe, _kf_model_dir
     from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
 
@@ -166,7 +172,12 @@ def get_kf_pipe(model_dir: str):
         if _kf_pipe is None or _kf_model_dir != model_dir:
             emit({"event": "log", "line": f"Loading Keyframe pipeline (Q8 dev model — {model_dir})..."})
             _kf_pipe = KeyframeInterpolationPipeline(
-                model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                model_dir=model_dir,
+                gemma_model_id=GEMMA_PATH,
+                low_memory=LOW_MEMORY,
+                dev_transformer="transformer-dev.safetensors",
+                distilled_lora="ltx-2.3-22b-distilled-lora-384.safetensors",
+                distilled_lora_strength=1.0,
             )
             _kf_model_dir = model_dir
         return _kf_pipe
