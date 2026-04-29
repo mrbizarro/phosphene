@@ -3,8 +3,11 @@
   "description": "[MAC ONLY] LTX Video 2.3 generation panel for Apple Silicon — local web UI, batch queue, image-to-video, lossless h264 output. Built on dgrauet/ltx-2-mlx.",
   "icon": "icon.png",
   "links": [{
-    "title": "LTX23MLX (panel by mrbizarro)",
+    "title": "LTX23MLX (panel by Mr. Bizarro)",
     "links": [{
+      "title": "X / Twitter",
+      "value": "https://x.com/AIBizarrothe"
+    }, {
       "title": "GitHub",
       "value": "https://github.com/mrbizarro/LTX23MLX"
     }]

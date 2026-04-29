@@ -893,6 +893,29 @@ class Handler(BaseHTTPRequestHandler):
                 while chunk := fh.read(1024 * 1024):
                     self.wfile.write(chunk)
             return
+        if parsed.path.startswith("/assets/"):
+            # Serve files from <ROOT>/assets/ (creator avatar, future static).
+            # Path-bound to that directory only — no traversal.
+            rel = parsed.path[len("/assets/"):]
+            assets_dir = (ROOT / "assets").resolve()
+            try:
+                path = (assets_dir / rel).resolve()
+            except Exception:
+                self.send_error(400); return
+            if not path.is_relative_to(assets_dir) or not path.is_file():
+                self.send_error(404); return
+            ext = path.suffix.lower()
+            ctype = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml",
+            }.get(ext, "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(path.read_bytes())
+            return
         if parsed.path == "/image":
             qs = parse_qs(parsed.query)
             try:
@@ -1134,6 +1157,19 @@ HTML = r"""<!doctype html>
       padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
     }
     .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+    .creator-link {
+      display: inline-flex; align-items: center; gap: 7px;
+      color: var(--muted); font-size: 11px; text-decoration: none;
+      padding: 3px 8px 3px 3px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--panel-2);
+      transition: 0.12s;
+    }
+    .creator-link:hover { color: var(--accent-bright); border-color: var(--accent); }
+    .creator-avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      object-fit: cover; display: block;
+      box-shadow: 0 0 0 1px var(--border);
+    }
 
     /* ===== MAIN LAYOUT ===== */
     .layout {
@@ -1438,6 +1474,10 @@ HTML = r"""<!doctype html>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
+  <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Mr. Bizarro on X">
+    <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
+    <span>by Bizarro</span>
+  </a>
 </header>
 
 <main class="layout">
