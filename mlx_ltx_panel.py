@@ -1255,11 +1255,11 @@ HTML = r"""<!doctype html>
   <span class="tag" id="modelTag"></span>
   <span class="spacer"></span>
   <span id="memPill" class="pill">memory…</span>
-  <span id="comfyPill" class="pill">comfy…</span>
+  <span id="comfyPill" class="pill" style="display:none">comfy…</span>
   <span id="helperPill" class="pill">helper…</span>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
-  <button class="ghost-btn" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
+  <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
   <button class="ghost-btn" onclick="api('/helper/restart', 'POST').then(()=>setTimeout(poll,500))">Restart helper</button>
   <button class="ghost-btn" onclick="api('/open_pinokio', 'POST').then(poll)">Open Pinokio</button>
 </header>
@@ -1368,8 +1368,8 @@ HTML = r"""<!doctype html>
         </label>
       </details>
 
-      <label class="check">
-        <input type="checkbox" name="stop_comfy" id="stop_comfy" checked> Stop Comfy before render <span style="color:var(--muted);font-size:11px;">(default on — Comfy idle costs ~27 GB and thrashes 720p+ renders)</span>
+      <label class="check" id="stopComfyRow" style="display:none">
+        <input type="checkbox" name="stop_comfy" id="stop_comfy" checked> Stop Comfy before render <span style="color:var(--muted);font-size:11px;">(Comfy detected on this machine — kill it to free RAM for 720p+ renders)</span>
       </label>
 
       <div class="actions">
@@ -1646,13 +1646,23 @@ async function poll() {
   else if (m.swap_gb > 4 || m.pressure_pct > 75) memCls = 'pill-warn';
   memPill.className = 'pill ' + memCls;
 
+  // Comfy UI is hidden by default. It only appears when a Comfy process is
+  // detected on this machine — i.e. for the small subset of users who run
+  // ComfyUI alongside this panel and need to kill it before heavy renders.
+  // Fresh Pinokio installs of this panel never see this UI.
   const cp = document.getElementById('comfyPill');
+  const stopBtn = document.getElementById('stopComfyBtn');
+  const stopRow = document.getElementById('stopComfyRow');
   if (s.comfy_pids.length) {
     cp.innerHTML = `<span class="dot"></span>Comfy PID ${s.comfy_pids.join(', ')}`;
     cp.className = 'pill pill-warn';
+    cp.style.display = '';
+    stopBtn.style.display = '';
+    stopRow.style.display = '';
   } else {
-    cp.innerHTML = `<span class="dot"></span>Comfy stopped`;
-    cp.className = 'pill pill-good';
+    cp.style.display = 'none';
+    stopBtn.style.display = 'none';
+    stopRow.style.display = 'none';
   }
 
   const hp = document.getElementById('helperPill');
