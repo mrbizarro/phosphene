@@ -2871,9 +2871,19 @@ HTML = r"""<!doctype html>
       <textarea name="prompt" id="prompt" placeholder="Describe the scene AND the sound: e.g. 'wizard in a forest clearing, fireflies spiraling up — low whispered chant, ember crackle, distant owl'. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
       <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
            Rewrites your prompt with the structure/keywords LTX 2.3 trained
-           on. ~12-15s on cold start (Gemma needs to load), ~5s warm. -->
-      <div class="row-actions" style="margin-top:6px">
+           on. ~12-15s on cold start (Gemma needs to load), ~5s warm.
+
+           "No music" checkbox: appends an audio constraint to the prompt
+           on submit so users can keep voice + ambient and skip the model's
+           default soundtrack tendency. Music is annoying in editing because
+           it can't be cleanly removed without affecting the dialogue track.
+           Recommended for clips you plan to score yourself in post. -->
+      <div class="row-actions" style="margin-top:6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
         <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance prompt with Gemma</button>
+        <label class="hint" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none">
+          <input type="checkbox" id="noMusic" name="no_music" style="margin:0">
+          <span>🚫🎵 No music — voice + ambient only</span>
+        </label>
       </div>
 
       <!-- Mode-specific: audio (i2v_clean_audio only — accessed via Advanced) -->
@@ -3825,9 +3835,26 @@ async function queueBatch() {
 }
 
 // ====== Form submit ======
+//
+// "No music" checkbox: appends a clear audio constraint to the prompt
+// before submission so the LTX 2.3 vocoder skips the soundtrack/score it
+// otherwise tends to add. Music is hard to remove cleanly from a stem
+// after the fact (it shares spectral space with dialogue), so users who
+// plan to score the clip themselves want voice + ambient only.
+//
+// We modify the FormData copy, not the textarea value — so the user's
+// original prompt stays untouched in the UI.
 document.getElementById('genForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
+  const noMusic = document.getElementById('noMusic');
+  if (noMusic && noMusic.checked) {
+    const original = fd.get('prompt') || '';
+    const constraint = ' Audio: voice and ambient sounds only, no music, no soundtrack, no score, no melody.';
+    if (!original.toLowerCase().includes('no music')) {
+      fd.set('prompt', original.trim() + constraint);
+    }
+  }
   await api('/queue/add','POST',fd);
   poll();
 });
