@@ -1329,12 +1329,17 @@ def run_job_inner(job: dict) -> None:
                 "width": width,
                 "frames": frames,
                 "seed": p["seed"],
-                "stage1_steps": 15,
+                # Upstream reference for the dev-model keyframe path is 20
+                # stage-1 steps (`s1_steps = stage1_steps or 20` in
+                # keyframe_interpolation.py). We were using 15 — slightly
+                # under-cooked. Bumping to match upstream reference quality;
+                # ~33% more wall time for noticeably cleaner motion.
+                "stage1_steps": 20,
                 "stage2_steps": 3,
                 "cfg_scale": 3.0,
             },
         }
-        push(f"Run KEYFRAME via helper: id={job['id']} {width}x{height} {frames}f · Q8 two-stage")
+        push(f"Run KEYFRAME via helper: id={job['id']} {width}x{height} {frames}f · Q8 two-stage (stage1=20)")
         result = HELPER.run(job_spec)
         if "seed_used" in result:
             push(f"seed used: {result['seed_used']}")
@@ -3135,6 +3140,27 @@ function durationToFrames(s) {
 }
 function framesToDuration(f) { return ((f - 1) / FPS).toFixed(2); }
 
+// LTX 2.3 requires frame counts in the form 1 + 8k (one keyframe + N
+// VAE-temporal blocks of 8 frames each). Typing "100" or "240" wastes
+// compute on partially-filled trailing latents — the pipeline rounds
+// up internally but charges for the empty slots. Snap on blur to the
+// nearest valid value below + 1 (so we never silently render *more*
+// than the user asked for, only less or equal).
+function snapFramesTo8kPlus1() {
+  const el = document.getElementById('frames');
+  if (!el) return;
+  const v = parseInt(el.value) || 0;
+  if (v < 1) { el.value = 9; return; }
+  // Nearest 8k+1: round (v-1)/8 to nearest int, multiply back, +1.
+  const k = Math.max(1, Math.round((v - 1) / 8));
+  const snapped = k * 8 + 1;
+  if (snapped !== v) {
+    el.value = snapped;
+    // Reflect the change in duration too, since they're bound.
+    document.getElementById('duration').value = framesToDuration(snapped);
+  }
+}
+
 function updateDerived() {
   const mode = document.getElementById('mode').value;
   const w = parseInt(document.getElementById('width').value || 0);
@@ -3188,6 +3214,7 @@ function updateDerived() {
     el.addEventListener('input', e => { document.getElementById('frames').value = durationToFrames(parseFloat(e.target.value) || 0); updateDerived(); });
   } else if (id === 'frames') {
     el.addEventListener('input', e => { document.getElementById('duration').value = framesToDuration(parseInt(e.target.value) || 0); updateDerived(); });
+    el.addEventListener('blur', () => { snapFramesTo8kPlus1(); updateDerived(); });
   } else {
     el.addEventListener('input', updateDerived);
   }
