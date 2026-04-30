@@ -2159,6 +2159,11 @@ HTML = r"""<!doctype html>
     @keyframes pulse { 50% { opacity: 0.7; } }
     .spacer { flex: 1; }
     .ghost-btn {
+      /* width:auto overrides the global `button { width:100% }` rule above
+         so ghost buttons sit at intrinsic width inside flex rows. Without
+         this, the Enhance button stretches full-width and forces the
+         No-music pill to wrap to a second line. */
+      width: auto;
       background: transparent; border: 1px solid var(--border); color: var(--text);
       padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
     }
@@ -2907,9 +2912,13 @@ HTML = r"""<!doctype html>
            default soundtrack tendency. Music is annoying in editing because
            it can't be cleanly removed without affecting the dialogue track.
            Recommended for clips you plan to score yourself in post. -->
+      <!-- Two controls on one row: Enhance button on the left, No-music
+           toggle pushed to the right edge with margin-left:auto. Same row
+           keeps the prompt-related actions visually grouped without
+           stacking them and wasting vertical space. -->
       <div class="row-actions" style="margin-top:8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
         <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
-        <label class="toggle-pill" id="noMusicPill" title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
+        <label class="toggle-pill" id="noMusicPill" style="margin-left:auto" title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
           <input type="checkbox" id="noMusic" name="no_music">
           <span class="toggle-dot"></span>
           <span>No music</span>
