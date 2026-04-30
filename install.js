@@ -5,7 +5,7 @@
 // pinokio.js). Every step below is safe to repeat:
 //
 //   - clone:       skipped if ltx-2-mlx/.git exists
-//   - venv:        Pinokio's `venv:` directive is itself idempotent
+//   - venv:        skipped if env/bin/python3.11 exists (force 3.11)
 //   - uv pip:      idempotent (already-installed packages are no-ops)
 //   - patch:       patch_ltx_codec.py is idempotent + fails loud on drift
 //   - hf download: resumes partial files, skips intact ones
@@ -13,6 +13,13 @@
 // If the user's first install died after the venv was created but before
 // the model downloads, hitting Resume Install picks up exactly where it
 // left off without re-downloading the working pieces.
+//
+// IMPORTANT: we do NOT use Pinokio's `venv: "env"` directive to CREATE the
+// venv — that uses conda-base's Python (currently 3.10 on the macOS bundle)
+// which fails the ltx-core-mlx Python>=3.11 constraint. We force 3.11 with
+// `uv venv --python 3.11` and then use `--python env/bin/python` on every
+// pip step. The hf download steps still use `venv: "env"` for activation
+// only (sourcing the existing 3.11 venv to put `hf` on PATH).
 
 module.exports = {
   // Pulls in `huggingface-cli`/`hf`, `ffmpeg`, `git`, `uv`, `python3.11` etc.
@@ -41,22 +48,48 @@ module.exports = {
       }
     },
 
-    // ---- Create venv + install MLX pipeline packages ----------------------
-    // Pinokio's `venv: "env"` creates ./ltx-2-mlx/env/ on first run and
-    // reuses it on subsequent runs. `uv pip install` is idempotent —
-    // already-installed packages are no-ops. Non-editable install (no -e):
-    // packages get copied into env/lib/.../site-packages/ which is where
-    // patch_ltx_codec.py looks for video_vae.py.
+    // ---- Force Python 3.11 venv (SHIP-BLOCKER fix) ------------------------
+    // Pinokio's `venv: "env"` shortcut creates a venv using whatever python
+    // is on `conda activate base` — on machines where conda's base env is
+    // Python 3.10 (the current macOS bundle reality), that venv has no
+    // python3.11 and the MLX packages refuse to install:
+    //   "ltx-core-mlx==0.2.0 depends on Python>=3.11"
+    //
+    // Worse, that error doesn't abort the install — Pinokio happily moves on
+    // to download 35 GB of weights into a broken venv. So we explicitly
+    // create the venv with `uv venv --python 3.11` before any pip step.
+    //
+    // Idempotency: if env/bin/python3.11 already exists we skip. If env
+    // exists but is 3.10 (our exact failure mode), nuke and rebuild — those
+    // dirs only hold a wrong-Python venv, no user data.
+    {
+      when: "{{!exists('ltx-2-mlx/env/bin/python3.11')}}",
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: [
+          "rm -rf env",
+          "uv venv --python 3.11 --seed env"
+        ]
+      }
+    },
+
+    // ---- Install MLX pipeline packages into the 3.11 venv -----------------
+    // `--python env/bin/python` pins the install to the venv we just made
+    // (avoids any conda-base interference). uv pip install is idempotent —
+    // already-installed packages are no-ops on Resume Install.
+    // Non-editable install (no -e): packages get copied into
+    // env/lib/python3.11/site-packages/ which is where patch_ltx_codec.py
+    // looks for video_vae.py.
     // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still
     // get the v1+ `hf` CLI used by the download steps below.
     {
       method: "shell.run",
       params: {
-        venv: "env",
         path: "ltx-2-mlx",
         message: [
-          "uv pip install ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
-          "uv pip install pillow numpy 'huggingface-hub>=1.0'"
+          "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0'"
         ]
       }
     },

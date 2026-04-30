@@ -30,7 +30,7 @@ from pathlib import Path
 # Brand palette — locked colors from the prompt spec
 # ---------------------------------------------------------------------------
 COLORS = {
-    "void":     "#0A0E1B",   # background
+    "void":     "#00061a",   # background
     "yellow":   "#FFE13B",   # center spark
     "magenta":  "#FF2E9F",   # inner rings (warm core)
     "violet":   "#B14AFF",   # middle rings (primary brand color)

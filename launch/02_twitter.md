@@ -2,7 +2,19 @@
 
 ## 1. Hero Tweet
 
-**Variant A — technical wow (recommended)**
+**Variant C — announcement (CHOSEN — use this)**
+
+> Happy to share something I've been building — Phosphene.
+>
+> A free local video+audio generator for Apple Silicon, running LTX 2.3 in MLX. Built with a lot of help from Claude. Mostly works. There are bugs. PRs welcome.
+>
+> One-click install via Pinokio. 🧵
+>
+> [video]
+
+Tone: builder-honest announcement. Not hype, not humble-brag — straight "I made a thing, here it is, it's flawed, help me make it better." The Claude credit upfront is the differentiator: nobody else is being honest about how their AI tool was built. Lead with that.
+
+**Variant A — technical wow (alt)**
 
 > Local generative video on a Mac just got weird.
 >
@@ -12,7 +24,7 @@
 >
 > [video]
 
-**Variant B — creator vibe**
+**Variant B — creator vibe (alt)**
 
 > made this on my Mac. no cloud, no API key, no rendering farm.
 >
@@ -22,36 +34,60 @@
 >
 > [video]
 
-**Pick A.** The "joint audio+video, locally, on a Mac" claim is the thing nobody on the timeline expects to be true. Lead with the disbelief.
+## 2. Thread (reply chain to hero — paired with Variant C)
 
-## 2. Thread (reply chain to hero)
+**1/** What it does:
+- T2V — text → video+audio
+- I2V — image → video+audio
+- FFLF — first + last frame, model fills the middle
+- Extend — add seconds to an existing clip
 
-**1/** Phosphene wraps LTX 2.3 (Lightricks) running on Apple's MLX framework. The differentiator: it generates video AND audio in a single forward pass — ambient sound, footsteps, lipsync dialogue. Wan, Hunyuan, Mochi are silent. This isn't.
+LTX 2.3 generates audio jointly with video. Most local video models are silent. This isn't.
 
-**2/** Install is one click via Pinokio. No conda, no venv, no CUDA cosplay on a Mac.
-github.com/mrbizarro/phosphene
-
-**3/** Real numbers, M4 Mac Studio 64 GB:
-- 5s clip @ 1280×704 — ~7 min
+**2/** Real numbers on an M4 Mac Studio 64 GB:
+- 5s @ 1280×704 — ~7 min
 - High quality (Q8) — ~12 min
 - FFLF @ 768 — ~5 min
-Slower than an H100. Faster than a credit card.
 
-**4/** Modes:
-- T2V — text → video+audio
-- I2V — still image → video+audio
-- FFLF — first frame + last frame, model fills the middle
-- Extend — add seconds to a clip you already have
+Not a render farm. But: no cloud, no API key, no queue, no monthly bill.
 
-**5/** Hardware tiers auto-gate by RAM. 32 GB runs Compact (lower res, shorter). 64 GB is the comfortable floor for full 1280×704. 96/128 GB unlocks longer clips and Q8 without pain. Not negotiable — generative video is memory-hungry.
+**3/** Hardware tiers auto-gate by RAM:
+- 32 GB → Compact tier (lower res, shorter clips)
+- 64 GB → comfortable floor for full 1280×704
+- 96 / 128 GB → longer clips and Q8 without pain
 
-**6/** Credit where it's due. The MLX port is by @dgrauet — none of this exists without that work. The model is LTX 2.3 by @Lightricks. MLX itself is from the Apple ML team. Phosphene is just a panel on top of all three.
+Generative video is memory-hungry. Not negotiable.
 
-**7/** It's free, MIT licensed (panel — LTX weights are under Lightricks' license, read it).
-Try it, break it, tell me what's wrong.
-Follow @AIBizarrothe for updates. RT if you ship something with it.
+**4/** Honest disclaimer:
+Claude (Anthropic) wrote a lot of this with me. I designed, directed, reviewed, tested, broke, and fixed. There are bugs. Some edges are rough. The repo is open — file issues, send PRs.
 
-**8/** Roadmap, briefly: LoRAs (style, camera motion, HDR), prompt enhance via Gemma is already in, CivitAI browser coming. Local generative video is going to get strange in a good way over the next year.
+github.com/mrbizarro/phosphene
+
+**5/** Install is one click via Pinokio. No conda, no venv, no CUDA cosplay on a Mac. Search "Phosphene" in the Pinokio Discover tab.
+
+**6/** Credit where it's due:
+- LTX 2.3 model: @Lightricks
+- MLX port: @dgrauet
+- MLX framework: Apple ML team
+- Pinokio one-click runtime: @cocktailpeanut
+
+Phosphene is the panel tying them together. None of it exists without their work.
+
+**7/** Free, MIT licensed (panel — model has Lightricks' license, read it before you build a business on it).
+
+If you make something weird with it, tag me.
+If something's broken, file an issue.
+If you want to fix it, PRs welcome.
+
+Follow @AIBizarrothe for updates.
+
+**8/** Roadmap: LoRAs (style, camera motion, HDR), CivitAI model browser, prompt enhance via Gemma is already shipped. Local generative video is going to get strange in a good way over the next year. Glad to be early.
+
+**9/** If you read this far — thank you.
+
+Local AI tools live or die by word of mouth. A like, a repost, a quote with your take, a comment with what broke — all of it helps this reach the people who'd actually use it.
+
+RT the hero if you think a Mac dev should see it. 🙏
 
 ## 3. Reply Variants
 
@@ -86,7 +122,7 @@ Follow @AIBizarrothe for updates. RT if you ship something with it.
 
 ## 5. Pin the Post — Instructions
 
-Pin the **hero tweet** (Variant A), not the thread root individually — the pinned tweet should auto-expand the thread for new visitors. Keep it pinned for at least two weeks; local-AI Twitter discovers things on a delay, and the "joint audio+video on a Mac" hook is the strongest top-of-funnel you have. Replace it only when you ship a meaningful update (LoRAs, CivitAI integration) worth re-pinning around.
+Pin the **hero tweet** (Variant C — announcement), not the thread root individually — the pinned tweet should auto-expand the thread for new visitors. Keep it pinned for at least two weeks; local-AI Twitter discovers things on a delay. Replace it only when you ship a meaningful update (LoRAs, CivitAI integration) worth re-pinning around.
 
 ## 6. Asset Descriptions
 

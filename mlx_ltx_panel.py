@@ -2112,8 +2112,12 @@ HTML = r"""<!doctype html>
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
-      --bg: #0b0e13; --bg-2: #0d1117; --panel: #161b22; --panel-2: #1c2230;
-      --border: #2a3038; --border-strong: #3a424d; --text: #e6edf3; --muted: #8b949e;
+      /* Phosphene void = #00061a — the canonical dark-navy backdrop the
+         brand artwork was rendered against. Body uses it as-is; elevated
+         panels lift slightly toward blue-violet so the brand color story
+         carries from the logo through every surface. */
+      --bg: #00061a; --bg-2: #050b22; --panel: #0c1330; --panel-2: #141a3a;
+      --border: #1f2547; --border-strong: #2e3658; --text: #e6edf3; --muted: #8b949e;
       --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
       --success: #3fb950; --warning: #d29922; --danger: #f85149;
       --radius: 10px;
@@ -2127,21 +2131,20 @@ HTML = r"""<!doctype html>
     }
 
     /* ===== HEADER =====
-       Background matches the brand-void (#0A0E1B) so the logo PNG's own
-       background blends cleanly into the header instead of sitting as a
-       darker rectangle on a lighter panel. Logo height bumped from 40 →
-       72 so the wordmark is actually readable. */
+       Background uses var(--bg) which is the brand-void (#00061a) — same
+       color baked into the logo PNG so it blends seamlessly into the
+       header. Logo height 72px so the wordmark reads. */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
       padding: 12px 18px; border-bottom: 1px solid var(--border);
-      background: #0A0E1B;
+      background: var(--bg);
     }
     header h1 {
       margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
       display: inline-flex; align-items: center; gap: 8px;
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
-    .brand img { height: 72px; width: auto; display: block; }
+    .brand img { height: 104px; width: auto; display: block; }
     .tag { color: var(--muted); font-size: 11px; }
     .pill {
       padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
