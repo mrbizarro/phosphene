@@ -551,6 +551,138 @@ def open_pinokio() -> None:
         push(f"Could not open Pinokio: {exc}")
 
 
+# ---- hardware tier + capability matrix ---------------------------------------
+# Detected once at startup (RAM doesn't change at runtime). The /status
+# endpoint exposes this so the UI can grey out features the box can't run
+# instead of letting the user submit a job that's going to swap thrash for
+# 2 hours and then fail.
+#
+# Empirically-derived limits from our own testing on a 64 GB M4 Studio:
+#
+#   T2V/I2V Q4 standard at 1280×704: ~38 GB peak, fine on 32 GB w/ a bit of swap
+#   T2V/I2V Q4 standard at 768×432:  ~22 GB peak, fine anywhere
+#   T2V/I2V Q8 HQ        at 1280×704: ~50 GB peak, fits 64 GB cleanly
+#   FFLF (Q8 dev)        at 1280×704: > 64 GB peak, OOMs into swap
+#   FFLF (Q8 dev)        at  768×416: ~48 GB peak, fits 64 GB
+#   Extend (Q4 dev)      at 1280×704: ~50 GB peak + 12 GB swap (240s/step)
+#   Extend (Q4 dev)      at  768×416: ~46 GB peak, no swap (54s/step)
+#
+# `t2v_max_dim` / `i2v_max_dim` clamp T2V/I2V resolution. `keyframe_max_dim`
+# and `extend_max_dim` clamp those modes' resolutions specifically (since
+# they use the dev transformer + guided denoise which is heavier). 0 means
+# no clamp. `allows_q8` gates HQ + FFLF entirely.
+CAPABILITIES: dict[str, dict] = {
+    "base": {
+        # < 48 GB. Apple Silicon shipping configurations: M2 8/16/24 GB,
+        # M-Pro 18/36 GB, base M-Max 36 GB. Q8 won't fit; even Q4 at 720p
+        # is borderline. Steer them toward small-aspect Standard renders.
+        "label": "Base (< 48 GB)",
+        "tagline": "Q4 only · keep it small",
+        "t2v_max_dim": 768,
+        "i2v_max_dim": 768,
+        "keyframe_max_dim": 0,    # disabled
+        "extend_max_dim": 0,      # disabled
+        "allows_q8": False,
+        "allows_keyframe": False,
+        "allows_extend": False,
+        "blurb": (
+            "Less than 48 GB unified memory. "
+            "Q8 features (High quality, FFLF, Extend) need more headroom — "
+            "those modes are disabled here. T2V / I2V at Standard quality "
+            "are clamped to 768 max-side to keep you out of swap."
+        ),
+    },
+    "standard": {
+        # 48–79 GB. The 64 GB M-Studio configuration this panel was built
+        # for. Everything works, but FFLF and Extend get clamped to 768
+        # because the dev transformer at 1280×704 swap-thrashes (240 s/step
+        # vs 54 s/step at 768).
+        "label": "Standard (48–79 GB)",
+        "tagline": "Full features · FFLF/Extend clamped to 768",
+        "t2v_max_dim": 0,         # no clamp
+        "i2v_max_dim": 0,
+        "keyframe_max_dim": 768,
+        "extend_max_dim": 768,
+        "allows_q8": True,
+        "allows_keyframe": True,
+        "allows_extend": True,
+        "blurb": (
+            "64 GB middle ground — every mode works. FFLF and Extend "
+            "clamp the rendered resolution to 768 max-side because the "
+            "dev transformer swap-thrashes on 64 GB at full 1280×704. "
+            "768 is a great working size; upscale post-render if you need 720p+."
+        ),
+    },
+    "high": {
+        # 80–119 GB. M-Max 128 GB stripped, M-Ultra 96 GB. Comfortable
+        # at 1024-class resolutions; full 1280×704 is on the edge.
+        "label": "High (80–119 GB)",
+        "tagline": "Most things at full res · 1024 clamp on FFLF/Extend",
+        "t2v_max_dim": 0,
+        "i2v_max_dim": 0,
+        "keyframe_max_dim": 1024,
+        "extend_max_dim": 1024,
+        "allows_q8": True,
+        "allows_keyframe": True,
+        "allows_extend": True,
+        "blurb": (
+            "96 GB-class machine. FFLF and Extend run at up to 1024 max-side "
+            "without swap. T2V / I2V / HQ at full 1280×704."
+        ),
+    },
+    "pro": {
+        # 128+ GB. M-Ultra fully kitted, Mac Studio Ultra 192/256 GB. No
+        # clamps; the dev transformer's full-res memory peak is below
+        # the RAM ceiling.
+        "label": "Pro (≥ 120 GB)",
+        "tagline": "No clamps — render at any resolution",
+        "t2v_max_dim": 0,
+        "i2v_max_dim": 0,
+        "keyframe_max_dim": 0,
+        "extend_max_dim": 0,
+        "allows_q8": True,
+        "allows_keyframe": True,
+        "allows_extend": True,
+        "blurb": (
+            "120+ GB. Every mode runs at every resolution we support — "
+            "the upstream defaults Just Work."
+        ),
+    },
+}
+
+
+def _detect_tier() -> str:
+    """Pick a tier based on `hw.memsize`. Cached at module load — RAM is
+    fixed at boot. LTX_TIER_OVERRIDE env var lets advanced users force a
+    tier (useful for demos / reproducing other-machine bugs)."""
+    override = os.environ.get("LTX_TIER_OVERRIDE", "").strip().lower()
+    if override in CAPABILITIES:
+        return override
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=1,
+        ).stdout.strip()
+        gb = int(out) / 1024**3
+    except Exception:
+        return "standard"   # safe default
+    if gb < 48:  return "base"
+    if gb < 80:  return "standard"
+    if gb < 120: return "high"
+    return "pro"
+
+
+SYSTEM_TIER = _detect_tier()
+SYSTEM_CAPS = CAPABILITIES[SYSTEM_TIER]
+
+
+def tier_max_dim(kind: str) -> int:
+    """Return the max-dim clamp for a given pipeline kind on this tier.
+    0 means "no clamp". Caller decides how to interpret 0 (skip downscale,
+    pass user's W/H through, etc.)."""
+    return int(SYSTEM_CAPS.get(f"{kind}_max_dim", 0))
+
+
 def get_memory() -> dict:
     info = {"total_gb": 0.0, "used_gb": 0.0, "pressure_pct": 0, "swap_gb": 0.0}
     try:
@@ -1003,24 +1135,33 @@ def run_job_inner(job: dict) -> None:
 
     if mode == "extend":
         # Extend: input video → longer video
+        if not SYSTEM_CAPS["allows_extend"]:
+            raise RuntimeError(
+                f"Extend isn't supported on the {SYSTEM_CAPS['label']} hardware "
+                f"tier — the dev transformer needs more headroom than this Mac "
+                f"has. Bump to 64+ GB or render the longer clip in one shot."
+            )
         src = p["video_path"]
         if not src or not Path(src).exists():
             raise RuntimeError(f"source video for extend not found: {src}")
         # Resolution clamp — same fix shape as FFLF. The upstream extend
-        # pipeline runs the ~10–12 GB dev transformer in CFG-guided mode
-        # (line 294 of extend.py — guided_denoise_loop is unconditional;
-        # cfg_scale=1.0 changes the math but not the activation memory).
-        # At 1280×704 that pushes 8–12 GB into swap on 64 GB Macs and
-        # makes each step take 240s instead of 25s. Downscaling the
-        # source to ≤768 max-side avoids the swap entirely.
-        # Cached by target dimensions so repeated extends on the same
-        # source skip the re-encode.
+        # pipeline runs the dev transformer in CFG-guided mode (line 294
+        # of extend.py — guided_denoise_loop is unconditional; cfg_scale=1.0
+        # changes the math but not the activation memory). max_dim is
+        # tier-derived: 768 on standard (64 GB), 1024 on high (96 GB),
+        # unclamped on pro (128+ GB). Cached by target dimensions so
+        # repeated extends on the same source skip the re-encode.
         original_src = Path(src)
-        downscaled_src = _ensure_downscaled(original_src, max_dim=768)
-        if downscaled_src != original_src:
-            push(f"Extend: source {original_src.name} downscaled to "
-                 f"{downscaled_src.name} (≤768 max-side, fits 64 GB).")
-            src = str(downscaled_src)
+        ext_max = tier_max_dim("extend")
+        if ext_max:
+            downscaled_src = _ensure_downscaled(original_src, max_dim=ext_max)
+            if downscaled_src != original_src:
+                push(f"Extend: source {original_src.name} downscaled to "
+                     f"{downscaled_src.name} (≤{ext_max} max-side, "
+                     f"{SYSTEM_CAPS['label']} tier).")
+                src = str(downscaled_src)
+        else:
+            push(f"Extend: no resolution clamp ({SYSTEM_CAPS['label']} tier).")
         out_name = Path(src).stem + f"_ext{p['extend_frames']}_{stamp}.mp4"
         final_out = OUTPUT / out_name
         job["raw_path"] = str(final_out)
@@ -1075,6 +1216,13 @@ def run_job_inner(job: dict) -> None:
     # require Q8 on disk and route to generate_keyframe regardless of quality
     # tier (which doesn't really apply — there's no "Q4 keyframe" path).
     if mode == "keyframe":
+        if not SYSTEM_CAPS["allows_keyframe"]:
+            raise RuntimeError(
+                f"FFLF (keyframe interpolation) isn't supported on the "
+                f"{SYSTEM_CAPS['label']} hardware tier — Q8 + the dev "
+                f"transformer's two-stage memory peak doesn't fit. "
+                f"Bump to 64+ GB."
+            )
         # Check the SAME file list the menu + /status report on. The old
         # "directory exists and non-empty" check let half-downloaded Q8
         # installs through, only to crash later mid-render with a
@@ -1091,24 +1239,22 @@ def run_job_inner(job: dict) -> None:
             raise RuntimeError(f"start_image not found: {p.get('start_image')}")
         if not p.get("end_image") or not Path(p["end_image"]).exists():
             raise RuntimeError(f"end_image not found: {p.get('end_image')}")
-        # Clamp keyframe-mode resolution to 768 on the longer side. The Q8
+        # Clamp keyframe-mode resolution to the tier's max-dim. The Q8
         # KeyframeInterpolationPipeline OOMs on 64 GB Macs at the stage-1 →
         # stage-2 transition for 1280×704 (peak memory hits the ceiling
-        # during the upscale + VAE-encoder reload). 768×432 / 768×768 fits
-        # cleanly. We tried free/reload of the dev DiT around the upscale
-        # and it did not help; resolution clamp is the working fix.
-        # See patch_ltx_codec.py docstring for details.
-        KF_MAX_DIM = 768
+        # during the upscale + VAE-encoder reload). On standard tier we
+        # clamp to 768; on high tier we go to 1024; pro tier has no clamp.
+        kf_max = tier_max_dim("keyframe")
         KF_ALIGN = 32
         req_w, req_h = p["width"], p["height"]
-        if max(req_w, req_h) > KF_MAX_DIM:
-            scale = KF_MAX_DIM / max(req_w, req_h)
+        if kf_max and max(req_w, req_h) > kf_max:
+            scale = kf_max / max(req_w, req_h)
             width = max(KF_ALIGN, int(round(req_w * scale / KF_ALIGN)) * KF_ALIGN)
             height = max(KF_ALIGN, int(round(req_h * scale / KF_ALIGN)) * KF_ALIGN)
             push(
-                f"Keyframe: clamping {req_w}x{req_h} → {width}x{height} "
-                f"(64 GB Mac can't fit the keyframe pipeline at full res; "
-                f"dev DiT + upscaler + 4×-volume upscaled tensor exceed RAM)."
+                f"Keyframe: clamping {req_w}×{req_h} → {width}×{height} "
+                f"({SYSTEM_CAPS['label']} tier — {kf_max} max-side keeps "
+                f"the dev DiT + upscaler + 4×-volume upscaled tensor in RAM)."
             )
             # Persist back to params so the sidecar / history reflect the
             # actual rendered resolution, not the form input.
@@ -1161,6 +1307,21 @@ def run_job_inner(job: dict) -> None:
     width, height = p["width"], p["height"]
     frames = p["frames"]
     quality = p.get("quality", "standard")
+
+    # T2V/I2V resolution clamp — only applies on the base tier (< 48 GB).
+    # Standard / high / pro tiers pass full user-requested W×H through.
+    t2v_max = tier_max_dim("t2v" if mode == "t2v" else "i2v")
+    if t2v_max and max(width, height) > t2v_max:
+        scale = t2v_max / max(width, height)
+        new_w = max(32, (int(round(width * scale)) // 32) * 32)
+        new_h = max(32, (int(round(height * scale)) // 32) * 32)
+        push(
+            f"{mode.upper()}: clamping {width}×{height} → {new_w}×{new_h} "
+            f"({SYSTEM_CAPS['label']} tier — keeps you out of swap)."
+        )
+        width, height = new_w, new_h
+        p["width"], p["height"] = width, height
+
     pad_w, pad_h, pad_filter = compute_pad(width, height)
     suffix = f"{pad_w}x{pad_h}" if mode == "i2v_clean_audio" and pad_filter else f"{width}x{height}"
     tag = f"{mode}_hq" if quality == "high" else mode
@@ -1180,6 +1341,13 @@ def run_job_inner(job: dict) -> None:
     job["raw_path"] = str(raw_out)
 
     if quality == "high":
+        if not SYSTEM_CAPS["allows_q8"]:
+            raise RuntimeError(
+                f"High quality (Q8 two-stage) isn't supported on the "
+                f"{SYSTEM_CAPS['label']} hardware tier — Q8 dev transformer "
+                f"(~19 GB) plus the upscaler stage doesn't fit. "
+                f"Use Standard or Draft instead, or upgrade to 64+ GB."
+            )
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
         # Same completeness check as keyframe — see comment there.
@@ -1501,6 +1669,23 @@ class Handler(BaseHTTPRequestHandler):
             _repo_snap = repo_status_list()
             payload["repos_total"] = len(_repo_snap)
             payload["repos_ready"] = sum(1 for r in _repo_snap if r.get("complete"))
+            # Hardware tier — UI uses this to disable mode pills / quality
+            # buttons / show a helpful banner explaining what this Mac can
+            # and can't do. Detected once at startup; the override env
+            # var lets users force a tier for testing.
+            payload["tier"] = {
+                "key": SYSTEM_TIER,
+                "label": SYSTEM_CAPS["label"],
+                "tagline": SYSTEM_CAPS["tagline"],
+                "blurb": SYSTEM_CAPS["blurb"],
+                "allows_q8": SYSTEM_CAPS["allows_q8"],
+                "allows_keyframe": SYSTEM_CAPS["allows_keyframe"],
+                "allows_extend": SYSTEM_CAPS["allows_extend"],
+                "t2v_max_dim": SYSTEM_CAPS["t2v_max_dim"],
+                "i2v_max_dim": SYSTEM_CAPS["i2v_max_dim"],
+                "keyframe_max_dim": SYSTEM_CAPS["keyframe_max_dim"],
+                "extend_max_dim": SYSTEM_CAPS["extend_max_dim"],
+            }
             # Active model-download status — UI shows a progress strip when
             # this is set. last_line is the most recent hf output line so the
             # user gets live feedback even before opening the log panel.
@@ -2308,6 +2493,10 @@ HTML = r"""<!doctype html>
 <header>
   <a href="/" class="brand"><img src="/assets/logo-header.png" alt="LTX23MLX"></a>
   <span class="spacer"></span>
+  <!-- Hardware tier badge — clickable, opens a dialog explaining what
+       this Mac's RAM tier allows. Modes / qualities the tier doesn't
+       support are visibly disabled in the form below. -->
+  <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="What can this Mac run?">tier…</span>
   <span id="memPill" class="pill">memory…</span>
   <span id="comfyPill" class="pill" style="display:none">comfy…</span>
   <span id="helperPill" class="pill">helper…</span>
@@ -2559,6 +2748,25 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+
+<!-- ============== TIER MODAL ============== -->
+<!-- Opened by the "tier" pill in the header. Renders the detected
+     hardware tier + what it allows. Helps users understand WHY some
+     options are disabled instead of just hitting a wall mid-flow. -->
+<div id="tierModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeTierModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2 id="tierModalTitle">Hardware tier</h2>
+      <button class="ghost-btn" onclick="closeTierModal()">Close</button>
+    </div>
+    <div class="models-hint" id="tierModalBlurb"></div>
+    <ul class="models-list" id="tierCapsList"></ul>
+    <div class="models-foot">
+      Set <code>LTX_TIER_OVERRIDE=base|standard|high|pro</code> in the env to
+      force a tier (useful for testing what other users see).
+    </div>
+  </div>
+</div>
 
 <!-- ============== MODELS MODAL ============== -->
 <!-- Opened by the "models" pill in the header. Shows per-repo download
@@ -3024,6 +3232,23 @@ async function poll() {
     hp.title = 'Helper is idle (auto-exited after the idle timeout). The next queued job will respawn it; expect a one-time ~30s pipeline-load delay.';
   }
 
+  // Tier pill — what this Mac's RAM tier allows. Click to open the
+  // explanation modal. Color is informational, not warning: the tier is
+  // what it is, not "wrong".
+  const tp = document.getElementById('tierPill');
+  if (s.tier) {
+    const t = s.tier;
+    const cls = t.key === 'base' ? 'pill-warn'
+              : (t.key === 'pro' ? 'pill-good' : '');
+    tp.innerHTML = `<span class="dot"></span>${escapeHtml(t.key)}`;
+    tp.className = 'pill ' + cls;
+    tp.title = `${t.label} · ${t.tagline}`;
+    // Apply tier-driven enabled/disabled state to mode + quality pills.
+    // Done here in poll() so a tier override (env var) flips state on
+    // panel restart without needing to also change a separate setMode call.
+    applyTierGates(t);
+  }
+
   // Models pill — roll-up status: base ready / Q8 ready, plus active download.
   // Renders as one of:
   //   "models ↓ Q4 12%"   while a download streams (live progress, last hf line)
@@ -3287,6 +3512,86 @@ document.getElementById('genForm').addEventListener('submit', async e => {
   await api('/queue/add','POST',fd);
   poll();
 });
+
+// ====== Tier gating ======
+// Disables the FFLF / Extend mode pills and the High quality pill when
+// the detected hardware tier doesn't support them. Visual state +
+// tooltip + intercepted clicks. Run from the poll handler so an env
+// override flips state on restart.
+function applyTierGates(tier) {
+  // Mode pills
+  document.querySelectorAll('#modeGroup .pill-btn').forEach(b => {
+    const m = b.dataset.mode;
+    const allowed = (m === 'keyframe') ? tier.allows_keyframe
+                  : (m === 'extend')   ? tier.allows_extend
+                  : true;
+    b.classList.toggle('disabled', !allowed);
+    if (!allowed) {
+      const need = m === 'keyframe' ? 'FFLF needs Q8 + headroom (64+ GB)'
+                                    : 'Extend needs the dev transformer (64+ GB)';
+      b.title = `Disabled on ${tier.label} — ${need}.`;
+    } else {
+      b.title = '';
+    }
+  });
+  // Quality: High requires Q8. We already disable based on q8_available
+  // for the no-download case; this layer enforces the RAM tier on top.
+  // Both layers can disable — we OR them together via a class.
+  const highBtn = document.getElementById('qualityHigh');
+  if (highBtn) {
+    if (!tier.allows_q8) {
+      highBtn.classList.add('disabled');
+      highBtn.title = `Disabled on ${tier.label} — Q8 dev transformer doesn't fit.`;
+    } else {
+      // Don't unconditionally clear .disabled — the Q8-not-installed code
+      // path also sets it. Only clear if the tier is the only reason.
+      // The poll() code that checks q8_available re-applies that state
+      // every cycle, so this branch is safe to unset.
+      highBtn.title = '';
+    }
+  }
+}
+// Intercept clicks on disabled mode pills so users get a helpful message
+// instead of a broken-feeling no-op.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('#modeGroup .pill-btn.disabled');
+  if (btn) {
+    e.stopPropagation();
+    e.preventDefault();
+    alert(btn.title || 'This mode is not supported on this hardware tier.');
+  }
+}, true);
+
+// ====== Tier modal ======
+function openTierModal() {
+  const modal = document.getElementById('tierModal');
+  modal.style.display = 'flex';
+  // Snapshot tier from the latest /status. We could also fetch fresh,
+  // but since the tier is detected once at panel startup it never changes.
+  fetch('/status').then(r => r.json()).then(s => {
+    const t = s.tier || {};
+    document.getElementById('tierModalTitle').textContent = `Hardware tier · ${t.label || 'unknown'}`;
+    document.getElementById('tierModalBlurb').textContent = t.blurb || '';
+    const items = [
+      { label: 'T2V (text → video)',         on: true,                                    note: t.t2v_max_dim ? `clamp ${t.t2v_max_dim} max-side` : 'no clamp' },
+      { label: 'I2V (image → video)',        on: true,                                    note: t.i2v_max_dim ? `clamp ${t.i2v_max_dim} max-side` : 'no clamp' },
+      { label: 'Standard quality (Q4)',      on: true,                                    note: 'always available' },
+      { label: 'High quality (Q8 two-stage)', on: t.allows_q8,                              note: t.allows_q8 ? 'no clamp' : 'needs ≥ 48 GB' },
+      { label: 'FFLF — first/last frame',    on: t.allows_keyframe,                        note: t.allows_keyframe ? `clamp ${t.keyframe_max_dim || 'none'}` : 'needs ≥ 48 GB' },
+      { label: 'Extend (continue a clip)',   on: t.allows_extend,                          note: t.allows_extend   ? `clamp ${t.extend_max_dim || 'none'}`   : 'needs ≥ 48 GB' },
+    ];
+    document.getElementById('tierCapsList').innerHTML = items.map(it => `
+      <li class="${it.on ? 'ready' : 'missing'}">
+        <span class="icon">${it.on ? '✓' : '✗'}</span>
+        <div class="meta">
+          <span class="ttl">${escapeHtml(it.label)}</span>
+          <span class="sub">${escapeHtml(it.note)}</span>
+        </div>
+        <span></span>
+      </li>`).join('');
+  });
+}
+function closeTierModal() { document.getElementById('tierModal').style.display = 'none'; }
 
 // ====== Models modal ======
 // Opens to /models snapshot. While open, the main poll() refreshes the
