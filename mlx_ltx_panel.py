@@ -2126,18 +2126,22 @@ HTML = r"""<!doctype html>
       display: flex; flex-direction: column; min-height: 100vh;
     }
 
-    /* ===== HEADER ===== */
+    /* ===== HEADER =====
+       Background matches the brand-void (#0A0E1B) so the logo PNG's own
+       background blends cleanly into the header instead of sitting as a
+       darker rectangle on a lighter panel. Logo height bumped from 40 →
+       72 so the wordmark is actually readable. */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      padding: 10px 18px; border-bottom: 1px solid var(--border);
-      background: var(--panel);
+      padding: 12px 18px; border-bottom: 1px solid var(--border);
+      background: #0A0E1B;
     }
     header h1 {
       margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
       display: inline-flex; align-items: center; gap: 8px;
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
-    .brand img { height: 40px; width: auto; display: block; }
+    .brand img { height: 72px; width: auto; display: block; }
     .tag { color: var(--muted); font-size: 11px; }
     .pill {
       padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
