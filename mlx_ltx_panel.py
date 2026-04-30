@@ -2526,6 +2526,15 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border);
     }
     .now-card.idle { opacity: 0.7; }
+    /* Failed-job state — kept loud instead of letting the panel drift back
+       to a sleepy "Idle". Border + background tint match the danger color
+       so the eye lands on it immediately. Stays visible until the user
+       submits a new job (next render flips us out of failed state). */
+    .now-card.failed {
+      border-color: rgba(248,81,73,0.55);
+      background: rgba(248,81,73,0.06);
+      opacity: 1;
+    }
     .now-card .ttl { font-weight: 600; font-size: 13px; }
     .now-card .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
     .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 7px 0; }
@@ -2544,6 +2553,9 @@ HTML = r"""<!doctype html>
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .row-list li .params { color: var(--muted); font-size: 10px; }
+    /* Inline error text in failed history rows. Shown in the title slot
+       so users see the cause without reading the log. */
+    .row-list li .err-inline { color: var(--danger, #f85149); font-weight: 500; }
     .row-list li .badge {
       font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
       padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
@@ -3718,7 +3730,7 @@ async function poll() {
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
   if (s.running && s.current) {
-    nowCard.classList.remove('idle');
+    nowCard.classList.remove('idle', 'failed');
     const elapsed = Math.max(0, s.server_now - s.current.started_ts);
     const avg = s.avg_elapsed_sec || 420;
     const pct = Math.min(99, Math.round(elapsed / avg * 100));
@@ -3729,12 +3741,49 @@ async function poll() {
       `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · <strong>${fmtMin(elapsed)}</strong> elapsed${avg ? ' / ~'+fmtMin(avg)+' avg' : ''}` +
       (lastLog ? `<br><span style="color:var(--muted)">${escapeHtml(lastLog.split(']').slice(1).join(']').trim().slice(0,100))}</span>` : '');
   } else {
-    nowCard.classList.add('idle');
+    // Idle state. If the LAST history entry was a failure (helper crash,
+    // OOM, etc.) surface it loud-and-clear here — otherwise users like
+    // cocktailpeanut just see "Idle" and assume "the panel did nothing."
+    // We hold the failure visible until the user starts a new job.
     fill.style.width = '0%';
-    nowCard.querySelector('.ttl').textContent = s.paused ? 'Paused' : 'Idle';
-    nowCard.querySelector('.meta').textContent = s.paused
-      ? 'Worker paused — current job (if any) finishes, queue waits for resume.'
-      : (s.queue.length ? 'Worker about to pick up next queued job.' : 'No jobs queued. Generate something on the left.');
+    const last = (s.history || [])[0];
+    const showFailure = last && last.status === 'failed' && !s.queue.length;
+    if (showFailure) {
+      nowCard.classList.remove('idle');
+      nowCard.classList.add('failed');
+      // Translate cryptic engine errors into actionable user guidance.
+      // "helper died mid-job (no event)" is the SIGKILL-by-jetsam
+      // signature on memory-pressured Macs — the helper subprocess gets
+      // killed by the OS for using too much RAM and we never get an
+      // event back. Tell the user how to recover instead of leaving them
+      // with the engine wording.
+      const raw = (last.error || 'unknown error');
+      let friendly, hint;
+      if (raw.toLowerCase().includes('helper died') || raw.toLowerCase().includes('helper exited')) {
+        friendly = 'Helper crashed — likely out of memory.';
+        hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again. ' +
+               'Or switch Quality to Draft, which uses about half the RAM.';
+      } else if (raw.toLowerCase().includes('q8') || raw.toLowerCase().includes('keyframe')) {
+        friendly = 'This mode needs the Q8 model.';
+        hint = raw;
+      } else {
+        friendly = 'Job failed.';
+        hint = raw;
+      }
+      nowCard.querySelector('.ttl').innerHTML =
+        `<span style="color: var(--danger, #f85149)">⚠ ${escapeHtml(friendly)}</span>`;
+      nowCard.querySelector('.meta').innerHTML =
+        `<span style="color: var(--muted)">${escapeHtml(snippet(last.params.label || last.params.prompt, 80))}</span>` +
+        ` <span style="color: var(--muted)">· ${escapeHtml(last.params.mode)} · ${last.params.width}×${last.params.height}</span>` +
+        `<br><span style="color: var(--text)">${escapeHtml(hint)}</span>`;
+    } else {
+      nowCard.classList.add('idle');
+      nowCard.classList.remove('failed');
+      nowCard.querySelector('.ttl').textContent = s.paused ? 'Paused' : 'Idle';
+      nowCard.querySelector('.meta').textContent = s.paused
+        ? 'Worker paused — current job (if any) finishes, queue waits for resume.'
+        : (s.queue.length ? 'Worker about to pick up next queued job.' : 'No jobs queued. Generate something on the left.');
+    }
   }
 
   // Logs
@@ -3754,16 +3803,28 @@ async function poll() {
       <button title="Remove" onclick="removeJob('${j.id}')">×</button>
     </li>`).join('');
 
-  // History
+  // History — failed jobs show the error inline in the title slot, so
+  // users can see WHY without having to scroll the log to find it.
   const hl = document.getElementById('historyList');
   if (!s.history.length) hl.innerHTML = '<li class="empty-state"><span></span><span>No history yet</span><span></span><span></span></li>';
-  else hl.innerHTML = s.history.slice(0, 20).map(j => `
+  else hl.innerHTML = s.history.slice(0, 20).map(j => {
+    const titleText = escapeHtml(j.params.label || snippet(j.params.prompt, 60));
+    const titleAttr = escapeHtml(j.params.prompt || '');
+    let titleHtml;
+    if (j.status === 'failed' && j.error) {
+      titleHtml = `${titleText} ` +
+        `<span class="err-inline" title="${escapeHtml(j.error)}">— ${escapeHtml(snippet(j.error, 70))}</span>`;
+    } else {
+      titleHtml = titleText;
+    }
+    return `
     <li class="${j.status}">
       <span class="badge">${j.status}</span>
-      <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
+      <span class="ttl" title="${titleAttr}">${titleHtml}</span>
       <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
       <span></span>
-    </li>`).join('');
+    </li>`;
+  }).join('');
 
   // Outputs / carousel
   if (JSON.stringify(currentOutputs) !== JSON.stringify(s.outputs)) {
