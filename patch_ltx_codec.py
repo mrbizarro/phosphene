@@ -142,18 +142,63 @@ def _atomic_write(target: Path, text: str) -> None:
         raise
 
 
-def apply_patch(target: Path, old: str, new: str, marker: str, label: str) -> str:
+def apply_patch(target: Path, old: str, new: str, marker: str, label: str,
+                upgrade_marker: str | None = None) -> str:
     """Idempotently apply old→new replacement on `target`. Returns one of
     OUTCOME_APPLIED / OUTCOME_ALREADY / OUTCOME_MISSING / OUTCOME_DRIFT —
     deep-review fix to surface upstream drift loudly instead of silently
-    no-op'ing the patch and shipping a broken install."""
+    no-op'ing the patch and shipping a broken install.
+
+    `upgrade_marker` (optional): a substring that exists in the NEW patch
+    but not in the OLD already-applied version. If `marker` is found but
+    `upgrade_marker` is NOT, an older version of our own patch is on disk
+    — re-write the file to the latest content. Used for shipping fixes to
+    users who already have an earlier patch applied (e.g. adding +faststart
+    to the codec patch without forcing a venv rebuild)."""
     if target is None or not target.exists():
         print(f"  [{label}] MISSING — target file not found", file=sys.stderr)
         return OUTCOME_MISSING
     text = target.read_text()
     if marker in text:
-        print(f"  [{label}] already patched: {target}")
-        return OUTCOME_ALREADY
+        # Marker present → some version of our patch is on disk. If the
+        # caller didn't supply an upgrade_marker we treat it as ALREADY.
+        if upgrade_marker is None or upgrade_marker in text:
+            print(f"  [{label}] already patched: {target}")
+            return OUTCOME_ALREADY
+        # Marker but no upgrade_marker → old patch version on disk. The
+        # surrounding lines were rewritten by the previous patch, so the
+        # OLD raw upstream string isn't there to find. Restore from import
+        # of the function's source text by REVERTING our previous patch
+        # back to OLD using an embedded undo, then re-apply NEW. We do
+        # this by re-reading the upstream commit-pinned source.
+        print(f"  [{label}] upgrading older patch: {target}")
+        # Naive but works for our patches: re-write the entire file by
+        # mapping NEW back to itself isn't useful. Instead, find the
+        # specific patched line and replace with NEW — provided NEW
+        # contains a unique-enough head/tail anchor. We rely on caller
+        # setting OLD to a substring still present after patching.
+        # SIMPLER ROUTE: write the upstream OLD string anywhere it would
+        # have been. Since we can't easily reconstruct the un-patched
+        # form, we instead just edit the patched site-packages directly
+        # at runtime via direct Edit — this branch is reachable only
+        # for the codec patch where +faststart was added. The narrow
+        # marker-pair (old=cmd.extend without faststart, new=cmd.extend
+        # with faststart) lets us find and replace.
+        # Find the old line (without faststart) and replace with new line.
+        old_one_liner = ('cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, '
+                         '"-crf", _crf, output_path])')
+        new_one_liner = ('cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, '
+                         '"-crf", _crf,\n                    "-movflags", '
+                         '"+faststart", output_path])')
+        if old_one_liner in text:
+            _atomic_write(target, text.replace(old_one_liner, new_one_liner))
+            print(f"  [{label}] upgrade applied: {target}")
+            return OUTCOME_APPLIED
+        print(
+            f"  [{label}] upgrade target text not found — patch shape may have "
+            f"changed. Manual inspection needed.", file=sys.stderr,
+        )
+        return OUTCOME_DRIFT
     if old not in text:
         print(
             f"  [{label}] DRIFT — expected text not found in {target}. "
@@ -173,11 +218,18 @@ def main() -> int:
     outcomes: list[tuple[str, str]] = []
 
     # Patch 1: codec
+    # `upgrade_marker="+faststart"` lets us upgrade installs where the
+    # earlier version of this patch was applied (LTX_OUTPUT_PIX_FMT marker
+    # present, but the +faststart movflag missing). Without the upgrade
+    # path, those installs would never get the moov-at-front fix that lets
+    # gallery thumbnails render the first frame without downloading the
+    # full clip.
     codec_target = _find("ltx_core_mlx/model/video_vae/video_vae.py")
-    outcomes.append(("codec (yuv444p crf 0)", apply_patch(
+    outcomes.append(("codec (yuv444p crf 0 + faststart)", apply_patch(
         codec_target, PATCH_CODEC_OLD, PATCH_CODEC_NEW,
         marker="LTX_OUTPUT_PIX_FMT",
-        label="codec (yuv444p crf 0)",
+        upgrade_marker="+faststart",
+        label="codec (yuv444p crf 0 + faststart)",
     )))
 
     # Patch 2: I2V OOM cleanup before decode
