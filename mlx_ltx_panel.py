@@ -1426,7 +1426,13 @@ def run_job_inner(job: dict) -> None:
                 "stage1_steps": 15,
                 "stage2_steps": 3,
                 "cfg_scale": 3.0,
-                "stg_scale": 1.0,
+                # Upstream HQ params (`LTX_2_3_HQ_PARAMS`) and the
+                # TwoStageHQPipeline signature both default stg_scale=0.0.
+                # HQ uses res_2s sampler with `stg_blocks=[]`, so STG is
+                # meant to be off — passing 1.0 burns one extra forward
+                # pass per outer step (~33% slower) for nothing. Was 1.0
+                # by mistake (copy from standard params); fixed here.
+                "stg_scale": 0.0,
                 "enable_teacache": True,
                 "teacache_thresh": 1.0,
             },
@@ -2770,8 +2776,10 @@ HTML = r"""<!doctype html>
         <input name="video_path" id="video_path" placeholder="/path/to/source.mp4" style="margin-top:6px">
         <div class="row" style="margin-top:8px">
           <div>
-            <label class="lbl">Extend by (latent frames)</label>
-            <input name="extend_frames" id="extend_frames" type="number" value="5" min="1" max="32">
+            <label class="lbl">Extend by (seconds)</label>
+            <input id="extend_seconds" type="number" value="2" min="0.4" max="10" step="0.5">
+            <input type="hidden" name="extend_frames" id="extend_frames" value="6">
+            <div class="hint" id="extendDurationHint" style="margin-top:4px">≈ 2.0 s of new content (6 latent frames × 8 video frames at 24 fps)</div>
           </div>
           <div>
             <label class="lbl">Direction</label>
@@ -3065,6 +3073,26 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () =>
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
+
+// Extend duration: user types seconds, we convert to latent frames behind
+// the scenes. Each latent = 8 video frames; at 24 fps that's 0.333 s.
+// Round-up so the user gets at least the seconds they asked for.
+//   seconds → latents: ceil(seconds * 24 / 8)
+//   latents → actual seconds: latents * 8 / 24
+// Hint line shows both numbers so the conversion isn't a black box.
+function syncExtendDuration() {
+  const secInput = document.getElementById('extend_seconds');
+  const hidden = document.getElementById('extend_frames');
+  const hint = document.getElementById('extendDurationHint');
+  if (!secInput || !hidden || !hint) return;
+  const seconds = parseFloat(secInput.value) || 0;
+  const latents = Math.max(1, Math.ceil(seconds * 24 / 8));
+  const actualSec = (latents * 8 / 24);
+  hidden.value = String(latents);
+  hint.textContent = `≈ ${actualSec.toFixed(2)} s of new content (${latents} latent frames × 8 video frames at 24 fps)`;
+}
+document.getElementById('extend_seconds').addEventListener('input', syncExtendDuration);
+syncExtendDuration();   // initialize on load
 document.getElementById('i2vMode').addEventListener('change', () => {
   document.getElementById('audioSection').classList.toggle('show', document.getElementById('i2vMode').value === 'i2v_clean_audio');
   if (currentMode === 'i2v') document.getElementById('mode').value = document.getElementById('i2vMode').value;
@@ -3764,8 +3792,23 @@ function updateModelsCard(s) {
     return;
   }
 
-  // ----- All good or not currently relevant — hide -------------------------
-  card.style.display = 'none';
+  // ----- All good — keep the card visible but quiet ------------------------
+  // Earlier version hid the card entirely when nothing was actionable, but
+  // that made users on healthy installs think "the download UI doesn't
+  // exist." The card now stays visible with a small ✓ status, telling
+  // them what's installed and giving them a path to the per-repo manager.
+  // Default border / background = muted neutral, no warning colour.
+  card.style.display = '';
+  card.classList.remove('state-missing', 'state-warn', 'state-downloading');
+  icon.textContent = '✓';
+  const ready = s.repos_ready ?? 0;
+  const total = s.repos_total ?? 0;
+  title.textContent = `Models ready · ${ready}/${total}`;
+  const partialNote = (q8Ok && baseOk) ? '' : ` · ${total - ready} optional missing`;
+  sub.innerHTML =
+    `All installed weights detected${partialNote}. ` +
+    `<a style="color:var(--accent-bright,#7e98ff); cursor:pointer; text-decoration:underline" onclick="openModelsModal()">Manage models →</a>`;
+  actions.innerHTML = '';   // no big button in the ready state
 }
 
 // ====== Tier gating ======

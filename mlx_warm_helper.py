@@ -416,7 +416,10 @@ for line in sys.__stdin__:
                 stage1_steps=int(p.get("stage1_steps", 15)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
                 cfg_scale=float(p.get("cfg_scale", 3.0)),
-                stg_scale=float(p.get("stg_scale", 1.0)),
+                # Default 0.0 — upstream HQ (TwoStageHQPipeline) uses empty
+                # stg_blocks, so any nonzero stg_scale just runs an extra
+                # forward pass per step that's then discarded.
+                stg_scale=float(p.get("stg_scale", 0.0)),
                 enable_teacache=bool(p.get("enable_teacache", True)),
                 teacache_thresh=float(p.get("teacache_thresh", 1.0)),
             )
