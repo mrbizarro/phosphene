@@ -17,6 +17,18 @@ module.exports = {
         message: ["git fetch origin", "git checkout dcd639e"]
       }
     },
+    // Force-downgrade mlx to 0.31.1 — fixes 22 dB audio regression on mlx
+    // 0.31.2. Existing users who installed before this commit have mlx 0.31.2
+    // and quiet audio; clicking Update reinstalls to the pinned version.
+    // --force-reinstall + --no-deps so we change ONLY mlx without disturbing
+    // ltx-* / transformers / etc. (some of which depend on mlx>=0.31.0).
+    // See install.js for the full diagnostic note.
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
     // Pin to the venv's python3.11 to match install.js — `python3` on

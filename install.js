@@ -107,11 +107,23 @@ module.exports = {
     // looks for video_vae.py.
     // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still
     // get the v1+ `hf` CLI used by the download steps below.
+    //
+    // SHIP-BLOCKER: pin mlx==0.31.1 (NOT 0.31.2). LTX 2.3 audio regresses
+    // by 22 dB on mlx 0.31.2 — output peaks at -37 dB instead of the
+    // expected -9 to -15 dB. Verified empirically by downgrading mlx in a
+    // working install and re-running the same prompt:
+    //   mlx 0.31.2 → max_volume -42.8 dB (broken)
+    //   mlx 0.31.1 → max_volume -9.2  dB (working)
+    // Same packages, same weights, same seed; only mlx differs. Numerical
+    // change in 0.31.2 attenuates the vocoder output.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
         message: [
+          // Force the mlx pin BEFORE installing ltx-* packages so their deps
+          // resolve to the pinned version instead of pulling latest 0.31.x.
+          "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'",
           "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
           "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0'"
         ]
