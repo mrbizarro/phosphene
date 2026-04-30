@@ -114,6 +114,7 @@ def release_pipelines(keep_kind=None):
     Caller must hold _pipe_lock.
     """
     global _t2v_pipe, _i2v_pipe, _extend_pipe, _hq_pipe, _kf_pipe, _hq_model_dir, _kf_model_dir
+    global _gemma_lm
     try:
         from ltx_core_mlx.utils.memory import aggressive_cleanup
     except Exception:
@@ -130,6 +131,11 @@ def release_pipelines(keep_kind=None):
         _hq_pipe = None; _hq_model_dir = None; freed.append("HQ")
     if keep_kind != "keyframe" and _kf_pipe is not None:
         _kf_pipe = None; _kf_model_dir = None; freed.append("Keyframe")
+    # Always free Gemma LanguageModel when releasing for any pipeline —
+    # ~6 GB persistent that competes with the dev transformer's headroom.
+    # Re-loaded on demand by the next enhance call (one-time ~10s cost).
+    if keep_kind != "gemma_lm" and _gemma_lm is not None:
+        _gemma_lm = None; freed.append("GemmaLM")
     if freed:
         aggressive_cleanup()
         emit({"event": "log", "line": f"Released pipelines: {', '.join(freed)} (freeing RAM before next load)"})
@@ -219,6 +225,42 @@ def get_kf_pipe(model_dir: str):
             )
             _kf_model_dir = model_dir
         return _kf_pipe
+
+
+# ---- prompt enhancement (Gemma language model) ------------------------------
+# Separate from the pipeline's TextEncoder wrapper — same weights file, but
+# the LanguageModel class supports `.enhance_t2v(prompt, seed)` /
+# `.enhance_i2v(prompt, seed)` for prompt rewriting. Loaded lazily on first
+# enhance request. Held warm across calls; freed by `release_pipelines`
+# when a render starts to keep memory below the 64 GB ceiling.
+_gemma_lm = None
+
+
+def get_gemma_lm():
+    global _gemma_lm
+    if _gemma_lm is None:
+        from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+        emit({"event": "log", "line": "Loading Gemma language model for prompt enhancement (~10-15s)…"})
+        with _pipe_lock:
+            # Free any active pipeline first — Gemma is ~6 GB, the dev
+            # transformer is ~12-19 GB, having both resident risks pushing
+            # us past 64 GB on standard tier.
+            release_pipelines(keep_kind=None)
+            _gemma_lm = GemmaLanguageModel()
+            _gemma_lm.load(GEMMA_PATH)
+        emit({"event": "log", "line": "Gemma loaded — subsequent enhances will be fast."})
+    return _gemma_lm
+
+
+def free_gemma_lm():
+    global _gemma_lm
+    if _gemma_lm is not None:
+        _gemma_lm = None
+        try:
+            from ltx_core_mlx.utils.memory import aggressive_cleanup
+            aggressive_cleanup()
+        except Exception:
+            pass
 
 
 # ---- image preprocessing -----------------------------------------------------
@@ -484,6 +526,46 @@ for line in sys.__stdin__:
                 "event": "done", "id": job_id,
                 "output": str(out_path), "elapsed_sec": elapsed,
                 "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    if action == "enhance_prompt":
+        # Gemma-driven prompt rewriting. Same model file as the pipeline's
+        # text encoder, but loaded as a `GemmaLanguageModel` (the wrapper
+        # that knows how to do `enhance_t2v` / `enhance_i2v`). First call
+        # eats a ~10-15s Gemma load; cached afterwards. release_pipelines
+        # frees Gemma when a real render comes in, so memory doesn't pile up.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        user_prompt = (p.get("prompt") or "").strip()
+        mode = (p.get("mode") or "t2v").lower()
+        if mode not in ("t2v", "i2v"):
+            mode = "t2v"
+        seed = int(p.get("seed", 10))
+        if not user_prompt:
+            emit({"event": "error", "id": job_id, "error": "empty prompt"})
+            continue
+        _is_busy = True
+        try:
+            t0 = time.time()
+            lm = get_gemma_lm()
+            if mode == "t2v":
+                enhanced = lm.enhance_t2v(user_prompt, seed=seed)
+            else:
+                enhanced = lm.enhance_i2v(user_prompt, seed=seed)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "enhanced": enhanced,
+                "original": user_prompt,
+                "mode": mode,
+                "elapsed_sec": elapsed,
             })
         except Exception as exc:
             _last_activity = time.time()

@@ -2042,6 +2042,42 @@ class Handler(BaseHTTPRequestHandler):
             push(f"[hf] cancel requested for {rid}")
             self._json({"ok": True}); return
 
+        if path == "/prompt/enhance":
+            # Gemma-driven prompt enhancement, routed through the warm
+            # helper subprocess. First call after panel start eats a
+            # ~10-15s Gemma load; cached afterwards (subsequent enhances
+            # ~3-5s). Helper's release_pipelines frees Gemma when a real
+            # render comes in, so memory doesn't accumulate on top of
+            # the dev transformer.
+            user_prompt = (form.get("prompt", [""])[0] or "").strip()
+            mode = (form.get("mode", ["t2v"])[0] or "t2v").lower()
+            if mode not in ("t2v", "i2v"):
+                mode = "t2v"
+            if not user_prompt:
+                self._json({"error": "no prompt provided"}, 400); return
+            push(f"[enhance] {mode}: {user_prompt[:80]}…")
+            try:
+                result = HELPER.run({
+                    "action": "enhance_prompt",
+                    "id": f"enh-{int(time.time()*1000)}",
+                    "params": {"prompt": user_prompt, "mode": mode, "seed": 10},
+                })
+            except Exception as exc:
+                push(f"[enhance] failed: {exc}")
+                self._json({"error": str(exc)}, 500); return
+            enhanced = result.get("enhanced", "").strip()
+            if not enhanced:
+                self._json({"error": "Gemma returned empty result"}, 500); return
+            push(f"[enhance] → {enhanced[:120]}… ({result.get('elapsed_sec','?')}s)")
+            self._json({
+                "ok": True,
+                "original": user_prompt,
+                "enhanced": enhanced,
+                "mode": mode,
+                "elapsed_sec": result.get("elapsed_sec"),
+            })
+            return
+
         self.send_error(404)
 
 
@@ -2814,6 +2850,12 @@ HTML = r"""<!doctype html>
 
       <h2>Prompt</h2>
       <textarea name="prompt" id="prompt" placeholder="What should happen in the video..."></textarea>
+      <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
+           Rewrites your prompt with the structure/keywords LTX 2.3 trained
+           on. ~12-15s on cold start (Gemma needs to load), ~5s warm. -->
+      <div class="row-actions" style="margin-top:6px">
+        <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance prompt with Gemma</button>
+      </div>
 
       <!-- Mode-specific: audio (i2v_clean_audio only — accessed via Advanced) -->
       <details>
@@ -3078,6 +3120,40 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () =>
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
+
+// Prompt enhancement via Gemma — wraps the upstream CLI's `enhance`
+// subcommand. Cold start ~12-15s (Gemma load), warm ~5s. Blocks the UI
+// during the request (just the button — rest of the form stays usable).
+async function enhancePrompt() {
+  const ta = document.getElementById('prompt');
+  const original = ta.value.trim();
+  if (!original) { alert('Type a prompt before enhancing it.'); return; }
+  const mode = (currentMode === 'i2v' || currentMode === 'keyframe' || currentMode === 'extend') ? 'i2v' : 't2v';
+  const btn = document.getElementById('enhanceBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '✨ Loading Gemma… (~15s on cold start)';
+  let res;
+  try {
+    const fd = new URLSearchParams({ prompt: original, mode });
+    const r = await fetch('/prompt/enhance', { method: 'POST', body: fd });
+    res = await r.json();
+  } catch (e) {
+    alert('Enhance request failed: ' + (e.message || e));
+    btn.disabled = false; btn.textContent = originalLabel;
+    return;
+  }
+  btn.disabled = false; btn.textContent = originalLabel;
+  if (res.error) { alert('Enhance failed: ' + res.error); return; }
+  // Show diff in a confirm so the user can decide whether to accept.
+  const accept = confirm(
+    `Original:\n${res.original}\n\nEnhanced:\n${res.enhanced}\n\nReplace your prompt with the enhanced version?`
+  );
+  if (accept) {
+    ta.value = res.enhanced;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
 
 // Extend duration: user types seconds, we convert to latent frames behind
 // the scenes. Each latent = 8 video frames; at 24 fps that's 0.333 s.
