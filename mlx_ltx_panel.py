@@ -2825,7 +2825,14 @@ HTML = r"""<!doctype html>
         <div class="row" style="margin-top:8px">
           <div>
             <label class="lbl">Extend by (seconds)</label>
-            <input id="extend_seconds" type="number" value="2" min="0.4" max="10" step="0.5">
+            <!-- min must align to step from value=2: with min=0.4 step=0.5 the
+                 valid sequence is 0.4, 0.9, 1.4, 1.9, 2.4… — `2` is OFF the
+                 grid. Chrome blocks the entire form submission silently when
+                 ANY input fails validation, even hidden ones in inactive
+                 modes. Generate appeared dead until cocktailpeanut diagnosed
+                 it. With min=0.5 the sequence is 0.5, 1.0, 1.5, 2.0… and
+                 value=2 is valid. -->
+            <input id="extend_seconds" type="number" value="2" min="0.5" max="10" step="0.5">
             <input type="hidden" name="extend_frames" id="extend_frames" value="6">
             <div class="hint" id="extendDurationHint" style="margin-top:4px">≈ 2.0 s of new content (6 latent frames × 8 video frames at 24 fps)</div>
           </div>
