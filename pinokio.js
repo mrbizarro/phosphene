@@ -19,16 +19,30 @@
 const fs = require("fs")
 const path = require("path")
 
-function loadRequired(kernelDir) {
-  // kernelDir is the install dir Pinokio gives us via info.path. Read the
-  // JSON synchronously — Pinokio menus are sync today (info.exists is sync),
-  // and this is small (< 1 KB) so blocking on it is fine.
+function getInstallRoot(info) {
+  // Pinokio's `info.path` API has shifted across versions:
+  //   - older Pinokio: info.path is a STRING property (the install dir itself)
+  //   - newer Pinokio: info.path is a FUNCTION that joins args with install dir
+  // cocktailpeanut's working diff uses the function form; some user installs
+  // (Salo's reproduced this) error with TypeError on the function call, then
+  // Pinokio's outer error handler stat's a bogus path constructed from the
+  // error's .errno property — surfacing as "ENOENT ... stat '.../Errno'".
+  // Try both shapes; fall back to __dirname which Pinokio sets to the install
+  // dir for the running menu module on every version we've tested.
+  if (info && typeof info.path === "function") {
+    try { return path.dirname(info.path("required_files.json")) } catch (e) {}
+  }
+  if (info && typeof info.path === "string") return info.path
+  return __dirname
+}
+
+function loadRequired(installRoot) {
+  // Read required_files.json synchronously — Pinokio menus are sync today
+  // (info.exists is sync) and this is small (< 1 KB) so blocking is fine.
   try {
-    const p = path.join(kernelDir, "required_files.json")
-    return JSON.parse(fs.readFileSync(p, "utf8"))
+    return JSON.parse(fs.readFileSync(path.join(installRoot, "required_files.json"), "utf8"))
   } catch (e) {
-    // Treat as completely uninstalled if the manifest is gone — the user is
-    // going to need to reinstall anyway.
+    // Treat as completely uninstalled if the manifest is gone.
     return { repos: [], env: { marker_paths: [] }, min_size_bytes: 1024 }
   }
 }
@@ -54,16 +68,12 @@ module.exports = {
   description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
-    // SHIP-BLOCKER fix (credit: cocktailpeanut). `info.path` is a FUNCTION in
-    // Pinokio's menu API, not a string property. Calling it with a relative
-    // path returns the absolute path inside the install dir — so to get the
-    // install root itself we resolve a known file and dirname it. Previous
-    // code passed the function itself to loadRequired/repoComplete, which
-    // made `path.join(<function>, ...)` produce garbage, fs.readFileSync
-    // threw ENOENT, the catch returned the empty fallback (no repos, no
-    // marker_paths), env_ready was always false, and the menu kept
-    // rendering "Install" instead of "Start" even on a complete install.
-    const installRoot = path.dirname(info.path("required_files.json"))
+    // Resolve the install root. cocktailpeanut diagnosed that `info.path` is
+    // a function on his Pinokio (call as info.path("file") → absolute path
+    // inside install dir). On older Pinokio versions it's a string property.
+    // getInstallRoot() handles both shapes and falls back to __dirname when
+    // info is unusable. See the helper above for the full history.
+    const installRoot = getInstallRoot(info)
     const required = loadRequired(installRoot)
     const minBytes = required.min_size_bytes || 1024
 
