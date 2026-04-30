@@ -571,13 +571,23 @@ def open_pinokio() -> None:
 # and `extend_max_dim` clamp those modes' resolutions specifically (since
 # they use the dev transformer + guided denoise which is heavier). 0 means
 # no clamp. `allows_q8` gates HQ + FFLF entirely.
+# Time estimates are for a typical 5-second render (121 frames @ 24fps)
+# on the hardware that's most common at each tier:
+#   compact     M2 / M-Pro base — slowest of the bunch
+#   comfortable M4 base Mac Studio (the rig this panel was built on)
+#   roomy       M-Max
+#   studio      M-Ultra (~3x the comfortable tier)
+# These are *estimates* shown in the UI to help users decide whether to
+# wait — wall-clock varies with prompt length, current memory pressure,
+# and what else is running. We label them with "~" so users don't expect
+# stopwatch precision.
 CAPABILITIES: dict[str, dict] = {
     "base": {
-        # < 48 GB. Apple Silicon shipping configurations: M2 8/16/24 GB,
-        # M-Pro 18/36 GB, base M-Max 36 GB. Q8 won't fit; even Q4 at 720p
-        # is borderline. Steer them toward small-aspect Standard renders.
-        "label": "Base (< 48 GB)",
-        "tagline": "Q4 only · keep it small",
+        # < 48 GB. M2 8/16/24 GB, M-Pro 18/36 GB, base M-Max 36 GB.
+        # Q8 won't fit; even Q4 at 720p is borderline.
+        "label": "Compact",
+        "ram_label": "Under 48 GB",
+        "tagline": "Q4 base model · small renders",
         "t2v_max_dim": 768,
         "i2v_max_dim": 768,
         "keyframe_max_dim": 0,    # disabled
@@ -586,19 +596,29 @@ CAPABILITIES: dict[str, dict] = {
         "allows_keyframe": False,
         "allows_extend": False,
         "blurb": (
-            "Less than 48 GB unified memory. "
-            "Q8 features (High quality, FFLF, Extend) need more headroom — "
-            "those modes are disabled here. T2V / I2V at Standard quality "
-            "are clamped to 768 max-side to keep you out of swap."
+            "This Mac has under 48 GB of unified memory. The basic "
+            "modes work — text-to-video and image-to-video — but only "
+            "at smaller sizes (up to 768 pixels on the longer side). "
+            "The bigger modes (High quality, first-last-frame, extend "
+            "an existing clip) need more memory than this Mac has, so "
+            "they're turned off."
         ),
+        # Per-mode time estimates for a typical 5s render (121 frames @ 24fps).
+        # Times are wall-clock on the typical hardware at this tier.
+        "times": {
+            "t2v_draft":     "about 2 min",
+            "t2v_standard":  "about 5 min",
+            "i2v_standard":  "about 5 min",
+            "high":          None,  # disabled
+            "keyframe":      None,  # disabled
+            "extend":        None,  # disabled
+        },
     },
     "standard": {
-        # 48–79 GB. The 64 GB M-Studio configuration this panel was built
-        # for. Everything works, but FFLF and Extend get clamped to 768
-        # because the dev transformer at 1280×704 swap-thrashes (240 s/step
-        # vs 54 s/step at 768).
-        "label": "Standard (48–79 GB)",
-        "tagline": "Full features · FFLF/Extend clamped to 768",
+        # 48–79 GB. 64 GB M-Studio is the canonical hardware here.
+        "label": "Comfortable",
+        "ram_label": "48–79 GB",
+        "tagline": "Every mode works · larger modes capped at 768 px",
         "t2v_max_dim": 0,         # no clamp
         "i2v_max_dim": 0,
         "keyframe_max_dim": 768,
@@ -607,17 +627,29 @@ CAPABILITIES: dict[str, dict] = {
         "allows_keyframe": True,
         "allows_extend": True,
         "blurb": (
-            "64 GB middle ground — every mode works. FFLF and Extend "
-            "clamp the rendered resolution to 768 max-side because the "
-            "dev transformer swap-thrashes on 64 GB at full 1280×704. "
-            "768 is a great working size; upscale post-render if you need 720p+."
+            "This is the 64 GB tier — the panel was built and tuned on "
+            "exactly this hardware. Every mode works. Text-to-video and "
+            "image-to-video run at the full 1280×704. The two biggest "
+            "modes (first-last-frame interpolation and extending an "
+            "existing clip) cap their video size at 768 pixels on the "
+            "longer side because the bigger model behind them runs out "
+            "of memory above that. 768 is a sweet-spot working size; "
+            "you can run a separate upscaler afterwards if you need 720p+."
         ),
+        "times": {
+            "t2v_draft":     "about 2 min",
+            "t2v_standard":  "about 7 min",
+            "i2v_standard":  "about 7 min",
+            "high":          "about 12 min",
+            "keyframe":      "about 5 min (at 768 px)",
+            "extend":        "about 11 min (at 768 px)",
+        },
     },
     "high": {
-        # 80–119 GB. M-Max 128 GB stripped, M-Ultra 96 GB. Comfortable
-        # at 1024-class resolutions; full 1280×704 is on the edge.
-        "label": "High (80–119 GB)",
-        "tagline": "Most things at full res · 1024 clamp on FFLF/Extend",
+        # 80–119 GB.
+        "label": "Roomy",
+        "ram_label": "80–119 GB",
+        "tagline": "Most modes at full size · larger modes up to 1024 px",
         "t2v_max_dim": 0,
         "i2v_max_dim": 0,
         "keyframe_max_dim": 1024,
@@ -626,16 +658,26 @@ CAPABILITIES: dict[str, dict] = {
         "allows_keyframe": True,
         "allows_extend": True,
         "blurb": (
-            "96 GB-class machine. FFLF and Extend run at up to 1024 max-side "
-            "without swap. T2V / I2V / HQ at full 1280×704."
+            "This Mac has 96 GB-class memory. Text-to-video, "
+            "image-to-video, and high-quality renders all run at the "
+            "full 1280×704. First-last-frame and extend can go up to "
+            "1024 pixels (a real bump in detail over the 768 cap) "
+            "without falling into swap."
         ),
+        "times": {
+            "t2v_draft":     "about 1 min",
+            "t2v_standard":  "about 4 min",
+            "i2v_standard":  "about 4 min",
+            "high":          "about 7 min",
+            "keyframe":      "about 6 min (at 1024 px)",
+            "extend":        "about 9 min (at 1024 px)",
+        },
     },
     "pro": {
-        # 128+ GB. M-Ultra fully kitted, Mac Studio Ultra 192/256 GB. No
-        # clamps; the dev transformer's full-res memory peak is below
-        # the RAM ceiling.
-        "label": "Pro (≥ 120 GB)",
-        "tagline": "No clamps — render at any resolution",
+        # 128+ GB. M-Ultra Mac Studio 192/256 GB.
+        "label": "Studio",
+        "ram_label": "120 GB or more",
+        "tagline": "No size limits anywhere",
         "t2v_max_dim": 0,
         "i2v_max_dim": 0,
         "keyframe_max_dim": 0,
@@ -644,9 +686,19 @@ CAPABILITIES: dict[str, dict] = {
         "allows_keyframe": True,
         "allows_extend": True,
         "blurb": (
-            "120+ GB. Every mode runs at every resolution we support — "
-            "the upstream defaults Just Work."
+            "This Mac has 120 GB or more of unified memory. There are "
+            "no size limits on any mode — render at whatever resolution "
+            "and length the model supports. Bigger renders take longer, "
+            "but nothing's capped artificially."
         ),
+        "times": {
+            "t2v_draft":     "under a minute",
+            "t2v_standard":  "about 2 min",
+            "i2v_standard":  "about 2 min",
+            "high":          "about 4 min",
+            "keyframe":      "about 3 min (full size)",
+            "extend":        "about 5 min (full size)",
+        },
     },
 }
 
@@ -1676,6 +1728,7 @@ class Handler(BaseHTTPRequestHandler):
             payload["tier"] = {
                 "key": SYSTEM_TIER,
                 "label": SYSTEM_CAPS["label"],
+                "ram_label": SYSTEM_CAPS["ram_label"],
                 "tagline": SYSTEM_CAPS["tagline"],
                 "blurb": SYSTEM_CAPS["blurb"],
                 "allows_q8": SYSTEM_CAPS["allows_q8"],
@@ -1685,6 +1738,7 @@ class Handler(BaseHTTPRequestHandler):
                 "i2v_max_dim": SYSTEM_CAPS["i2v_max_dim"],
                 "keyframe_max_dim": SYSTEM_CAPS["keyframe_max_dim"],
                 "extend_max_dim": SYSTEM_CAPS["extend_max_dim"],
+                "times": SYSTEM_CAPS.get("times", {}),
             }
             # Active model-download status — UI shows a progress strip when
             # this is set. last_line is the most recent hf output line so the
@@ -2574,7 +2628,7 @@ HTML = r"""<!doctype html>
   <!-- Hardware tier badge — clickable, opens a dialog explaining what
        this Mac's RAM tier allows. Modes / qualities the tier doesn't
        support are visibly disabled in the form below. -->
-  <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="What can this Mac run?">tier…</span>
+  <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="Click to see what this Mac can do">click for system info</span>
   <span id="memPill" class="pill">memory…</span>
   <span id="comfyPill" class="pill" style="display:none">comfy…</span>
   <span id="helperPill" class="pill">helper…</span>
@@ -3350,9 +3404,11 @@ async function poll() {
     const t = s.tier;
     const cls = t.key === 'base' ? 'pill-warn'
               : (t.key === 'pro' ? 'pill-good' : '');
-    tp.innerHTML = `<span class="dot"></span>${escapeHtml(t.key)}`;
+    // Show the friendly label ("Compact" / "Comfortable" / "Roomy" /
+    // "Studio") not the internal key. Click opens the explanation modal.
+    tp.innerHTML = `<span class="dot"></span>${escapeHtml(t.label || t.key)}`;
     tp.className = 'pill ' + cls;
-    tp.title = `${t.label} · ${t.tagline}`;
+    tp.title = `${t.label} (${t.ram_label}) · ${t.tagline} · click for details`;
     // Apply tier-driven enabled/disabled state to mode + quality pills.
     // Done here in poll() so a tier override (env var) flips state on
     // panel restart without needing to also change a separate setMode call.
@@ -3726,9 +3782,10 @@ function applyTierGates(tier) {
                   : true;
     b.classList.toggle('disabled', !allowed);
     if (!allowed) {
-      const need = m === 'keyframe' ? 'FFLF needs Q8 + headroom (64+ GB)'
-                                    : 'Extend needs the dev transformer (64+ GB)';
-      b.title = `Disabled on ${tier.label} — ${need}.`;
+      const need = m === 'keyframe'
+        ? 'first/last-frame interpolation needs more memory than this Mac has — try Image → Video instead'
+        : 'extending an existing clip needs more memory than this Mac has — try Image → Video instead';
+      b.title = `Off on the ${tier.label} tier · ${need}`;
     } else {
       b.title = '';
     }
@@ -3740,7 +3797,7 @@ function applyTierGates(tier) {
   if (highBtn) {
     if (!tier.allows_q8) {
       highBtn.classList.add('disabled');
-      highBtn.title = `Disabled on ${tier.label} — Q8 dev transformer doesn't fit.`;
+      highBtn.title = `Off on the ${tier.label} tier · the high-quality model needs more memory than this Mac has`;
     } else {
       // Don't unconditionally clear .disabled — the Q8-not-installed code
       // path also sets it. Only clear if the tier is the only reason.
@@ -3765,26 +3822,81 @@ document.addEventListener('click', (e) => {
 function openTierModal() {
   const modal = document.getElementById('tierModal');
   modal.style.display = 'flex';
-  // Snapshot tier from the latest /status. We could also fetch fresh,
-  // but since the tier is detected once at panel startup it never changes.
+  // Tier doesn't change at runtime — RAM is fixed at boot — so a single
+  // fetch on open is plenty. No need for live polling here.
   fetch('/status').then(r => r.json()).then(s => {
     const t = s.tier || {};
-    document.getElementById('tierModalTitle').textContent = `Hardware tier · ${t.label || 'unknown'}`;
-    document.getElementById('tierModalBlurb').textContent = t.blurb || '';
+    const tt = t.times || {};
+    // Helper: a row is "available" if it's allowed; "max" is the friendly
+    // size limit (or "Any size" / "—" when there is no limit / disabled).
+    const sizeLine = (on, maxDim, fallback) => {
+      if (!on) return fallback || 'Not available on this Mac';
+      if (!maxDim) return 'Any size';
+      return `Up to ${maxDim} pixels on the longer side`;
+    };
+    document.getElementById('tierModalTitle').textContent = `What this Mac can do · ${t.label || 'unknown'}`;
+    document.getElementById('tierModalBlurb').innerHTML = `
+      <div style="margin-bottom: 6px"><strong>${escapeHtml(t.label || '')}</strong> · ${escapeHtml(t.ram_label || '')} of memory</div>
+      <div>${escapeHtml(t.blurb || '')}</div>`;
+    // One row per mode/option, with three pieces of info each:
+    //   - is it available? (✓ / ✗)
+    //   - what's the size limit? (plain English)
+    //   - how long does a typical 5-second render take? (rough estimate)
     const items = [
-      { label: 'T2V (text → video)',         on: true,                                    note: t.t2v_max_dim ? `clamp ${t.t2v_max_dim} max-side` : 'no clamp' },
-      { label: 'I2V (image → video)',        on: true,                                    note: t.i2v_max_dim ? `clamp ${t.i2v_max_dim} max-side` : 'no clamp' },
-      { label: 'Standard quality (Q4)',      on: true,                                    note: 'always available' },
-      { label: 'High quality (Q8 two-stage)', on: t.allows_q8,                              note: t.allows_q8 ? 'no clamp' : 'needs ≥ 48 GB' },
-      { label: 'FFLF — first/last frame',    on: t.allows_keyframe,                        note: t.allows_keyframe ? `clamp ${t.keyframe_max_dim || 'none'}` : 'needs ≥ 48 GB' },
-      { label: 'Extend (continue a clip)',   on: t.allows_extend,                          note: t.allows_extend   ? `clamp ${t.extend_max_dim || 'none'}`   : 'needs ≥ 48 GB' },
+      {
+        title: 'Text → video',
+        desc: 'Type a prompt, get a clip. The default mode.',
+        on: true,
+        size: sizeLine(true, t.t2v_max_dim),
+        time: tt.t2v_standard,
+      },
+      {
+        title: 'Image → video',
+        desc: 'Drop in a still, get it animated. Same speed as text → video.',
+        on: true,
+        size: sizeLine(true, t.i2v_max_dim),
+        time: tt.i2v_standard,
+      },
+      {
+        title: 'Draft (faster, smaller)',
+        desc: 'Half-resolution preview to scout prompts and seeds before a full render.',
+        on: true,
+        size: 'Always smaller than Standard',
+        time: tt.t2v_draft,
+      },
+      {
+        title: 'High quality',
+        desc: 'Bigger model, two-stage denoising, sharper faces. Needs the optional Q8 download.',
+        on: !!t.allows_q8,
+        size: sizeLine(!!t.allows_q8, 0, 'Needs more memory than this Mac has'),
+        time: tt.high,
+      },
+      {
+        title: 'First / last frame (FFLF)',
+        desc: 'Pick a start image and an end image, the model fills the motion between.',
+        on: !!t.allows_keyframe,
+        size: sizeLine(!!t.allows_keyframe, t.keyframe_max_dim, 'Needs more memory than this Mac has'),
+        time: tt.keyframe,
+      },
+      {
+        title: 'Extend an existing clip',
+        desc: 'Pick a video you already rendered, the model adds more time onto either end.',
+        on: !!t.allows_extend,
+        size: sizeLine(!!t.allows_extend, t.extend_max_dim, 'Needs more memory than this Mac has'),
+        time: tt.extend,
+      },
     ];
     document.getElementById('tierCapsList').innerHTML = items.map(it => `
       <li class="${it.on ? 'ready' : 'missing'}">
         <span class="icon">${it.on ? '✓' : '✗'}</span>
         <div class="meta">
-          <span class="ttl">${escapeHtml(it.label)}</span>
-          <span class="sub">${escapeHtml(it.note)}</span>
+          <span class="ttl">${escapeHtml(it.title)}</span>
+          <span class="sub">${escapeHtml(it.desc)}</span>
+          <span class="sub" style="margin-top:2px">
+            <span style="color:var(--fg,#d8e0ee)">${escapeHtml(it.size)}</span>${
+              it.time ? ` · <span style="color:var(--accent-bright,#7e98ff)">~ ${escapeHtml(it.time)} for a 5-second clip</span>` : ''
+            }
+          </span>
         </div>
         <span></span>
       </li>`).join('');
