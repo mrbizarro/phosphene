@@ -1019,7 +1019,19 @@ class WarmHelper:
                 raise RuntimeError(f"helper stdin closed: {exc}")
         ev = self._read_until(["done", "error", "exit"])
         if ev is None:
-            raise RuntimeError("helper died mid-job (no event)")
+            # Silent death — no exit event, no Python error, just stdout pipe
+            # closing. This is the OOM / SIGKILL / Metal-segfault fingerprint
+            # because nothing else can kill the helper without giving Python
+            # a chance to emit "exit" or "error". The atexit handler emits
+            # "python_normal_exit" on normal shutdown; the SIGTERM handler
+            # emits "sigterm(...)" before exit. If we get nothing at all,
+            # SIGKILL or hard fault is the only explanation.
+            raise RuntimeError(
+                "helper killed by the OS (likely out of memory or a Metal fault). "
+                "No Python exception was emitted before the helper died — that's "
+                "the SIGKILL signature. Close memory-heavy apps and retry, "
+                "or switch to Draft quality."
+            )
         if ev.get("event") == "error":
             raise RuntimeError(ev.get("error", "helper error"))
         if ev.get("event") == "exit":
@@ -3758,12 +3770,16 @@ async function poll() {
       // event back. Tell the user how to recover instead of leaving them
       // with the engine wording.
       const raw = (last.error || 'unknown error');
+      const rawLower = raw.toLowerCase();
       let friendly, hint;
-      if (raw.toLowerCase().includes('helper died') || raw.toLowerCase().includes('helper exited')) {
-        friendly = 'Helper crashed — likely out of memory.';
+      if (rawLower.includes('killed by the os') || rawLower.includes('sigkill') ||
+          rawLower.includes('helper died') || rawLower.includes('helper exited')) {
+        friendly = 'Helper killed by the OS — likely out of memory.';
         hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again. ' +
-               'Or switch Quality to Draft, which uses about half the RAM.';
-      } else if (raw.toLowerCase().includes('q8') || raw.toLowerCase().includes('keyframe')) {
+               'Or switch Quality to Draft, which uses about half the RAM. ' +
+               'If it keeps happening, check ~/Library/Logs/DiagnosticReports/ for ' +
+               'a crash report named python3.11_*.crash and share it on the GitHub repo.';
+      } else if (rawLower.includes('q8') || rawLower.includes('keyframe')) {
         friendly = 'This mode needs the Q8 model.';
         hint = raw;
       } else {

@@ -76,6 +76,43 @@ class LineEmitter(io.TextIOBase):
 sys.stdout = LineEmitter()
 sys.stderr = LineEmitter()
 
+# ---- exit / signal tracing ---------------------------------------------------
+# When users hit "no error, just stopped" silent crashes (cocktailpeanut on
+# I2V, ~10s in), we currently can't tell if the helper exited cleanly, was
+# SIGTERM'd by the panel, was SIGKILL'd by jetsam (macOS OOM), or hit a
+# C-level fault in MLX/Metal. atexit fires on graceful Python exit (which
+# also runs after our own emit({"exit"})), and the SIGTERM handler emits
+# before the raise/exit. Neither catches SIGKILL — that's the diagnostic
+# fingerprint. If the panel sees no exit/sigterm event AND the pipe closes,
+# we KNOW it was SIGKILL (jetsam OOM) or a segfault.
+import atexit, signal
+_exit_emitted = False
+
+def _emit_exit(reason: str) -> None:
+    global _exit_emitted
+    if _exit_emitted:
+        return
+    _exit_emitted = True
+    try:
+        emit({"event": "exit", "reason": reason})
+    except Exception:
+        pass
+
+atexit.register(lambda: _emit_exit("python_normal_exit"))
+
+def _sigterm_handler(signum, frame):
+    _emit_exit(f"sigterm({signum})")
+    sys.exit(0)
+
+# SIGTERM is what the panel sends on /helper/restart and at panel shutdown.
+# SIGINT is Ctrl+C from a user running the helper directly. Both exit cleanly.
+# SIGKILL can't be caught — that's by design, and is the OOM fingerprint.
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, _sigterm_handler)
+    except (ValueError, OSError):
+        pass
+
 # ---- idle reaper -------------------------------------------------------------
 _last_activity = time.time()
 _is_busy = False  # set during active generation; reaper skips while True
@@ -338,7 +375,16 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            # Granular breadcrumbs so a silent helper death is traceable:
+            # if the panel's last log line is "step:get_pipe" then we died
+            # during pipeline init (likely OOM or weight-load issue). If
+            # the last line is "step:generate_and_save" we died during
+            # the actual gen (denoising / VAE decode). Without this the
+            # last visible line was the original "Loading I2V pipeline..."
+            # message and users had no idea where to look.
+            emit({"event": "log", "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')}"})
             pipe = get_pipe("i2v" if needs_image else "t2v")
+            emit({"event": "log", "line": "step:get_pipe done"})
 
             kwargs = dict(
                 prompt=p["prompt"],
@@ -368,7 +414,9 @@ for line in sys.__stdin__:
                 else:
                     kwargs["image"] = None
 
+            emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']}"})
             out_path = pipe.generate_and_save(**kwargs)
+            emit({"event": "log", "line": "step:generate_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             emit({
