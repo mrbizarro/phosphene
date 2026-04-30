@@ -101,6 +101,68 @@ PATCH_I2V_OOM_NEW = '''        video_latent, audio_latent = self.generate_from_i
         return self._decode_and_save_video(video_latent, audio_latent, output_path)'''
 
 
+# ---- Patch 3: I2V free vae_encoder + feature_extractor BEFORE denoise --------
+# Credit: cocktailpeanut review. The existing Patch 2 only frees memory
+# right before the VAE *decode* step. By that point we've already paid the
+# peak: during the denoise loop we have DiT (~10.54 GiB Q4 / ~19 GiB Q8 dev)
+# + feature_extractor with connector (~5.91 GiB) + vae_encoder (still
+# resident because ImageToVideoPipeline.load() reloads it after super().
+# load() finishes) + denoise activations. That overlap is what kills the
+# helper "10 seconds in" silently.
+#
+# Fix: right after _encode_text_and_load() returns inside generate_from_image,
+# explicitly null out vae_encoder + feature_extractor. They aren't needed
+# during denoise — vae_encoder was used in step 1 and reload happens via
+# the I2V load(); feature_extractor only mattered for the text-encoding
+# step that just completed.
+PATCH_I2V_PREDENOISE_OLD = '''        # Step 2: Encode text, then load remaining components
+        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
+        assert self.dit is not None'''
+PATCH_I2V_PREDENOISE_NEW = '''        # Step 2: Encode text, then load remaining components
+        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
+
+        # PATCHED (LTX23MLX, peanut review): free vae_encoder +
+        # feature_extractor BEFORE the denoise loop, not just before VAE
+        # decode. The old patch (Patch 2) freed too late — denoise itself
+        # was the peak. With DiT (10.5 GB Q4) + connector (5.9 GB) + vae_enc
+        # + activations all overlapping during the loop, the helper was
+        # being SIGKILL'd by jetsam on memory-pressured Macs (cocktailpeanut
+        # repro: "I2V started, ~10s in stopped with no error").
+        if self.low_memory:
+            self.vae_encoder = None
+            self.feature_extractor = None
+            try:
+                from ltx_core_mlx.utils.memory import aggressive_cleanup as _cleanup
+                _cleanup()
+            except Exception:
+                pass
+
+        assert self.dit is not None'''
+
+# ---- Patch 4: Base load() also clears feature_extractor before DiT -----------
+# Same diagnosis. Base TextToVideoPipeline.load() only clears self.text_encoder
+# before loading the transformer; feature_extractor (which holds the connector,
+# ~5.9 GiB on Q4) stays resident through the DiT load. Two big weight blobs
+# coexisting in MLX memory at peak load is exactly the avoidable overlap.
+PATCH_BASE_LOAD_OLD = '''        # Stage 2: DiT (largest component — load after text encoding frees Gemma)
+        if self.dit is None:
+            if self.low_memory:
+                # Free text encoder before loading transformer to fit in RAM
+                self.text_encoder = None
+                aggressive_cleanup()'''
+PATCH_BASE_LOAD_NEW = '''        # Stage 2: DiT (largest component — load after text encoding frees Gemma)
+        if self.dit is None:
+            if self.low_memory:
+                # PATCHED (LTX23MLX, peanut review): also clear feature_extractor
+                # alongside text_encoder before loading the transformer. The
+                # connector lives inside feature_extractor (~5.9 GiB Q4) and
+                # without this it stays resident through the 10.5 GiB DiT load,
+                # peaking around 16+ GiB just for weights before activations.
+                self.text_encoder = None
+                self.feature_extractor = None
+                aggressive_cleanup()'''
+
+
 # NOTE: Keyframe interpolation OOMs at the stage-1 → stage-2 transition on
 # 64 GB Macs. We tried free-DiT-before-upscale + reload-after-upscale; that
 # *didn't* help (the reload hit the same memory peak from a different angle
@@ -256,6 +318,46 @@ def main() -> int:
         # Treat as ALREADY for the rollup so install doesn't fail.
         i2v_outcome = OUTCOME_ALREADY
     outcomes.append(("I2V OOM (free DiT before decode)", i2v_outcome))
+
+    # Patch 3: free vae_encoder + feature_extractor BEFORE the I2V denoise loop.
+    # Same target file as Patch 2; different anchor. Optional like Patch 2 —
+    # if dgrauet refactors generate_from_image upstream this becomes a no-op
+    # warning instead of a hard install failure.
+    pre_outcome = apply_patch(
+        i2v_target, PATCH_I2V_PREDENOISE_OLD, PATCH_I2V_PREDENOISE_NEW,
+        marker="PATCHED (LTX23MLX, peanut review): free vae_encoder",
+        label="I2V free pre-denoise (peanut)",
+    )
+    if pre_outcome in (OUTCOME_DRIFT, OUTCOME_MISSING):
+        print(
+            "  [I2V free pre-denoise] note: anchor not found — pipeline may have "
+            "been refactored upstream. Generation still works, just without the "
+            "memory-overlap cleanup. T2V users unaffected.",
+            file=sys.stderr,
+        )
+        pre_outcome = OUTCOME_ALREADY
+    outcomes.append(("I2V free pre-denoise (peanut)", pre_outcome))
+
+    # Patch 4: base TextToVideoPipeline.load() also clears feature_extractor
+    # alongside text_encoder before loading the transformer. Affects T2V/I2V/
+    # Extend — they all go through the same base load(). Strict subset of the
+    # peanut-review fix: even when generate_from_image has its own cleanup,
+    # the base load() reload-then-free-then-load-DiT path benefits from the
+    # extra clear (no point holding feature_extractor through a 10 GiB DiT load).
+    base_outcome = apply_patch(
+        i2v_target, PATCH_BASE_LOAD_OLD, PATCH_BASE_LOAD_NEW,
+        marker="PATCHED (LTX23MLX, peanut review): also clear feature_extractor",
+        label="base load() free feature_extractor (peanut)",
+    )
+    if base_outcome in (OUTCOME_DRIFT, OUTCOME_MISSING):
+        print(
+            "  [base load() free feature_extractor] note: anchor not found — "
+            "base load() may have been refactored upstream. Memory peak slightly "
+            "higher than with this patch but generation is unaffected.",
+            file=sys.stderr,
+        )
+        base_outcome = OUTCOME_ALREADY
+    outcomes.append(("base load() free feature_extractor (peanut)", base_outcome))
 
     # (Keyframe OOM patch was removed — see NOTE in the patches block above.
     #  The fix is currently a panel-side resolution clamp, not a pipeline edit.)

@@ -1019,18 +1019,37 @@ class WarmHelper:
                 raise RuntimeError(f"helper stdin closed: {exc}")
         ev = self._read_until(["done", "error", "exit"])
         if ev is None:
-            # Silent death — no exit event, no Python error, just stdout pipe
-            # closing. This is the OOM / SIGKILL / Metal-segfault fingerprint
-            # because nothing else can kill the helper without giving Python
-            # a chance to emit "exit" or "error". The atexit handler emits
-            # "python_normal_exit" on normal shutdown; the SIGTERM handler
-            # emits "sigterm(...)" before exit. If we get nothing at all,
-            # SIGKILL or hard fault is the only explanation.
+            # Pipe closed without an event. peanut review correction: don't
+            # claim "SIGKILL" with certainty — could be SIGKILL (OOM jetsam),
+            # SIGSEGV (Metal/MLX fault), SIGABRT (assertion), or any other
+            # native-level abort. Inspect proc.returncode to actually name
+            # the signal so users have a real datapoint to share.
+            proc = self.proc
+            rc = proc.poll() if proc else None
+            if rc is not None and rc < 0:
+                sig_num = -rc
+                try:
+                    sig_name = signal.Signals(sig_num).name
+                except (ValueError, AttributeError):
+                    sig_name = f"signal{sig_num}"
+                # Translate the common ones into intent — what the OS was
+                # likely telling us when it sent that signal.
+                hint = {
+                    "SIGKILL": "out of memory (jetsam) or external kill — close memory-heavy apps and retry",
+                    "SIGSEGV": "native segfault inside MLX/Metal — share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash",
+                    "SIGABRT": "C-level assertion failed — share the crashlog as above",
+                    "SIGBUS":  "memory access fault — could indicate a Metal driver issue or a bad weight file",
+                }.get(sig_name, "external kill")
+                raise RuntimeError(
+                    f"helper exited from {sig_name} ({hint}); returncode={rc}"
+                )
+            # rc is None (still running but pipe closed?) or rc >= 0
+            # (graceful exit but missed the event). Both are unusual.
             raise RuntimeError(
-                "helper killed by the OS (likely out of memory or a Metal fault). "
-                "No Python exception was emitted before the helper died — that's "
-                "the SIGKILL signature. Close memory-heavy apps and retry, "
-                "or switch to Draft quality."
+                f"helper pipe closed without an event; returncode={rc}. "
+                "Check the panel log for the last step:* breadcrumb to see "
+                "which phase died, and the crashlog at "
+                "~/Library/Logs/DiagnosticReports/python3.11_*.crash if any."
             )
         if ev.get("event") == "error":
             raise RuntimeError(ev.get("error", "helper error"))
@@ -3772,13 +3791,23 @@ async function poll() {
       const raw = (last.error || 'unknown error');
       const rawLower = raw.toLowerCase();
       let friendly, hint;
-      if (rawLower.includes('killed by the os') || rawLower.includes('sigkill') ||
-          rawLower.includes('helper died') || rawLower.includes('helper exited')) {
-        friendly = 'Helper killed by the OS — likely out of memory.';
-        hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again. ' +
-               'Or switch Quality to Draft, which uses about half the RAM. ' +
-               'If it keeps happening, check ~/Library/Logs/DiagnosticReports/ for ' +
-               'a crash report named python3.11_*.crash and share it on the GitHub repo.';
+      if (rawLower.includes('sigkill')) {
+        friendly = 'Helper killed by the OS — out of memory (jetsam).';
+        hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again, ' +
+               'or switch Quality to Draft (about half the RAM).';
+      } else if (rawLower.includes('sigsegv') || rawLower.includes('sigbus')) {
+        friendly = 'Helper crashed at the native level (MLX/Metal fault).';
+        hint = 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
+               'on github.com/mrbizarro/phosphene/issues so we can fix it.';
+      } else if (rawLower.includes('sigabrt')) {
+        friendly = 'Helper hit a C-level assertion and aborted.';
+        hint = 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
+               'on github.com/mrbizarro/phosphene/issues.';
+      } else if (rawLower.includes('helper exited from') || rawLower.includes('helper pipe closed') ||
+                 rawLower.includes('helper died') || rawLower.includes('helper exited')) {
+        friendly = 'Helper exited unexpectedly.';
+        hint = 'Check the log for the last "step:*" breadcrumb (tells us which ' +
+               'phase died). If memory-pressured, close other apps and retry.';
       } else if (rawLower.includes('q8') || rawLower.includes('keyframe')) {
         friendly = 'This mode needs the Q8 model.';
         hint = raw;
