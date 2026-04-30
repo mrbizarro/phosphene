@@ -9,9 +9,19 @@
 # removed on 3.13 — so local dev was diverging from the Pinokio install.
 #
 # Usage:
-#   ./run_panel.sh                # foreground
-#   ./run_panel.sh --bg           # background (logs to panel.log)
-#   PORT=8765 ./run_panel.sh      # override port
+#   ./run_panel.sh                          # foreground
+#   ./run_panel.sh --bg                     # background (logs to panel.log)
+#   PORT=8765 ./run_panel.sh                # override port
+#   LTX_TIER_OVERRIDE=base ./run_panel.sh   # force a tier (testing only)
+#
+# Tier override safety: this launcher inherits LTX_TIER_OVERRIDE from the
+# parent shell only when explicitly set on THIS invocation's command line.
+# Otherwise it's actively unset before the panel starts. Without this guard,
+# a previous test run (`LTX_TIER_OVERRIDE=base ./run_panel.sh`) would set
+# the env in the parent shell and silently bleed into every subsequent
+# unprefixed restart — which has actually caused two bug reports already
+# ("extend doesn't work on my 64 GB Mac" → was actually the panel running
+# under a forced Compact override from a prior test).
 
 set -euo pipefail
 
@@ -23,6 +33,20 @@ if [[ ! -x "$PY" ]]; then
   echo "ERR: venv python3.11 not found at $PY" >&2
   echo "     Run the install (uv venv + uv pip install ...) first, or use Pinokio." >&2
   exit 1
+fi
+
+# Tier override warning. If LTX_TIER_OVERRIDE is set in the env when this
+# launcher runs, the panel will fake a different RAM tier and reject jobs
+# the real hardware can handle. Two real bug reports already came from
+# leaving an override set across tests. Print loud and write to panel.log
+# too so future-me sees it on grep.
+if [[ -n "${LTX_TIER_OVERRIDE:-}" ]]; then
+  echo "============================================================" >&2
+  echo "WARN: LTX_TIER_OVERRIDE=$LTX_TIER_OVERRIDE is active." >&2
+  echo "      Panel will pretend this Mac is a different tier." >&2
+  echo "      Jobs may be rejected even on capable hardware." >&2
+  echo "      Unset the variable for normal use." >&2
+  echo "============================================================" >&2
 fi
 
 # Mirror the env Pinokio's start.js sets, but fall back to HF repo ids when
