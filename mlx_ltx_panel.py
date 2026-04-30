@@ -134,6 +134,74 @@ def _repo_complete(repo: dict) -> bool:
     return not _repo_missing(repo)
 
 
+# ---- HF cache fallback -------------------------------------------------------
+# Background:
+#   - Pinokio installs use `hf download --local-dir mlx_models/<repo>/`. Files
+#     live at the canonical local_dir path the manifest declares.
+#   - Manual / dev installs that pass an HF repo id as LTX_MODEL get the
+#     weights resolved via huggingface_hub's cache at ~/.cache/huggingface/.
+#     Same files, different location.
+#
+# Without this fallback, dev-env users whose models were already pulled into
+# the HF cache (e.g. by an earlier `huggingface-cli download` or by the helper
+# itself on first run) saw the panel report Q4 as "MISSING" even though every
+# render was working perfectly. That was the confusing "honest note" — fixing
+# it here so the modal honestly reflects "available, just not in mlx_models/".
+def _hf_cache_root() -> Path:
+    """Resolve HF cache root the same way huggingface_hub does — env vars
+    in the order the library checks, falling back to ~/.cache/huggingface/hub."""
+    explicit = (
+        os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    )
+    if explicit:
+        return Path(explicit)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return Path.home() / ".cache/huggingface/hub"
+
+
+def _repo_hf_cache_dir(repo_id: str) -> Path | None:
+    """Return the most recent snapshot dir for repo_id in the HF cache, or
+    None if not present. Layout: <cache>/models--<owner>--<repo>/snapshots/<rev>/"""
+    safe = repo_id.replace("/", "--")
+    base = _hf_cache_root() / f"models--{safe}" / "snapshots"
+    if not base.is_dir():
+        return None
+    revs = []
+    try:
+        for d in base.iterdir():
+            if d.is_dir():
+                revs.append((d, d.stat().st_mtime))
+    except OSError:
+        return None
+    if not revs:
+        return None
+    revs.sort(key=lambda t: t[1], reverse=True)
+    return revs[0][0]
+
+
+def _repo_missing_in_cache(repo: dict) -> list[str] | None:
+    """Files missing from the HF cache snapshot for this repo, or None if
+    the repo isn't in the cache at all (caller treats None as "fall back to
+    local-dir reporting"). HF cache stores symlinks to ../blobs/<hash>; we
+    follow them and check size on the actual blob."""
+    cache_dir = _repo_hf_cache_dir(repo["repo_id"])
+    if cache_dir is None:
+        return None
+    missing = []
+    for fname in repo.get("files", []):
+        p = cache_dir / fname
+        try:
+            actual = p.resolve()
+            if not actual.exists() or actual.stat().st_size < _MIN_FILE_BYTES:
+                missing.append(fname)
+        except OSError:
+            missing.append(fname)
+    return missing
+
+
 def base_missing() -> list[str]:
     """Aggregate of all base-kind repos' missing files (each prefixed with
     its local_dir for backwards-compat with existing /status consumers).
@@ -183,17 +251,45 @@ def q8_missing_files() -> list[str]:
 
 def repo_status_list() -> list[dict]:
     """Per-repo status snapshot for the /models endpoint and the UI panel.
-    Each entry is self-describing: the UI doesn't need to know about JSON
-    schema versions, just renders what's here."""
+
+    Resolution order per repo:
+      1. Check the canonical local_dir (mlx_models/<repo>/...) — what
+         Pinokio installs always populate.
+      2. If incomplete there, check HF cache (~/.cache/huggingface/...) —
+         what manual installs / dev environments use.
+      3. Whichever is more complete wins; the `where` field tells the UI
+         which storage layer the files are in (so we can show "Cached"
+         instead of "Installed" for cache-backed installs).
+
+    This is the fix for the previously-reported false "MISSING" against
+    HF-cache installs — the panel now sees them and reports honestly."""
     out = []
     for r in _repos():
-        # For Q8 specifically, honor the env-var override
         local_dir = r["local_dir"]
         if r.get("key") == "q8":
             local_dir = str(Q8_LOCAL_PATH)
-        missing = q8_missing_files() if r.get("key") == "q8" else _repo_missing(r)
+
+        local_missing = q8_missing_files() if r.get("key") == "q8" else _repo_missing(r)
         total = len(r.get("files", []))
-        present = total - len(missing)
+        local_present = total - len(local_missing)
+
+        cache_missing = _repo_missing_in_cache(r)
+        cache_present = (total - len(cache_missing)) if cache_missing is not None else 0
+
+        # Pick the layer with more files present — ties go to local_dir
+        # because that's what Pinokio installs use and what the menu
+        # consults.
+        if cache_missing is not None and cache_present > local_present:
+            where = "hf_cache"
+            missing = cache_missing
+            present = cache_present
+            location = str(_repo_hf_cache_dir(r["repo_id"]) or _hf_cache_root())
+        else:
+            where = "local_dir"
+            missing = local_missing
+            present = local_present
+            location = local_dir
+
         out.append({
             "key": r["key"],
             "kind": r.get("kind", "base"),
@@ -201,6 +297,8 @@ def repo_status_list() -> list[dict]:
             "blurb": r.get("blurb", ""),
             "repo_id": r["repo_id"],
             "local_dir": local_dir,
+            "where": where,                 # 'local_dir' | 'hf_cache'
+            "location": location,           # actual on-disk path the files are in
             "size_gb": r.get("size_gb"),
             "total_files": total,
             "present_files": present,
@@ -511,6 +609,43 @@ def set_hidden(path: str, hidden: bool) -> None:
         else:
             HIDDEN_PATHS.discard(path)
     persist_hidden()
+
+
+def list_uploads(limit: int = 40) -> list[dict]:
+    """Return recent panel_uploads/* images sorted by mtime descending.
+
+    Powers the "Recent uploads — click to use" strip in the FFLF / I2V
+    pickers. Image-only filter so user-dropped junk doesn't pollute the
+    strip; we trust filename extensions because uploads are local-only
+    and the worst outcome of a misnamed file is a broken thumbnail."""
+    if not UPLOADS.exists():
+        return []
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    files = []
+    for p in UPLOADS.iterdir():
+        try:
+            if not p.is_file() or p.suffix.lower() not in exts:
+                continue
+            files.append((p, p.stat().st_mtime, p.stat().st_size))
+        except OSError:
+            continue
+    files.sort(key=lambda t: t[1], reverse=True)
+    out = []
+    for p, mtime, size in files[:limit]:
+        # Strip the millisecond-prefix the upload handler adds, so the
+        # display name is what the user actually picked. Keep the full
+        # path as the value so the form submits the unique copy.
+        display = p.name
+        m = re.match(r"^\d+_(.*)$", display)
+        if m: display = m.group(1)
+        out.append({
+            "name": display,
+            "path": str(p),
+            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)),
+            "size_kb": int(size / 1024),
+            "url": f"/image?path={quote(str(p))}",
+        })
+    return out
 
 
 def list_outputs(include_hidden: bool = False) -> list[dict]:
@@ -1310,6 +1445,15 @@ class Handler(BaseHTTPRequestHandler):
             payload["hf_available"] = HF_BIN is not None
             self._json(payload)
             return
+        if parsed.path == "/uploads":
+            # Recent panel_uploads/* images for the picker's "click to reuse"
+            # strip. Limit defaults to 40; client can paginate later if needed.
+            try:
+                limit = int(parse_qs(parsed.query).get("limit", ["40"])[0])
+            except (TypeError, ValueError):
+                limit = 40
+            self._json({"uploads": list_uploads(limit=max(1, min(200, limit)))})
+            return
         if parsed.path == "/models":
             # Per-repo status snapshot for the Models modal in the UI.
             # Same data the menu/install rely on, just shaped per-repo so
@@ -1965,6 +2109,76 @@ HTML = r"""<!doctype html>
     /* Empty state */
     .empty-state { color: var(--muted); font-size: 12px; padding: 14px 0; text-align: center; }
 
+    /* ----- Image picker (FFLF + I2V) -----
+       Replaces the old `<input>` with a path placeholder that confused
+       non-technical users. Tile is the entire interaction surface: click
+       opens the file dialog, drop receives the file, and below the tile
+       is a thumbnail strip of recent uploads for one-click reuse. */
+    .picker { margin-bottom: 14px; }
+    .picker-drop {
+      position: relative;
+      border: 1.5px dashed var(--border, #2a3140);
+      border-radius: 10px;
+      min-height: 130px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      background: rgba(255,255,255,0.015);
+      transition: border-color 120ms ease, background 120ms ease;
+      overflow: hidden;
+    }
+    .picker-drop:hover { border-color: var(--accent, #5a7cff); background: rgba(90,124,255,0.04); }
+    .picker-drop.dragover {
+      border-color: var(--accent-bright, #7e98ff);
+      background: rgba(90,124,255,0.10);
+      border-style: solid;
+    }
+    .picker-drop.has-image { border-style: solid; cursor: zoom-in; min-height: 0; }
+    .picker-empty {
+      text-align: center; padding: 18px 14px; color: var(--muted);
+      pointer-events: none;
+    }
+    .picker-icon { font-size: 28px; margin-bottom: 6px; line-height: 1; }
+    .picker-cta { font-size: 13px; color: var(--fg, #d8e0ee); margin-bottom: 4px; }
+    .picker-empty .hint { font-size: 11px; color: var(--muted); }
+    .picker-preview {
+      max-width: 100%; max-height: 240px;
+      display: block; margin: 0 auto;
+      border-radius: 8px;
+    }
+    .picker-clear {
+      position: absolute; top: 6px; right: 6px;
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 1px solid var(--border, #2a3140);
+      background: rgba(0,0,0,0.6); color: var(--fg, #d8e0ee);
+      cursor: pointer; font-size: 16px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .picker-clear:hover { background: rgba(220,80,80,0.45); border-color: rgba(220,80,80,0.6); }
+    .picker-uploading {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); border-radius: 8px;
+      color: var(--fg, #d8e0ee); font-size: 12px;
+    }
+    .picker-recent { margin-top: 8px; }
+    .picker-recent-label {
+      font-size: 11px; color: var(--muted); margin-bottom: 4px;
+    }
+    .picker-recent-strip {
+      display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px;
+      scrollbar-width: thin;
+    }
+    .picker-recent-strip::-webkit-scrollbar { height: 6px; }
+    .picker-recent-strip::-webkit-scrollbar-thumb { background: var(--border, #2a3140); border-radius: 3px; }
+    .picker-recent-thumb {
+      flex: 0 0 auto; width: 56px; height: 56px;
+      border-radius: 6px; border: 2px solid transparent;
+      object-fit: cover; cursor: pointer;
+      background: rgba(255,255,255,0.04);
+      transition: border-color 120ms ease, transform 120ms ease;
+    }
+    .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
+    .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
+
     /* Models modal — opened by the header `models` pill. Layered on top
        of everything; the form/log keep working underneath while a
        download streams in (via the existing log panel at the bottom). */
@@ -2064,37 +2278,73 @@ HTML = r"""<!doctype html>
 
       <div id="warnBanner" class="warn-banner"></div>
 
-      <!-- Mode-specific: image -->
+      <!-- Mode-specific: image (I2V).
+           New picker: a clickable / drag-drop tile + a "Recent uploads"
+           strip below. The raw path input is gone — paths are still set
+           via the hidden field for form submission, but never typed by the
+           user. Same component is reused for FFLF Start / End below. -->
       <div class="mode-only" id="imageSection">
         <h2>Reference image</h2>
-        <input name="image" id="image" placeholder="path or click Upload">
-        <div class="img-row">
-          <button type="button" class="small" onclick="document.getElementById('imageFile').click()">Upload…</button>
-          <input type="file" id="imageFile" accept="image/*" onchange="uploadImage()">
-          <span class="hint" id="imgHint">PIL cover-crop applied automatically to W×H</span>
+        <div class="picker" data-key="image">
+          <div class="picker-drop" id="picker_drop_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🖼</div>
+              <div class="picker-cta">Drop image here, or <strong>click to browse</strong></div>
+              <div class="hint">PNG / JPG / WEBP — auto cover-crop to model size</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_image" accept="image/*" style="display:none">
+          <input type="hidden" name="image" id="image" value="">
+          <div class="picker-recent" id="picker_recent_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_image"></div>
+          </div>
         </div>
-        <img id="imagePreview" class="img-preview" alt="">
       </div>
 
-      <!-- Mode-specific: keyframe (FFLF) -->
+      <!-- Mode-specific: keyframe (FFLF). Two pickers, same component. -->
       <div class="mode-only" id="keyframeSection">
         <h2>Start frame (frame 0)</h2>
-        <input name="start_image" id="start_image" placeholder="path or click Upload">
-        <div class="img-row">
-          <button type="button" class="small" onclick="document.getElementById('startImageFile').click()">Upload start…</button>
-          <input type="file" id="startImageFile" accept="image/*" onchange="uploadKeyframe('start')">
+        <div class="picker" data-key="start_image">
+          <div class="picker-drop" id="picker_drop_start_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🎬</div>
+              <div class="picker-cta">Drop the <strong>first frame</strong>, or <strong>click to browse</strong></div>
+              <div class="hint">This image opens the clip — its aspect picks the output dimensions.</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_start_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_start_image" accept="image/*" style="display:none">
+          <input type="hidden" name="start_image" id="start_image" value="">
+          <div class="picker-recent" id="picker_recent_start_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_start_image"></div>
+          </div>
         </div>
-        <img id="startImagePreview" class="img-preview" alt="">
 
         <h2>End frame (last frame)</h2>
-        <input name="end_image" id="end_image" placeholder="path or click Upload">
-        <div class="img-row">
-          <button type="button" class="small" onclick="document.getElementById('endImageFile').click()">Upload end…</button>
-          <input type="file" id="endImageFile" accept="image/*" onchange="uploadKeyframe('end')">
+        <div class="picker" data-key="end_image">
+          <div class="picker-drop" id="picker_drop_end_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🎯</div>
+              <div class="picker-cta">Drop the <strong>last frame</strong>, or <strong>click to browse</strong></div>
+              <div class="hint">A close-up here anchors face identity through the clip.</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_end_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_end_image" accept="image/*" style="display:none">
+          <input type="hidden" name="end_image" id="end_image" value="">
+          <div class="picker-recent" id="picker_recent_end_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_end_image"></div>
+          </div>
         </div>
-        <img id="endImagePreview" class="img-preview" alt="">
 
-        <div class="hint">FFLF needs Q8 (auto-selects High quality). Closeup as the end frame anchors face identity through the clip.</div>
+        <div class="hint">FFLF needs Q8 (auto-selects High quality). The model interpolates between the two frames you provide.</div>
       </div>
 
       <!-- Mode-specific: extend -->
@@ -2313,7 +2563,10 @@ let currentMode = 't2v';
   if (label.startsWith('/')) label = label.split('/').slice(-2).join('/');
   document.getElementById('modelTag').textContent = label;
 })();
-document.getElementById('image').value = BOOT.default_image;
+// `audio` is still a free-text input (advanced section); `image` is now a
+// picker — leave the picker empty by default and let the user pick or
+// drop. Pre-filling examples/reference.png surprised users into rendering
+// the demo image when they meant to leave it blank.
 document.getElementById('audio').value = BOOT.default_audio;
 
 // ====== Pill-button group helpers ======
@@ -2429,23 +2682,11 @@ function updateDerived() {
   const dimsRow = document.getElementById('dimsRow');
   if (dimsRow) dimsRow.style.display = inImageFlow ? 'none' : '';
 
-  // Image preview (single image — i2v modes)
-  const imgPath = document.getElementById('image').value.trim();
-  const preview = document.getElementById('imagePreview');
-  if (inI2V && currentMode !== 'keyframe' && imgPath) {
-    preview.src = '/image?path=' + encodeURIComponent(imgPath);
-    preview.classList.add('show');
-  } else preview.classList.remove('show');
-
-  // Keyframe previews (start + end)
-  for (const which of ['start', 'end']) {
-    const path = document.getElementById(which + '_image').value.trim();
-    const p = document.getElementById(which + 'ImagePreview');
-    if (currentMode === 'keyframe' && path) {
-      p.src = '/image?path=' + encodeURIComponent(path);
-      p.classList.add('show');
-    } else p.classList.remove('show');
-  }
+  // Image previews are now part of the picker component itself — the
+  // preview <img> + clear button live inside .picker-drop and are toggled
+  // by pickerSetImage(). No per-mode preview management here anymore;
+  // the old imagePreview / startImagePreview / endImagePreview elements
+  // are gone.
 }
 
 ['width','height','frames','duration'].forEach(id => {
@@ -2458,8 +2699,9 @@ function updateDerived() {
     el.addEventListener('input', updateDerived);
   }
 });
-document.getElementById('image').addEventListener('input', updateDerived);
-['start_image', 'end_image'].forEach(id => document.getElementById(id).addEventListener('input', updateDerived));
+// Picker hidden inputs no longer take user input — their value changes
+// via pickerSetImage(), which already calls updateDerived(). No per-input
+// listeners needed.
 
 // Auto-snap the aspect picker based on an image's actual dimensions.
 // Avoids the 16:9-source-cropped-to-9:16-strip footgun.
@@ -2473,33 +2715,145 @@ function snapAspectToImage(path) {
   probe.src = '/image?path=' + encodeURIComponent(path);
 }
 
-async function uploadImage() {
-  const f = document.getElementById('imageFile').files[0];
-  if (!f) return;
-  const fd = new FormData(); fd.append('image', f);
-  const r = await fetch('/upload', { method: 'POST', body: fd });
-  const data = await r.json();
-  if (data.ok) {
-    document.getElementById('image').value = data.path;
-    document.getElementById('imgHint').textContent = `Uploaded: ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
-    snapAspectToImage(data.path);
-    updateDerived();
-  } else alert('Upload failed: ' + (data.error || '?'));
+// uploadImage() / uploadKeyframe() were replaced by the unified picker
+// component (pickerUploadFile + refreshUploadsStrip). The /upload endpoint
+// still drives the actual transfer; the only change is which JS calls it.
+
+// ====== Image picker component ======
+// One implementation, three call sites: I2V image, FFLF start_image,
+// FFLF end_image. Each picker carries a `key` (the hidden field's name);
+// every DOM element it owns is suffixed with `_<key>` so we can wire
+// listeners by lookup instead of a per-instance closure.
+const PICKERS = ['image', 'start_image', 'end_image'];
+
+function pickerEls(key) {
+  return {
+    drop:    document.getElementById(`picker_drop_${key}`),
+    file:    document.getElementById(`picker_file_${key}`),
+    hidden:  document.getElementById(key),
+    preview: document.getElementById(`picker_preview_${key}`),
+    clear:   document.getElementById(`picker_clear_${key}`),
+    empty:   document.querySelector(`#picker_drop_${key} .picker-empty`),
+    recentWrap:  document.getElementById(`picker_recent_${key}_wrap`),
+    recentStrip: document.getElementById(`picker_recent_${key}`),
+  };
 }
 
-async function uploadKeyframe(which) {
-  const f = document.getElementById(which + 'ImageFile').files[0];
-  if (!f) return;
-  const fd = new FormData(); fd.append('image', f);
-  const r = await fetch('/upload', { method: 'POST', body: fd });
-  const data = await r.json();
-  if (data.ok) {
-    document.getElementById(which + '_image').value = data.path;
-    // FFLF anchors framing on the START frame — that's the one users see
-    // first, so its aspect drives the output dimensions.
-    if (which === 'start') snapAspectToImage(data.path);
-    updateDerived();
-  } else alert('Upload failed: ' + (data.error || '?'));
+function pickerSetImage(key, path, opts = {}) {
+  const els = pickerEls(key);
+  if (!els.hidden) return;
+  els.hidden.value = path;
+  if (path) {
+    els.preview.src = `/image?path=${encodeURIComponent(path)}`;
+    els.preview.style.display = 'block';
+    els.empty.style.display = 'none';
+    els.clear.style.display = 'flex';
+    els.drop.classList.add('has-image');
+    // Highlight the matching thumbnail in the recent strip if visible.
+    if (els.recentStrip) {
+      els.recentStrip.querySelectorAll('img').forEach(img => {
+        img.classList.toggle('selected', img.dataset.path === path);
+      });
+    }
+    // FFLF anchors framing on the start frame; I2V anchors on its single
+    // image. End frame doesn't drive aspect (would override the start frame).
+    if (key !== 'end_image' && opts.snapAspect !== false) {
+      snapAspectToImage(path);
+    }
+  } else {
+    els.preview.removeAttribute('src');
+    els.preview.style.display = 'none';
+    els.empty.style.display = '';
+    els.clear.style.display = 'none';
+    els.drop.classList.remove('has-image');
+    if (els.recentStrip) {
+      els.recentStrip.querySelectorAll('img').forEach(img => img.classList.remove('selected'));
+    }
+  }
+  updateDerived();
+}
+
+async function pickerUploadFile(key, file) {
+  const els = pickerEls(key);
+  if (!file || !els.drop) return;
+  // Inline progress overlay on the drop tile while the upload runs.
+  let busy = els.drop.querySelector('.picker-uploading');
+  if (!busy) {
+    busy = document.createElement('div');
+    busy.className = 'picker-uploading';
+    busy.textContent = `Uploading ${file.name}…`;
+    els.drop.appendChild(busy);
+  }
+  try {
+    const fd = new FormData(); fd.append('image', file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'upload failed');
+    pickerSetImage(key, data.path);
+    // Refresh the "Recent uploads" strip so the just-uploaded file shows
+    // up immediately for the other slots too.
+    refreshUploadsStrip();
+  } catch (e) {
+    alert(`Upload failed: ${e.message || e}`);
+  } finally {
+    busy.remove();
+  }
+}
+
+function pickerWire(key) {
+  const els = pickerEls(key);
+  if (!els.drop) return;
+  // Click → file dialog. Skip when the click came from the clear button.
+  els.drop.addEventListener('click', (e) => {
+    if (e.target.closest('.picker-clear')) return;
+    els.file.click();
+  });
+  els.file.addEventListener('change', () => {
+    if (els.file.files[0]) pickerUploadFile(key, els.file.files[0]);
+    els.file.value = '';   // allow re-uploading the same file
+  });
+  els.clear.addEventListener('click', (e) => { e.stopPropagation(); pickerSetImage(key, ''); });
+  // Drag-drop. preventDefault on dragover is what enables drop.
+  els.drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.drop.classList.add('dragover');
+  });
+  els.drop.addEventListener('dragleave', () => els.drop.classList.remove('dragover'));
+  els.drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.drop.classList.remove('dragover');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) pickerUploadFile(key, f);
+  });
+}
+
+let _uploadsCache = [];   // last fetched list, kept module-level so all
+                          //   three pickers render the same source data.
+async function refreshUploadsStrip() {
+  let data;
+  try { data = await api('/uploads?limit=24'); }
+  catch (e) { return; }
+  _uploadsCache = data.uploads || [];
+  PICKERS.forEach(key => {
+    const els = pickerEls(key);
+    if (!els.recentStrip) return;
+    if (!_uploadsCache.length) {
+      els.recentWrap.style.display = 'none';
+      return;
+    }
+    els.recentWrap.style.display = '';
+    const currentPath = els.hidden.value;
+    els.recentStrip.innerHTML = _uploadsCache.map(u => `
+      <img class="picker-recent-thumb${u.path === currentPath ? ' selected' : ''}"
+           src="${escapeHtml(u.url)}"
+           data-path="${escapeHtml(u.path)}"
+           title="${escapeHtml(u.name)} · ${u.size_kb} KB · ${escapeHtml(u.mtime)}"
+           alt="">
+    `).join('');
+    els.recentStrip.querySelectorAll('img').forEach(img => {
+      img.addEventListener('click', () => pickerSetImage(key, img.dataset.path));
+    });
+  });
 }
 
 // ====== Format helpers ======
@@ -2789,11 +3143,12 @@ async function loadParams() {
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
   if (p.seed != null) document.getElementById('seed').value = p.seed;
-  if (p.image) document.getElementById('image').value = p.image;
+  // Image / start / end go through pickerSetImage so the preview tile
+  // and recent-strip selection state update along with the hidden input.
+  if (p.image)       pickerSetImage('image', p.image, { snapAspect: false });
+  if (p.start_image) pickerSetImage('start_image', p.start_image, { snapAspect: false });
+  if (p.end_image)   pickerSetImage('end_image', p.end_image, { snapAspect: false });
   if (p.audio) document.getElementById('audio').value = p.audio;
-  // Keyframe-specific: restore start + end frame paths
-  if (p.start_image) document.getElementById('start_image').value = p.start_image;
-  if (p.end_image) document.getElementById('end_image').value = p.end_image;
   // Extend-specific: restore source video path
   if (p.video_path) document.getElementById('video_path').value = p.video_path;
   if (p.label) document.getElementById('preset_label').value = p.label;
@@ -2875,7 +3230,12 @@ async function refreshModelsModal({ silent = false } = {}) {
       btnHtml = `<button class="ghost" onclick="cancelDownload()">Cancel</button>`;
     } else if (r.complete) {
       cls = 'ready'; icon = '✓';
-      statusText = `Ready · ${r.total_files} files · ~${r.size_gb || '?'} GB`;
+      // `where: 'hf_cache'` means the files were resolved from
+      // ~/.cache/huggingface/ rather than the canonical mlx_models/
+      // dir. Common on manual / dev installs that pre-existed Pinokio
+      // and pulled the model via `huggingface-cli` or first-run helper.
+      const tag = r.where === 'hf_cache' ? 'HF cache' : 'local';
+      statusText = `Ready · ${r.total_files} files · ~${r.size_gb || '?'} GB · ${tag}`;
       btnHtml = `<button class="ghost" disabled>Installed</button>`;
     } else if (r.present_files > 0) {
       cls = 'partial'; icon = '◐';
@@ -2944,6 +3304,17 @@ setMode('t2v');
 setQuality('standard');
 setAspect('landscape');
 updateDerived();
+
+// Wire the picker components (I2V image + FFLF start/end) and seed the
+// "Recent uploads" strip. The strip is shared across all three pickers,
+// so dropping a new image in one slot makes it instantly clickable in
+// the other two.
+PICKERS.forEach(pickerWire);
+refreshUploadsStrip();
+// Refresh the strip whenever a render finishes (queue/history changes
+// don't fire here), and whenever the user opens FFLF — covers the case
+// where they uploaded something via I2V, then switched to FFLF.
+document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListener('click', refreshUploadsStrip));
 </script>
 </body>
 </html>
