@@ -354,13 +354,20 @@ for line in sys.__stdin__:
             video_path = p["video_path"]
             if not os.path.exists(video_path):
                 raise RuntimeError(f"source video not found: {video_path}")
+            # cfg_scale defaults to 1.0 (no classifier-free guidance) on 64 GB
+            # Macs: CFG runs both conditional + unconditional through the dev
+            # transformer, doubling activation memory and pushing 1280×704
+            # extends into swap (240s/step instead of ~25s/step). The panel
+            # exposes a "Fast" / "Quality" toggle that flips this to 3.0.
+            cfg_scale = float(p.get("cfg_scale", 1.0))
             video_lat, audio_lat = pipe.extend_from_video(
                 prompt=p["prompt"],
                 video_path=video_path,
                 extend_frames=int(p.get("extend_frames", 5)),
                 direction=p.get("direction", "after"),
                 seed=seed,
-                num_steps=int(p.get("steps", 30)),
+                num_steps=int(p.get("steps", 12)),
+                cfg_scale=cfg_scale,
             )
             # Decode + save (mirrors the CLI _decode_and_save)
             from ltx_core_mlx.utils.memory import aggressive_cleanup

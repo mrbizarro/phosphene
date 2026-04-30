@@ -68,6 +68,7 @@ def _resolve_ffmpeg() -> Path:
 
 FFMPEG = _resolve_ffmpeg()
 FFMPEG_BIN = FFMPEG.parent
+FFPROBE = FFMPEG.parent / "ffprobe"  # ships next to ffmpeg in every distribution we support
 
 MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
 MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
@@ -611,6 +612,51 @@ def set_hidden(path: str, hidden: bool) -> None:
     persist_hidden()
 
 
+def _probe_video_dims(path: str) -> tuple[int, int]:
+    """Return (width, height) of a video via ffprobe. Returns (0, 0) on
+    any failure — caller treats that as "unknown, skip resolution check"."""
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", path],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if "x" in out:
+            w, h = out.split("x", 1)
+            return int(w), int(h)
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
+    """If `src` has its longer side > max_dim, write a downscaled lossless
+    copy alongside it and return that. Cached on disk by target dimensions
+    so repeated extends on the same source don't re-encode every time.
+
+    Used by Extend: the upstream pipeline runs the dev transformer at the
+    source's native resolution. On 64 GB Macs, 1280×704 + dev transformer
+    + CFG-style guided denoising peaks past ~50 GB resident and pushes
+    8-12 GB into swap, making each step take 4 minutes instead of 25
+    seconds. Pre-downscaling to ≤768 max-side fits cleanly in RAM."""
+    src_w, src_h = _probe_video_dims(str(src))
+    if not src_w or not src_h or max(src_w, src_h) <= max_dim:
+        return src
+    scale = max_dim / max(src_w, src_h)
+    new_w = max(align, (int(round(src_w * scale)) // align) * align)
+    new_h = max(align, (int(round(src_h * scale)) // align) * align)
+    cached = src.parent / f"{src.stem}_dn{new_w}x{new_h}.mp4"
+    if cached.exists() and cached.stat().st_size > 1024:
+        return cached
+    cmd = [str(FFMPEG), "-y", "-i", str(src),
+           "-vf", f"scale={new_w}:{new_h}",
+           "-c:v", "libx264", "-pix_fmt", "yuv444p", "-crf", "0", "-preset", "veryfast",
+           "-c:a", "copy",   # don't re-encode audio — extend doesn't need it transformed
+           str(cached)]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    return cached
+
+
 def list_uploads(limit: int = 40) -> list[dict]:
     """Return recent panel_uploads/* images sorted by mtime descending.
 
@@ -910,7 +956,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "video_path": f("video_path", ""),
             "extend_frames": max(1, int(f("extend_frames", "5") or 5)),
             "extend_direction": f("extend_direction", "after"),
-            "extend_steps": max(1, int(f("extend_steps", "30") or 30)),
+            "extend_steps": max(1, int(f("extend_steps", "12") or 12)),
+            "extend_cfg": float(f("extend_cfg", "1.0") or 1.0),
             # keyframe (FFLF) mode params
             "start_image": f("start_image", ""),
             "end_image": f("end_image", ""),
@@ -959,10 +1006,34 @@ def run_job_inner(job: dict) -> None:
         src = p["video_path"]
         if not src or not Path(src).exists():
             raise RuntimeError(f"source video for extend not found: {src}")
+        # Resolution clamp — same fix shape as FFLF. The upstream extend
+        # pipeline runs the ~10–12 GB dev transformer in CFG-guided mode
+        # (line 294 of extend.py — guided_denoise_loop is unconditional;
+        # cfg_scale=1.0 changes the math but not the activation memory).
+        # At 1280×704 that pushes 8–12 GB into swap on 64 GB Macs and
+        # makes each step take 240s instead of 25s. Downscaling the
+        # source to ≤768 max-side avoids the swap entirely.
+        # Cached by target dimensions so repeated extends on the same
+        # source skip the re-encode.
+        original_src = Path(src)
+        downscaled_src = _ensure_downscaled(original_src, max_dim=768)
+        if downscaled_src != original_src:
+            push(f"Extend: source {original_src.name} downscaled to "
+                 f"{downscaled_src.name} (≤768 max-side, fits 64 GB).")
+            src = str(downscaled_src)
         out_name = Path(src).stem + f"_ext{p['extend_frames']}_{stamp}.mp4"
         final_out = OUTPUT / out_name
         job["raw_path"] = str(final_out)
 
+        # Extend memory profile: pipe loads the ~10–12 GB dev transformer
+        # (Q4-quantized) and does CFG-guided denoising over the source's
+        # native resolution. At 1280×704 + CFG 3.0 we OOM into swap on 64 GB
+        # Macs (peak ~47 GB resident + 12 GB swap → 240s/step). Default to
+        # cfg_scale=1.0 (no CFG, ~half the activation memory, fits cleanly)
+        # and 12 steps. Form exposes a "Quality" toggle that flips to
+        # cfg=3.0 + steps=30 for users with the headroom.
+        cfg_scale = float(p.get("extend_cfg") or 1.0)
+        steps = int(p["extend_steps"]) if p.get("extend_steps") else 12
         job_spec = {
             "action": "extend",
             "id": job["id"],
@@ -973,10 +1044,12 @@ def run_job_inner(job: dict) -> None:
                 "direction": p["extend_direction"],
                 "output_path": str(final_out),
                 "seed": p["seed"],
-                "steps": p["extend_steps"],
+                "steps": steps,
+                "cfg_scale": cfg_scale,
             },
         }
-        push(f"Extend via helper: id={job['id']} src={Path(src).name} +{p['extend_frames']}f")
+        push(f"Extend via helper: id={job['id']} src={Path(src).name} +{p['extend_frames']}f · "
+             f"steps={steps} cfg={cfg_scale}")
         result = HELPER.run(job_spec)
         if "seed_used" in result:
             push(f"seed used: {result['seed_used']}")
@@ -2365,9 +2438,22 @@ HTML = r"""<!doctype html>
             </select>
           </div>
         </div>
-        <label class="lbl">Stage-1 steps</label>
-        <input name="extend_steps" id="extend_steps" type="number" value="30" min="4" max="60">
-        <div class="hint">Each latent ≈ 8 frames (~0.33s). Q8 weights recommended for two-stage extend.</div>
+
+        <!-- Speed/quality preset for extend.
+             Fast: cfg_scale=1.0 (no CFG, ~half the activation memory) +
+                   12 steps. Fits comfortably on 64 GB at 1280×704. ~3-5 min.
+             Quality: cfg_scale=3.0 + 30 steps. The upstream defaults. Will
+                   swap on 64 GB at 1280×704 (peak ~47 GB resident + 12 GB
+                   swap) — only pick this on a 96+ GB machine or below 768
+                   max-side. Pinokio 64 GB users should leave this on Fast. -->
+        <label class="lbl" style="margin-top:10px">Extend mode</label>
+        <div class="pill-group cols-2" id="extendModeGroup">
+          <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">12 steps · no CFG · 64 GB safe</span></button>
+          <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">30 steps · CFG 3.0 · 96+ GB</span></button>
+        </div>
+        <input type="hidden" name="extend_steps" id="extend_steps" value="12">
+        <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
+        <div class="hint">Each latent ≈ 8 frames (~0.33s). Quality mode runs the upstream defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Fast unless you've got more RAM.</div>
       </div>
 
       <h2>Prompt</h2>
@@ -2596,10 +2682,22 @@ function setAspect(a) {
   document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === a));
   applyAspect(a);
 }
+function setExtendMode(m) {
+  // Fast = no-CFG path, fits in 64 GB at 1280×704. Quality = upstream
+  // defaults, requires headroom. Both are exposed on the form via hidden
+  // inputs; this just flips the values + active pill.
+  const steps = m === 'quality' ? 30  : 12;
+  const cfg   = m === 'quality' ? 3.0 : 1.0;
+  document.getElementById('extend_steps').value = String(steps);
+  document.getElementById('extend_cfg').value   = String(cfg);
+  document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.extendMode === m));
+}
 
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
+document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 document.getElementById('i2vMode').addEventListener('change', () => {
   document.getElementById('audioSection').classList.toggle('show', document.getElementById('i2vMode').value === 'i2v_clean_audio');
   if (currentMode === 'i2v') document.getElementById('mode').value = document.getElementById('i2vMode').value;
