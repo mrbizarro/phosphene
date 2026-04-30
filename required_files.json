@@ -1,0 +1,67 @@
+{
+  "_comment": "Single source of truth for what counts as a complete install. Read by pinokio.js (sidebar menu), mlx_ltx_panel.py (/status, /models, run-time job validation), and consumed indirectly by install.js + download_q8.js (whose `hf download` calls land files at the local_dir paths listed below). When the upstream model layout changes, edit ONE file.",
+
+  "repos": [
+    {
+      "key": "q4",
+      "kind": "base",
+      "name": "LTX 2.3 — Q4 (base model, distilled)",
+      "blurb": "Required. Drives Standard / Draft renders.",
+      "repo_id": "dgrauet/ltx-2.3-mlx-q4",
+      "local_dir": "mlx_models/ltx-2.3-mlx-q4",
+      "size_gb": 25,
+      "files": [
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors"
+      ]
+    },
+    {
+      "key": "gemma",
+      "kind": "base",
+      "name": "Gemma 3 12B (4-bit text encoder)",
+      "blurb": "Required. Encodes the prompt for the diffusion model.",
+      "repo_id": "mlx-community/gemma-3-12b-it-4bit",
+      "local_dir": "mlx_models/gemma-3-12b-it-4bit",
+      "size_gb": 6,
+      "files": [
+        "config.json",
+        "tokenizer.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors"
+      ]
+    },
+    {
+      "key": "q8",
+      "kind": "optional",
+      "name": "LTX 2.3 — Q8 (high-quality + FFLF)",
+      "blurb": "Optional. Unlocks High quality and keyframe (FFLF) interpolation.",
+      "repo_id": "dgrauet/ltx-2.3-mlx-q8",
+      "local_dir": "mlx_models/ltx-2.3-mlx-q8",
+      "size_gb": 25,
+      "files": [
+        "connector.safetensors",
+        "transformer-dev.safetensors",
+        "ltx-2.3-22b-distilled-lora-384.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ]
+    }
+  ],
+
+  "env": {
+    "_comment": "Marker that the venv exists. Pinokio creates `env/`; manual `uv venv` creates `.venv/`. Either is acceptable.",
+    "marker_paths": [
+      "ltx-2-mlx/env/bin/python3.11",
+      "ltx-2-mlx/.venv/bin/python3.11"
+    ]
+  },
+
+  "min_size_bytes": 1024
+}

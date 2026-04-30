@@ -21,6 +21,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,8 +80,254 @@ HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 FPS = 24
 PORT = int(os.environ.get("LTX_PORT", "8198"))
-HISTORY_LIMIT = 60
+HISTORY_LIMIT = 200
+HISTORY_PERSIST_LIMIT = 100  # how many history entries to write to panel_queue.json
+HISTORY_API_LIMIT = 50       # how many to expose via /status
 LOG_LIMIT = 1000
+
+# ---- single source of truth: required files for "installed" ----------------
+# Loaded from required_files.json so pinokio.js, this panel, and install.js
+# all check the SAME list. When upstream model layout changes, edit ONE file.
+def _load_required_files() -> dict:
+    """Read required_files.json. On any failure, return a sane fallback so a
+    corrupt/missing JSON doesn't take the panel down — log it loudly though."""
+    fallback = {"repos": [], "env": {"marker_paths": []}, "min_size_bytes": 1024}
+    try:
+        with open(ROOT / "required_files.json", "r") as fh:
+            data = json.load(fh)
+        for key in ("repos", "env", "min_size_bytes"):
+            if key not in data:
+                raise ValueError(f"required_files.json missing key: {key}")
+        return data
+    except Exception as exc:
+        sys.stderr.write(f"WARN: required_files.json unreadable ({exc}); "
+                         f"completeness checks will under-report. Reinstall to fix.\n")
+        return fallback
+
+
+_REQUIRED = _load_required_files()
+_MIN_FILE_BYTES = int(_REQUIRED.get("min_size_bytes", 1024))
+
+
+def _repos() -> list[dict]:
+    """All repo entries from required_files.json (list, in order)."""
+    return list(_REQUIRED.get("repos", []))
+
+
+def _repo_missing(repo: dict) -> list[str]:
+    """Files missing or zero-byte for one repo, expressed as bare filenames
+    (relative to the repo's local_dir). Bare names are friendlier in the UI
+    than full paths."""
+    base = ROOT / repo["local_dir"]
+    missing = []
+    for fname in repo.get("files", []):
+        p = base / fname
+        try:
+            if not p.exists() or p.stat().st_size < _MIN_FILE_BYTES:
+                missing.append(fname)
+        except OSError:
+            missing.append(fname)
+    return missing
+
+
+def _repo_complete(repo: dict) -> bool:
+    return not _repo_missing(repo)
+
+
+def base_missing() -> list[str]:
+    """Aggregate of all base-kind repos' missing files (each prefixed with
+    its local_dir for backwards-compat with existing /status consumers).
+
+    Only checks the canonical Pinokio layout. If LTX_MODEL is set to an HF
+    repo id rather than a local path, the helper resolves weights via the
+    HF cache and the local-dir check would misreport — return [] there so
+    the panel doesn't false-positive against a working manual install."""
+    if not str(MODEL_ID).startswith("/"):
+        return []
+    out = []
+    for r in _repos():
+        if r.get("kind") != "base":
+            continue
+        for fname in _repo_missing(r):
+            out.append(f"{r['local_dir']}/{fname}")
+    return out
+
+
+def q8_missing_files() -> list[str]:
+    """Files missing for the Q8 repo (bare filenames). Honors $LTX_Q8_LOCAL.
+
+    When LTX_Q8_LOCAL is set, it overrides the Q8 repo's local_dir — we
+    re-route the check there. Other overrides (e.g. moving Q4 elsewhere)
+    aren't supported via env var; users with custom layouts should adjust
+    required_files.json directly."""
+    for r in _repos():
+        if r.get("key") == "q8":
+            override = r.copy()
+            override["local_dir"] = str(Q8_LOCAL_PATH.relative_to(ROOT)) \
+                if Q8_LOCAL_PATH.is_relative_to(ROOT) else str(Q8_LOCAL_PATH)
+            # _repo_missing uses ROOT-relative; if Q8_LOCAL_PATH is absolute
+            # outside ROOT, build a temporary repo with absolute base.
+            if Path(override["local_dir"]).is_absolute():
+                missing = []
+                for fname in r.get("files", []):
+                    p = Path(override["local_dir"]) / fname
+                    try:
+                        if not p.exists() or p.stat().st_size < _MIN_FILE_BYTES:
+                            missing.append(fname)
+                    except OSError:
+                        missing.append(fname)
+                return missing
+            return _repo_missing(override)
+    return []
+
+
+def repo_status_list() -> list[dict]:
+    """Per-repo status snapshot for the /models endpoint and the UI panel.
+    Each entry is self-describing: the UI doesn't need to know about JSON
+    schema versions, just renders what's here."""
+    out = []
+    for r in _repos():
+        # For Q8 specifically, honor the env-var override
+        local_dir = r["local_dir"]
+        if r.get("key") == "q8":
+            local_dir = str(Q8_LOCAL_PATH)
+        missing = q8_missing_files() if r.get("key") == "q8" else _repo_missing(r)
+        total = len(r.get("files", []))
+        present = total - len(missing)
+        out.append({
+            "key": r["key"],
+            "kind": r.get("kind", "base"),
+            "name": r["name"],
+            "blurb": r.get("blurb", ""),
+            "repo_id": r["repo_id"],
+            "local_dir": local_dir,
+            "size_gb": r.get("size_gb"),
+            "total_files": total,
+            "present_files": present,
+            "missing_files": missing,
+            "complete": not missing,
+        })
+    return out
+
+
+# ---- HF download (in-panel model fetcher) ------------------------------------
+# `hf` is the v1+ huggingface_hub CLI. We resolve it from (in order):
+#   1. $LTX_HF env var
+#   2. ltx-2-mlx/.venv/bin/hf       (manual install)
+#   3. ltx-2-mlx/env/bin/hf         (Pinokio)
+#   4. shutil.which("hf")           (system PATH fallback)
+def _resolve_hf() -> Path | None:
+    candidates = [
+        os.environ.get("LTX_HF"),
+        str(MLX / ".venv/bin/hf"),
+        str(MLX / "env/bin/hf"),
+        shutil.which("hf"),
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return Path(c)
+    return None
+
+
+HF_BIN = _resolve_hf()
+
+# Single global download slot — concurrent hf downloads compete for bandwidth
+# anyway, and serializing them keeps the log readable. State protected by
+# DOWNLOAD_LOCK; UI polls via /status to render progress.
+DOWNLOAD_LOCK = threading.Lock()
+DOWNLOAD: dict = {
+    "active": False,
+    "key": None,           # which repo (q4/gemma/q8)
+    "repo_id": None,
+    "started_ts": None,
+    "last_line": "",       # most recent hf output line for UI display
+    "proc": None,
+    "pgid": None,
+}
+
+
+def _download_thread(repo: dict) -> None:
+    """Run `hf download <repo_id> --local-dir <repo.local_dir>` and stream
+    stdout/stderr line-by-line into STATE['log']. Sets DOWNLOAD["active"]
+    back to False on exit (success or fail). Files land at repo['local_dir']
+    relative to ROOT, which is exactly where the completeness checks look —
+    so the moment hf finishes, /status flips to complete + the UI updates."""
+    repo_id = repo["repo_id"]
+    target = ROOT / repo["local_dir"]
+    target.mkdir(parents=True, exist_ok=True)
+    cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
+    push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        with DOWNLOAD_LOCK:
+            DOWNLOAD["proc"] = proc
+            try:
+                DOWNLOAD["pgid"] = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                DOWNLOAD["pgid"] = None
+        # Stream every line. hf emits a tqdm progress bar with carriage
+        # returns; we split on \r as well as \n so progress updates show
+        # up live in the panel log instead of being buffered until done.
+        buf = ""
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch:
+                break
+            if ch in ("\n", "\r"):
+                line = buf.strip()
+                buf = ""
+                if line:
+                    with DOWNLOAD_LOCK:
+                        DOWNLOAD["last_line"] = line[:200]
+                    push(f"[hf:{repo['key']}] {line[:300]}")
+            else:
+                buf += ch
+        if buf.strip():
+            push(f"[hf:{repo['key']}] {buf.strip()[:300]}")
+        rc = proc.wait()
+        if rc == 0:
+            push(f"[hf] {repo_id} downloaded successfully.")
+        else:
+            push(f"[hf] {repo_id} FAILED — exit {rc}. Click Download again to retry/resume.")
+    except Exception as exc:
+        push(f"[hf] {repo_id} crashed: {exc}")
+    finally:
+        with DOWNLOAD_LOCK:
+            DOWNLOAD["active"] = False
+            DOWNLOAD["key"] = None
+            DOWNLOAD["repo_id"] = None
+            DOWNLOAD["started_ts"] = None
+            DOWNLOAD["last_line"] = ""
+            DOWNLOAD["proc"] = None
+            DOWNLOAD["pgid"] = None
+
+
+def _kill_active_download() -> None:
+    """Best-effort kill the running hf process group. Called by atexit and
+    by the /models/cancel endpoint."""
+    with DOWNLOAD_LOCK:
+        pgid = DOWNLOAD.get("pgid")
+        proc = DOWNLOAD.get("proc")
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elif proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_kill_active_download)
 
 # Aspect presets — width × height (model-safe, multiples of 32)
 ASPECTS = {
@@ -306,7 +553,7 @@ def persist_queue() -> None:
         snapshot = {
             "queue": [_strip_for_disk(j) for j in STATE["queue"]],
             "current": _strip_for_disk(STATE["current"]) if STATE["current"] else None,
-            "history": [_strip_for_disk(j) for j in STATE["history"][:30]],
+            "history": [_strip_for_disk(j) for j in STATE["history"][:HISTORY_PERSIST_LIMIT]],
             "paused": STATE["paused"],
         }
     try:
@@ -620,16 +867,46 @@ def run_job_inner(job: dict) -> None:
     # require Q8 on disk and route to generate_keyframe regardless of quality
     # tier (which doesn't really apply — there's no "Q4 keyframe" path).
     if mode == "keyframe":
-        if not Q8_LOCAL_PATH.exists() or not any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else []):
+        # Check the SAME file list the menu + /status report on. The old
+        # "directory exists and non-empty" check let half-downloaded Q8
+        # installs through, only to crash later mid-render with a
+        # `load_safetensors` error referencing a specific missing file.
+        kf_missing = q8_missing_files()
+        if kf_missing:
             raise RuntimeError(
-                f"Keyframe mode requires Q8 model at {Q8_LOCAL_PATH}. "
-                f"Run: huggingface-cli download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+                f"Keyframe mode requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Missing {len(kf_missing)} file(s): {', '.join(kf_missing[:3])}"
+                f"{' …' if len(kf_missing) > 3 else ''}. "
+                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
             )
         if not p.get("start_image") or not Path(p["start_image"]).exists():
             raise RuntimeError(f"start_image not found: {p.get('start_image')}")
         if not p.get("end_image") or not Path(p["end_image"]).exists():
             raise RuntimeError(f"end_image not found: {p.get('end_image')}")
-        width, height = p["width"], p["height"]
+        # Clamp keyframe-mode resolution to 768 on the longer side. The Q8
+        # KeyframeInterpolationPipeline OOMs on 64 GB Macs at the stage-1 →
+        # stage-2 transition for 1280×704 (peak memory hits the ceiling
+        # during the upscale + VAE-encoder reload). 768×432 / 768×768 fits
+        # cleanly. We tried free/reload of the dev DiT around the upscale
+        # and it did not help; resolution clamp is the working fix.
+        # See patch_ltx_codec.py docstring for details.
+        KF_MAX_DIM = 768
+        KF_ALIGN = 32
+        req_w, req_h = p["width"], p["height"]
+        if max(req_w, req_h) > KF_MAX_DIM:
+            scale = KF_MAX_DIM / max(req_w, req_h)
+            width = max(KF_ALIGN, int(round(req_w * scale / KF_ALIGN)) * KF_ALIGN)
+            height = max(KF_ALIGN, int(round(req_h * scale / KF_ALIGN)) * KF_ALIGN)
+            push(
+                f"Keyframe: clamping {req_w}x{req_h} → {width}x{height} "
+                f"(64 GB Mac can't fit the keyframe pipeline at full res; "
+                f"dev DiT + upscaler + 4×-volume upscaled tensor exceed RAM)."
+            )
+            # Persist back to params so the sidecar / history reflect the
+            # actual rendered resolution, not the form input.
+            p["width"], p["height"] = width, height
+        else:
+            width, height = req_w, req_h
         frames = p["frames"]
         out_path = OUTPUT / f"mlx_keyframe_{width}x{height}_{frames}f_{stamp}.mp4"
         job["raw_path"] = str(out_path)
@@ -679,17 +956,32 @@ def run_job_inner(job: dict) -> None:
     pad_w, pad_h, pad_filter = compute_pad(width, height)
     suffix = f"{pad_w}x{pad_h}" if mode == "i2v_clean_audio" and pad_filter else f"{width}x{height}"
     tag = f"{mode}_hq" if quality == "high" else mode
-    raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
-    final_out = OUTPUT / f"mlx_{tag}_{suffix}_{frames}f_{stamp}.mp4"
+    # Only `i2v_clean_audio` runs a panel-side mux (raw → final). For T2V / I2V /
+    # HQ the upstream-patched encode writes the lossless yuv444p crf 0 + AAC
+    # file directly, so the "raw" is the final — keeping the `_raw` suffix in
+    # that case made the filenames look half-finished and confused later
+    # tooling that pattern-matched on `_raw`.
+    needs_mux = mode == "i2v_clean_audio"
+    if needs_mux:
+        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
+        final_out = OUTPUT / f"mlx_{tag}_{suffix}_{frames}f_{stamp}.mp4"
+    else:
+        # Single file — name it as the final, no `_raw` suffix.
+        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}.mp4"
+        final_out = raw_out
     job["raw_path"] = str(raw_out)
 
     if quality == "high":
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
-        if not Q8_LOCAL_PATH.exists() or not any(Q8_LOCAL_PATH.iterdir() if Q8_LOCAL_PATH.is_dir() else []):
+        # Same completeness check as keyframe — see comment there.
+        hq_missing = q8_missing_files()
+        if hq_missing:
             raise RuntimeError(
-                f"High quality requires Q8 model at {Q8_LOCAL_PATH}. "
-                f"Run: huggingface-cli download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
+                f"High quality requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Missing {len(hq_missing)} file(s): {', '.join(hq_missing[:3])}"
+                f"{' …' if len(hq_missing) > 3 else ''}. "
+                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
             )
         job_spec = {
             "action": "generate_hq",
@@ -872,6 +1164,83 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_video_with_range(self, path: Path) -> None:
+        """Serve an mp4 with HTTP byte-range support so the browser <video>
+        tag can seek without redownloading and the gallery's `preload="metadata"`
+        thumbnails only fetch the moov atom range instead of full clips.
+
+        Without this every preview pulled the whole 50–80 MB file at page load.
+        Spec: RFC 7233. We support a single `bytes=start-end` form (the only
+        one Chrome / Safari send) and ignore multi-range requests."""
+        size = path.stat().st_size
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                spec = rng.split("=", 1)[1]
+                # We don't honor multi-range; first one wins.
+                spec = spec.split(",", 1)[0].strip()
+                start_s, end_s = spec.split("-", 1)
+                # RFC 7233 § 2.1 has three forms:
+                #   bytes=N-M   first..last (closed interval)
+                #   bytes=N-    N..end-of-file
+                #   bytes=-N    last N bytes (start_s empty, end_s is the count)
+                # The third form is what browsers send for the mp4 moov atom
+                # at the tail of the file. Initial implementation treated it
+                # as bytes=0-N which is wrong.
+                if not start_s and end_s:
+                    suffix_len = int(end_s)
+                    if suffix_len <= 0:
+                        raise ValueError("zero-length suffix range")
+                    start = max(0, size - suffix_len)
+                    end = size - 1
+                else:
+                    start = int(start_s) if start_s else 0
+                    end = int(end_s) if end_s else size - 1
+                if start < 0 or end >= size or start > end:
+                    raise ValueError("range out of bounds")
+            except (ValueError, IndexError):
+                # Malformed range header → 416 per RFC 7233.
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            length = end - start + 1
+            self.send_response(206)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(length))
+            self.end_headers()
+            with path.open("rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        # Browser hung up mid-stream (user scrubbed or closed
+                        # tab). Not an error — exit cleanly.
+                        return
+                    remaining -= len(chunk)
+            return
+
+        # No Range header — full file with Accept-Ranges advertised so the
+        # browser knows it CAN range-request next time.
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        with path.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
@@ -890,7 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = _copy.deepcopy({
                     "running": STATE["running"], "paused": STATE["paused"],
                     "current": STATE["current"], "queue": STATE["queue"],
-                    "history": STATE["history"][:30], "log": STATE["log"],
+                    "history": STATE["history"][:HISTORY_API_LIMIT], "log": STATE["log"],
                     "pid": STATE["pid"], "pgid": STATE["pgid"],
                 })
                 hidden_count = len(HIDDEN_PATHS)
@@ -906,33 +1275,56 @@ class Handler(BaseHTTPRequestHandler):
                 "low_memory": HELPER_LOW_MEMORY == "true",
                 "idle_timeout_sec": HELPER_IDLE_TIMEOUT,
             }
-            # Q8 is "available" only when ALL critical safetensors are on disk.
-            # HQ + Keyframe pipelines need dev transformer + connector +
-            # distilled LoRA (used for stage-2 refine) + VAE + audio. A
-            # partially-downloaded model passes basic exists() checks but
-            # fails at load_safetensors mid-run, which is worse than
-            # reporting False.
-            _Q8_REQUIRED = (
-                "connector.safetensors",
-                "transformer-dev.safetensors",
-                "ltx-2.3-22b-distilled-lora-384.safetensors",  # stage-2 refine
-                "vae_decoder.safetensors",
-                "vae_encoder.safetensors",
-                "audio_vae.safetensors",
-                "vocoder.safetensors",
-                "spatial_upscaler_x2_v1_1.safetensors",  # used by two-stage upscale
-            )
-            _q8_missing = []
-            if Q8_LOCAL_PATH.exists() and Q8_LOCAL_PATH.is_dir():
-                for fname in _Q8_REQUIRED:
-                    fpath = Q8_LOCAL_PATH / fname
-                    if not fpath.exists() or fpath.stat().st_size < 1024:
-                        _q8_missing.append(fname)
-            else:
-                _q8_missing = list(_Q8_REQUIRED)
+            # Completeness checks come from the shared required_files.json so
+            # the menu, the UI, and the run-time job validator all agree on
+            # what counts as "installed". Single source of truth — see the
+            # _load_required_files() helper near the top of this file.
+            _q8_missing = q8_missing_files()
+            _base_missing = base_missing()
             payload["q8_available"] = not _q8_missing
             payload["q8_missing"] = _q8_missing
             payload["q8_path"] = str(Q8_LOCAL_PATH)
+            payload["base_available"] = not _base_missing
+            payload["base_missing"] = _base_missing
+            # Repo-level counts for the header pill — granular view that
+            # matches the modal's per-repo rows (Q4 + Gemma + Q8 = 3 in the
+            # default manifest). Avoids the pill claiming "2/2 ready" while
+            # the modal shows three rows.
+            _repo_snap = repo_status_list()
+            payload["repos_total"] = len(_repo_snap)
+            payload["repos_ready"] = sum(1 for r in _repo_snap if r.get("complete"))
+            # Active model-download status — UI shows a progress strip when
+            # this is set. last_line is the most recent hf output line so the
+            # user gets live feedback even before opening the log panel.
+            with DOWNLOAD_LOCK:
+                if DOWNLOAD["active"]:
+                    payload["download"] = {
+                        "active": True,
+                        "key": DOWNLOAD["key"],
+                        "repo_id": DOWNLOAD["repo_id"],
+                        "started_ts": DOWNLOAD["started_ts"],
+                        "last_line": DOWNLOAD["last_line"],
+                    }
+                else:
+                    payload["download"] = {"active": False}
+            payload["hf_available"] = HF_BIN is not None
+            self._json(payload)
+            return
+        if parsed.path == "/models":
+            # Per-repo status snapshot for the Models modal in the UI.
+            # Same data the menu/install rely on, just shaped per-repo so
+            # the front-end can render rows without re-aggregating.
+            payload = {
+                "repos": repo_status_list(),
+                "hf_available": HF_BIN is not None,
+                "hf_path": str(HF_BIN) if HF_BIN else None,
+            }
+            with DOWNLOAD_LOCK:
+                payload["active_download"] = (
+                    {"key": DOWNLOAD["key"], "repo_id": DOWNLOAD["repo_id"],
+                     "started_ts": DOWNLOAD["started_ts"], "last_line": DOWNLOAD["last_line"]}
+                    if DOWNLOAD["active"] else None
+                )
             self._json(payload)
             return
         if parsed.path == "/file":
@@ -950,14 +1342,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404); return
             if not path.exists():
                 self.send_error(404); return
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Content-Length", str(path.stat().st_size))
-            self.send_header("Accept-Ranges", "none")
-            self.end_headers()
-            with path.open("rb") as fh:
-                while chunk := fh.read(1024 * 1024):
-                    self.wfile.write(chunk)
+            self._serve_video_with_range(path)
             return
         if parsed.path.startswith("/assets/"):
             # Serve files from <ROOT>/assets/ (creator avatar, future static).
@@ -1150,6 +1535,44 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/open_pinokio":
             open_pinokio()
+            self._json({"ok": True}); return
+
+        if path == "/models/download":
+            # POST { repo_key: "q4" | "gemma" | "q8" }
+            # Validates the key against required_files.json (so the user
+            # can't trick the panel into running `hf download` on an
+            # arbitrary repo by faking the form). One slot — return 409
+            # if a download is already in progress.
+            key = (form.get("repo_key", [""])[0] or "").strip()
+            repo = next((r for r in _repos() if r.get("key") == key), None)
+            if not repo:
+                self._json({"error": f"unknown repo key: {key!r}. Valid keys: "
+                                     f"{[r['key'] for r in _repos()]}"}, 400); return
+            if HF_BIN is None:
+                self._json({"error": "hf binary not found. Reinstall LTX23MLX "
+                                     "or install huggingface_hub>=1.0 in the venv."}, 500); return
+            with DOWNLOAD_LOCK:
+                if DOWNLOAD["active"]:
+                    self._json({"error": f"another download is in progress: "
+                                         f"{DOWNLOAD['repo_id']}. Wait for it to finish "
+                                         f"(or click Cancel)."}, 409); return
+                DOWNLOAD["active"] = True
+                DOWNLOAD["key"] = key
+                DOWNLOAD["repo_id"] = repo["repo_id"]
+                DOWNLOAD["started_ts"] = time.time()
+                DOWNLOAD["last_line"] = "starting…"
+            threading.Thread(target=_download_thread, args=(repo,), daemon=True).start()
+            self._json({"ok": True, "key": key, "repo_id": repo["repo_id"]}); return
+
+        if path == "/models/cancel":
+            # Best-effort kill — the next status poll will see active=False.
+            with DOWNLOAD_LOCK:
+                was_active = DOWNLOAD["active"]
+                rid = DOWNLOAD.get("repo_id")
+            if not was_active:
+                self._json({"error": "no active download"}, 404); return
+            _kill_active_download()
+            push(f"[hf] cancel requested for {rid}")
             self._json({"ok": True}); return
 
         self.send_error(404)
@@ -1541,6 +1964,56 @@ HTML = r"""<!doctype html>
 
     /* Empty state */
     .empty-state { color: var(--muted); font-size: 12px; padding: 14px 0; text-align: center; }
+
+    /* Models modal — opened by the header `models` pill. Layered on top
+       of everything; the form/log keep working underneath while a
+       download streams in (via the existing log panel at the bottom). */
+    .models-modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .models-card {
+      background: var(--bg-elevated, #1a1f29); color: var(--fg, #d8e0ee);
+      border: 1px solid var(--border, #2a3140); border-radius: 12px;
+      width: min(640px, 92vw); max-height: 86vh; overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+      padding: 22px 24px;
+    }
+    .models-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .models-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+    .models-hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+    .models-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+    .models-list li {
+      display: grid; grid-template-columns: 24px 1fr auto; gap: 10px;
+      align-items: center;
+      background: rgba(255,255,255,0.02); border: 1px solid var(--border, #2a3140);
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .models-list li .icon { font-size: 18px; line-height: 1; text-align: center; }
+    .models-list li .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .models-list li .meta .ttl { font-weight: 500; font-size: 13px; }
+    .models-list li .meta .sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .models-list li .progress {
+      font-size: 11px; color: var(--muted); margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .models-list li.ready    { border-color: rgba(63,185,80,0.35); }
+    .models-list li.partial  { border-color: rgba(210,153,34,0.45); }
+    .models-list li.missing  { border-color: rgba(220,80,80,0.35); }
+    .models-list li.downloading { border-color: var(--accent, #5a7cff); animation: keyframes-modeldl 1.6s ease-in-out infinite; }
+    @keyframes keyframes-modeldl { 50% { box-shadow: 0 0 0 3px rgba(90,124,255,0.18); } }
+    .models-list li button {
+      padding: 6px 12px; font-size: 12px; border-radius: 6px;
+      background: var(--accent, #5a7cff); color: white; border: none; cursor: pointer;
+    }
+    .models-list li button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .models-list li button.ghost {
+      background: transparent; color: var(--muted); border: 1px solid var(--border, #2a3140);
+    }
+    .models-foot { font-size: 11px; color: var(--muted); margin-top: 14px; line-height: 1.4; }
   </style>
 </head>
 <body>
@@ -1551,6 +2024,11 @@ HTML = r"""<!doctype html>
   <span id="memPill" class="pill">memory…</span>
   <span id="comfyPill" class="pill" style="display:none">comfy…</span>
   <span id="helperPill" class="pill">helper…</span>
+  <!-- Models pill: shows roll-up status (X / Y models ready) and click-opens
+       a modal with per-repo download buttons. Color reflects readiness:
+       pill-good = all models present, pill-warn = base ready but Q8 missing,
+       pill-bad = base incomplete (panel can't render). -->
+  <span id="modelsPill" class="pill" style="cursor:pointer" onclick="openModelsModal()" title="View / download model status">models…</span>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
@@ -1693,7 +2171,19 @@ HTML = r"""<!doctype html>
         <div class="derived" id="derived"></div>
       </div>
 
-      <input type="hidden" name="stop_comfy" id="stop_comfy" value="on">
+      <!-- Comfy-kill toggle. Hidden in DOM by default; shown only when the
+           panel detects ComfyUI actually running on this Mac (see updateUI
+           in the poll handler). Default-on when surfaced because Comfy idle
+           costs ~27 GB and on a 64 GB Mac that pushes 720p+ renders into
+           swap. The reviewer flagged the always-on hidden field as too
+           surprising for a public install — this version is opt-in only
+           when there's something to opt into. -->
+      <div id="comfyKillRow" class="comfy-row" style="display:none">
+        <label class="lbl" style="display:flex; align-items:center; gap:8px; cursor:pointer">
+          <input type="checkbox" name="stop_comfy" id="stop_comfy" value="on" checked>
+          <span>Stop ComfyUI before render <span style="color:var(--muted)">(detected · frees ~27 GB)</span></span>
+        </label>
+      </div>
 
       <div class="actions">
         <button type="submit" class="primary" id="genBtn">Generate</button>
@@ -1733,6 +2223,22 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+
+<!-- ============== MODELS MODAL ============== -->
+<!-- Opened by the "models" pill in the header. Shows per-repo download
+     status from /models, with a Download button per row. Active downloads
+     stream into the existing log at the bottom of the page. -->
+<div id="modelsModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeModelsModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2>Models</h2>
+      <button class="ghost-btn" onclick="closeModelsModal()">Close</button>
+    </div>
+    <div class="models-hint" id="modelsHint">Loading…</div>
+    <ul class="models-list" id="modelsList"></ul>
+    <div class="models-foot" id="modelsFoot"></div>
+  </div>
+</div>
 
 <!-- ============== BOTTOM TABBED PANE ============== -->
 <aside class="bottom-pane" id="bottomPane">
@@ -2028,16 +2534,27 @@ async function poll() {
   else if (m.swap_gb > 4 || m.pressure_pct > 75) memCls = 'pill-warn';
   memPill.className = 'pill ' + memCls;
 
-  // Comfy (hidden when not running)
+  // Comfy (hidden when not running). Drives three things in lockstep —
+  // the status pill, the global Stop Comfy button, and the per-render
+  // "Stop ComfyUI before render" checkbox in the form. The checkbox row
+  // stays hidden when Comfy isn't running so users who don't have Comfy
+  // installed never see a cryptic toggle.
   const cp = document.getElementById('comfyPill');
   const stopBtn = document.getElementById('stopComfyBtn');
+  const comfyRow = document.getElementById('comfyKillRow');
+  const comfyToggle = document.getElementById('stop_comfy');
   if (s.comfy_pids.length) {
     cp.innerHTML = `<span class="dot"></span>Comfy ${s.comfy_pids.join(', ')}`;
     cp.className = 'pill pill-warn'; cp.style.display = '';
     stopBtn.style.display = '';
+    if (comfyRow) comfyRow.style.display = '';
   } else {
     cp.style.display = 'none';
     stopBtn.style.display = 'none';
+    if (comfyRow) comfyRow.style.display = 'none';
+    // When Comfy isn't running, also force the form value off so the
+    // submission doesn't carry a meaningless `stop_comfy=on` server-side.
+    if (comfyToggle) comfyToggle.checked = false;
   }
 
   // Helper
@@ -2045,9 +2562,47 @@ async function poll() {
   if (s.helper && s.helper.alive) {
     hp.innerHTML = `<span class="dot"></span>helper warm`;
     hp.className = 'pill pill-good';
+    hp.title = 'Helper subprocess is loaded with pipelines and ready.';
   } else {
-    hp.innerHTML = `<span class="dot"></span>helper cold`;
+    // Helper auto-respawns on the next job (see WarmHelper._ensure). "Cold"
+    // is normal after the idle timeout, not an error — first job after a
+    // cold start eats a ~30s pipeline-load cost.
+    hp.innerHTML = `<span class="dot"></span>helper idle`;
     hp.className = 'pill';
+    hp.title = 'Helper is idle (auto-exited after the idle timeout). The next queued job will respawn it; expect a one-time ~30s pipeline-load delay.';
+  }
+
+  // Models pill — roll-up status: base ready / Q8 ready, plus active download.
+  // Renders as one of:
+  //   "models ↓ Q4 12%"   while a download streams (live progress, last hf line)
+  //   "models 3/3"        all on disk
+  //   "models 2/3"        base ready, Q8 missing → warn color
+  //   "models 0/3"        base incomplete → bad color
+  const mp = document.getElementById('modelsPill');
+  const dl = s.download && s.download.active ? s.download : null;
+  if (dl) {
+    const elapsed = Math.max(0, Math.round(s.server_now - (dl.started_ts || s.server_now)));
+    mp.innerHTML = `<span class="dot"></span>↓ ${dl.key} · ${elapsed}s`;
+    mp.className = 'pill pill-running';
+    mp.title = `Downloading ${dl.repo_id} — ${dl.last_line || 'starting…'}`;
+  } else {
+    // Per-repo ready/total counts, matches what the modal shows (3 rows by
+    // default: Q4 + Gemma + Q8). base_available is a roll-up bool that
+    // honors the HF-id env-var short-circuit; we use it for the color
+    // hint, not the count itself.
+    const baseOk = s.base_available;
+    const q8Ok = s.q8_available;
+    const ready = s.repos_ready ?? 0;
+    const total = s.repos_total ?? 0;
+    mp.innerHTML = `<span class="dot"></span>models ${ready}/${total}`;
+    mp.className = 'pill ' + (!baseOk ? 'pill-warn' : (q8Ok ? 'pill-good' : ''));
+    mp.title = !baseOk
+      ? 'Base models incomplete — click to download'
+      : (q8Ok ? 'All models on disk' : 'Q8 not installed (optional — needed for High quality + FFLF)');
+  }
+  // If the modal is open, refresh its rows on each poll so progress updates.
+  if (document.getElementById('modelsModal').style.display !== 'none') {
+    refreshModelsModal({ silent: true });
   }
 
   // Queue pill + tab badge
@@ -2081,6 +2636,27 @@ async function poll() {
     const missing = (s.q8_missing || []).length;
     highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} files left` : 'Q8 not installed';
     if (document.getElementById('quality').value === 'high') setQuality('standard');
+  }
+
+  // Keyframe (FFLF) requires Q8 — server enforces it (see run_job_inner). The
+  // UI was previously silently downgrading the user to Standard when they
+  // picked keyframe with Q8 missing, then the server would 500 on submit.
+  // Disable Generate + show a clear reason while in that state.
+  const genBtn = document.getElementById('genBtn');
+  if (currentMode === 'keyframe' && !s.q8_available) {
+    genBtn.disabled = true;
+    const left = (s.q8_missing || []).length;
+    genBtn.title = left > 0 && left < 6
+      ? `Keyframe (FFLF) needs Q8 — ${left} file(s) still downloading.`
+      : 'Keyframe (FFLF) needs the Q8 model. Click "Download Q8 (~25 GB)" in Pinokio.';
+    genBtn.textContent = 'Generate · Q8 required';
+  } else if (genBtn.disabled && genBtn.textContent.startsWith('Generate · Q8')) {
+    // Restore — only do so if WE were the ones who disabled it, otherwise
+    // some future code path that disables Generate for a different reason
+    // would get clobbered here.
+    genBtn.disabled = false;
+    genBtn.title = '';
+    genBtn.textContent = 'Generate';
   }
 
   // Now card
@@ -2141,7 +2717,7 @@ async function poll() {
     if (!activePath && currentOutputs.length) selectOutput(currentOutputs[0].path);
     const sel = document.getElementById('extendSrcSelect');
     sel.innerHTML = '<option value="">— pick an output below or paste a path —</option>' +
-      currentOutputs.slice(0, 40).map(o => `<option value="${o.path}">${o.name}</option>`).join('');
+      currentOutputs.slice(0, 40).map(o => `<option value="${escapeHtml(o.path)}">${escapeHtml(o.name)}</option>`).join('');
   }
   document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
   document.getElementById('carouselTitle').textContent = filterMode === 'hidden' ? 'Hidden outputs' : `Outputs · ${currentOutputs.length}`;
@@ -2258,6 +2834,108 @@ document.getElementById('genForm').addEventListener('submit', async e => {
   await api('/queue/add','POST',fd);
   poll();
 });
+
+// ====== Models modal ======
+// Opens to /models snapshot. While open, the main poll() refreshes the
+// list every cycle so download progress appears live. Each row shows:
+//   ✓ ready (green)             — all repo files present
+//   ◐ partial (amber)           — some files there, some missing (e.g. interrupted)
+//   ⊘ missing (red)             — nothing on disk
+//   ↻ downloading (blue, anim)  — hf is currently fetching this repo
+function openModelsModal() {
+  document.getElementById('modelsModal').style.display = 'flex';
+  refreshModelsModal();
+}
+function closeModelsModal() {
+  document.getElementById('modelsModal').style.display = 'none';
+}
+async function refreshModelsModal({ silent = false } = {}) {
+  const list = document.getElementById('modelsList');
+  const hint = document.getElementById('modelsHint');
+  const foot = document.getElementById('modelsFoot');
+  let data;
+  try { data = await api('/models'); }
+  catch (e) {
+    if (!silent) hint.textContent = 'Failed to load models. Panel might be restarting — try again.';
+    return;
+  }
+  const repos = data.repos || [];
+  const active = data.active_download;
+  hint.innerHTML = data.hf_available
+    ? `Each row shows what's on disk. Click <b>Download</b> to fetch missing files via <code>hf download</code>; progress streams to the log at the bottom of the page.`
+    : `<span style="color:var(--warning,#d29922)">⚠ <code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`;
+  const rows = repos.map(r => {
+    let cls, icon, statusText, btnHtml;
+    if (active && active.key === r.key) {
+      cls = 'downloading';
+      icon = '↻';
+      const elapsed = Math.max(0, Math.round((Date.now()/1000) - (active.started_ts || 0)));
+      const last = active.last_line ? `<div class="progress">${escapeHtml(active.last_line)}</div>` : '';
+      statusText = `Downloading · ${elapsed}s${last}`;
+      btnHtml = `<button class="ghost" onclick="cancelDownload()">Cancel</button>`;
+    } else if (r.complete) {
+      cls = 'ready'; icon = '✓';
+      statusText = `Ready · ${r.total_files} files · ~${r.size_gb || '?'} GB`;
+      btnHtml = `<button class="ghost" disabled>Installed</button>`;
+    } else if (r.present_files > 0) {
+      cls = 'partial'; icon = '◐';
+      const left = r.total_files - r.present_files;
+      statusText = `Partial · ${r.present_files}/${r.total_files} files · ${left} missing — resume to finish`;
+      btnHtml = data.hf_available
+        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Resume</button>`
+        : `<button disabled>Resume</button>`;
+    } else {
+      cls = 'missing'; icon = '⊘';
+      statusText = `Not installed · ~${r.size_gb || '?'} GB`;
+      btnHtml = data.hf_available
+        ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Download</button>`
+        : `<button disabled>Download</button>`;
+    }
+    const kindBadge = r.kind === 'optional'
+      ? `<span style="color:var(--muted)">optional</span>`
+      : `<span style="color:var(--success,#3fb950)">required</span>`;
+    return `
+      <li class="${cls}">
+        <span class="icon">${icon}</span>
+        <div class="meta">
+          <span class="ttl">${escapeHtml(r.name)} · ${kindBadge}</span>
+          <span class="sub">${escapeHtml(r.repo_id)} → ${escapeHtml(r.local_dir)}</span>
+          <span class="sub">${statusText}${r.blurb ? ' · ' + escapeHtml(r.blurb) : ''}</span>
+        </div>
+        ${btnHtml}
+      </li>`;
+  }).join('');
+  list.innerHTML = rows || `<li class="empty-state">No model manifest found — required_files.json is missing or unreadable.</li>`;
+  // Footer summarises required vs optional counts.
+  const reqRepos = repos.filter(r => r.kind !== 'optional');
+  const optRepos = repos.filter(r => r.kind === 'optional');
+  const reqReady = reqRepos.filter(r => r.complete).length;
+  const optReady = optRepos.filter(r => r.complete).length;
+  foot.innerHTML = `
+    <div>Required: ${reqReady}/${reqRepos.length} ready &nbsp;·&nbsp; Optional: ${optReady}/${optRepos.length} ready</div>
+    <div style="margin-top:4px">Tip: downloads resume on retry — closing this dialog mid-download keeps it running in the background.</div>`;
+}
+async function startDownload(key) {
+  let res;
+  try {
+    res = await api('/models/download', 'POST', `repo_key=${encodeURIComponent(key)}`);
+  } catch (e) {
+    alert('Download failed to start: ' + (e?.message || e));
+    return;
+  }
+  // The api() helper coerces 409 (busy) to { error: 'busy' } — surface that
+  // to the user instead of silently no-op'ing the click.
+  if (res && res.error) {
+    alert(`Can't start download: ${res.error}`);
+  }
+  refreshModelsModal();
+  poll();
+}
+async function cancelDownload() {
+  if (!confirm('Cancel the active download? Partial files stay on disk; clicking Download/Resume later picks up where you left off.')) return;
+  try { await api('/models/cancel', 'POST'); } catch (e) {}
+  refreshModelsModal();
+}
 
 // ====== Init ======
 setInterval(poll, 1500);

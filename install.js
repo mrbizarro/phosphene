@@ -1,5 +1,21 @@
+// LTX23MLX install — idempotent.
+//
+// Pinokio will re-run this whenever the user clicks "Install" or "Resume
+// Install" (the latter fires when env_ready && !base_models_ready, see
+// pinokio.js). Every step below is safe to repeat:
+//
+//   - clone:       skipped if ltx-2-mlx/.git exists
+//   - venv:        Pinokio's `venv:` directive is itself idempotent
+//   - uv pip:      idempotent (already-installed packages are no-ops)
+//   - patch:       patch_ltx_codec.py is idempotent + fails loud on drift
+//   - hf download: resumes partial files, skips intact ones
+//
+// If the user's first install died after the venv was created but before
+// the model downloads, hitting Resume Install picks up exactly where it
+// left off without re-downloading the working pieces.
+
 module.exports = {
-  // Pulls in `huggingface-cli`, `ffmpeg`, `git`, `uv`, `python3.11` etc.
+  // Pulls in `huggingface-cli`/`hf`, `ffmpeg`, `git`, `uv`, `python3.11` etc.
   requires: { bundle: "ai" },
   run: [
     // ---- Apple Silicon gate ------------------------------------------------
@@ -12,8 +28,13 @@ module.exports = {
       next: null
     },
 
-    // ---- Clone ltx-2-mlx (the MLX backend) --------------------------------
+    // ---- Clone ltx-2-mlx (skip if already cloned) -------------------------
+    // Re-running install when the clone exists used to fail with
+    // "destination path 'ltx-2-mlx' already exists and is not an empty
+    // directory", aborting the whole install. Guard with `when:` so the
+    // step is a no-op on Resume Install.
     {
+      when: "{{!exists('ltx-2-mlx/.git')}}",
       method: "shell.run",
       params: {
         message: ["git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx"]
@@ -21,12 +42,13 @@ module.exports = {
     },
 
     // ---- Create venv + install MLX pipeline packages ----------------------
-    // Pinokio creates ./ltx-2-mlx/env/ and activates it for the message commands.
-    // Non-editable install (no -e): packages get copied into env/lib/.../site-packages/
-    // which is where the codec patch script looks for video_vae.py. With -e the
-    // patch can't find its target file because the runtime imports from packages/.
-    // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still get
-    // the v1+ `hf` CLI used by the download steps below.
+    // Pinokio's `venv: "env"` creates ./ltx-2-mlx/env/ on first run and
+    // reuses it on subsequent runs. `uv pip install` is idempotent —
+    // already-installed packages are no-ops. Non-editable install (no -e):
+    // packages get copied into env/lib/.../site-packages/ which is where
+    // patch_ltx_codec.py looks for video_vae.py.
+    // Pin huggingface-hub>=1.0 explicitly so older Pinokio bundles still
+    // get the v1+ `hf` CLI used by the download steps below.
     {
       method: "shell.run",
       params: {
@@ -39,12 +61,11 @@ module.exports = {
       }
     },
 
-    // ---- Apply the lossless-h264 codec patch (idempotent) -----------------
-    // Switches output codec from yuv420p crf 18 (visible chroma blocks on faces)
-    // to yuv444p crf 0 (lossless, no chroma subsampling). Adds env-var override
-    // so users can flip back via LTX_OUTPUT_PIX_FMT / LTX_OUTPUT_CRF.
-    // Use the venv's explicit Python so we don't depend on Pinokio's bundle
-    // shipping a `python3` symlink — what we know exists is env/bin/python3.11.
+    // ---- Apply patches (idempotent, fails loud on upstream drift) ---------
+    // Codec → yuv444p crf 0 (lossless), I2V OOM cleanup before VAE decode.
+    // Patch script exits non-zero if it can't find expected text — that
+    // surfaces upstream-restructure problems instead of silently shipping
+    // broken installs to users (deep-review recommendation).
     {
       method: "shell.run",
       params: {
@@ -52,10 +73,12 @@ module.exports = {
       }
     },
 
-    // ---- Download the Q4 LTX 2.3 model (~25 GB, resumable) ----------------
+    // ---- Download Q4 LTX 2.3 (~25 GB, resumable) --------------------------
     // `hf download` is the v1+ name (huggingface_hub deprecated `huggingface-cli`).
-    // Both handle resume + verification natively; --local-dir avoids the HF cache
-    // store so the panel can point at the path directly with no symlink chase.
+    // Resume + verify is built-in; --local-dir avoids the HF cache store so
+    // the panel can point at the path directly with no symlink chase.
+    // On Resume Install with base files already complete, this is a fast
+    // verify pass (~seconds) — `hf` checks each file's hash and skips.
     {
       method: "shell.run",
       params: {
@@ -67,7 +90,7 @@ module.exports = {
       }
     },
 
-    // ---- Download the Gemma 4-bit text encoder (~6 GB) --------------------
+    // ---- Download Gemma 4-bit text encoder (~6 GB) ------------------------
     {
       method: "shell.run",
       params: {

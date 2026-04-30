@@ -68,8 +68,9 @@ The pieces below are what justify the panel existing as its own project. Most ar
 3. Click **Install**. Pinokio handles the rest:
    - Apple-Silicon hardware gate (refuses to install on Intel / Linux / Windows)
    - Clones `dgrauet/ltx-2-mlx`, creates a Python 3.11 venv via `uv`, installs the MLX pipelines
-   - Applies the lossless h264 codec patch (idempotent, runs again on update)
-   - Downloads Q4 model (`dgrauet/ltx-2.3-mlx-q4`, ~25 GB) and Gemma 4-bit (~6 GB) via `huggingface-cli` (resumes if interrupted)
+   - Applies the lossless h264 + I2V cleanup patches (idempotent, fails loud if upstream drifts)
+   - Downloads Q4 model (`dgrauet/ltx-2.3-mlx-q4`, ~25 GB) and Gemma 4-bit (~6 GB) via the Hugging Face CLI `hf download` (resumes if interrupted)
+   - The whole step is **resumable** — if a network hiccup interrupts the download, hit **Resume Install** and it picks up where it left off (clone + venv + already-downloaded model files are skipped, only missing pieces are pulled)
 4. Click **Start** → **Open Panel** → http://127.0.0.1:8198
 
 For the High quality tier (Q8 two-stage + TeaCache), download the Q8 model separately afterward (one-time, ~25 GB extra). See [Quality tiers](#quality-tiers) below.
@@ -106,9 +107,10 @@ The panel exposes three render quality tiers via a dropdown in the form:
 
 | Tier | Model | Mode | Steps | ~Time (5s clip) | Use case |
 |---|---|---|---|---|---|
-| **Draft** | Q4 distilled | one-stage | 4 | ~3 min | Prompt scouting / seed picking |
+| **Draft** | Q4 distilled | one-stage | 8 (smaller res) | ~3 min | Prompt scouting / seed picking. Same 8-step schedule as Standard but at half resolution — the Q4 distilled model uses a fixed 9-sigma schedule that needs the full walk to reach σ=0, so steps below 8 leave the output 70%+ noise. Draft halves resolution instead. |
 | **Standard** *(default)* | Q4 distilled | one-stage | 8 | ~7 min | Most renders |
 | **High** | **Q8** | two-stage HQ + TeaCache | stage1=15, stage2=3 | ~12 min | Keeper renders. Better face fidelity (Q8 + dev model + CFG anchor). |
+| **Keyframe (FFLF)** | **Q8** | two-stage interpolation | stage1=15, stage2=3 | ~5 min | First-frame / last-frame interpolation. Two images bookend the clip, model fills the motion between. Resolution clamped to 768 max-side on 64 GB Macs (full-res OOMs at the stage transition). |
 
 Same-seed re-roll is the workflow: pick a seed at Draft (cheap), confirm at Standard, finalize at High when it matters. Each output's sidecar JSON has the seed; click "↩ Load params" to recreate the same shot at a different tier.
 
@@ -117,14 +119,13 @@ Same-seed re-roll is the workflow: pick a seed at Draft (cheap), confirm at Stan
 Q8 is a separate download. Run this one-time inside the Pinokio install dir (or the manual install dir):
 
 ```bash
-# Pinokio install: huggingface-cli is on PATH via the "ai" bundle
-huggingface-cli download dgrauet/ltx-2.3-mlx-q8 --local-dir mlx_models/ltx-2.3-mlx-q8
+# Pinokio install: `hf` is on PATH via the "ai" bundle (huggingface_hub v1+
+# replaced the deprecated `huggingface-cli` shim with `hf`).
+hf download dgrauet/ltx-2.3-mlx-q8 --local-dir mlx_models/ltx-2.3-mlx-q8
 
-# Manual install: use the Python API (works on any huggingface_hub version)
-ltx-2-mlx/.venv/bin/python3.11 -c \
-  "from huggingface_hub import snapshot_download; \
-   snapshot_download(repo_id='dgrauet/ltx-2.3-mlx-q8', \
-                     local_dir='mlx_models/ltx-2.3-mlx-q8', max_workers=8)"
+# Manual install (pinned to the venv's hf so version is known):
+ltx-2-mlx/.venv/bin/hf download dgrauet/ltx-2.3-mlx-q8 \
+  --local-dir mlx_models/ltx-2.3-mlx-q8
 ```
 
 The panel auto-detects Q8 on disk and enables the High option in the dropdown within ~2 seconds.
@@ -177,10 +178,9 @@ M-Max tier divides by ~3–4×. M-Ultra by ~6×.
 
 Worth surfacing before you hit Install:
 
-- **High quality (Q8) and FFLF keyframing are opt-in**. The default install only pulls Q4 (~25 GB) + Gemma (~6 GB). Q8 is a separate menu action (~25 GB extra). On 64 GB Macs, Q8 two-stage HQ can OOM the helper subprocess mid-render — workaround is to render at lower resolution (e.g., Quality=Draft with the High pill) until we land the upstream cleanup PR.
+- **High quality (Q8) and FFLF keyframing are opt-in**. The default install only pulls Q4 (~25 GB) + Gemma (~6 GB). Q8 is a separate menu action (~25 GB extra). On 64 GB Macs, FFLF at full resolution (1280×704) OOMs the helper at the stage-1 → stage-2 transition; the panel works around this by clamping keyframe-mode resolution to 768 max-side. Q8 two-stage HQ at 1280×704 fits, but back-to-back HQ jobs may push memory pressure higher than expected.
 - **The panel binds to localhost (127.0.0.1) only.** Don't tunnel it onto a LAN or expose it through ngrok / similar — there's no auth, no CSRF, and `/image?path=` will serve any image file the user account can read. It's designed for single-user local use.
 - **Reset is intentionally non-destructive** for your work. It removes the `ltx-2-mlx/` clone (the venv) so a fresh Install rebuilds cleanly. It does NOT delete `mlx_models/`, `mlx_outputs/`, `panel_uploads/`, `panel_queue.json`, or `panel_hidden.json` — those are your generations and config. Delete them manually via the Models/Outputs/Uploads file-browser entries in the Pinokio sidebar if you want a true factory reset.
-- **The `Image → video + clean audio mux` mode currently re-encodes the final video as `yuv420p crf 18`** (subsampled chroma — same as the upstream default). Normal Image → Video and Text → Video modes use the patched lossless `yuv444p crf 0` output. If you need lossless on the audio-mux path, swap the mux step's codec args manually until we wire the env-var pass-through there too.
 - **A few performance levers exist that aren't in the UI yet**. Check `mlx_ltx_panel.py` for environment variables: `LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`, `LTX_HELPER_LOW_MEMORY`, `LTX_HELPER_IDLE_TIMEOUT`. Override via shell env when starting the panel (or via the Pinokio `start.js` env block).
 
 ## Roadmap

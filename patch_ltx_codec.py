@@ -13,6 +13,12 @@ Two upstream issues we patch around:
    Macs this OOMs the helper subprocess on the I2V code path. Patched to
    add the same low_memory cleanup the parent has.
 
+Known unfixed: KeyframeInterpolationPipeline OOMs at the stage-1 → stage-2
+transition on 64 GB Macs at full resolution. We tried freeing/reloading
+the DiT around the upscale and it didn't help. Worked around in the panel
+by clamping keyframe-mode resolution to 768×432 by default — see the
+`mode == "keyframe"` block in mlx_ltx_panel.py.
+
 Safe to re-run — each patch checks for its marker before touching anything.
 """
 from __future__ import annotations
@@ -90,45 +96,119 @@ PATCH_I2V_OOM_NEW = '''        video_latent, audio_latent = self.generate_from_i
         return self._decode_and_save_video(video_latent, audio_latent, output_path)'''
 
 
-def apply_patch(target: Path, old: str, new: str, marker: str, label: str) -> bool:
-    """Idempotently apply old→new replacement on `target`. Returns True if changed."""
+# NOTE: Keyframe interpolation OOMs at the stage-1 → stage-2 transition on
+# 64 GB Macs. We tried free-DiT-before-upscale + reload-after-upscale; that
+# *didn't* help (the reload hit the same memory peak from a different angle
+# and added ~30s of wall time). Workaround is now in the panel side: keyframe
+# mode runs at half resolution (640×352 stage-1, 1280×704 stage-2 still goes
+# OOM; 384×216 stage-1 / 768×432 stage-2 fits). Looking for a real upstream
+# fix later. Keep this comment so we don't re-introduce the failed patch.
+
+
+# Outcome codes for apply_patch — three-valued (vs the old True/False) so
+# main() can distinguish a genuinely missing target / drifted upstream from
+# the no-op "already patched" case. Without this distinction the install
+# used to exit 0 on a corrupt patch attempt and ship a broken pipeline.
+OUTCOME_APPLIED = "applied"
+OUTCOME_ALREADY = "already"
+OUTCOME_MISSING = "missing"          # target file not on disk
+OUTCOME_DRIFT   = "drift"            # target found but expected text isn't there
+
+
+def _atomic_write(target: Path, text: str) -> None:
+    """Write to a temp file in the same directory, fsync, then os.replace.
+    Avoids the failure mode where Pinokio kills the install mid-write and
+    leaves a half-written .py that imports as a SyntaxError forever."""
+    import os, tempfile
+    target_dir = target.parent
+    fd, tmp_path = tempfile.mkstemp(prefix=target.name + ".", dir=str(target_dir))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        # Clean up the temp file if we never made it to the replace.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def apply_patch(target: Path, old: str, new: str, marker: str, label: str) -> str:
+    """Idempotently apply old→new replacement on `target`. Returns one of
+    OUTCOME_APPLIED / OUTCOME_ALREADY / OUTCOME_MISSING / OUTCOME_DRIFT —
+    deep-review fix to surface upstream drift loudly instead of silently
+    no-op'ing the patch and shipping a broken install."""
     if target is None or not target.exists():
-        print(f"  [{label}] target file not found", file=sys.stderr)
-        return False
+        print(f"  [{label}] MISSING — target file not found", file=sys.stderr)
+        return OUTCOME_MISSING
     text = target.read_text()
     if marker in text:
         print(f"  [{label}] already patched: {target}")
-        return False
+        return OUTCOME_ALREADY
     if old not in text:
-        print(f"  [{label}] expected text not found — upstream may have moved it", file=sys.stderr)
-        return False
-    target.write_text(text.replace(old, new))
+        print(
+            f"  [{label}] DRIFT — expected text not found in {target}. "
+            f"Upstream likely restructured this file. The patch needs to be "
+            f"updated (see patch_ltx_codec.py); the install will fail loud "
+            f"rather than ship an unpatched copy.",
+            file=sys.stderr,
+        )
+        return OUTCOME_DRIFT
+    _atomic_write(target, text.replace(old, new))
     print(f"  [{label}] patched {target}")
-    return True
+    return OUTCOME_APPLIED
 
 
 def main() -> int:
     print("Applying LTX23MLX patches:")
-    changed = 0
+    outcomes: list[tuple[str, str]] = []
 
     # Patch 1: codec
     codec_target = _find("ltx_core_mlx/model/video_vae/video_vae.py")
-    if apply_patch(codec_target, PATCH_CODEC_OLD, PATCH_CODEC_NEW,
-                   marker="LTX_OUTPUT_PIX_FMT",
-                   label="codec (yuv444p crf 0)"):
-        changed += 1
+    outcomes.append(("codec (yuv444p crf 0)", apply_patch(
+        codec_target, PATCH_CODEC_OLD, PATCH_CODEC_NEW,
+        marker="LTX_OUTPUT_PIX_FMT",
+        label="codec (yuv444p crf 0)",
+    )))
 
     # Patch 2: I2V OOM cleanup before decode
     i2v_target = _find("ltx_pipelines_mlx/ti2vid_one_stage.py")
-    if apply_patch(i2v_target, PATCH_I2V_OOM_OLD, PATCH_I2V_OOM_NEW,
-                   marker="PATCHED (LTX23MLX): mirror the parent T2V cleanup",
-                   label="I2V OOM (free DiT before decode)"):
-        changed += 1
+    outcomes.append(("I2V OOM (free DiT before decode)", apply_patch(
+        i2v_target, PATCH_I2V_OOM_OLD, PATCH_I2V_OOM_NEW,
+        marker="PATCHED (LTX23MLX): mirror the parent T2V cleanup",
+        label="I2V OOM (free DiT before decode)",
+    )))
 
-    if changed == 0:
-        print("All patches already applied (or upstream layout changed).")
+    # (Keyframe OOM patch was removed — see NOTE in the patches block above.
+    #  The fix is currently a panel-side resolution clamp, not a pipeline edit.)
+
+    applied = sum(1 for _, o in outcomes if o == OUTCOME_APPLIED)
+    already = sum(1 for _, o in outcomes if o == OUTCOME_ALREADY)
+    failed  = [(label, o) for label, o in outcomes if o in (OUTCOME_MISSING, OUTCOME_DRIFT)]
+
+    if failed:
+        print(
+            f"\nERROR: {len(failed)} patch(es) failed to apply:",
+            file=sys.stderr,
+        )
+        for label, o in failed:
+            print(f"  - [{label}] {o}", file=sys.stderr)
+        print(
+            "\nThis exits non-zero so install.js / update.js fail loud. "
+            "The runtime depends on these patches; running with them missing "
+            "produces broken output (chroma artifacts, mid-job OOMs).",
+            file=sys.stderr,
+        )
+        return 2
+
+    if applied == 0:
+        print(f"All patches already applied ({already} already-patched, 0 changed).")
     else:
-        print(f"Done — {changed} patch(es) applied.")
+        print(f"Done — {applied} patch(es) newly applied, {already} already-patched.")
     return 0
 
 
