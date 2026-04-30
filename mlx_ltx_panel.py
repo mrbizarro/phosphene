@@ -2670,7 +2670,7 @@ HTML = r"""<!doctype html>
 <body>
 
 <header>
-  <a href="/" class="brand"><img src="/assets/logo-header.png" alt="LTX23MLX"></a>
+  <a href="/" class="brand"><img src="/assets/logo-header.png" alt="Phosphene"></a>
   <span class="spacer"></span>
   <!-- Hardware tier badge — clickable, opens a dialog explaining what
        this Mac's RAM tier allows. Modes / qualities the tier doesn't
