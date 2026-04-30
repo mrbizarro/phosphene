@@ -1,4 +1,4 @@
-// LTX23MLX Pinokio menu.
+// Phosphene Pinokio menu.
 //
 // Uses required_files.json as the single source of truth for what counts
 // as "installed". The same file is consumed by mlx_ltx_panel.py (run-time
@@ -50,8 +50,8 @@ function repoComplete(installRoot, repo, minBytes) {
 
 module.exports = {
   version: "7.0",
-  title: "LTX23MLX",
-  description: "[MAC ONLY] LTX Video 2.3 generation panel for Apple Silicon — local web UI, batch queue, lossless h264. Built on dgrauet/ltx-2-mlx.",
+  title: "Phosphene",
+  description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
     const required = loadRequired(info.path)

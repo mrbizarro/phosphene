@@ -29,7 +29,7 @@
 **1/** Phosphene wraps LTX 2.3 (Lightricks) running on Apple's MLX framework. The differentiator: it generates video AND audio in a single forward pass — ambient sound, footsteps, lipsync dialogue. Wan, Hunyuan, Mochi are silent. This isn't.
 
 **2/** Install is one click via Pinokio. No conda, no venv, no CUDA cosplay on a Mac.
-github.com/mrbizarro/LTX23MLX
+github.com/mrbizarro/phosphene
 
 **3/** Real numbers, M4 Mac Studio 64 GB:
 - 5s clip @ 1280×704 — ~7 min

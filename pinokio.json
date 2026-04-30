@@ -1,15 +1,15 @@
 {
-  "title": "LTX23MLX",
-  "description": "[MAC ONLY] LTX Video 2.3 generation panel for Apple Silicon — local web UI, batch queue, image-to-video, lossless h264 output. Built on dgrauet/ltx-2-mlx.",
+  "title": "Phosphene",
+  "description": "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. Hardware-tier feature gating. Free, open source.",
   "icon": "icon.png",
   "links": [{
-    "title": "LTX23MLX (panel by Mr. Bizarro)",
+    "title": "Phosphene (panel by Mr. Bizarro)",
     "links": [{
       "title": "X / Twitter",
       "value": "https://x.com/AIBizarrothe"
     }, {
       "title": "GitHub",
-      "value": "https://github.com/mrbizarro/LTX23MLX"
+      "value": "https://github.com/mrbizarro/phosphene"
     }]
   }, {
     "title": "Upstream MLX port (by @dgrauet)",

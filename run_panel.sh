@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local-dev launcher for the LTX23MLX panel. Pinokio uses pinokio.js +
+# Local-dev launcher for the Phosphene panel. Pinokio uses pinokio.js +
 # start.js; this is the equivalent for running outside Pinokio.
 #
 # Pins the panel to the venv's python3.11 so it shares the exact same

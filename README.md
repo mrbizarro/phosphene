@@ -64,7 +64,7 @@ The pieces below are what justify the panel existing as its own project. Most ar
 ### Option A — Pinokio one-click (recommended)
 
 1. Open Pinokio
-2. **Discover → Download from URL** → paste `https://github.com/mrbizarro/LTX23MLX`
+2. **Discover → Download from URL** → paste `https://github.com/mrbizarro/phosphene`
 3. Click **Install**. Pinokio handles the rest:
    - Apple-Silicon hardware gate (refuses to install on Intel / Linux / Windows)
    - Clones `dgrauet/ltx-2-mlx`, creates a Python 3.11 venv via `uv`, installs the MLX pipelines
@@ -79,8 +79,8 @@ For the High quality tier (Q8 two-stage + TeaCache), download the Q8 model separ
 
 ```bash
 # 1. Clone this panel
-git clone https://github.com/mrbizarro/LTX23MLX.git
-cd LTX23MLX
+git clone https://github.com/mrbizarro/phosphene.git
+cd phosphene
 
 # 2. Clone ltx-2-mlx alongside (default panel layout assumes ./ltx-2-mlx/)
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx

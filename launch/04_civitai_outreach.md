@@ -21,7 +21,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > Made with **Phosphene** — a free local panel for LTX-2.3 on Apple Silicon (M-series). Audio + video are generated jointly in one pass — that ambient rain and the pachinko bells are not added in post. Render time on M3 Ultra: ~3:20 for a 5s clip @ 1280×704. One-click install via Pinokio Discover.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 > Settings: LTX-2.3 dev, 20 steps, CFG 3, 24fps, 5s, seed 42
 > Tags: ltx-video, LTX-2.3, apple-silicon, mlx, mac, audio-to-video
 
@@ -34,7 +34,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > Phosphene wraps dgrauet/ltx-2-mlx and adds: prompt history, batch queue, audio mute toggle, presets for portrait/landscape/square. Free, open source.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 > Tags: ltx-video, LTX-2.3, i2v, apple-silicon, mlx
 
 **Demo 3 — "Portrait — TikTok native"**
@@ -45,7 +45,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > M2 Max, 64GB unified, 5s @ 1080×1920, ~5:00. Audio mix is mono-but-spatial; the coin-drop is in the right channel.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 > Tags: ltx-video, LTX-2.3, portrait, vertical, tiktok, mlx
 
 **Demo 4 — "LoRA test: Camera Zoom Out (I2V) + Phosphene"**
@@ -57,7 +57,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > Cross-promo for the LoRA author. Settings: LoRA strength 0.85, base CFG 3, 20 steps.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 > Tags: ltx-video, LTX-2.3, lora, i2v, mlx
 
 **Demo 5 — "Stress test: 20s clip, audio sync"**
@@ -68,7 +68,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > Phosphene exposes duration as a slider; previously you'd be hand-editing config in ltx-2-mlx.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 > Tags: ltx-video, LTX-2.3, long-form, audio-sync, m3-ultra, mlx
 
 ### CivitAI article draft (~520 words)
@@ -98,7 +98,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > **Try it, break it, tell me.**
 > - Pinokio: search "Phosphene" in Discover.
-> - GitHub: github.com/mrbizarro/LTX23MLX
+> - GitHub: github.com/mrbizarro/phosphene
 > - Issues / feature requests welcome.
 >
 > Massive credit to **dgrauet** for the MLX port (the hard part), to **Lightricks** for open-weighting LTX-2.3, and to **cocktailpeanut** for accepting it into Pinokio Factory.
@@ -131,7 +131,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 >
 > Roadmap: keyframe UI, MLX-native upscaler, CivitAI LoRA browser inside the app.
 >
-> Try it, break it, tell me what's wrong. Issues on GitHub: github.com/mrbizarro/LTX23MLX
+> Try it, break it, tell me what's wrong. Issues on GitHub: github.com/mrbizarro/phosphene
 >
 > Thanks to dgrauet, Lightricks, the MLX team at Apple, and cocktailpeanut for getting it into Pinokio.
 
@@ -200,7 +200,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 **Draft (GitHub issue or DM, ~110 words):**
 
-> Hey — Salo here (@AIBizarrothe). I built Phosphene, a Mac app that wraps your `ltx-2-mlx` with a one-click Pinokio install, prompt history, LoRA loading, and a few presets. Repo: github.com/mrbizarro/LTX23MLX. The README credits you front-and-center — your port is the load-bearing piece, the panel is just the seatbelt.
+> Hey — Salo here (@AIBizarrothe). I built Phosphene, a Mac app that wraps your `ltx-2-mlx` with a one-click Pinokio install, prompt history, LoRA loading, and a few presets. Repo: github.com/mrbizarro/phosphene. The README credits you front-and-center — your port is the load-bearing piece, the panel is just the seatbelt.
 >
 > Two asks: (1) any factual corrections you want me to make in the README before launch — I want to represent what `ltx-2-mlx` does accurately. (2) Want to be tagged in the launch posts (X / ProductHunt / CivitAI article)? Happy to write you in however you prefer, or stay quiet if you'd rather not.
 >
@@ -212,7 +212,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 > Hey — Phosphene is now in Pinokio Discover (LTX-2.3 panel for Mac, MLX-native, generates video+audio jointly). Thank you for accepting it into Factory. Quick public launch is going up [date] — I credit Pinokio prominently. If you want to amplify, the demo videos are at [link]; if you'd rather not, totally fine, just wanted to give a heads-up before it goes loud.
 >
-> Repo: github.com/mrbizarro/LTX23MLX. M-series only for now, 16GB+ unified memory.
+> Repo: github.com/mrbizarro/phosphene. M-series only for now, 16GB+ unified memory.
 
 ### Lightricks / LTX team
 
@@ -222,7 +222,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 > Hi — I'm Salo (@AIBizarrothe). I built **Phosphene**, a free, open-source Mac panel that wraps an MLX port of LTX-2.3 (dgrauet's port) so M-series Mac users can run T2V/I2V with joint audio in one click via Pinokio.
 >
-> Repo: github.com/mrbizarro/LTX23MLX. Demos: [link]. ~30s install, no CLI, no GGUF.
+> Repo: github.com/mrbizarro/phosphene. Demos: [link]. ~30s install, no CLI, no GGUF.
 >
 > The reason I'm reaching out: open-weighting LTX-2.3 made all of this possible. I'd love to (a) get a sanity check from your team that we're representing LTX-2.3 accurately in Phosphene's UI/copy, (b) explore whether a "made by community" cross-mention on LTX Studio's channels makes sense at launch, (c) hear how we could properly support the LTX-2 LoRA ecosystem from inside the app.
 >
@@ -234,7 +234,7 @@ The audience signal is overwhelming: 12+ active LTX 2.3 workflows, multiple LTX-
 
 > @awnihannun — wanted to flag: Phosphene, a free Mac panel for LTX-2.3 (Lightricks' open-weighted audio+video model), is shipping on top of dgrauet's pure-MLX port. End-to-end MLX, generates 5s of synchronized video+audio on a MacBook in ~3min. One-click install via Pinokio.
 >
-> Repo: github.com/mrbizarro/LTX23MLX. 30s demo: [link].
+> Repo: github.com/mrbizarro/phosphene. 30s demo: [link].
 >
 > Wanted you to see what MLX is making possible at the creative-tool layer, not just LLM inference. Genuinely thank you for the framework — none of this exists otherwise.
 

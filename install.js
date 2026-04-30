@@ -1,4 +1,4 @@
-// LTX23MLX install — idempotent.
+// Phosphene install — idempotent.
 //
 // Pinokio will re-run this whenever the user clicks "Install" or "Resume
 // Install" (the latter fires when env_ready && !base_models_ready, see
@@ -23,7 +23,7 @@ module.exports = {
       when: "{{platform !== 'darwin' || arch !== 'arm64'}}",
       method: "notify",
       params: {
-        html: "<b>LTX23MLX requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs, Linux, or Windows."
+        html: "<b>Phosphene requires an Apple Silicon Mac (M1 or newer).</b><br>It will not run on Intel Macs, Linux, or Windows."
       },
       next: null
     },
@@ -106,7 +106,7 @@ module.exports = {
     {
       method: "notify",
       params: {
-        html: "<b>LTX23MLX installed.</b><br>Click <b>Start</b> to launch the panel, then <b>Open Panel</b>."
+        html: "<b>Phosphene installed.</b><br>Click <b>Start</b> to launch the panel, then <b>Open Panel</b>."
       }
     }
   ]

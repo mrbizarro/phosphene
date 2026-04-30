@@ -2016,7 +2016,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"unknown repo key: {key!r}. Valid keys: "
                                      f"{[r['key'] for r in _repos()]}"}, 400); return
             if HF_BIN is None:
-                self._json({"error": "hf binary not found. Reinstall LTX23MLX "
+                self._json({"error": "hf binary not found. Reinstall Phosphene "
                                      "or install huggingface_hub>=1.0 in the venv."}, 500); return
             with DOWNLOAD_LOCK:
                 if DOWNLOAD["active"]:
@@ -2107,7 +2107,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LTX23MLX Studio</title>
+  <title>Phosphene</title>
   <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png">
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>

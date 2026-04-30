@@ -43,7 +43,7 @@ The actual MLX port is `dgrauet/ltx-2-mlx` — Phosphene is a panel/UX layer on 
 
 **Coming next**: LoRA loading, an integrated upscaler pass, longer chained Extends with audio continuity.
 
-Repo: github.com/mrbizarro/LTX23MLX (rename to Phosphene pending)
+Repo: github.com/mrbizarro/phosphene (rename to Phosphene pending)
 
 Feedback welcome, especially on the prompt formats that work best for the audio side — still mapping that out.
 
@@ -85,7 +85,7 @@ Pinokio one-click (Discover listing pending), or run the panel directly from the
 
 **Credits**: dgrauet (MLX port), Lightricks (model + weights license), Apple MLX team (framework). Phosphene panel is MIT; weights stay under Lightricks' license.
 
-Repo: github.com/mrbizarro/LTX23MLX
+Repo: github.com/mrbizarro/phosphene
 
 Roadmap: LoRA, upscaler pass, longer chained extends. Happy to answer questions about the MLX side.
 
@@ -123,7 +123,7 @@ Free. Local. No subs, no credits, no queue.
 
 Built on `dgrauet/ltx-2-mlx` (the MLX port) and Lightricks' LTX Video 2.3. Big credit to both — Phosphene is the panel layer.
 
-Repo: github.com/mrbizarro/LTX23MLX
+Repo: github.com/mrbizarro/phosphene
 Install via Pinokio one-click (Discover listing pending).
 
 Drop your favorite prompts and clips, would love to see what people make with the audio side.
@@ -164,7 +164,7 @@ Easiest path: install Pinokio (a free one-click installer for AI tools) and grab
 **What it isn't**
 Not a full video editor. Not Veo / Sora quality — those are billion-dollar cloud systems. This is "good open-source video, on your Mac, free." For a lot of uses that's the right tradeoff.
 
-Repo: github.com/mrbizarro/LTX23MLX
+Repo: github.com/mrbizarro/phosphene
 
 Built on `dgrauet/ltx-2-mlx` (MLX port) and Lightricks LTX Video 2.3.
 
@@ -195,7 +195,7 @@ A few things that I think are actually novel rather than just another wrapper:
 
 **Credits**: dgrauet for the MLX port, Lightricks for the model (their license on the weights), Apple for MLX. Phosphene the panel is MIT.
 
-Repo: https://github.com/mrbizarro/LTX23MLX
+Repo: https://github.com/mrbizarro/phosphene
 Install via Pinokio (Discover listing pending) or run directly.
 
 Happy to answer questions about the MLX path, memory tiering, or the audio side.
@@ -210,27 +210,27 @@ Happy to answer questions about the MLX path, memory tiering, or the audio side.
 >
 > Wanted to share it here in case it's useful for the Mac portion of the community, and to make sure credit reads correctly — the README points back to your model and license, and to dgrauet for the port. If anything in the wording or attribution looks off to you, please let me know and I'll fix it. Would also love any pointers on prompt structures the team has found work best for the audio side.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 
 ### Pinokio Discord
 
 > Hey Pinokio folks — submitted **Phosphene** to Discover (local LTX-2 video panel for Apple Silicon, joint audio+video). Listing pending. While I wait, would love any feedback from people running it via the install.json — particularly on first-run weight download UX and whether the memory-tier check fires correctly on your hardware. Thanks for building Pinokio, made the packaging side an order of magnitude easier.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 
 ### MLX community on Hugging Face
 
 > Sharing a Mac-native MLX project for the community: **Phosphene**, a panel around `dgrauet/ltx-2-mlx` (LTX Video 2.3 port). Notable bits from an MLX angle: joint audio+video in one pass, tiered unified-memory gating (16/32/64 GB capability tiers), yuv444p CRF 0 lossless mux to avoid chroma artifacts on faces. ~7 min per 5s 1280×704 clip on base M4 64 GB. All actual MLX inference work is dgrauet's; Phosphene is the UX layer. Would value technical feedback on the memory tiering and any obvious wins I'm leaving on the table.
 >
-> Repo: github.com/mrbizarro/LTX23MLX
+> Repo: github.com/mrbizarro/phosphene
 
 ### Direct DM to dgrauet
 
-> Hey — I'm Mr. Bizarro (AIBizarrothe on X). Built a free Mac panel called Phosphene that wraps your `ltx-2-mlx` port. Credit to you is prominent in the README and in every launch post — your port is the actual inference work, mine is just the panel/UX layer. About to do a small launch wave (HN, r/StableDiffusion, r/LocalLLaMA, Twitter, Pinokio Discover). Wanted to give you a heads-up since some of that traffic may land on your repo too. If anything in the attribution looks wrong or you'd like me to change wording / link target, please tell me and I'll fix it before the posts go up. Repo: github.com/mrbizarro/LTX23MLX. Thanks for the port — it's what made this possible.
+> Hey — I'm Mr. Bizarro (AIBizarrothe on X). Built a free Mac panel called Phosphene that wraps your `ltx-2-mlx` port. Credit to you is prominent in the README and in every launch post — your port is the actual inference work, mine is just the panel/UX layer. About to do a small launch wave (HN, r/StableDiffusion, r/LocalLLaMA, Twitter, Pinokio Discover). Wanted to give you a heads-up since some of that traffic may land on your repo too. If anything in the attribution looks wrong or you'd like me to change wording / link target, please tell me and I'll fix it before the posts go up. Repo: github.com/mrbizarro/phosphene. Thanks for the port — it's what made this possible.
 
 ### r/macsetups (long shot)
 
-> If you bought a high-RAM Apple Silicon Mac partly for AI work and haven't found much to actually run on it: **Phosphene** generates AI video locally with synced audio, free. 64 GB hits 1280×704, 32 GB does 768 px. Apple Silicon only. Built on Lightricks' LTX-2 model + dgrauet's MLX port. github.com/mrbizarro/LTX23MLX
+> If you bought a high-RAM Apple Silicon Mac partly for AI work and haven't found much to actually run on it: **Phosphene** generates AI video locally with synced audio, free. 64 GB hits 1280×704, 32 GB does 768 px. Apple Silicon only. Built on Lightricks' LTX-2 model + dgrauet's MLX port. github.com/mrbizarro/phosphene
 
 ### Skip r/macgaming
 
