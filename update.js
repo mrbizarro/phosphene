@@ -29,6 +29,21 @@ module.exports = {
         message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'"
       }
     },
+    // Re-install ltx-core-mlx + ltx-pipelines-mlx from local packages.
+    // Critical for users who hit the dcd639e pin window (commits 157b259
+    // through e02e288): their site-packages still has 0.1.0 installed
+    // even after `git checkout main` updates the source tree to 0.2.0+.
+    // Without this re-install they'd have working source but broken
+    // installed code (e.g. ExtendPipeline.extend_from_video missing
+    // cfg_scale kwarg). --force-reinstall guarantees overwrite;
+    // --no-deps avoids re-resolving (and re-pulling) mlx etc.
+    {
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: "./env/bin/pip install --force-reinstall --no-deps ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
     // Pin to the venv's python3.11 to match install.js — `python3` on
