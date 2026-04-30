@@ -75,6 +75,19 @@ The pieces below are what justify the panel existing as its own project. Most ar
 
 For the High quality tier (Q8 two-stage + TeaCache), download the Q8 model separately afterward (one-time, ~25 GB extra). See [Quality tiers](#quality-tiers) below.
 
+### Faster downloads (optional — recommended for Q8)
+
+Hugging Face throttles unauthenticated downloads. If your Q4 / Gemma / Q8 download is taking hours, log in once and downloads run **~10× faster** (especially the 25 GB Q8):
+
+```bash
+# 1. Get a token (read-only is fine) at https://huggingface.co/settings/tokens
+# 2. Run once in Terminal — it's stored at ~/.cache/huggingface/token
+hf auth login
+# Paste the token when prompted.
+```
+
+Pinokio's `hf` binary reads from the same standard cache file, so future downloads in the panel auto-authenticate. No env var fiddling, no Pinokio config changes.
+
 ### Option B — manual
 
 ```bash
