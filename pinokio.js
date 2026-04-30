@@ -54,7 +54,17 @@ module.exports = {
   description: "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. Hardware-tier feature gating. Free, open source.",
   icon: "icon.png",
   menu: async (kernel, info) => {
-    const required = loadRequired(info.path)
+    // SHIP-BLOCKER fix (credit: cocktailpeanut). `info.path` is a FUNCTION in
+    // Pinokio's menu API, not a string property. Calling it with a relative
+    // path returns the absolute path inside the install dir — so to get the
+    // install root itself we resolve a known file and dirname it. Previous
+    // code passed the function itself to loadRequired/repoComplete, which
+    // made `path.join(<function>, ...)` produce garbage, fs.readFileSync
+    // threw ENOENT, the catch returned the empty fallback (no repos, no
+    // marker_paths), env_ready was always false, and the menu kept
+    // rendering "Install" instead of "Start" even on a complete install.
+    const installRoot = path.dirname(info.path("required_files.json"))
+    const required = loadRequired(installRoot)
     const minBytes = required.min_size_bytes || 1024
 
     // --- env detection: either Pinokio's `env/` or manual `.venv/` ---
@@ -65,8 +75,8 @@ module.exports = {
     const baseRepos = repos.filter(r => r.kind === "base")
     const q8Repo    = repos.find(r => r.key === "q8")
 
-    const base_ready = baseRepos.length > 0 && baseRepos.every(r => repoComplete(info.path, r, minBytes))
-    const q8_ready   = q8Repo ? repoComplete(info.path, q8Repo, minBytes) : false
+    const base_ready = baseRepos.length > 0 && baseRepos.every(r => repoComplete(installRoot, r, minBytes))
+    const q8_ready   = q8Repo ? repoComplete(installRoot, q8Repo, minBytes) : false
 
     // User-content folders persist across Reset (which only removes the venv).
     // Keep their shortcuts visible whenever they exist on disk so users can
