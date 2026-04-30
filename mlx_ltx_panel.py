@@ -2863,7 +2863,12 @@ HTML = r"""<!doctype html>
       </div>
 
       <h2>Prompt</h2>
-      <textarea name="prompt" id="prompt" placeholder="What should happen in the video..."></textarea>
+      <!-- Audio-guidance hint in the placeholder. LTX 2.3 generates audio
+           jointly but is CONDITIONED on prompt cues — visual-only prompts
+           produce near-silent room tone (peaks at -37 dB on test runs).
+           Most users assume "no sound" = bug. Hint nudges them to describe
+           the soundscape too. Documented in the LTX 2.3 paper but unobvious. -->
+      <textarea name="prompt" id="prompt" placeholder="Describe the scene AND the sound: e.g. 'wizard in a forest clearing, fireflies spiraling up — low whispered chant, ember crackle, distant owl'. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
       <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
            Rewrites your prompt with the structure/keywords LTX 2.3 trained
            on. ~12-15s on cold start (Gemma needs to load), ~5s warm. -->

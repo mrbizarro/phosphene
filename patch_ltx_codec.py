@@ -48,10 +48,15 @@ PATCH_CODEC_OLD = 'cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf",
 PATCH_CODEC_NEW = (
     '# PATCHED (LTX23MLX): default to lossless yuv444p crf 0 (no chroma\n'
     '        # subsampling, no JPEG-style block artifacts on faces). Override via env.\n'
+    '        # `+faststart` moves the moov atom to the front of the file so the\n'
+    '        # gallery thumbnails (preload="metadata") can decode the first\n'
+    '        # frame without downloading the full clip — without it the thumbs\n'
+    '        # render black until clicked.\n'
     '        import os as _os\n'
     '        _pix = _os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")\n'
     '        _crf = _os.environ.get("LTX_OUTPUT_CRF", "0")\n'
-    '        cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, "-crf", _crf, output_path])'
+    '        cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, "-crf", _crf,\n'
+    '                    "-movflags", "+faststart", output_path])'
 )
 
 # ---- Patch 2: I2V free-DiT-before-VAE-decode (OOM fix) -----------------------
@@ -176,12 +181,29 @@ def main() -> int:
     )))
 
     # Patch 2: I2V OOM cleanup before decode
+    # SHIP-BLOCKER history: install.js pins ltx-2-mlx to commit dcd639e
+    # (the 0.1.0 audio baseline) because newer 0.2.0 commits regressed
+    # audio amplitude by 22 dB. At dcd639e the I2V function inlines the
+    # decode steps instead of calling _decode_and_save_video, so this
+    # patch's old/new strings don't match. Mark it OPTIONAL — DRIFT is
+    # treated as a warning (the patch only helps Q8 / 64 GB I2V runs;
+    # T2V works fine without it). The codec patch above is REQUIRED.
     i2v_target = _find("ltx_pipelines_mlx/ti2vid_one_stage.py")
-    outcomes.append(("I2V OOM (free DiT before decode)", apply_patch(
+    i2v_outcome = apply_patch(
         i2v_target, PATCH_I2V_OOM_OLD, PATCH_I2V_OOM_NEW,
         marker="PATCHED (LTX23MLX): mirror the parent T2V cleanup",
         label="I2V OOM (free DiT before decode)",
-    )))
+    )
+    if i2v_outcome == OUTCOME_DRIFT:
+        print(
+            "  [I2V OOM] note: this patch only matches the 0.2.0+ I2V "
+            "structure. On the pinned 0.1.0 baseline (dcd639e) it's a no-op. "
+            "T2V output is unaffected; HQ I2V on Q8 may OOM without it.",
+            file=sys.stderr,
+        )
+        # Treat as ALREADY for the rollup so install doesn't fail.
+        i2v_outcome = OUTCOME_ALREADY
+    outcomes.append(("I2V OOM (free DiT before decode)", i2v_outcome))
 
     # (Keyframe OOM patch was removed — see NOTE in the patches block above.
     #  The fix is currently a panel-side resolution clamp, not a pipeline edit.)

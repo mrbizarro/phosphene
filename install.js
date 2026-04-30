@@ -48,6 +48,30 @@ module.exports = {
       }
     },
 
+    // ---- Pin ltx-2-mlx to dcd639e (SHIP-BLOCKER fix) ----------------------
+    // SHIP-BLOCKER history: dgrauet/ltx-2-mlx upstream made 100+ commits
+    // between the 0.1.0 baseline and the 0.2.0 release HEAD. Several
+    // touched the audio path (570cce8, ca784dd, 22adef1) and empirically
+    // produced -22 dB output amplitude — peaks at -37 dB vs the working
+    // baseline's -15 dB peaks. The "fixes" claim to align MLX numerics with
+    // PyTorch reference, but the LTX 2.3 weights were trained against the
+    // pre-fix MLX behavior, so post-fix output is quieter / hissy.
+    //
+    // dcd639e is the original "complete MLX port" commit at version 0.1.0,
+    // which the user verified produces the expected audio levels. We pin
+    // the working tree there explicitly. Bisecting the 100-commit range
+    // for the actual regression is post-launch work.
+    //
+    // Idempotency: `git checkout` is safe to re-run on every install /
+    // resume install — already-on-dcd639e is a no-op.
+    {
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: ["git fetch origin", "git checkout dcd639e"]
+      }
+    },
+
     // ---- Force Python 3.11 venv (SHIP-BLOCKER fix) ------------------------
     // Pinokio's `venv: "env"` shortcut creates a venv using whatever python
     // is on `conda activate base` — on machines where conda's base env is
