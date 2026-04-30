@@ -147,6 +147,23 @@ module.exports = {
       }
     },
 
+    // ---- Symlink transformer.safetensors -> transformer-distilled.safetensors
+    // SHIP-BLOCKER history: at the dcd639e pin (0.1.0), the loader hardcodes
+    //   load_split_safetensors(model_dir / "transformer.safetensors", ...)
+    // But the published Q4 model repo uses the 0.2.0+ naming convention with
+    // split variants (transformer-distilled.safetensors, transformer-dev.
+    // safetensors, transformer-distilled-1.1.safetensors). The 0.2.0+ code
+    // resolves the right variant from split_model.json; the 0.1.0 code does
+    // not. A relative symlink bridges the gap with zero disk overhead.
+    // `ln -sf` is idempotent (overwrites stale symlink, no-op if correct).
+    {
+      method: "shell.run",
+      params: {
+        path: "mlx_models/ltx-2.3-mlx-q4",
+        message: ["ln -sf transformer-distilled.safetensors transformer.safetensors"]
+      }
+    },
+
     // ---- Download Gemma 4-bit text encoder (~6 GB) ------------------------
     {
       method: "shell.run",
