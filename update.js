@@ -5,16 +5,16 @@ module.exports = {
       method: "shell.run",
       params: { message: "git pull" }
     },
-    // Re-pin ltx-2-mlx to dcd639e — DO NOT `git pull` blindly here.
-    // upstream's 0.2.0 regressed audio amplitude by 22 dB; until we bisect
-    // the actual regression and either patch it or move forward to a
-    // post-fix commit, we hold dcd639e steady. install.js does the same.
-    // git fetch is safe (just updates remote refs); checkout is idempotent.
+    // Pull ltx-2-mlx HEAD. (We previously pinned to dcd639e thinking audio
+    // regressed in dgrauet's commits; turned out the audio bug was in mlx
+    // 0.31.2 itself. HEAD has the APIs the panel needs — cfg_scale on
+    // extend_from_video, the I2V structure our OOM patch targets, etc.
+    // git fetch + checkout main is idempotent.)
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
-        message: ["git fetch origin", "git checkout dcd639e"]
+        message: ["git fetch origin", "git checkout main", "git pull --ff-only origin main"]
       }
     },
     // Force-downgrade mlx to 0.31.1 — fixes 22 dB audio regression on mlx

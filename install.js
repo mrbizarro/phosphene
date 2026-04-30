@@ -48,29 +48,16 @@ module.exports = {
       }
     },
 
-    // ---- Pin ltx-2-mlx to dcd639e (SHIP-BLOCKER fix) ----------------------
-    // SHIP-BLOCKER history: dgrauet/ltx-2-mlx upstream made 100+ commits
-    // between the 0.1.0 baseline and the 0.2.0 release HEAD. Several
-    // touched the audio path (570cce8, ca784dd, 22adef1) and empirically
-    // produced -22 dB output amplitude — peaks at -37 dB vs the working
-    // baseline's -15 dB peaks. The "fixes" claim to align MLX numerics with
-    // PyTorch reference, but the LTX 2.3 weights were trained against the
-    // pre-fix MLX behavior, so post-fix output is quieter / hissy.
-    //
-    // dcd639e is the original "complete MLX port" commit at version 0.1.0,
-    // which the user verified produces the expected audio levels. We pin
-    // the working tree there explicitly. Bisecting the 100-commit range
-    // for the actual regression is post-launch work.
-    //
-    // Idempotency: `git checkout` is safe to re-run on every install /
-    // resume install — already-on-dcd639e is a no-op.
-    {
-      method: "shell.run",
-      params: {
-        path: "ltx-2-mlx",
-        message: ["git fetch origin", "git checkout dcd639e"]
-      }
-    },
+    // ---- ltx-2-mlx version: use HEAD (the original audio bug was MLX 0.31.2,
+    //      not anything dgrauet shipped). Earlier we briefly pinned to
+    //      dcd639e thinking the audio regression was in dgrauet's commits;
+    //      empirical follow-up showed pinning mlx==0.31.1 alone fixes audio
+    //      on HEAD. dcd639e was missing several APIs the panel calls
+    //      (cfg_scale on extend_from_video, the 0.2.0 I2V structure our OOM
+    //      patch targets, split_model.json filename resolution). HEAD with
+    //      the mlx pin gives us working audio AND working Extend / I2V.
+    //      Leaving this comment as a marker so we don't re-introduce the
+    //      pin without re-verifying the audio path. ----
 
     // ---- Force Python 3.11 venv (SHIP-BLOCKER fix) ------------------------
     // Pinokio's `venv: "env"` shortcut creates a venv using whatever python
@@ -159,22 +146,9 @@ module.exports = {
       }
     },
 
-    // ---- Symlink transformer.safetensors -> transformer-distilled.safetensors
-    // SHIP-BLOCKER history: at the dcd639e pin (0.1.0), the loader hardcodes
-    //   load_split_safetensors(model_dir / "transformer.safetensors", ...)
-    // But the published Q4 model repo uses the 0.2.0+ naming convention with
-    // split variants (transformer-distilled.safetensors, transformer-dev.
-    // safetensors, transformer-distilled-1.1.safetensors). The 0.2.0+ code
-    // resolves the right variant from split_model.json; the 0.1.0 code does
-    // not. A relative symlink bridges the gap with zero disk overhead.
-    // `ln -sf` is idempotent (overwrites stale symlink, no-op if correct).
-    {
-      method: "shell.run",
-      params: {
-        path: "mlx_models/ltx-2.3-mlx-q4",
-        message: ["ln -sf transformer-distilled.safetensors transformer.safetensors"]
-      }
-    },
+    // ---- (no transformer.safetensors symlink needed on HEAD — 0.2.0 reads
+    //      split_model.json to resolve transformer-distilled.safetensors.
+    //      Symlink was a workaround for the dcd639e pin we no longer use.) ----
 
     // ---- Download Gemma 4-bit text encoder (~6 GB) ------------------------
     {
