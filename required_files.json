@@ -56,8 +56,12 @@
   ],
 
   "env": {
-    "_comment": "Marker that the venv exists. Pinokio creates `env/`; manual `uv venv` creates `.venv/`. Either is acceptable.",
+    "_comment": "Marker that the venv exists. SHIP-BLOCKER history: we used to point at `bin/python3.11` but uv creates that as a symlink chain (python3.11 -> python -> ~/pinokio/cache/.../uv/python/.../python3.11). Pinokio's info.exists() check returned false on that chain, so the menu rendered Install instead of Start even after a complete install — confirmed by cocktailpeanut. Use `pyvenv.cfg` instead: it's a tiny ASCII file uv writes to every venv root, never a symlink, never moves. `bin/activate` is the same kind of plain file; we keep it as a secondary check. The bin/python3.11 entries stay last as a final fallback for older installs.",
     "marker_paths": [
+      "ltx-2-mlx/env/pyvenv.cfg",
+      "ltx-2-mlx/.venv/pyvenv.cfg",
+      "ltx-2-mlx/env/bin/activate",
+      "ltx-2-mlx/.venv/bin/activate",
       "ltx-2-mlx/env/bin/python3.11",
       "ltx-2-mlx/.venv/bin/python3.11"
     ]
