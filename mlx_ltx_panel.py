@@ -2055,19 +2055,97 @@ HTML = r"""<!doctype html>
       padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
     }
     .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+    /* "by Bizarro" link in the top-right of the header. Bumped from a
+       muted 11px chip to something with actual presence — accent-color
+       border ring + bold text + subtle lift on hover. The avatar is a
+       hand-drawn portrait so deserves to read at a glance. */
     .creator-link {
-      display: inline-flex; align-items: center; gap: 7px;
-      color: var(--muted); font-size: 11px; text-decoration: none;
-      padding: 3px 8px 3px 3px; border-radius: 999px;
-      border: 1px solid var(--border); background: var(--panel-2);
-      transition: 0.12s;
+      display: inline-flex; align-items: center; gap: 9px;
+      color: var(--fg, #d8e0ee); font-size: 12px; font-weight: 500;
+      text-decoration: none;
+      padding: 4px 12px 4px 4px; border-radius: 999px;
+      border: 1.5px solid var(--accent, #5a7cff);
+      background: linear-gradient(135deg, rgba(90,124,255,0.10), rgba(90,124,255,0.02));
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+      box-shadow: 0 0 0 1px rgba(90,124,255,0.18), 0 2px 8px rgba(90,124,255,0.10);
     }
-    .creator-link:hover { color: var(--accent-bright); border-color: var(--accent); }
+    .creator-link:hover {
+      color: var(--accent-bright, #93a8ff);
+      border-color: var(--accent-bright, #93a8ff);
+      transform: translateY(-1px);
+      box-shadow: 0 0 0 1px rgba(147,168,255,0.30), 0 4px 14px rgba(90,124,255,0.25);
+    }
     .creator-avatar {
-      width: 22px; height: 22px; border-radius: 50%;
+      width: 28px; height: 28px; border-radius: 50%;
       object-fit: cover; display: block;
-      box-shadow: 0 0 0 1px var(--border);
+      box-shadow: 0 0 0 2px var(--accent, #5a7cff), 0 0 0 3px var(--bg, #0d1017);
     }
+    .creator-link .x-icon {
+      font-size: 10px; opacity: 0.6; margin-left: -2px;
+      letter-spacing: 0.05em;
+    }
+
+    /* Inline models card — sits at the top of the form, where users
+       actually look. Four states drawn from /status:
+         missing-base    big red CTA, blocks generation
+         missing-current big amber CTA when the SELECTED mode needs Q8
+         downloading     green progress bar with last hf line
+         hidden          (everything ready, no urgency — link in header)
+       See updateModelsCard() in the JS. */
+    .models-inline {
+      border-radius: 10px; padding: 12px 14px; margin-bottom: 14px;
+      border: 1.5px solid var(--border, #2a3140);
+      background: var(--panel-2, #131724);
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    .models-inline.state-missing  { border-color: rgba(220,80,80,0.55); background: rgba(220,80,80,0.06); }
+    .models-inline.state-warn     { border-color: rgba(210,153,34,0.55); background: rgba(210,153,34,0.06); }
+    .models-inline.state-downloading {
+      border-color: var(--accent, #5a7cff);
+      background: rgba(90,124,255,0.07);
+      animation: keyframes-modeldl 1.6s ease-in-out infinite;
+    }
+    .models-inline-body {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      gap: 12px; align-items: center;
+    }
+    .models-inline-icon { font-size: 22px; line-height: 1; text-align: center; }
+    .models-inline-text { min-width: 0; }
+    .models-inline-text .ttl { font-weight: 600; font-size: 13px; color: var(--fg, #d8e0ee); }
+    .models-inline-text .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .models-inline-progress { margin-top: 8px; }
+    .models-inline-progress .bar {
+      height: 6px; border-radius: 3px; background: rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+    .models-inline-progress .bar .fill {
+      height: 100%; background: var(--accent, #5a7cff);
+      transition: width 250ms ease;
+    }
+    .models-inline-progress .last {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--muted); margin-top: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .models-inline-actions button {
+      padding: 7px 14px; border-radius: 7px;
+      background: var(--accent, #5a7cff); color: white; border: none;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      white-space: nowrap;
+    }
+    .models-inline-actions button:hover { background: var(--accent-bright, #7e98ff); }
+    .models-inline-actions button.danger { background: rgba(220,80,80,0.7); }
+    .models-inline-actions button.ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border, #2a3140); font-weight: 500;
+    }
+    .models-inline-link {
+      display: block; margin-top: 10px;
+      font-size: 11px; color: var(--muted); text-align: right;
+      cursor: pointer; text-decoration: none;
+    }
+    .models-inline-link:hover { color: var(--accent-bright, #93a8ff); }
 
     /* ===== MAIN LAYOUT ===== */
     .layout {
@@ -2508,9 +2586,10 @@ HTML = r"""<!doctype html>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
-  <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Mr. Bizarro on X">
+  <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
     <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
     <span>by Bizarro</span>
+    <span class="x-icon">↗ X</span>
   </a>
 </header>
 
@@ -2520,6 +2599,27 @@ HTML = r"""<!doctype html>
   <aside class="form-pane">
     <form id="genForm">
       <input type="hidden" name="preset_label" id="preset_label" value="">
+
+      <!-- Inline models card. Sits ABOVE the mode picker because for many
+           users the very first thing they need to do is download base
+           weights — burying that in a header modal hides the whole point
+           of the panel. The card has four visual states it cycles through
+           depending on /status data; see updateModelsCard() in the JS. -->
+      <div id="modelsInline" class="models-inline" style="display:none">
+        <div class="models-inline-body">
+          <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
+          <div class="models-inline-text">
+            <div class="ttl" id="modelsInlineTitle">Download required</div>
+            <div class="sub" id="modelsInlineSub">Click to start.</div>
+            <div class="models-inline-progress" id="modelsInlineProgress" style="display:none">
+              <div class="bar"><div class="fill" id="modelsInlineFill" style="width:0%"></div></div>
+              <div class="last" id="modelsInlineLast"></div>
+            </div>
+          </div>
+          <div class="models-inline-actions" id="modelsInlineActions"></div>
+        </div>
+        <a class="models-inline-link" onclick="openModelsModal()">Manage all models →</a>
+      </div>
 
       <h2>Mode</h2>
       <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
@@ -2879,11 +2979,16 @@ function setMode(mode) {
     setQuality('high');
   }
   updateDerived();
+  // Refresh the inline models card immediately — switching to FFLF when
+  // Q8 is missing should surface the Download Q8 CTA without waiting for
+  // the next 1.5s poll tick.
+  if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 function setQuality(q) {
   document.getElementById('quality').value = q;
   document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.quality === q));
   applyQuality();
+  if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 function setAspect(a) {
   document.getElementById('aspect').value = a;
@@ -3180,10 +3285,15 @@ async function api(path, method = 'GET', body = null) {
 }
 
 // ====== Poll ======
+// Cache of the latest /status response so non-poll callers (setMode,
+// setQuality) can refresh tier-gated UI without waiting for the next tick.
+let LAST_STATUS = null;
+
 async function poll() {
   let s;
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
   try { s = await (await fetch(url)).json(); } catch (e) { return; }
+  LAST_STATUS = s;
 
   // Memory
   const m = s.memory;
@@ -3281,6 +3391,9 @@ async function poll() {
   if (document.getElementById('modelsModal').style.display !== 'none') {
     refreshModelsModal({ silent: true });
   }
+  // Inline models card — top-of-form, big, can't miss it. State logic
+  // lives in updateModelsCard so we don't bloat poll() further.
+  updateModelsCard(s);
 
   // Queue pill + tab badge
   const qp = document.getElementById('queuePill');
@@ -3512,6 +3625,92 @@ document.getElementById('genForm').addEventListener('submit', async e => {
   await api('/queue/add','POST',fd);
   poll();
 });
+
+// ====== Inline models card (top of form) ======
+// Displays what the current install needs RIGHT WHERE the user is about
+// to act. Beats burying the download CTA in a header modal. State picked
+// from /status: base missing → red blocker, current-mode-needs-Q8 →
+// amber prompt, downloading → animated progress, all-good → hidden.
+function updateModelsCard(s) {
+  const card     = document.getElementById('modelsInline');
+  const icon     = document.getElementById('modelsInlineIcon');
+  const title    = document.getElementById('modelsInlineTitle');
+  const sub      = document.getElementById('modelsInlineSub');
+  const progress = document.getElementById('modelsInlineProgress');
+  const fill     = document.getElementById('modelsInlineFill');
+  const last     = document.getElementById('modelsInlineLast');
+  const actions  = document.getElementById('modelsInlineActions');
+  if (!card) return;
+
+  const baseOk = !!s.base_available;
+  const q8Ok   = !!s.q8_available;
+  const dl     = s.download && s.download.active ? s.download : null;
+  const tier   = s.tier || {};
+
+  // Reset state classes — we set the right one below.
+  card.classList.remove('state-missing', 'state-warn', 'state-downloading');
+  progress.style.display = 'none';
+
+  // ----- Active download takes precedence over everything ------------------
+  if (dl) {
+    card.style.display = '';
+    card.classList.add('state-downloading');
+    icon.textContent = '↓';
+    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model' };
+    title.textContent = `Downloading ${labelByKey[dl.key] || dl.repo_id}`;
+    const elapsed = Math.max(0, Math.round((Date.now()/1000) - (dl.started_ts || 0)));
+    sub.textContent = `${elapsed}s elapsed · resumable if interrupted`;
+    progress.style.display = '';
+    // Try to extract a percent from the last hf line (tqdm format).
+    const m = (dl.last_line || '').match(/\b(\d{1,3})%/);
+    fill.style.width = m ? `${Math.min(100, parseInt(m[1]))}%` : '15%';
+    last.textContent = dl.last_line || 'starting…';
+    actions.innerHTML = `<button class="danger" onclick="cancelDownload()">Cancel</button>`;
+    return;
+  }
+
+  // ----- Base missing — hard block, the panel can't render anything --------
+  if (!baseOk) {
+    card.style.display = '';
+    card.classList.add('state-missing');
+    icon.textContent = '⚠';
+    title.textContent = 'Base models needed before you can render';
+    const missing = (s.base_missing || []).length;
+    sub.innerHTML = `Q4 (~25 GB) and Gemma (~6 GB) are required. Click below — downloads resume if interrupted.${
+      missing ? ` <span style="color:var(--muted)">(${missing} files left)</span>` : ''
+    }`;
+    actions.innerHTML = (s.hf_available ?? true)
+      ? `<button onclick="startDownload('q4')">Download Q4 (25 GB)</button>`
+      : `<button disabled title="hf binary not found — reinstall via Pinokio">hf missing</button>`;
+    return;
+  }
+
+  // ----- User picked a mode that needs Q8, but Q8 isn't there --------------
+  // FFLF + Extend + High quality all need Q8. Surface the CTA *only* when
+  // the user is about to do one of those — no point nagging a T2V user
+  // about Q8 if they'll never use it.
+  const needsQ8 = (currentMode === 'keyframe')
+                || (document.getElementById('quality').value === 'high');
+  if (needsQ8 && !q8Ok && tier.allows_q8 !== false) {
+    card.style.display = '';
+    card.classList.add('state-warn');
+    icon.textContent = '⬇';
+    const reason = currentMode === 'keyframe' ? 'FFLF needs the Q8 model'
+                                              : 'High quality needs the Q8 model';
+    title.textContent = reason;
+    const missing = (s.q8_missing || []).length;
+    sub.innerHTML = `Q8 (~25 GB) is a separate one-time download. Resumable.${
+      missing && missing < 8 ? ` <span style="color:var(--muted)">(${missing} files left — partial install detected)</span>` : ''
+    }`;
+    actions.innerHTML = (s.hf_available ?? true)
+      ? `<button onclick="startDownload('q8')">Download Q8 (25 GB)</button>`
+      : `<button disabled>hf missing</button>`;
+    return;
+  }
+
+  // ----- All good or not currently relevant — hide -------------------------
+  card.style.display = 'none';
+}
 
 // ====== Tier gating ======
 // Disables the FFLF / Extend mode pills and the High quality pill when
