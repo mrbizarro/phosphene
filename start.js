@@ -19,14 +19,24 @@ module.exports = {
         LTX_HELPER_PYTHON: "{{cwd}}/ltx-2-mlx/env/bin/python3.11"
       },
       message: ["python mlx_ltx_panel.py"],
+      // SHIP-BLOCKER history: we used to have extra `/errno/i` and `/error:/i`
+      // patterns here (cargo-culted from comfy.git's start.js) with break:false
+      // intended to just keep the shell running through Python tracebacks. But
+      // Pinokio's event handler invokes downstream lookups on EVERY matched
+      // event — when the panel ever logged a line containing "Errno" (Python's
+      // `OSError [Errno N]` format), Pinokio tried to stat a file literally
+      // named "Errno" inside the install dir and surfaced
+      //   "ENOENT: no such file or directory, stat '.../phosphene.git/Errno'"
+      // even though clicking Start was the trigger, not a real error from us.
+      // Removed those patterns. We only need the URL match to advance to step 2.
+      // Capture group `(http://...)` mirrors comfy.git's working pattern so
+      // input.event[1] is the URL (full line is event[0]).
       on: [
-        { event: "/http:\\/\\/\\S+/", done: true },
-        { event: "/error:/i", break: false },
-        { event: "/errno/i",  break: false }
+        { event: "/(http:\\/\\/[a-zA-Z0-9.]+:[0-9]+)/", done: true }
       ]
     }
   }, {
     method: "local.set",
-    params: { url: "{{input.event[0]}}" }
+    params: { url: "{{input.event[1]}}" }
   }]
 }
