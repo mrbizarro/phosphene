@@ -2163,6 +2163,35 @@ HTML = r"""<!doctype html>
       padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
     }
     .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+
+    /* Toggle pill — used for binary on/off controls (e.g. "No music")
+       living next to ghost-btn actions. Same height + radius family as
+       ghost-btn so they line up cleanly, but visually distinct: when ON,
+       fills with the accent color so it reads as an active filter. */
+    .toggle-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+      user-select: none; transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+      white-space: nowrap;
+    }
+    .toggle-pill:hover { border-color: var(--accent); color: var(--text); }
+    .toggle-pill input[type="checkbox"] {
+      position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0;
+    }
+    .toggle-pill .toggle-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--border-strong); border: 1px solid transparent;
+      transition: background 120ms ease, box-shadow 120ms ease;
+      flex-shrink: 0;
+    }
+    .toggle-pill.on {
+      background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright);
+    }
+    .toggle-pill.on .toggle-dot {
+      background: var(--accent-bright);
+      box-shadow: 0 0 0 2px rgba(47,129,247,0.25);
+    }
     /* "by Bizarro" link in the top-right of the header. Bumped from a
        muted 11px chip to something with actual presence — accent-color
        border ring + bold text + subtle lift on hover. The avatar is a
@@ -2878,30 +2907,36 @@ HTML = r"""<!doctype html>
            default soundtrack tendency. Music is annoying in editing because
            it can't be cleanly removed without affecting the dialogue track.
            Recommended for clips you plan to score yourself in post. -->
-      <div class="row-actions" style="margin-top:6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
-        <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance prompt with Gemma</button>
-        <label class="hint" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none">
-          <input type="checkbox" id="noMusic" name="no_music" style="margin:0">
-          <span>🚫🎵 No music — voice + ambient only</span>
+      <div class="row-actions" style="margin-top:8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+        <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
+        <label class="toggle-pill" id="noMusicPill" title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
+          <input type="checkbox" id="noMusic" name="no_music">
+          <span class="toggle-dot"></span>
+          <span>No music</span>
         </label>
       </div>
 
-      <!-- Mode-specific: audio (i2v_clean_audio only — accessed via Advanced) -->
+      <!-- Advanced — power-user options. We trimmed two things in cleanup:
+           1. Removed the "Enhance prompt" checkbox: it was labeled "CLI only,
+              ignored by helper" — actual dead code. The Enhance button next
+              to the prompt textarea is the real thing.
+           2. The I2V audio mode (mux external audio over LTX-generated video)
+              only applies in I2V mode; the panel auto-hides it elsewhere via
+              `.mode-only` on the wrapper. -->
       <details>
         <summary>Advanced</summary>
-        <label class="lbl">I2V audio mode</label>
-        <select id="i2vMode">
-          <option value="i2v" selected>Joint audio (LTX generates audio synced with visual)</option>
-          <option value="i2v_clean_audio">Replace LTX audio with external file (mux)</option>
-        </select>
-        <div class="mode-only" id="audioSection">
-          <label class="lbl">Audio file</label>
-          <input name="audio" id="audio">
+        <div class="mode-only" id="i2vAudioModeSection">
+          <label class="lbl">I2V audio source</label>
+          <select id="i2vMode">
+            <option value="i2v" selected>Joint audio (LTX generates audio synced with the visual)</option>
+            <option value="i2v_clean_audio">Use external audio file (mux it onto LTX video)</option>
+          </select>
+          <div class="mode-only" id="audioSection">
+            <label class="lbl">Audio file path</label>
+            <input name="audio" id="audio" placeholder="/path/to/your/track.wav">
+          </div>
         </div>
-        <label class="check">
-          <input type="checkbox" name="enhance" id="enhance"> Enhance prompt (Gemma rewrite — CLI only, ignored by helper)
-        </label>
-        <label class="check">
+        <label class="check" style="margin-top:6px">
           <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done
         </label>
       </details>
@@ -3300,6 +3335,11 @@ function updateDerived() {
   document.getElementById('keyframeSection').classList.toggle('show', currentMode === 'keyframe');
   document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
+  // I2V audio source picker (Advanced) — only relevant in I2V flow.
+  // In T2V/Extend/FFLF the model generates audio jointly; there's nothing
+  // to swap out, so the dropdown is just noise.
+  const i2vAudioSec = document.getElementById('i2vAudioModeSection');
+  if (i2vAudioSec) i2vAudioSec.classList.toggle('show', inI2V);
   // In image flows the aspect picker is the only sizing control. Width/height
   // auto-derive from aspect+quality so the source image drives the framing
   // and we don't accidentally cover-crop a 16:9 photo into 9:16.
@@ -3834,9 +3874,30 @@ async function queueBatch() {
   if (r && r.added) { document.getElementById('batchPrompts').value = ''; poll(); }
 }
 
+// ====== "No music" toggle pill ======
+//
+// Custom pill replacing the default checkbox. Click anywhere on the pill
+// to flip the hidden checkbox + reflect state in the UI (.on class drives
+// the accent fill from the toggle-pill CSS). Backed by a real <input
+// type=checkbox> inside the label, so FormData still picks it up the
+// normal way and screen readers / keyboard nav still work.
+(function () {
+  const pill = document.getElementById('noMusicPill');
+  const cb = document.getElementById('noMusic');
+  if (!pill || !cb) return;
+  const sync = () => pill.classList.toggle('on', cb.checked);
+  cb.addEventListener('change', sync);
+  pill.addEventListener('click', e => {
+    // <label> already toggles the checkbox; we just need to refresh the
+    // visual state on the next tick AFTER the native toggle has fired.
+    setTimeout(sync, 0);
+  });
+  sync();
+})();
+
 // ====== Form submit ======
 //
-// "No music" checkbox: appends a clear audio constraint to the prompt
+// "No music" toggle: appends a clear audio constraint to the prompt
 // before submission so the LTX 2.3 vocoder skips the soundtrack/score it
 // otherwise tends to add. Music is hard to remove cleanly from a stem
 // after the fact (it shares spectral space with dialogue), so users who
