@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-readme.png" alt="Phosphene" width="780">
+  <img src="assets/phosphene_banner.png" alt="Phosphene" width="100%">
 </p>
 
 <p align="center">
