@@ -4084,6 +4084,13 @@ document.addEventListener('click', (e) => {
 function openTierModal() {
   const modal = document.getElementById('tierModal');
   modal.style.display = 'flex';
+  // Defensive: show "loading" state immediately so the modal never appears
+  // with the body completely blank (which is what happens if the panel
+  // process is dead and fetch fails — looked like a "buggy bug" to a user
+  // who was just kicked off a stale browser view).
+  document.getElementById('tierModalTitle').textContent = 'Hardware tier';
+  document.getElementById('tierModalBlurb').innerHTML = '<em>Loading…</em>';
+  document.getElementById('tierCapsList').innerHTML = '';
   // Tier doesn't change at runtime — RAM is fixed at boot — so a single
   // fetch on open is plenty. No need for live polling here.
   fetch('/status').then(r => r.json()).then(s => {
@@ -4162,6 +4169,14 @@ function openTierModal() {
         </div>
         <span></span>
       </li>`).join('');
+  }).catch(err => {
+    // Panel might be dead, status endpoint unreachable, or response not JSON.
+    // Replace the loading state with a visible error so the modal doesn't
+    // look "broken" with empty content.
+    document.getElementById('tierModalBlurb').innerHTML =
+      '<div style="color: var(--danger, #f85149)">Could not load tier info — the panel server may have stopped responding. Check the Pinokio terminal and restart the panel if needed.</div>';
+    document.getElementById('tierCapsList').innerHTML = '';
+    console.error('tier modal fetch failed:', err);
   });
 }
 function closeTierModal() { document.getElementById('tierModal').style.display = 'none'; }
