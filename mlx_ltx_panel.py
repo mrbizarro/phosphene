@@ -4244,25 +4244,78 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
     /* LoRA picker — collapsible <details>. Compact list rows (Y1.007).
-       Earlier iterations went too far in opposite directions: the very
-       first version was a 4-column grid (cramped), then we rebuilt as
-       big card-stack with autoplaying video previews (too tall, hard
-       to scroll, distracting). User feedback: drop the previews, make
-       the rows quick to scan, keep large libraries usable.
-       This version: each LoRA = one ~32-44px row. Active rows expand
-       to show a strength slider inline; inactive rows are compact. A
-       filter box appears at top once 5+ LoRAs are installed. */
-    .loras-summary {
-      cursor: pointer; user-select: none; font-size: 12px;
-      font-weight: 600; color: var(--text);
-      display: flex; align-items: center; gap: 8px;
-      padding: 6px 0;
+       Distinct visual section so users notice it (Y1.008): wrapped in a
+       bordered container, separator dividers above/below, custom chevron
+       in the summary header so it's obviously expandable.
+       Each LoRA = one ~36px row. Active rows expand to show a strength
+       slider inline. Filter input appears at 5+ LoRAs. */
+
+    /* Thin horizontal separator used both above and below the LoRAs
+       section. Reused in case we want it elsewhere in the form. */
+    .form-divider {
+      height: 1px; margin: 16px 0 14px;
+      background: linear-gradient(to right,
+        transparent, var(--border) 18%, var(--border) 82%, transparent);
     }
-    .loras-summary .hint { font-weight: 400; }
+    /* Bordered container wrapping the whole <details>. Subtle accent
+       background so the section pulls the eye but doesn't shout. */
+    .loras-section {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.015);
+      overflow: hidden;     /* keeps the summary's hover bg inside the radius */
+    }
+    /* Hide the native disclosure marker; we render our own chevron
+       inline so it can be sized + animated consistently. */
+    .loras-section > summary { list-style: none; }
+    .loras-section > summary::-webkit-details-marker { display: none; }
+    .loras-summary {
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 10px;
+      padding: 11px 14px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      transition: background 100ms;
+    }
+    .loras-summary:hover { background: rgba(255,255,255,0.02); }
+    .loras-section[open] .loras-summary {
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.025);
+    }
+    .loras-summary .loras-chevron {
+      display: inline-block; width: 14px;
+      font-size: 11px; color: var(--muted);
+      transform: rotate(-90deg);    /* points right when collapsed */
+      transition: transform 140ms ease;
+      text-align: center;
+    }
+    .loras-section[open] .loras-summary .loras-chevron {
+      transform: rotate(0deg);      /* points down when open */
+      color: var(--accent-bright, #93a8ff);
+    }
+    .loras-summary .loras-title {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.01em;
+    }
+    .loras-summary .loras-meta {
+      margin-left: auto; font-size: 11px; font-weight: 400;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    /* Body padding + internal layout. All children get consistent
+       spacing without each one declaring its own margin. */
+    .loras-body {
+      display: flex; flex-direction: column;
+      gap: 10px; padding: 12px 14px 14px;
+    }
+    .loras-actions {
+      display: flex; gap: 8px;
+      padding-top: 6px;
+      border-top: 1px dashed var(--border);
+    }
     .lora-filter {
       width: 100%; padding: 6px 9px; border-radius: 6px;
       border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
       color: var(--text); font-size: 12px;
+      box-sizing: border-box;
     }
     .lora-filter:focus { outline: 1px solid var(--accent); }
     .loras-list {
@@ -4906,33 +4959,41 @@ HTML = r"""<!doctype html>
            a given session, and inline because hiding it behind a modal
            makes it easy to forget. Loaded from /loras on open; the
            "Browse CivitAI" affordance opens the search modal. -->
-      <details id="lorasDetails" open style="margin-top:14px">
+      <!-- LoRAs section — visually distinct from the surrounding form so
+           users notice "oh, there's a whole controllable area here." A
+           thin separator above + bordered container + a clear chevron
+           on the summary. Default open so first-time users see what's
+           inside without hunting for the disclosure triangle. -->
+      <div class="form-divider"></div>
+      <details id="lorasDetails" open class="loras-section">
         <summary class="loras-summary">
-          <span>LoRAs</span>
-          <span class="hint" id="lorasSummaryCount">none active</span>
+          <span class="loras-chevron" aria-hidden="true">▾</span>
+          <span class="loras-title">LoRAs</span>
+          <span class="loras-meta" id="lorasSummaryCount">none active</span>
         </summary>
         <div class="loras-body" id="lorasBody">
           <!-- Filter/search box. Shows up only when 5+ LoRAs are
                installed; below that it's just visual noise. Filters by
                name AND trigger words (case-insensitive substring). -->
-          <div id="lorasFilterRow" style="display:none; margin: 6px 0 8px;">
+          <div id="lorasFilterRow" style="display:none;">
             <input type="text" id="lorasFilter" class="lora-filter"
                    placeholder="Filter LoRAs… (name or trigger word)"
                    oninput="renderLorasList()">
           </div>
-          <div class="hint" id="lorasEmpty" style="margin-top:8px">
+          <div class="hint" id="lorasEmpty">
             Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
             to use them, or browse CivitAI below. Each LoRA picks up an
             optional sidecar <code>.json</code> with name + trigger words +
             recommended strength.
           </div>
           <div class="loras-list" id="lorasList"></div>
-          <div class="loras-actions" style="margin-top:10px; display:flex; gap:8px">
+          <div class="loras-actions">
             <button type="button" class="ghost-btn" onclick="refreshLoras()">↻ Rescan</button>
             <button type="button" class="ghost-btn" onclick="openCivitaiModal()">🔍 Browse CivitAI</button>
           </div>
         </div>
       </details>
+      <div class="form-divider"></div>
       <!-- Hidden field; updated by the LoRA picker JS to a JSON-encoded
            array of {path, strength} that make_job parses. -->
       <input type="hidden" id="lorasJson" name="loras" value="">
