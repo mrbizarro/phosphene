@@ -4039,6 +4039,93 @@ HTML = r"""<!doctype html>
     .car-card.active { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
     .car-card.hidden-card { opacity: 0.4; }
     .car-card video { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
+    /* ⓘ info button overlaid on the card thumbnail. Subtle until hover so
+       it doesn't compete with the video preview itself. Click → opens
+       outputInfoModal with the full sidecar data. */
+    .car-card { position: relative; }
+    .car-card .car-info-btn {
+      position: absolute; top: 6px; right: 6px;
+      width: 24px; height: 24px; padding: 0;
+      border-radius: 6px;
+      border: 1px solid rgba(0,0,0,0.5);
+      background: rgba(15,18,28,0.7); backdrop-filter: blur(4px);
+      color: rgba(255,255,255,0.85);
+      font-size: 14px; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer; opacity: 0; transition: opacity 100ms, background 100ms;
+      z-index: 2;
+    }
+    .car-card:hover .car-info-btn,
+    .car-card.active .car-info-btn { opacity: 1; }
+    .car-card .car-info-btn:hover { background: rgba(20,25,40,0.92); color: #fff; }
+
+    /* Output info modal layout. Reuses .models-modal scaffolding. */
+    .output-info-body {
+      display: flex; flex-direction: column; gap: 14px;
+      max-height: 70vh; overflow-y: auto; padding-right: 4px;
+    }
+    .oi-section {
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; background: rgba(255,255,255,0.015);
+    }
+    .oi-section-title {
+      font-size: 11px; font-weight: 600;
+      color: var(--accent-bright, #93a8ff);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .oi-grid {
+      display: grid; grid-template-columns: 110px 1fr;
+      gap: 4px 12px; margin: 0;
+    }
+    .oi-grid dt {
+      color: var(--muted); font-size: 11px;
+      align-self: center;
+    }
+    .oi-grid dd {
+      margin: 0; color: var(--text); font-size: 12px;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .oi-grid dd code {
+      background: rgba(255,255,255,0.04); padding: 1px 6px;
+      border-radius: 4px; font-size: 11px;
+    }
+    .oi-prompt {
+      font-size: 12px; line-height: 1.5; color: var(--text);
+      background: var(--bg-2, #0a0c14);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 10px; max-height: 200px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .oi-copy {
+      font-size: 10px; padding: 2px 8px;
+      border-radius: 4px; border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04); color: var(--muted);
+      cursor: pointer; font-weight: 500;
+      letter-spacing: 0;
+    }
+    .oi-copy:hover { color: var(--text); border-color: var(--accent); }
+    .oi-lora-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 6px 8px; border-radius: 5px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      font-size: 12px; margin-bottom: 4px;
+    }
+    .oi-lora-row:last-child { margin-bottom: 0; }
+    .oi-lora-row .oi-lora-name {
+      flex: 1; color: var(--text); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .oi-lora-row .oi-lora-strength {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted); font-size: 11px;
+    }
+    .oi-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: 4px;
+    }
     .car-card .info { padding: 6px 8px; font-size: 10px; }
     .car-card .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .car-card .sub { color: var(--muted); margin-top: 2px; }
@@ -5308,6 +5395,25 @@ HTML = r"""<!doctype html>
      full UI now: click while behind → confirm + git pull; click while
      current → live re-check. See versionPillClick() in the JS section.) -->
 
+<!-- ============== OUTPUT INFO MODAL ============== -->
+<!-- Opened by the ⓘ button on each gallery card. Shows everything we
+     wrote into the .mp4.json sidecar at render time: prompt, seed,
+     mode/quality, frames + dimensions, LoRAs used (with name + strength),
+     elapsed time, queue id, model. Plus copy-buttons for prompt + seed
+     so users can easily re-use them. -->
+<div id="outputInfoModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeOutputInfoModal()">
+  <div class="models-card" style="width: min(720px, 96vw)">
+    <div class="models-head">
+      <h2 id="outputInfoTitle">Generation info</h2>
+      <button class="ghost-btn" onclick="closeOutputInfoModal()">Close</button>
+    </div>
+    <div id="outputInfoBody" class="output-info-body">
+      <div class="hint">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <!-- ============== BOTTOM TABBED PANE ============== -->
 <aside class="bottom-pane" id="bottomPane">
   <nav class="tabs">
@@ -6093,19 +6199,26 @@ function setFilter(mode) {
 function renderCarousel() {
   const el = document.getElementById('carousel');
   if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
-  el.innerHTML = currentOutputs.map(o => `
+  el.innerHTML = currentOutputs.map(o => {
+    const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
+    return `
     <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
-         data-path="${escapeHtml(o.path)}" onclick="selectOutput('${escapeHtml(o.path)}')">
+         data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
       <video src="/file?path=${encodeURIComponent(o.path)}#t=0.5" preload="metadata" muted></video>
+      ${o.has_sidecar
+        ? `<button class="car-info-btn" type="button" title="Show generation info"
+                   onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
+        : ''}
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
         <div class="sub">${o.mtime.slice(11,16)} · ${o.size_mb.toFixed(1)} MB</div>
       </div>
       <div class="row-btns">
-        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}('${escapeHtml(o.path)}')">${o.hidden ? 'Show' : 'Hide'}</button>
-        <button onclick="event.stopPropagation(); useAsExtendSourcePath('${escapeHtml(o.path)}')">Extend</button>
+        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})">${o.hidden ? 'Show' : 'Hide'}</button>
+        <button onclick="event.stopPropagation(); useAsExtendSourcePath(${pathAttr})">Extend</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function selectOutput(path) {
@@ -6162,6 +6275,186 @@ async function loadParams() {
     if (a.w === p.width && a.h === p.height) { setAspect(k); break; }
   }
   updateDerived();
+}
+
+// ====== Output info modal ======
+//
+// Opened by the ⓘ button on each gallery card. Shows the full sidecar
+// (.mp4.json) we wrote at render time: prompt, seed, mode, dimensions,
+// frames, steps, LoRAs used (with display names + strengths), elapsed
+// time, queue id, model. Plus per-field copy buttons for the things
+// users actually want to reuse (prompt + seed).
+//
+// Why a modal and not inline detail-on-hover: the prompt alone can be
+// 1000+ chars; trying to render it inline next to the thumbnail would
+// blow up the gallery layout. Modal lets us scroll comfortably.
+
+let _outputInfoLastPath = null;
+
+async function openOutputInfoModal(path) {
+  _outputInfoLastPath = path;
+  const modal = document.getElementById('outputInfoModal');
+  const body = document.getElementById('outputInfoBody');
+  const title = document.getElementById('outputInfoTitle');
+  modal.style.display = 'flex';
+  body.innerHTML = '<div class="hint">Loading…</div>';
+  // Display the filename in the modal title for quick orientation.
+  const fname = path.split('/').pop();
+  if (title) title.textContent = `Generation info · ${fname}`;
+  let data;
+  try {
+    const r = await fetch('/sidecar?path=' + encodeURIComponent(path));
+    if (!r.ok) {
+      body.innerHTML = `<div class="hint">No sidecar metadata for this output (older generation, or sidecar was deleted).</div>`;
+      return;
+    }
+    data = await r.json();
+  } catch (e) {
+    body.innerHTML = `<div class="hint">Couldn't load info: ${escapeHtml(e.message || String(e))}</div>`;
+    return;
+  }
+  body.innerHTML = renderOutputInfoBody(path, data);
+}
+
+function closeOutputInfoModal() {
+  document.getElementById('outputInfoModal').style.display = 'none';
+}
+
+function _copyToClipboard(text, btn) {
+  // Best-effort copy with visual feedback. Falls back silently when the
+  // clipboard API is blocked (e.g. iframe sandboxes without permissions).
+  try {
+    navigator.clipboard.writeText(text);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1200);
+    }
+  } catch (e) { /* swallow */ }
+}
+
+function _humanSize(b) {
+  if (b == null) return '';
+  if (b < 1024) return `${b} B`;
+  if (b < 1024*1024) return `${(b/1024).toFixed(1)} KB`;
+  if (b < 1024*1024*1024) return `${(b/1024/1024).toFixed(1)} MB`;
+  return `${(b/1024/1024/1024).toFixed(2)} GB`;
+}
+
+function _humanDuration(s) {
+  if (s == null) return '';
+  if (s < 60) return `${s.toFixed(1)} s`;
+  const m = Math.floor(s / 60); const r = (s - m*60).toFixed(0);
+  return `${m} min ${r} s`;
+}
+
+function renderOutputInfoBody(path, data) {
+  const p = (data && data.params) || {};
+  const loras = Array.isArray(p.loras) ? p.loras : [];
+  const fname = path.split('/').pop();
+
+  // Try to enrich each LoRA path with its display name + trigger words
+  // by looking it up in the cached _knownUserLoras list. If the LoRA was
+  // deleted or is an HF repo id, we fall back to the raw filename.
+  const lookupLoraName = (loraPath) => {
+    if (!loraPath) return '?';
+    const known = (_knownUserLoras || []).find(l => l.path === loraPath);
+    if (known) return known.name;
+    // HF repo path? Last two path segments are usually informative.
+    if (loraPath.includes('/') && !loraPath.endsWith('.safetensors')) return loraPath;
+    return loraPath.split('/').pop().replace(/\.safetensors$/, '');
+  };
+
+  // Layout: stacked sections. Output → Generation → Prompt → LoRAs → Timing.
+  const promptText = p.prompt || '';
+  const promptAttr = JSON.stringify(promptText).replace(/"/g, '&quot;');
+  const seedAttr = JSON.stringify(String(p.seed_used != null ? p.seed_used : p.seed || '')).replace(/"/g, '&quot;');
+
+  let html = '';
+
+  // ---- Output section
+  html += `<div class="oi-section">
+    <div class="oi-section-title">Output</div>
+    <dl class="oi-grid">
+      <dt>Filename</dt><dd><code>${escapeHtml(fname)}</code></dd>
+      ${p.width && p.height ? `<dt>Dimensions</dt><dd>${p.width} × ${p.height}</dd>` : ''}
+      ${data.video_duration_sec != null ? `<dt>Duration</dt><dd>${data.video_duration_sec.toFixed(2)} s @ ${data.fps || 24} fps</dd>` : ''}
+      ${p.frames != null ? `<dt>Frames</dt><dd>${p.frames}</dd>` : ''}
+    </dl>
+  </div>`;
+
+  // ---- Generation section
+  const modeLabel = ({
+    t2v: 'Text → Video',
+    i2v: 'Image → Video',
+    i2v_clean_audio: 'Image → Video (clean audio)',
+    keyframe: 'FFLF (first + last frame)',
+    extend: 'Extend',
+  })[p.mode] || p.mode;
+  html += `<div class="oi-section">
+    <div class="oi-section-title">Generation</div>
+    <dl class="oi-grid">
+      <dt>Mode</dt><dd>${escapeHtml(modeLabel || '—')}</dd>
+      <dt>Quality</dt><dd>${escapeHtml(p.quality || 'standard')}</dd>
+      <dt>Seed</dt><dd>
+        <code>${escapeHtml(String(p.seed_used != null ? p.seed_used : p.seed || ''))}</code>
+        <button class="oi-copy" type="button" onclick="_copyToClipboard(${seedAttr}, this)">Copy</button>
+      </dd>
+      ${p.steps != null ? `<dt>Steps</dt><dd>${p.steps}</dd>` : ''}
+      ${p.hdr ? `<dt>HDR</dt><dd>on</dd>` : ''}
+      ${p.label ? `<dt>Label</dt><dd>${escapeHtml(p.label)}</dd>` : ''}
+    </dl>
+  </div>`;
+
+  // ---- Prompt section (always rendered for t2v/i2v even if empty)
+  if (promptText) {
+    html += `<div class="oi-section">
+      <div class="oi-section-title">
+        Prompt
+        <button class="oi-copy" type="button" onclick="_copyToClipboard(${promptAttr}, this)">Copy</button>
+      </div>
+      <div class="oi-prompt">${escapeHtml(promptText)}</div>
+    </div>`;
+  }
+
+  // ---- LoRAs section
+  if (loras.length) {
+    const rows = loras.map(l => {
+      const name = lookupLoraName(l.path);
+      return `<div class="oi-lora-row">
+        <span class="oi-lora-name" title="${escapeHtml(l.path || '')}">${escapeHtml(name)}</span>
+        <span class="oi-lora-strength">strength ${(l.strength != null ? l.strength : 1).toFixed(2)}</span>
+      </div>`;
+    }).join('');
+    html += `<div class="oi-section">
+      <div class="oi-section-title">LoRAs used (${loras.length})</div>
+      ${rows}
+    </div>`;
+  } else {
+    html += `<div class="oi-section">
+      <div class="oi-section-title">LoRAs used</div>
+      <div class="hint">— none —</div>
+    </div>`;
+  }
+
+  // ---- Timing + provenance
+  html += `<div class="oi-section">
+    <div class="oi-section-title">Timing</div>
+    <dl class="oi-grid">
+      ${data.started ? `<dt>Started</dt><dd>${escapeHtml(data.started)}</dd>` : ''}
+      ${data.elapsed_sec != null ? `<dt>Elapsed</dt><dd>${_humanDuration(data.elapsed_sec)}</dd>` : ''}
+      ${data.queue_id ? `<dt>Queue ID</dt><dd><code>${escapeHtml(data.queue_id)}</code></dd>` : ''}
+      ${data.model ? `<dt>Model</dt><dd><code>${escapeHtml(data.model.split('/').pop())}</code></dd>` : ''}
+    </dl>
+  </div>`;
+
+  // ---- Action row at the bottom
+  html += `<div class="oi-actions">
+    <button class="ghost-btn" type="button" onclick="closeOutputInfoModal(); selectOutput(${JSON.stringify(path).replace(/"/g,'&quot;')}); loadParams()">Load params into form</button>
+    <button class="ghost-btn" type="button" onclick="closeOutputInfoModal()">Close</button>
+  </div>`;
+
+  return html;
 }
 
 async function removeJob(id) { await fetch('/queue/remove?id='+encodeURIComponent(id),{method:'POST'}); poll(); }
