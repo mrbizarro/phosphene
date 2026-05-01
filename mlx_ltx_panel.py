@@ -134,11 +134,17 @@ _MIN_FILE_BYTES = int(_REQUIRED.get("min_size_bytes", 1024))
 # the long-standing "visually lossless" default for web video).
 OUTPUT_PRESETS: dict[str, dict[str, str]] = {
     "archival": {
+        # Internal key stays "archival" so any settings files already on
+        # disk keep working. The user-facing label is "Video production"
+        # because that's who actually picks this — colorists, editors,
+        # VFX folks who'll grade or composite the clip downstream.
         "pix_fmt": "yuv444p",
         "crf": "0",
-        "label": "Archival (lossless)",
-        "blurb": "Mathematically lossless. ~50 MB per 5s clip. Use for "
-                 "post-processing or archive masters.",
+        "label": "Video production (lossless)",
+        "blurb": "Mathematically lossless — full 4:4:4 chroma, no "
+                 "compression artifacts. ~50 MB per 5s clip. For pro "
+                 "workflows: color grading, compositing, VFX, anywhere "
+                 "you'll re-encode downstream and need every frame intact.",
     },
     "standard": {
         "pix_fmt": "yuv420p",
@@ -3078,7 +3084,7 @@ HTML = r"""<!doctype html>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
   <!-- Settings cog: opens the modal that lets users pick output codec
-       presets (Standard / Archival / Web / Custom). Sits between the
+       presets (Standard / Video production / Web / Custom). Sits between the
        runtime pills and Stop Comfy so it's findable but not loud. -->
   <button id="settingsBtn" class="icon-btn" onclick="openSettingsModal()" title="Output settings — codec, file size">
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3392,7 +3398,7 @@ HTML = r"""<!doctype html>
 
 <!-- ============== SETTINGS MODAL ============== -->
 <!-- Opened by the gear icon in the header. Lets users pick output codec
-     presets (Standard / Archival / Web) or set custom pix_fmt + crf.
+     presets (Standard / Video production / Web) or set custom pix_fmt + crf.
      Persisted to panel_settings.json; the helper subprocess restarts on
      codec change so the new ffmpeg args take effect on next job. -->
 <div id="settingsModal" class="models-modal" style="display:none"
@@ -4685,7 +4691,9 @@ async function openSettingsModal() {
   }
   const cur = _settingsCache.settings;
   const presets = _settingsCache.presets;
-  // Render preset cards (Standard, Archival, Web, Custom).
+  // Render preset cards (Standard, Video production, Web, Custom).
+  // Display order matches the typical user journey: most users want
+  // Standard, video pros pick Video production, web preview folks pick Web.
   const order = ['standard', 'archival', 'web'];
   const grid = document.getElementById('settingsPresets');
   grid.innerHTML = '';
@@ -4714,7 +4722,7 @@ async function openSettingsModal() {
     <input type="radio" name="settingsPreset" value="custom" ${cur.output_preset === 'custom' ? 'checked' : ''}>
     <div class="preset-text">
       <div class="preset-label">Custom</div>
-      <div class="preset-blurb">Set pix_fmt and CRF manually. For unusual workflows (10-bit HDR, archival masters at non-standard CRF, format-specific delivery).</div>
+      <div class="preset-blurb">Set pix_fmt and CRF manually. For unusual workflows: 10-bit HDR, format-specific delivery, or non-standard CRF for video production work.</div>
       <div class="preset-spec">pix_fmt=${cur.output_pix_fmt} · crf=${cur.output_crf}</div>
     </div>`;
   custom.addEventListener('click', () => selectPreset('custom'));

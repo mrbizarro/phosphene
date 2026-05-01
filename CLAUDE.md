@@ -443,7 +443,7 @@ in `mlx_ltx_panel.py`:
 | key | pix_fmt | crf | Approx 5s @ 1280×704 | Use case |
 |---|---|---|---|---|
 | `standard` ⭐ default | yuv420p | 18 | ~7 MB | Visually lossless, plays everywhere (X / IG / Discord) |
-| `archival` | yuv444p | 0 | ~50 MB | Mathematically lossless, post-processing master |
+| `archival` (UI label "Video production") | yuv444p | 0 | ~50 MB | Mathematically lossless, full 4:4:4 chroma. For color grading, compositing, VFX, anywhere downstream re-encode is expected. Internal key kept as `archival` for backwards compat with settings files saved before the rename. |
 | `web` | yuv420p | 23 | ~3 MB | Smallest, mobile / embedding |
 
 `+faststart` is always applied (codec patch) regardless of preset, so

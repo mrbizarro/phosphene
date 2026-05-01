@@ -200,7 +200,7 @@ built-ins, plus a Custom mode for advanced overrides:
 | Preset | pix_fmt | CRF | ~Size (5s @ 1280×704) | Use case |
 |---|---|---|---|---|
 | **Standard** ⭐ default | yuv420p | 18 | ~7 MB | Visually lossless to most viewers. Plays everywhere — X, Instagram, Discord. The default for new installs. |
-| **Archival** | yuv444p | 0 | ~50 MB | Mathematically lossless. Use when you'll re-encode in post or need a master. |
+| **Video production** | yuv444p | 0 | ~50 MB | Mathematically lossless, full 4:4:4 chroma. For color grading, compositing, VFX — workflows that re-encode downstream and need every frame intact. |
 | **Web** | yuv420p | 23 | ~3 MB | Smallest files. For mobile, embedding, or quick previews. |
 | **Custom** | choose | 0–30 | varies | 10-bit HDR, format-specific delivery, etc. |
 
