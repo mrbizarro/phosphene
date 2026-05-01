@@ -178,10 +178,17 @@ _SETTINGS_LOCK = threading.Lock()
 def _settings_defaults() -> dict:
     preset = OUTPUT_PRESETS[DEFAULT_OUTPUT_PRESET]
     return {
-        "version": 1,
+        "version": 2,                                # bumped: added secrets
         "output_preset": DEFAULT_OUTPUT_PRESET,
         "output_pix_fmt": preset["pix_fmt"],
         "output_crf": preset["crf"],
+        # Secrets — empty means "not configured". Never exposed by GET
+        # /settings; the API surfaces only `has_civitai_key` /
+        # `has_hf_token` booleans so the modal can render status pills
+        # without leaking the values back to the frontend (defense
+        # against the panel ever being exposed beyond loopback).
+        "civitai_api_key": "",
+        "hf_token": "",
     }
 
 
@@ -268,7 +275,69 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
             return {}, "output_crf must be between 0 (lossless) and 30 (low)"
         out["output_crf"] = str(crf_i)
 
+    # Tokens. Sanity-check shape (no whitespace, reasonable length) but
+    # don't hard-validate against the upstream API here — that adds
+    # latency and the upstream services are the authoritative oracle
+    # anyway. The Settings UI shows a connectivity-test button if the
+    # user wants to verify before using.
+    if "civitai_api_key" in patch:
+        key = str(patch["civitai_api_key"]).strip()
+        if key and not (8 <= len(key) <= 256):
+            return {}, "civitai_api_key length looks wrong (expected 8–256 chars)"
+        if any(c.isspace() for c in key):
+            return {}, "civitai_api_key cannot contain whitespace"
+        out["civitai_api_key"] = key
+
+    if "hf_token" in patch:
+        token = str(patch["hf_token"]).strip()
+        # HF tokens start with "hf_" and are typically ~40 chars total.
+        if token and not (token.startswith("hf_") and 20 <= len(token) <= 256):
+            return {}, "hf_token must start with 'hf_' (get one at https://huggingface.co/settings/tokens)"
+        if any(c.isspace() for c in token):
+            return {}, "hf_token cannot contain whitespace"
+        out["hf_token"] = token
+
     return out, None
+
+
+def _active_civitai_key() -> str:
+    """Resolve the CivitAI key in this priority:
+       1. Saved panel setting (UI). Most users.
+       2. CIVITAI_API_KEY env var. Power users with shell config.
+    Returns empty string when neither is set."""
+    saved = get_settings().get("civitai_api_key", "").strip()
+    if saved:
+        return saved
+    return os.environ.get("CIVITAI_API_KEY", "").strip()
+
+
+def _active_hf_token() -> str:
+    """Resolve the HuggingFace token. Settings > HF_TOKEN env var.
+    Note: huggingface_hub also reads ~/.cache/huggingface/token
+    (the file `hf auth login` writes), and we don't override that —
+    if neither settings nor the env var has a token, the library
+    falls back to that cached file."""
+    saved = get_settings().get("hf_token", "").strip()
+    if saved:
+        return saved
+    return os.environ.get("HF_TOKEN", "").strip()
+
+
+def get_settings_public() -> dict:
+    """Settings shape safe to expose via GET /settings. Tokens are never
+    returned — only booleans indicating whether each is configured. This
+    matters because the panel binds to loopback only, but if a user ever
+    proxies it (Pinokio's tunnel feature, ngrok, etc.) the secrets would
+    leak with every status poll otherwise."""
+    s = get_settings()
+    return {
+        "version": s.get("version", 1),
+        "output_preset": s.get("output_preset"),
+        "output_pix_fmt": s.get("output_pix_fmt"),
+        "output_crf": s.get("output_crf"),
+        "has_civitai_key": bool(s.get("civitai_api_key", "").strip()),
+        "has_hf_token": bool(s.get("hf_token", "").strip()),
+    }
 
 
 _SETTINGS = _load_settings()
@@ -840,7 +909,7 @@ def _civitai_request(path: str, params: dict | None = None,
         "Accept": "application/json",
         "User-Agent": CIVITAI_USER_AGENT,
     })
-    api_key = os.environ.get("CIVITAI_API_KEY", "").strip()
+    api_key = _active_civitai_key()
     if api_key:
         req.add_header("Authorization", f"Bearer {api_key}")
     try:
@@ -967,7 +1036,7 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
     # canonical path is `?token=<key>` on the URL — and many CDN hops
     # only honour the token in the URL. Try the URL form first when a
     # key is available.
-    api_key_env = os.environ.get("CIVITAI_API_KEY", "").strip()
+    api_key_env = _active_civitai_key()
     if api_key_env and "token=" not in (parsed.query or ""):
         sep = "&" if parsed.query else "?"
         download_url = download_url + sep + "token=" + urllib.parse.quote(api_key_env)
@@ -997,7 +1066,7 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
         }
     tmp = target.with_suffix(target.suffix + ".partial")
     push(f"[civitai] downloading {meta.get('name') or safe_fname}")
-    api_key = os.environ.get("CIVITAI_API_KEY", "").strip()
+    api_key = _active_civitai_key()
     headers = {"User-Agent": CIVITAI_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1628,6 +1697,24 @@ class WarmHelper:
             _s = get_settings()
             env["LTX_OUTPUT_PIX_FMT"] = _s.get("output_pix_fmt", "yuv420p")
             env["LTX_OUTPUT_CRF"] = _s.get("output_crf", "18")
+            # Tokens — source-of-truth from settings (with env-var
+            # fallback for power users). These end up driving:
+            #   HF_TOKEN  → huggingface_hub.snapshot_download() picks it
+            #     up automatically when the helper resolves a gated LoRA
+            #     (Lightricks HDR, etc.).
+            #   CIVITAI_API_KEY → not used by the helper currently
+            #     (CivitAI downloads happen panel-side), but threaded
+            #     through anyway so future helper-side CivitAI code
+            #     inherits without ceremony.
+            _hf = _active_hf_token()
+            if _hf:
+                env["HF_TOKEN"] = _hf
+                # huggingface_hub also reads HUGGING_FACE_HUB_TOKEN —
+                # set both so older lib versions work too.
+                env["HUGGING_FACE_HUB_TOKEN"] = _hf
+            _civ = _active_civitai_key()
+            if _civ:
+                env["CIVITAI_API_KEY"] = _civ
             push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
@@ -2515,9 +2602,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/settings":
             # Return current panel settings + the preset table so the UI
             # can render preset pills with labels and blurbs without
-            # hardcoding any of it on the client side.
+            # hardcoding any of it on the client side. Secrets are
+            # surfaced as has_X booleans only — actual key values
+            # never leave the panel process.
             self._json({
-                "settings": get_settings(),
+                "settings": get_settings_public(),
                 "presets": OUTPUT_PRESETS,
                 "default_preset": DEFAULT_OUTPUT_PRESET,
             })
@@ -2535,11 +2624,13 @@ class Handler(BaseHTTPRequestHandler):
                 "user": list_user_loras(),
                 "curated": curated,
                 "loras_dir": str(_safe_loras_dir()),
-                # True iff CIVITAI_API_KEY is set in this panel's env.
-                # Lets the front end show a hint when the key is missing,
-                # so users learn about it BEFORE clicking Install on a
-                # CivitAI card and getting a 401 surprise.
-                "civitai_auth": bool(os.environ.get("CIVITAI_API_KEY", "").strip()),
+                # True iff a CivitAI key is configured. Source of truth:
+                # the saved panel settings first, falling back to the
+                # env var if a power user prefers shell-level config.
+                "civitai_auth": bool(_active_civitai_key()),
+                # Same pattern for HF — used for gated repo downloads
+                # (HDR LoRA, etc.).
+                "hf_auth": bool(_active_hf_token()),
             })
             return
         if parsed.path == "/civitai/search":
@@ -2818,21 +2909,36 @@ class Handler(BaseHTTPRequestHandler):
             # Accept partial-patch updates: only the fields the user
             # actually changed need to be present. Validation lives in
             # _validate_settings_patch — never trust the form payload.
+            #
+            # Re-parse with keep_blank_values=True so that an explicit
+            # empty value (e.g. `civitai_api_key=`) is treated as "clear
+            # this field" rather than dropped silently. The default form
+            # parser at the top of do_POST drops empty values, which
+            # would otherwise turn the Clear button into a no-op.
+            settings_form = parse_qs(body, keep_blank_values=True)
             payload: dict = {}
-            for k, v in form.items():
+            for k, v in settings_form.items():
                 payload[k] = v[0] if isinstance(v, list) else v
             prev = get_settings()
             current, err = update_settings(payload)
             if err:
-                self._json({"ok": False, "error": err, "settings": current}, 400)
+                # Public-safe view on errors too — never echo a saved
+                # secret back to the client even when validation fails
+                # on a different field.
+                self._json({"ok": False, "error": err,
+                            "settings": get_settings_public()}, 400)
                 return
-            # Codec env vars are read at helper SPAWN time. If the user
-            # changed pix_fmt or crf, kill the helper so the next job
-            # respawns it with the new env. Job in flight finishes with
-            # the OLD codec settings (we're not interrupting a render).
+            # Codec + token env vars are read at helper SPAWN time. If
+            # the user changed any of them, kill the helper so the next
+            # job respawns it with the new env. Job in flight finishes
+            # with the OLD values (we're not interrupting a render).
             codec_changed = (
                 prev.get("output_pix_fmt") != current.get("output_pix_fmt") or
                 prev.get("output_crf") != current.get("output_crf")
+            )
+            tokens_changed = (
+                prev.get("civitai_api_key", "") != current.get("civitai_api_key", "") or
+                prev.get("hf_token", "") != current.get("hf_token", "")
             )
             if codec_changed:
                 push(
@@ -2840,11 +2946,18 @@ class Handler(BaseHTTPRequestHandler):
                     f"crf {current['output_crf']} ({current['output_preset']}). "
                     f"Helper restarted; takes effect on next job."
                 )
+            if tokens_changed:
+                # Don't log token values themselves, just the action.
+                push("settings: API tokens updated. Helper restarted; "
+                     "takes effect on next job.")
+            if codec_changed or tokens_changed:
                 HELPER.kill()
+            # Return only the public-safe view — never echo the saved
+            # key back to the client even on success.
             self._json({
                 "ok": True,
-                "settings": current,
-                "helper_restarted": codec_changed,
+                "settings": get_settings_public(),
+                "helper_restarted": codec_changed or tokens_changed,
             })
             return
 
@@ -3685,6 +3798,42 @@ HTML = r"""<!doctype html>
     .settings-row label {
       font-size: 11px; color: var(--muted); min-width: 70px;
     }
+    /* Token rows in the Settings modal. The status pill on the right
+       of the label tells the user at a glance whether a key is
+       configured (green ✓) or missing (muted —). The input is masked
+       by default; a 'show' button reveals so the user can confirm a
+       paste landed correctly. Cleared by a separate button so accidental
+       Apply with empty input doesn't wipe a saved key (we treat empty
+       input as 'don't change' — actual removal is explicit). */
+    .token-row { margin-bottom: 14px; }
+    .token-row .token-label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 500; color: var(--text);
+      margin-bottom: 4px;
+    }
+    .token-row .token-status {
+      font-size: 10px; font-weight: 600;
+      padding: 1px 7px; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted);
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .token-row .token-status.set {
+      color: var(--success, #3fb950);
+      border-color: var(--success, #3fb950);
+    }
+    .token-row .token-status.dirty {
+      color: var(--warning, #d29922);
+      border-color: var(--warning, #d29922);
+    }
+    .token-row .token-row-input {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .token-row .token-row-input input {
+      flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; padding: 5px 9px;
+    }
+    .token-row .token-row-input button { flex-shrink: 0; }
+
     .settings-foot {
       display: flex; gap: 10px; justify-content: flex-end;
       margin-top: 18px; padding-top: 14px;
@@ -4192,6 +4341,61 @@ HTML = r"""<!doctype html>
       <h3>Output format</h3>
       <div class="preset-grid" id="settingsPresets">
         <!-- populated by openSettingsModal() from /settings -->
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>API tokens</h3>
+      <div class="hint" style="margin-bottom:8px">
+        Saved locally in <code>panel_settings.json</code>. Never sent
+        anywhere except as auth headers to civitai.com / huggingface.co.
+        Power users can override with <code>CIVITAI_API_KEY</code> /
+        <code>HF_TOKEN</code> env vars; the saved value here wins when
+        both are set.
+      </div>
+
+      <!-- CivitAI token row -->
+      <div class="token-row">
+        <div class="token-label">
+          <span>CivitAI API key</span>
+          <span class="token-status" id="civitaiKeyStatus">—</span>
+        </div>
+        <div class="token-row-input">
+          <input type="password" id="civitaiKeyInput" autocomplete="off"
+                 placeholder="paste key here…"
+                 oninput="onTokenInput('civitai')">
+          <button type="button" class="ghost-btn" id="civitaiKeyToggle"
+                  onclick="toggleTokenVisibility('civitaiKeyInput', this)">show</button>
+          <button type="button" class="ghost-btn" id="civitaiKeyClear"
+                  onclick="clearToken('civitai')" style="display:none">clear</button>
+        </div>
+        <div class="hint">
+          Required for installing CivitAI LoRAs.
+          Get one at <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a>
+          (Account → API Keys → Add).
+        </div>
+      </div>
+
+      <!-- HF token row -->
+      <div class="token-row">
+        <div class="token-label">
+          <span>Hugging Face token</span>
+          <span class="token-status" id="hfTokenStatus">—</span>
+        </div>
+        <div class="token-row-input">
+          <input type="password" id="hfTokenInput" autocomplete="off"
+                 placeholder="hf_…"
+                 oninput="onTokenInput('hf')">
+          <button type="button" class="ghost-btn" id="hfTokenToggle"
+                  onclick="toggleTokenVisibility('hfTokenInput', this)">show</button>
+          <button type="button" class="ghost-btn" id="hfTokenClear"
+                  onclick="clearToken('hf')" style="display:none">clear</button>
+        </div>
+        <div class="hint">
+          Required for gated LoRAs (Lightricks HDR + Control LoRAs).
+          Get one at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
+          — read access is enough.
+        </div>
       </div>
     </div>
 
@@ -5507,6 +5711,69 @@ async function openSettingsModal() {
   document.getElementById('settingsCrfNum').value = cur.output_crf;
   document.getElementById('settingsCustomSection').style.display =
     cur.output_preset === 'custom' ? 'block' : 'none';
+
+  // Token rows. We never receive the actual key from the server (the
+  // /settings GET returns has_X booleans only), so we display either
+  // "set" with an empty placeholder input, or "—" with the placeholder.
+  // Inputs start empty on every modal open; user pastes when they want
+  // to change.
+  setTokenStatus('civitaiKey', cur.has_civitai_key);
+  setTokenStatus('hfToken', cur.has_hf_token);
+  document.getElementById('civitaiKeyInput').value = '';
+  document.getElementById('hfTokenInput').value = '';
+  document.getElementById('civitaiKeyClear').style.display = cur.has_civitai_key ? '' : 'none';
+  document.getElementById('hfTokenClear').style.display = cur.has_hf_token ? '' : 'none';
+}
+
+function setTokenStatus(prefix, isSet, dirty) {
+  const el = document.getElementById(prefix + 'Status');
+  if (!el) return;
+  el.classList.remove('set', 'dirty');
+  if (dirty) {
+    el.textContent = '✎ unsaved';
+    el.classList.add('dirty');
+  } else if (isSet) {
+    el.textContent = '✓ saved';
+    el.classList.add('set');
+  } else {
+    el.textContent = 'not set';
+  }
+}
+
+function onTokenInput(which) {
+  const prefix = which === 'civitai' ? 'civitaiKey' : 'hfToken';
+  const inp = document.getElementById(prefix + 'Input');
+  setTokenStatus(prefix, false, !!inp.value);
+}
+
+function toggleTokenVisibility(inputId, btn) {
+  const inp = document.getElementById(inputId);
+  if (!inp) return;
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.textContent = 'hide';
+  } else {
+    inp.type = 'password';
+    btn.textContent = 'show';
+  }
+}
+
+async function clearToken(which) {
+  const fd = new FormData();
+  if (which === 'civitai') fd.set('civitai_api_key', '');
+  if (which === 'hf')      fd.set('hf_token', '');
+  try {
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      alert('Could not clear: ' + (data.error || `HTTP ${r.status}`));
+      return;
+    }
+    // Refresh the modal so the status flips back to "not set".
+    openSettingsModal();
+  } catch (e) {
+    alert('Network error: ' + (e.message || e));
+  }
 }
 
 function closeSettingsModal() {
@@ -5541,6 +5808,14 @@ async function applySettings() {
     fd.set('output_pix_fmt', document.getElementById('settingsPixFmt').value);
     fd.set('output_crf', document.getElementById('settingsCrfNum').value);
   }
+  // Tokens — only send a key when the input has a value. Empty input
+  // means "leave as-is" (clearing is explicit via the Clear button).
+  // This protects against accidentally wiping a saved key by clicking
+  // Apply on an unchanged form.
+  const civInput = document.getElementById('civitaiKeyInput').value.trim();
+  if (civInput) fd.set('civitai_api_key', civInput);
+  const hfInput = document.getElementById('hfTokenInput').value.trim();
+  if (hfInput)  fd.set('hf_token', hfInput);
   try {
     const r = await fetch('/settings', { method: 'POST', body: fd });
     const data = await r.json();

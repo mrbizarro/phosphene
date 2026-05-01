@@ -333,7 +333,7 @@ endpoints are unauthenticated (loopback only).
 | `/output/show_all` | (none) | `{unhidden_count: int}` | Clear hidden set. |
 | `/upload` | multipart `image=<file>` | `{ok, path}` | Saves to `panel_uploads/<ts>_<safename>`. |
 | `/helper/restart` | (none) | `{ok}` | SIGTERM the helper subprocess; the next job auto-respawns it. Useful for picking up site-packages changes. |
-| `/settings` | `output_preset=<key>` (+ optional `output_pix_fmt`, `output_crf` for custom) | `{ok, settings, helper_restarted}` | Update + persist panel settings. If the codec changed, the helper is killed so the next job respawns it with the new env. Validation rejects unknown presets, unknown pix_fmt values, or CRF outside 0–30. |
+| `/settings` | `output_preset` / `output_pix_fmt` / `output_crf` / `civitai_api_key` / `hf_token` (any subset) | `{ok, settings, helper_restarted}` | Update + persist. Public-safe `settings` view in the response (no token values, just `has_*` booleans). Helper killed on codec change OR token change so the next job spawns with fresh env. Form parser uses `keep_blank_values=True` so `civitai_api_key=` (the Clear button) is treated as "remove this token" rather than dropped silently. Empty input on the front-end Apply path is "leave as-is" — explicit clearing goes through the dedicated Clear button. |
 | `/loras/refresh` | (none) | `{ok, user, loras_dir}` | Rescan `mlx_models/loras/`. Filesystem is the source of truth; no caching layer to invalidate. |
 | `/loras/delete` | `path=<abs path>` | `{ok, removed}` | Delete a user-installed LoRA + its sidecar. Path must resolve inside `mlx_models/loras/` to prevent traversal. |
 | `/civitai/download` | `download_url=<civitai url>`, `meta=<json>` | `{ok, name, path, sidecar_path, size_bytes, skipped}` | Stream-download a LoRA from CivitAI into `mlx_models/loras/`, write a sidecar JSON. Refuses non-civitai.com hosts. Writes to a `.partial` then atomic-renames so a kill mid-write leaves nothing the next scan would mistake for a complete file. Surfaces 401 with a remediation hint pointing at `CIVITAI_API_KEY`. |
@@ -432,15 +432,66 @@ next job picks up new values.
 
 ```jsonc
 {
-  "version": 1,
+  "version": 2,                              // bumped from v1 when secrets added
   // Metadata so the UI knows which preset to highlight as active.
   // "custom" means pix_fmt + crf were set manually outside any preset.
   "output_preset": "standard" | "archival" | "web" | "custom",
   "output_pix_fmt": "yuv420p" | "yuv444p" | "yuv422p"
                   | "yuv420p10le" | "yuv422p10le" | "yuv444p10le",
-  "output_crf": "0".."30"   // string (passed via env vars)
+  "output_crf": "0".."30",                   // string (passed via env vars)
+
+  // Secrets. Stored locally only, never sent over the network except
+  // as Authorization headers / ?token= URL params to the upstream
+  // services (civitai.com, huggingface.co). NEVER returned by GET
+  // /settings — the public response surfaces booleans only.
+  "civitai_api_key": "",                     // empty = not configured
+  "hf_token": ""                             // empty = not configured
 }
 ```
+
+### `GET /settings` security contract
+
+The full settings dict — including `civitai_api_key` and `hf_token` —
+is read by the backend only. The HTTP API exposes a *masked* view via
+`get_settings_public()`:
+
+```jsonc
+{
+  "version": 2,
+  "output_preset": "standard",
+  "output_pix_fmt": "yuv420p",
+  "output_crf": "18",
+  "has_civitai_key": false,                  // bool, never the value
+  "has_hf_token": false                      // bool, never the value
+}
+```
+
+This applies on every response that includes settings — success path,
+validation errors, helper-restart confirmations. A user with the panel
+proxied through ngrok / tunneled to the LAN never leaks their saved
+secrets through a status poll.
+
+### Token resolution priority
+
+`_active_civitai_key()` and `_active_hf_token()` resolve the active
+token in this order:
+
+1. The saved value in `panel_settings.json` (set via the Settings
+   modal). This is the path normal users take.
+2. The corresponding env var (`CIVITAI_API_KEY` / `HF_TOKEN`). Power
+   users with shell-level config keep working unchanged.
+
+Empty string in #1 falls through to #2. The settings UI's "Clear"
+button writes an empty string to #1, so a user who configured a key
+in the UI and then wants to revert to env-var-based config can do
+so cleanly.
+
+For HF specifically, `huggingface_hub.snapshot_download` *also* reads
+`~/.cache/huggingface/token` (the file `hf auth login` writes). We
+don't override that file — if neither settings nor `HF_TOKEN` env is
+set, the library falls back to that cached file. This means power
+users who already ran `hf auth login` get gated LoRAs working without
+touching the panel's token settings.
 
 Preset table is the single source of truth, defined in `OUTPUT_PRESETS`
 in `mlx_ltx_panel.py`:

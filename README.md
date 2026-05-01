@@ -125,18 +125,19 @@ model afterward via the **Download Q8** button in the panel sidebar
 
 ### Faster downloads (recommended for Q8)
 
-Hugging Face throttles unauthenticated downloads. Log in once and
-downloads run **~10× faster**:
+Hugging Face throttles unauthenticated downloads. With a token,
+downloads run **~10× faster** — particularly relevant for the optional
+25 GB Q8 model.
 
-```bash
-# Get a token (read-only is fine) at https://huggingface.co/settings/tokens
-hf auth login
-# Paste the token when prompted.
-```
+Two options, no terminal required for either:
 
-The `hf` binary inside Pinokio's install reads from the same standard
-token file (`~/.cache/huggingface/token`), so future downloads
-auto-authenticate. No env var fiddling.
+1. **In-app**: open ⚙ Settings in the panel and paste your HF token
+   into the *Hugging Face token* field. Get a token at
+   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+   (read access is enough). The same token unlocks gated LoRAs (HDR
+   and the Lightricks Control LoRAs).
+2. **Terminal**: `hf auth login` once and paste the token. The `hf`
+   binary inside Pinokio's install reads the same cached token file.
 
 ### Option B — manual
 
@@ -184,9 +185,11 @@ HDR job triggers a one-time ~330 MB download of the LoRA weights from
 Hugging Face; subsequent jobs share the cache.
 
 The HDR LoRA is **gated** — you'll need to accept Lightricks' license
-at https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR and run
-`hf auth login` once. The panel surfaces a clear error pointing at
-both steps if you haven't.
+at https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR and have
+a Hugging Face token. Open ⚙ Settings in the panel and paste your token
+into the *Hugging Face token* field (get one at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens),
+read access is enough). No terminal, no env vars.
 
 ### Custom LoRAs from disk
 
@@ -205,11 +208,11 @@ Built into the LoRA picker: **Browse CivitAI** opens a modal that
 searches CivitAI filtered to `LTXV 2.3` LoRAs. Click Install on a
 card → downloads into `mlx_models/loras/` + writes the sidecar.
 
-CivitAI requires an API token for downloads as of 2025. Set
-`CIVITAI_API_KEY` in your environment (get a key at
-[civitai.com/user/account](https://civitai.com/user/account))
-before launching the panel, or the modal will warn you and Install
-will fail with a clear remediation hint.
+CivitAI requires an API token for downloads as of 2025. Open ⚙ Settings,
+paste your token into the *CivitAI API key* field (get one at
+[civitai.com/user/account](https://civitai.com/user/account) → Account
+→ API Keys → Add). Stored locally in `panel_settings.json` and never
+sent anywhere except CivitAI itself.
 
 ### How fusion works
 
