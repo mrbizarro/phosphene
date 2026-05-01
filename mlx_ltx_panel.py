@@ -2624,6 +2624,73 @@ class Handler(BaseHTTPRequestHandler):
                 "default_preset": DEFAULT_OUTPUT_PRESET,
             })
             return
+        if parsed.path == "/civitai/test":
+            # Sanity-check the saved CivitAI key by hitting an
+            # auth-required endpoint and reporting back the upstream
+            # status. Lets the Settings UI render a green/red dot
+            # without users having to risk a 300 MB download just to
+            # discover the key is malformed.
+            key = _active_civitai_key()
+            if not key:
+                self._json({"ok": False, "error": "No CivitAI key configured."}, 400)
+                return
+            try:
+                # /api/v1/me requires auth; success returns the user
+                # profile, failure returns 401. We never echo the
+                # username back — just enough info to tell the user
+                # the key works.
+                _civitai_request("/me", timeout=10)
+                self._json({"ok": True, "message": "CivitAI auth works."})
+            except Exception as exc:
+                msg = str(exc)
+                if "401" in msg or "403" in msg:
+                    self._json({
+                        "ok": False,
+                        "error": "Key rejected by CivitAI (401/403). "
+                                 "Re-paste the key and try again, or generate a new one.",
+                    }, 401)
+                else:
+                    self._json({
+                        "ok": False,
+                        "error": f"Network error reaching CivitAI: {msg[:200]}",
+                    }, 502)
+            return
+        if parsed.path == "/hf/test":
+            # Same idea for Hugging Face — call /api/whoami-v2 which
+            # is auth-required.
+            token = _active_hf_token()
+            if not token:
+                self._json({"ok": False, "error": "No Hugging Face token configured."}, 400)
+                return
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://huggingface.co/api/whoami-v2",
+                    headers={"Authorization": f"Bearer {token}",
+                             "User-Agent": CIVITAI_USER_AGENT},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = resp.read().decode("utf-8", "replace")
+                # Don't echo the username — just confirm.
+                self._json({"ok": True, "message": "Hugging Face auth works."})
+            except urllib.request.HTTPError as he:
+                if he.code in (401, 403):
+                    self._json({
+                        "ok": False,
+                        "error": "Token rejected by Hugging Face (401/403). "
+                                 "Re-paste the token, or generate a new one with read access.",
+                    }, 401)
+                else:
+                    self._json({
+                        "ok": False,
+                        "error": f"HTTP {he.code} reaching Hugging Face.",
+                    }, 502)
+            except Exception as exc:
+                self._json({
+                    "ok": False,
+                    "error": f"Network error reaching Hugging Face: {str(exc)[:200]}",
+                }, 502)
+            return
         if parsed.path == "/loras":
             # Returns: { user: [user-installed], curated: [Lightricks
             # officials minus hdr_toggle entries], loras_dir: <abs path>,
@@ -4379,10 +4446,12 @@ HTML = r"""<!doctype html>
                  oninput="onTokenInput('civitai')">
           <button type="button" class="ghost-btn" id="civitaiKeyToggle"
                   onclick="toggleTokenVisibility('civitaiKeyInput', this)">show</button>
+          <button type="button" class="ghost-btn"
+                  onclick="testToken('civitai')">test</button>
           <button type="button" class="ghost-btn" id="civitaiKeyClear"
                   onclick="clearToken('civitai')" style="display:none">clear</button>
         </div>
-        <div class="hint">
+        <div class="hint" id="civitaiTestResult">
           Required for installing CivitAI LoRAs.
           Get one at <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a>
           (Account → API Keys → Add).
@@ -4401,10 +4470,12 @@ HTML = r"""<!doctype html>
                  oninput="onTokenInput('hf')">
           <button type="button" class="ghost-btn" id="hfTokenToggle"
                   onclick="toggleTokenVisibility('hfTokenInput', this)">show</button>
+          <button type="button" class="ghost-btn"
+                  onclick="testToken('hf')">test</button>
           <button type="button" class="ghost-btn" id="hfTokenClear"
                   onclick="clearToken('hf')" style="display:none">clear</button>
         </div>
-        <div class="hint">
+        <div class="hint" id="hfTestResult">
           Required for gated LoRAs (Lightricks HDR + Control LoRAs).
           Get one at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
           — read access is enough.
@@ -5771,6 +5842,30 @@ function toggleTokenVisibility(inputId, btn) {
   }
 }
 
+// Hits /civitai/test or /hf/test which makes an auth-required upstream
+// request with the saved key. Lets the user verify their token works
+// without paying for a 300 MB download to find out it doesn't.
+async function testToken(which) {
+  const path = which === 'civitai' ? '/civitai/test' : '/hf/test';
+  const resultId = which === 'civitai' ? 'civitaiTestResult' : 'hfTestResult';
+  const result = document.getElementById(resultId);
+  if (!result) return;
+  const original = result.innerHTML;
+  result.textContent = 'Testing…';
+  result.style.color = 'var(--muted)';
+  try {
+    const r = await fetch(path);
+    const data = await r.json();
+    if (data.ok) {
+      result.innerHTML = `<strong style="color: var(--success, #3fb950)">✓</strong> ${escapeHtml(data.message)}`;
+    } else {
+      result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> ${escapeHtml(data.error)}`;
+    }
+  } catch (e) {
+    result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> Network error: ${escapeHtml(e.message || String(e))}`;
+  }
+}
+
 async function clearToken(which) {
   const fd = new FormData();
   if (which === 'civitai') fd.set('civitai_api_key', '');
@@ -6237,26 +6332,31 @@ async function civitaiInstall(btn, item) {
       btn.textContent = origLabel;
       return;
     }
-    btn.textContent = data.skipped ? 'Already installed' : 'Installed ✓';
+    btn.textContent = data.skipped ? 'Already installed ✓' : 'Installed ✓';
     const status = document.getElementById('civitaiStatus');
     status.textContent = data.skipped
-      ? `Already in ${data.path} — skipped.`
+      ? `Already in ${data.path} — auto-enabled below.`
       : `Saved to ${data.path}. Auto-enabled below.`;
     status.className = 'civitai-status-line ok';
     // Refresh the local picker so the new LoRA appears, then auto-enable.
+    // Auto-enable applies on BOTH the fresh-download AND the
+    // already-installed paths — clicking Install on a CivitAI card
+    // should always result in "this LoRA is now usable in the next
+    // render," regardless of whether it was already on disk. Earlier
+    // build only auto-enabled fresh downloads, leaving repeat clicks
+    // looking like a no-op even though the file was sitting right
+    // there in the picker.
     await refreshLoras();
-    if (!data.skipped) {
-      addLoraToActive({
-        path: data.path,
-        name: data.name || item.name,
-        strength: item.recommended_strength || 1.0,
-        trigger_words: item.trigger_words || [],
-      });
-      // Open the LoRAs disclosure so the user sees the new entry without
-      // hunting for it after the modal closes.
-      const det = document.getElementById('lorasDetails');
-      if (det) det.open = true;
-    }
+    addLoraToActive({
+      path: data.path,
+      name: data.name || item.name,
+      strength: item.recommended_strength || 1.0,
+      trigger_words: item.trigger_words || [],
+    });
+    // Open the LoRAs disclosure so the user sees the entry without
+    // hunting for it after the modal closes.
+    const det = document.getElementById('lorasDetails');
+    if (det) det.open = true;
   } catch (e) {
     document.getElementById('civitaiStatus').textContent = 'Network error: ' + (e.message || e);
     document.getElementById('civitaiStatus').className = 'civitai-status-line err';
