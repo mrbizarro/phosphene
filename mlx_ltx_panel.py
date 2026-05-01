@@ -3455,9 +3455,9 @@ HTML = r"""<!doctype html>
     .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.5); }
     .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.5); }
     .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
-    /* "Update available" pill — same shape as other pills, distinct
-       colour so it pulls the eye. Subtle glow animation so users notice
-       it appearing without it screaming. */
+    /* Version pill states. Always rendered so the spot is part of the
+       user's mental map — when state changes, the colour shift draws
+       the eye. Only `pill-update` glows; the other states are quiet. */
     .pill-update {
       color: var(--warning, #f0b940);
       border-color: rgba(240,185,64,0.55);
@@ -3469,6 +3469,28 @@ HTML = r"""<!doctype html>
     @keyframes glow-update {
       0%,100% { box-shadow: 0 0 0 0 rgba(240,185,64,0.0); }
       50%     { box-shadow: 0 0 0 3px rgba(240,185,64,0.18); }
+    }
+    /* Current — install is on origin/main HEAD. Subtle success tint so
+       it reads as "all good" without competing for attention. */
+    .pill-current {
+      color: var(--success, #8ec07c);
+      border-color: rgba(63,185,80,0.35);
+    }
+    .pill-current:hover { background: rgba(63,185,80,0.06); }
+    /* Dev — non-main branch / dirty tree / no git. We don't know if the
+       user is "behind"; surfacing the SHA in muted text just helps them
+       confirm what's running. */
+    .pill-dev {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .pill-dev:hover { color: var(--text); }
+    /* Checking — first /version poll hasn't completed yet. Same look as
+       dev (muted) so the pill doesn't flash colours in the first 30s of
+       boot before the GitHub fetch lands. */
+    .pill-checking {
+      color: var(--muted);
+      border-color: var(--border);
     }
     /* Version modal — commit list rows. Lives inside .models-modal /
        .models-list scaffolding so spacing matches the other modals. */
@@ -4393,8 +4415,15 @@ HTML = r"""<!doctype html>
        listing the unseen commits. We do this because users keep telling
        us "I clicked Update but I don't see anything" — by the time they
        do, we've usually pushed three more fixes. -->
-  <span id="versionPill" class="pill pill-update" style="cursor:pointer; display:none"
-        onclick="openVersionModal()" title="Click to see what's new and how to update">↑ Update available</span>
+  <!-- Version pill. Always visible so users learn where to look — when an
+       update lands the pill changes colour/text and pulses, so the change
+       is noticed even by people who've never read the modal. States:
+         pill-current  ✓ <sha>      → on origin/main HEAD, all good
+         pill-update   ↑ N updates  → behind origin/main (amber pulse)
+         pill-dev      ⚙ <sha>      → non-main branch / dirty tree / no git
+         pill-checking · <sha>     → first poll hasn't completed yet -->
+  <span id="versionPill" class="pill pill-checking" style="cursor:pointer"
+        onclick="openVersionModal()" title="Click to see version + check for updates">phosphene · …</span>
   <!-- Settings cog: opens the modal that lets users pick output codec
        presets (Standard / Video production / Web / Custom). Sits between the
        runtime pills and Stop Comfy so it's findable but not loud. -->
@@ -4959,7 +4988,7 @@ HTML = r"""<!doctype html>
 <div id="versionModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeVersionModal()">
   <div class="models-card">
     <div class="models-head">
-      <h2>Update available</h2>
+      <h2 id="versionModalTitle">Phosphene version</h2>
       <button class="ghost-btn" onclick="closeVersionModal()">Close</button>
     </div>
     <div class="models-hint" id="versionModalHint">Loading…</div>
@@ -7064,19 +7093,50 @@ function renderVersionPill() {
   const pill = document.getElementById('versionPill');
   if (!pill) return;
   const s = _versionState || {};
-  // Hide cases:
-  //   - we haven't checked yet (no checked_ts)
-  //   - we're suppressing (dev branch, dirty tree, no git)
-  //   - we're current (behind_by === 0)
-  //   - last check errored (offline; don't false-positive)
-  if (!s.checked_ts || s.suppress_reason || s.error || (s.behind_by | 0) === 0) {
-    pill.style.display = 'none';
+  // Always show the pill. Users can build a habit of glancing at this
+  // spot, so when the colour/text changes (a new commit lands upstream)
+  // they notice instantly. Four mutually-exclusive states; pick one.
+  const short = s.local_short || '…';
+  // Reset state classes — we set the right one below.
+  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking');
+  pill.style.display = '';
+
+  // Behind origin/main — most attention-grabbing state.
+  if (!s.suppress_reason && !s.error && s.checked_ts && (s.behind_by | 0) > 0) {
+    const n = s.behind_by | 0;
+    const more = !!s.behind_more_than;
+    pill.classList.add('pill-update');
+    pill.textContent = more ? `↑ ${n}+ updates` : (n === 1 ? '↑ 1 update' : `↑ ${n} updates`);
+    pill.title = `Click for the list of new commits and how to update.`;
     return;
   }
-  pill.style.display = '';
-  const n = s.behind_by | 0;
-  const more = !!s.behind_more_than;
-  pill.textContent = more ? `↑ ${n}+ updates` : (n === 1 ? '↑ 1 update' : `↑ ${n} updates`);
+  // Suppressed (dev branch / dirty tree / no git). Show the local SHA so
+  // the user can confirm what they're running, with the reason in the tooltip.
+  if (s.suppress_reason) {
+    pill.classList.add('pill-dev');
+    pill.textContent = `⚙ ${short}`;
+    pill.title = `Update check paused: ${s.suppress_reason}. Click for details.`;
+    return;
+  }
+  // Last check errored (offline). Show local SHA, neutral colour. We don't
+  // false-positive an "update available" badge when we genuinely don't know.
+  if (s.error && s.local_short) {
+    pill.classList.add('pill-dev');
+    pill.textContent = `⚙ ${short}`;
+    pill.title = `Couldn't reach github.com — showing last known local version. Click for details.`;
+    return;
+  }
+  // Current with origin/main — we have a successful poll AND behind == 0.
+  if (s.checked_ts && (s.behind_by | 0) === 0 && s.local_short) {
+    pill.classList.add('pill-current');
+    pill.textContent = `✓ ${short}`;
+    pill.title = `You're on the latest commit (${short}). Click for details.`;
+    return;
+  }
+  // First poll hasn't landed yet — quiet placeholder.
+  pill.classList.add('pill-checking');
+  pill.textContent = s.local_short ? `· ${short}` : 'phosphene · …';
+  pill.title = `Checking for updates…`;
 }
 
 function _humanRelativeTime(epochSec) {
@@ -7108,11 +7168,24 @@ function renderVersionModal() {
   const list = document.getElementById('versionCommitsList');
   const stepsBox = document.getElementById('versionModalUpdateSteps');
   const lastChecked = document.getElementById('versionLastCheckedHint');
+  const title = document.getElementById('versionModalTitle');
   if (!hint || !list) return;
 
   const local = s.local_short ? `<code>${escapeHtml(s.local_short)}</code>` : '<em>unknown</em>';
   const remote = s.remote_short ? `<code>${escapeHtml(s.remote_short)}</code>` : '<em>unknown</em>';
   const branch = s.local_branch ? escapeHtml(s.local_branch) : '?';
+
+  // State-aware modal title — "Update available" only when actually behind.
+  // Other states get a less alarming heading so opening the modal in normal
+  // conditions doesn't feel scary.
+  let titleText = 'Phosphene version';
+  if (s.checked_ts && !s.suppress_reason && !s.error && (s.behind_by | 0) > 0) {
+    const n = s.behind_by | 0;
+    titleText = `Update available · ${s.behind_more_than ? n + '+' : n} new commit${n === 1 ? '' : 's'}`;
+  } else if (s.checked_ts && !s.error && (s.behind_by | 0) === 0) {
+    titleText = 'You\'re on the latest version';
+  }
+  if (title) title.textContent = titleText;
 
   // Status line
   if (s.suppress_reason) {
@@ -7127,9 +7200,19 @@ function renderVersionModal() {
       `Local install: ${local}. Try the button below once you're online.`;
     stepsBox.style.display = 'none';
     list.innerHTML = '';
-  } else if ((s.behind_by | 0) === 0) {
+  } else if ((s.behind_by | 0) === 0 && s.checked_ts) {
+    // Reward state — make it clear and reassuring rather than empty.
     hint.innerHTML =
-      `You're on the latest commit (${local}). No updates needed.`;
+      `<span style="color:var(--success,#8ec07c)">✓</span> ` +
+      `You're on the latest commit (${local}). ` +
+      `When new commits land on <code>main</code>, this pill turns amber and pulses — ` +
+      `you'll know without having to look.`;
+    stepsBox.style.display = 'none';
+    list.innerHTML = '';
+  } else if (!s.checked_ts) {
+    // First poll hasn't completed yet (or panel just started).
+    hint.innerHTML =
+      `Checking github.com for updates… Local install: ${local}.`;
     stepsBox.style.display = 'none';
     list.innerHTML = '';
   } else {
