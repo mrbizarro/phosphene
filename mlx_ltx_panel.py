@@ -189,6 +189,12 @@ def _settings_defaults() -> dict:
         # against the panel ever being exposed beyond loopback).
         "civitai_api_key": "",
         "hf_token": "",
+        # When true, the inline "models ready" / "Q8 not installed" card
+        # at the top of the form is suppressed across reloads. Set when
+        # the user clicks × on that card. The card auto-clears this flag
+        # when the model state regresses (e.g. a download disappears) so
+        # a real new problem still surfaces. UI-only; no security impact.
+        "models_card_dismissed": False,
     }
 
 
@@ -310,6 +316,15 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
             return {}, "hf_token cannot contain whitespace"
         out["hf_token"] = token
 
+    if "models_card_dismissed" in patch:
+        # Accept the urlencoded "true"/"false"/"1"/"0" forms as well as a
+        # bool — JS posts via URLSearchParams which stringifies bools.
+        v = patch["models_card_dismissed"]
+        if isinstance(v, bool):
+            out["models_card_dismissed"] = v
+        else:
+            out["models_card_dismissed"] = str(v).strip().lower() in ("1", "true", "yes", "on")
+
     return out, None
 
 
@@ -350,6 +365,7 @@ def get_settings_public() -> dict:
         "output_crf": s.get("output_crf"),
         "has_civitai_key": bool(s.get("civitai_api_key", "").strip()),
         "has_hf_token": bool(s.get("hf_token", "").strip()),
+        "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
     }
 
 
@@ -478,9 +494,11 @@ def _read_lora_sidecar(safetensors_path: Path) -> dict:
         "trigger_words": [],
         "recommended_strength": 1.0,
         "preview_url": None,
+        "preview_type": None,        # "image" | "video" | None
         "base_model": None,
         "civitai_id": None,
         "civitai_version_id": None,
+        "civitai_url": None,         # link back to source page (for "read instructions")
         "downloaded_at": None,
     }
     if sidecar.exists():
@@ -511,6 +529,18 @@ def list_user_loras() -> list[dict]:
         except OSError:
             continue
         meta = _read_lora_sidecar(path)
+        # Heuristic: if preview_type wasn't recorded in the sidecar (older
+        # downloads pre-this-field), infer from the URL extension so the UI
+        # picks <video> vs <img> correctly.
+        preview_url = meta.get("preview_url")
+        preview_type = meta.get("preview_type")
+        if preview_url and not preview_type:
+            preview_type = "video" if preview_url.lower().split("?")[0].endswith(".mp4") else "image"
+        # Backfill civitai_url from civitai_id when the sidecar predates the
+        # explicit civitai_url field.
+        civitai_url = meta.get("civitai_url")
+        if not civitai_url and meta.get("civitai_id"):
+            civitai_url = f"https://civitai.com/models/{meta.get('civitai_id')}"
         out.append({
             "id": f"user:{path.name}",
             "name": meta["name"],
@@ -520,10 +550,12 @@ def list_user_loras() -> list[dict]:
             "size_bytes": size_bytes,
             "trigger_words": list(meta.get("trigger_words") or []),
             "recommended_strength": float(meta.get("recommended_strength") or 1.0),
-            "preview_url": meta.get("preview_url"),
+            "preview_url": preview_url,
+            "preview_type": preview_type,
             "base_model": meta.get("base_model"),
             "civitai_id": meta.get("civitai_id"),
             "civitai_version_id": meta.get("civitai_version_id"),
+            "civitai_url": civitai_url,
             "downloaded_at": meta.get("downloaded_at"),
             "is_curated": False,
         })
@@ -2584,6 +2616,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     payload["download"] = {"active": False}
             payload["hf_available"] = HF_BIN is not None
+            # Settings snapshot — only needs the public-safe view (booleans
+            # for token presence, no secret values). The UI reads
+            # `settings.models_card_dismissed` on each /status tick to know
+            # whether to keep the inline models card hidden.
+            payload["settings"] = get_settings_public()
             self._json(payload)
             return
         if parsed.path == "/uploads":
@@ -3288,7 +3325,21 @@ HTML = r"""<!doctype html>
       border: 1.5px solid var(--border, #2a3140);
       background: var(--panel-2, #131724);
       transition: border-color 150ms ease, background 150ms ease;
+      position: relative;
     }
+    /* Dismiss × — only rendered (visible) in dismissible states (warn /
+       partial-ok). The download-active and base-missing states omit it
+       so users can't accidentally hide a hard blocker. */
+    .models-inline-dismiss {
+      position: absolute; top: 6px; right: 8px;
+      width: 22px; height: 22px; border-radius: 4px;
+      background: transparent; border: 1px solid transparent;
+      color: var(--muted); font-size: 14px; line-height: 1;
+      cursor: pointer; padding: 0;
+      display: none;
+    }
+    .models-inline-dismiss:hover { color: var(--text); border-color: var(--border); }
+    .models-inline.dismissible .models-inline-dismiss { display: inline-block; }
     .models-inline.state-missing  { border-color: rgba(220,80,80,0.55); background: rgba(220,80,80,0.06); }
     .models-inline.state-warn     { border-color: rgba(210,153,34,0.55); background: rgba(210,153,34,0.06); }
     .models-inline.state-downloading {
@@ -3718,11 +3769,13 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
-    /* LoRA picker — collapsible <details> styled to match the rest of
-       the form. Rows are individual LoRAs with name + strength slider +
-       strength number + remove button. The "active" state on a row
-       (checked) tints the border to make it clear which LoRAs will be
-       fused into the next render. */
+    /* LoRA picker — collapsible <details>. Earlier version was a tight
+       4-column grid (checkbox | name | slider | × ); user feedback was
+       "this layout sucks balls" — too cramped, no preview, trigger words
+       hard to spot, no obvious link back to the source. Rebuilt as a
+       card stack: each LoRA gets a video/image preview, name, clickable
+       trigger word chips that append to the prompt, a full-width
+       strength slider, and a clear Active toggle. */
     .loras-summary {
       cursor: pointer; user-select: none; font-size: 12px;
       font-weight: 600; color: var(--text);
@@ -3731,47 +3784,130 @@ HTML = r"""<!doctype html>
     }
     .loras-summary .hint { font-weight: 400; }
     .loras-list {
-      display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+      display: flex; flex-direction: column; gap: 10px; margin-top: 8px;
     }
-    .lora-row {
-      display: grid; grid-template-columns: 24px 1fr auto auto;
-      gap: 10px; align-items: center;
-      padding: 8px 10px; border-radius: 6px;
+    .lora-card {
+      position: relative;
+      border-radius: 9px;
       border: 1px solid var(--border); background: var(--panel-2);
+      overflow: hidden;
+      transition: border-color 120ms ease, background 120ms ease;
     }
-    .lora-row.active {
+    .lora-card.active {
       border-color: var(--accent);
-      background: var(--accent-dim, rgba(47,129,247,0.1));
+      background: var(--accent-dim, rgba(47,129,247,0.07));
     }
-    .lora-row .lora-check { width: auto; margin: 0; accent-color: var(--accent); }
-    .lora-row .lora-name {
-      font-size: 12px; font-weight: 500; color: var(--text);
+    .lora-card .lora-thumb-wrap {
+      position: relative;
+      width: 100%; aspect-ratio: 16/9; background: var(--bg-2, #0a0c14);
+      overflow: hidden;
+    }
+    .lora-card .lora-thumb {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .lora-card .lora-thumb-empty {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 11px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(255,255,255,0.04));
+    }
+    .lora-card .lora-corner-actions {
+      position: absolute; top: 6px; right: 6px;
+      display: flex; gap: 4px; z-index: 2;
+    }
+    .lora-card .lora-corner-btn {
+      width: 28px; height: 28px; padding: 0;
+      border-radius: 6px; border: 1px solid rgba(0,0,0,0.4);
+      background: rgba(15,18,28,0.78); backdrop-filter: blur(4px);
+      color: rgba(255,255,255,0.85); font-size: 13px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center; text-decoration: none;
+    }
+    .lora-card .lora-corner-btn:hover { background: rgba(20,25,40,0.9); color: #fff; }
+    .lora-card .lora-corner-btn.danger:hover {
+      color: #ff8a8a; border-color: rgba(220,80,80,0.5);
+    }
+    .lora-card .lora-body { padding: 10px 12px 12px; }
+    .lora-card .lora-name {
+      font-size: 13px; font-weight: 600; color: var(--text);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      margin-bottom: 6px;
     }
-    .lora-row .lora-name .badge {
+    .lora-card .lora-name .badge {
       display: inline-block; font-size: 9px; font-weight: 600;
       letter-spacing: 0.05em; text-transform: uppercase;
       padding: 1px 6px; border-radius: 999px; margin-left: 6px;
       border: 1px solid var(--accent); color: var(--accent-bright);
+      vertical-align: middle;
     }
-    .lora-row .lora-trigger {
+    .lora-card .trigger-chips {
+      display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;
+    }
+    .lora-card .trigger-chip {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 10px; color: var(--muted); margin-top: 2px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-size: 10.5px; padding: 3px 8px; border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+      cursor: pointer; user-select: none;
+      transition: background 100ms ease, border-color 100ms ease;
     }
-    .lora-row .lora-strength-row {
-      display: flex; gap: 6px; align-items: center;
+    .lora-card .trigger-chip:hover {
+      background: rgba(90,124,255,0.15);
+      border-color: var(--accent);
     }
-    .lora-row input[type="range"] { width: 96px; }
-    .lora-row input[type="number"] {
-      width: 56px; padding: 3px 5px; font-size: 11px;
+    .lora-card .trigger-chip.empty {
+      color: var(--muted); font-style: italic;
+      cursor: default; background: transparent; border: none;
+      padding: 0; font-family: inherit;
     }
-    .lora-row .lora-remove {
-      width: auto; padding: 3px 7px; font-size: 11px;
-      background: transparent; border: 1px solid var(--border);
-      color: var(--muted); border-radius: 5px; cursor: pointer;
+    .lora-card .lora-strength-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 8px;
     }
-    .lora-row .lora-remove:hover { color: var(--danger, #f85149); border-color: var(--danger, #f85149); }
+    .lora-card .lora-strength-row label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted); width: 56px; flex: none;
+    }
+    .lora-card .lora-strength-row input[type="range"] {
+      flex: 1; min-width: 0; accent-color: var(--accent);
+    }
+    .lora-card .lora-strength-row input[type="number"] {
+      width: 56px; padding: 3px 6px; font-size: 11px;
+      text-align: right;
+    }
+    .lora-card .lora-toggle-row {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .lora-card .lora-toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 10px; border-radius: 6px;
+      border: 1px solid var(--border); background: rgba(255,255,255,0.02);
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      cursor: pointer; user-select: none;
+    }
+    .lora-card.active .lora-toggle {
+      background: var(--accent, #5a7cff); color: #fff;
+      border-color: var(--accent, #5a7cff);
+    }
+    .lora-card .lora-toggle input { display: none; }
+    .lora-card .lora-toggle .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); transition: background 100ms;
+    }
+    .lora-card.active .lora-toggle .dot { background: #fff; }
+    .lora-card .lora-meta-link {
+      font-size: 11px; color: var(--muted); margin-left: auto;
+      text-decoration: none;
+    }
+    .lora-card .lora-meta-link:hover { color: var(--accent-bright, #93a8ff); }
+    /* Brief flash on the prompt textarea when a trigger chip is clicked
+       but the word is already present — visual ack that the click did
+       fire (we just chose not to duplicate). */
+    textarea.flash-ok {
+      box-shadow: 0 0 0 2px rgba(80,200,120,0.45);
+      transition: box-shadow 240ms ease;
+    }
 
     /* CivitAI browser modal — grid of cards with thumbnail, name,
        creator, downloads, NSFW indicator, and an Install button per
@@ -3815,6 +3951,11 @@ HTML = r"""<!doctype html>
       background: rgba(248,81,73,0.15); border: 1px solid var(--danger, #f85149);
       color: var(--danger, #f85149);
     }
+    .civitai-card .civitai-source-link {
+      color: var(--accent-bright, #7e98ff);
+      text-decoration: none; font-size: 11px;
+    }
+    .civitai-card .civitai-source-link:hover { text-decoration: underline; }
     .civitai-card .actions { padding: 0 12px 12px; }
     .civitai-card .actions button { width: 100%; }
     .civitai-status-line { color: var(--muted); font-size: 11px; margin-top: 12px; }
@@ -4031,6 +4172,9 @@ HTML = r"""<!doctype html>
            of the panel. The card has four visual states it cycles through
            depending on /status data; see updateModelsCard() in the JS. -->
       <div id="modelsInline" class="models-inline" style="display:none">
+        <button type="button" class="models-inline-dismiss" id="modelsInlineDismiss"
+                title="Hide this card (won't show again until model state changes)"
+                onclick="dismissModelsCard()">×</button>
         <div class="models-inline-body">
           <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
           <div class="models-inline-text">
@@ -5499,9 +5643,10 @@ function updateModelsCard(s) {
   const q8Ok   = !!s.q8_available;
   const dl     = s.download && s.download.active ? s.download : null;
   const tier   = s.tier || {};
+  const dismissed = !!(s.settings && s.settings.models_card_dismissed);
 
   // Reset state classes — we set the right one below.
-  card.classList.remove('state-missing', 'state-warn', 'state-downloading');
+  card.classList.remove('state-missing', 'state-warn', 'state-downloading', 'dismissible');
   progress.style.display = 'none';
 
   // ----- Active download takes precedence over everything ------------------
@@ -5542,11 +5687,15 @@ function updateModelsCard(s) {
   // FFLF + Extend + High quality all need Q8. Surface the CTA *only* when
   // the user is about to do one of those — no point nagging a T2V user
   // about Q8 if they'll never use it.
+  // Dismissible: a user who deliberately doesn't want Q8 (storage budget,
+  // they only do T2V Draft/Standard) can × this away and we'll respect it
+  // until either model state changes or they re-summon the modal.
   const needsQ8 = (currentMode === 'keyframe')
                 || (document.getElementById('quality').value === 'high');
   if (needsQ8 && !q8Ok && tier.allows_q8 !== false) {
+    if (dismissed) { card.style.display = 'none'; return; }
     card.style.display = '';
-    card.classList.add('state-warn');
+    card.classList.add('state-warn', 'dismissible');
     icon.textContent = '⬇';
     const reason = currentMode === 'keyframe' ? 'FFLF needs the Q8 model'
                                               : 'High quality needs the Q8 model';
@@ -5561,14 +5710,24 @@ function updateModelsCard(s) {
     return;
   }
 
-  // ----- All good — keep the card visible but quiet ------------------------
-  // Earlier version hid the card entirely when nothing was actionable, but
-  // that made users on healthy installs think "the download UI doesn't
-  // exist." The card now stays visible with a small ✓ status, telling
-  // them what's installed and giving them a path to the per-repo manager.
-  // Default border / background = muted neutral, no warning colour.
+  // ----- All good — hide the card completely -------------------------------
+  // Per user feedback: the "Models ready · 3/3" status was visual noise once
+  // everything was downloaded. Hide the card on full readiness; the header
+  // models pill still gives a way to reopen the modal if the user wants to
+  // manage repos. If state regresses (a file gets deleted, partial download
+  // appears), one of the branches above re-shows it automatically.
+  const allReady = baseOk && q8Ok;
+  if (allReady) {
+    card.style.display = 'none';
+    actions.innerHTML = '';
+    return;
+  }
+  // ----- Partial-OK quiet state ---------------------------------------------
+  // Base OK but Q8 missing on a tier that supports it AND the user hasn't
+  // picked a Q8-needing mode — gentle nudge in neutral colours, dismissible.
+  if (dismissed) { card.style.display = 'none'; return; }
   card.style.display = '';
-  card.classList.remove('state-missing', 'state-warn', 'state-downloading');
+  card.classList.add('dismissible');
   icon.textContent = '✓';
   const ready = s.repos_ready ?? 0;
   const total = s.repos_total ?? 0;
@@ -5577,7 +5736,30 @@ function updateModelsCard(s) {
   sub.innerHTML =
     `All installed weights detected${partialNote}. ` +
     `<a style="color:var(--accent-bright,#7e98ff); cursor:pointer; text-decoration:underline" onclick="openModelsModal()">Manage models →</a>`;
-  actions.innerHTML = '';   // no big button in the ready state
+  actions.innerHTML = '';
+}
+
+// Persist the "user dismissed the models card" flag. POSTs to /settings
+// and re-runs updateModelsCard with the latest status so the card hides
+// immediately (not after the next /status poll cycle, ~5s away).
+async function dismissModelsCard() {
+  try {
+    const fd = new URLSearchParams();
+    fd.set('models_card_dismissed', 'true');
+    await fetch('/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: fd,
+    });
+  } catch (e) { /* best effort — UI still hides locally on next poll */ }
+  // Optimistically hide right now without waiting for the poll round-trip.
+  const card = document.getElementById('modelsInline');
+  if (card) card.style.display = 'none';
+  // Patch LAST_STATUS so subsequent updateModelsCard calls before the next
+  // /status fetch agree with the on-disk state.
+  if (LAST_STATUS && LAST_STATUS.settings) {
+    LAST_STATUS.settings.models_card_dismissed = true;
+  }
 }
 
 // ====== Tier gating ======
@@ -6061,9 +6243,7 @@ function renderLorasList() {
   const empty = document.getElementById('lorasEmpty');
   if (!wrap) return;
   // Combine: user-installed LoRAs (from /loras) plus any active LoRAs
-  // that aren't user-installed (e.g. from CivitAI not yet refreshed,
-  // unlikely but cover the case). Display each as a row with a
-  // checkbox for active state + a strength slider.
+  // that aren't user-installed (HF repo paths, e.g. from the HDR toggle).
   const rows = [];
   const seen = new Set();
   for (const ul of _knownUserLoras) {
@@ -6075,13 +6255,15 @@ function renderLorasList() {
       trigger_words: ul.trigger_words || [],
       recommended_strength: ul.recommended_strength || 1.0,
       filename: ul.filename,
+      preview_url: ul.preview_url,
+      preview_type: ul.preview_type,
       civitai_url: ul.civitai_url,
+      size_bytes: ul.size_bytes,
       active: !!active,
       strength: active ? active.strength : (ul.recommended_strength || 1.0),
       kind: 'user',
     });
   }
-  // Active LoRAs that aren't local files (e.g. HDR toggle target)
   for (const a of _activeLoras) {
     if (seen.has(a.path)) continue;
     rows.push({
@@ -6090,7 +6272,10 @@ function renderLorasList() {
       trigger_words: a.trigger_words || [],
       recommended_strength: 1.0,
       filename: null,
+      preview_url: null,
+      preview_type: null,
       civitai_url: null,
+      size_bytes: null,
       active: true,
       strength: a.strength,
       kind: 'remote',
@@ -6104,34 +6289,92 @@ function renderLorasList() {
   }
   if (empty) empty.style.display = 'none';
 
-  wrap.innerHTML = rows.map(r => {
-    const triggers = (r.trigger_words || []).slice(0, 3).join(', ');
-    return `
-      <div class="lora-row ${r.active ? 'active' : ''}" data-path="${escapeHtml(r.path)}">
-        <input type="checkbox" class="lora-check" ${r.active ? 'checked' : ''}
-               onchange="toggleLora('${escapeHtml(r.path)}', this.checked, ${r.recommended_strength}, ${JSON.stringify(r.name).replace(/"/g,'&quot;')})">
-        <div>
-          <div class="lora-name" title="${escapeHtml(r.path)}">
-            ${escapeHtml(r.name)}
-            ${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
-          </div>
-          ${triggers ? `<div class="lora-trigger" title="trigger words from sidecar">${escapeHtml(triggers)}</div>` : ''}
+  wrap.innerHTML = rows.map(r => loraCardHtml(r)).join('');
+}
+
+// Build a single LoRA card. Pulled out of renderLorasList so the markup
+// stays scannable. The card shows (top to bottom):
+//   1. Preview thumbnail (16:9 video or image; "no preview" placeholder).
+//   2. Corner buttons: open on CivitAI ↗, delete ×.
+//   3. Title row (filename ellipsis-truncated, HF badge for remote).
+//   4. Trigger word chips. Click → append to the prompt textarea so the
+//      user doesn't have to remember the exact spelling. Most LTX LoRAs
+//      need their trigger word in the prompt or they barely activate.
+//   5. Strength row: range slider + number input (-2..2, 0.05 step).
+//   6. Active toggle pill.
+function loraCardHtml(r) {
+  const pathHtml = escapeHtml(r.path);
+  const nameHtml = escapeHtml(r.name);
+  const nameAttr = JSON.stringify(r.name).replace(/"/g, '&quot;');
+  // Preview: <video> for .mp4 (autoplay/muted/loop = animated GIF feel),
+  // <img> otherwise, "no preview" placeholder when missing.
+  let thumbHtml;
+  if (!r.preview_url) {
+    thumbHtml = `<div class="lora-thumb-empty">no preview</div>`;
+  } else if (r.preview_type === 'video' || /\.mp4($|\?)/i.test(r.preview_url)) {
+    thumbHtml = `<video class="lora-thumb" src="${escapeHtml(r.preview_url)}"
+                        autoplay muted loop playsinline preload="metadata"></video>`;
+  } else {
+    thumbHtml = `<img class="lora-thumb" src="${escapeHtml(r.preview_url)}" alt="" loading="lazy">`;
+  }
+  // Corner actions: open on CivitAI when we know the page, then delete/×.
+  const cornerLinks = [];
+  if (r.civitai_url) {
+    cornerLinks.push(`<a class="lora-corner-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI to read instructions / examples">↗</a>`);
+  }
+  if (r.kind === 'user') {
+    cornerLinks.push(`<button class="lora-corner-btn danger" type="button" title="Delete from disk"
+                              onclick="deleteLora('${pathHtml}', '${escapeHtml(r.name)}')">×</button>`);
+  } else {
+    cornerLinks.push(`<button class="lora-corner-btn" type="button" title="Remove from active set"
+                              onclick="removeLoraFromActive('${pathHtml}')">×</button>`);
+  }
+  // Trigger chips. If a LoRA has no triggers (e.g. style-only LoRAs that
+  // activate purely from style transfer) say so explicitly so the user
+  // doesn't think the metadata is missing.
+  const trigs = (r.trigger_words || []).slice(0, 8);
+  const chipsHtml = trigs.length
+    ? trigs.map(w => {
+        const wAttr = JSON.stringify(w).replace(/"/g, '&quot;');
+        return `<span class="trigger-chip" title="Click to append to prompt"
+                       onclick="appendTriggerToPrompt(${wAttr})">${escapeHtml(w)}</span>`;
+      }).join('')
+    : `<span class="trigger-chip empty">no trigger word — applies as a style</span>`;
+
+  return `
+    <div class="lora-card ${r.active ? 'active' : ''}" data-path="${pathHtml}">
+      <div class="lora-thumb-wrap">
+        ${thumbHtml}
+        <div class="lora-corner-actions">${cornerLinks.join('')}</div>
+      </div>
+      <div class="lora-body">
+        <div class="lora-name" title="${pathHtml}">
+          ${nameHtml}
+          ${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
         </div>
+        <div class="trigger-chips">${chipsHtml}</div>
         <div class="lora-strength-row">
+          <label>strength</label>
           <input type="range" min="-2" max="2" step="0.05" value="${r.strength}"
                  ${r.active ? '' : 'disabled'}
-                 oninput="this.nextElementSibling.value = this.value; setLoraStrength('${escapeHtml(r.path)}', this.value)">
+                 oninput="this.nextElementSibling.value = this.value; setLoraStrength('${pathHtml}', this.value)">
           <input type="number" min="-2" max="2" step="0.05" value="${r.strength}"
                  ${r.active ? '' : 'disabled'}
-                 oninput="this.previousElementSibling.value = this.value; setLoraStrength('${escapeHtml(r.path)}', this.value)">
+                 oninput="this.previousElementSibling.value = this.value; setLoraStrength('${pathHtml}', this.value)">
         </div>
-        ${r.kind === 'user'
-          ? `<button class="lora-remove" type="button" title="Delete from disk"
-                     onclick="deleteLora('${escapeHtml(r.path)}', '${escapeHtml(r.name)}')">×</button>`
-          : `<button class="lora-remove" type="button" title="Remove from active set"
-                     onclick="removeLoraFromActive('${escapeHtml(r.path)}')">×</button>`}
-      </div>`;
-  }).join('');
+        <div class="lora-toggle-row">
+          <label class="lora-toggle">
+            <input type="checkbox" ${r.active ? 'checked' : ''}
+                   onchange="toggleLora('${pathHtml}', this.checked, ${r.recommended_strength}, ${nameAttr})">
+            <span class="dot"></span>
+            <span>${r.active ? 'Active' : 'Inactive'}</span>
+          </label>
+          ${r.civitai_url
+            ? `<a class="lora-meta-link" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener">read on CivitAI →</a>`
+            : ''}
+        </div>
+      </div>
+    </div>`;
 }
 
 function toggleLora(path, on, recommended, name) {
@@ -6140,6 +6383,37 @@ function toggleLora(path, on, recommended, name) {
   } else {
     removeLoraFromActive(path);
   }
+}
+
+// Append a LoRA's trigger word to the prompt textarea. Most LTX LoRAs
+// only fully activate when their trigger word is somewhere in the prompt,
+// and asking users to remember + type a string like "DISPSTYLE" exactly
+// is friction. Click the chip → it goes in. Idempotent: if the word is
+// already present (case-insensitive substring), do nothing so users can
+// click freely without piling duplicates.
+function appendTriggerToPrompt(word) {
+  const ta = document.getElementById('prompt');
+  if (!ta) return;
+  const cur = ta.value || '';
+  if (cur.toLowerCase().includes(String(word).toLowerCase())) {
+    // Brief visual ping so the click feels acknowledged even though we
+    // didn't change anything — otherwise users repeat-click thinking
+    // it's broken.
+    ta.classList.add('flash-ok');
+    setTimeout(() => ta.classList.remove('flash-ok'), 250);
+    return;
+  }
+  // If the user has typed nothing, drop the trigger in alone. Otherwise
+  // prepend to the existing prompt: many LoRA authors put the trigger
+  // FIRST in their examples, and quality often degrades when the trigger
+  // is buried at the end past 20+ tokens of unrelated context.
+  if (cur.trim() === '') {
+    ta.value = String(word);
+  } else {
+    ta.value = String(word) + ', ' + cur;
+  }
+  ta.focus();
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 async function deleteLora(path, name) {
@@ -6299,6 +6573,9 @@ function renderCivitaiGrid(items, append) {
           ${it.nsfw ? '<span class="nsfw-badge">NSFW</span>' : ''}
         </div>
         ${triggers ? `<div class="meta"><span title="trigger words">trigger: ${escapeHtml(triggers)}</span></div>` : ''}
+        ${it.civitai_url
+          ? `<div class="meta"><a class="civitai-source-link" href="${escapeHtml(it.civitai_url)}" target="_blank" rel="noopener" title="Open the original CivitAI page — usage notes, examples, comments">Read instructions on CivitAI ↗</a></div>`
+          : ''}
       </div>
       <div class="actions">
         <button type="button" class="primary-btn" data-id="${it.id}">Install</button>
