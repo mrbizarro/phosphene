@@ -248,13 +248,26 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         out["output_preset"] = preset
         if preset != "custom":
             # Preset overrides any pix_fmt/crf in the same patch — picking
-            # "Standard" should always give Standard's values.
+            # "Standard" should always give Standard's values. Note: we
+            # FALL THROUGH to the rest of validation (don't early-return)
+            # because the same patch may also carry token fields that
+            # the JS Apply path always sends together with the preset.
+            # An earlier version of this function had `return out, None`
+            # here, which silently dropped civitai_api_key + hf_token
+            # whenever the user clicked Apply on a non-custom preset —
+            # i.e. always, in practice. Reproduced as: panel reports
+            # has_civitai_key=False after a successful Apply with a
+            # valid key in the form.
             out["output_pix_fmt"] = OUTPUT_PRESETS[preset]["pix_fmt"]
             out["output_crf"] = OUTPUT_PRESETS[preset]["crf"]
-            return out, None
+            # Skip the per-field pix_fmt/crf validation below; the
+            # preset already populated them. But continue to the token
+            # checks further down.
 
-    # Custom path — validate pix_fmt + crf manually.
-    if "output_pix_fmt" in patch:
+    # Per-field pix_fmt + crf validation (custom path, or when no
+    # preset was supplied). Skipped automatically when the preset
+    # branch above filled them in.
+    if "output_pix_fmt" in patch and "output_pix_fmt" not in out:
         pf = str(patch["output_pix_fmt"]).strip().lower()
         # ffmpeg has many pix_fmts; whitelist the ones LTX 2.3 actually
         # produces correctly. Anything else is a footgun (color shifts,
@@ -266,7 +279,7 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
                         f"{sorted(ALLOWED_PIX_FMTS)}")
         out["output_pix_fmt"] = pf
 
-    if "output_crf" in patch:
+    if "output_crf" in patch and "output_crf" not in out:
         try:
             crf_i = int(str(patch["output_crf"]))
         except (TypeError, ValueError):
