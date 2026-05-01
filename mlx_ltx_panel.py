@@ -4387,16 +4387,49 @@ HTML = r"""<!doctype html>
       color: var(--muted);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
+    /* Action buttons in the LoRAs section header. Rescan is icon-only,
+       Browse CivitAI is the primary CTA. Both stop propagation so they
+       don't toggle the <details>. */
+    .loras-summary .loras-header-actions {
+      display: inline-flex; gap: 6px; align-items: center;
+      margin-left: 10px;
+    }
+    .loras-summary .loras-icon-btn {
+      width: 28px; height: 28px; padding: 0;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      color: var(--muted);
+      font-size: 14px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center;
+      transition: color 100ms, border-color 100ms, background 100ms;
+    }
+    .loras-summary .loras-icon-btn:hover {
+      color: var(--text); border-color: var(--accent);
+      background: rgba(47,129,247,0.08);
+    }
+    .loras-summary .loras-browse-btn {
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: white;
+      font-size: 11.5px; font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      transition: background 100ms, transform 80ms;
+    }
+    .loras-summary .loras-browse-btn:hover {
+      background: var(--accent-bright, #58a6ff);
+    }
+    .loras-summary .loras-browse-btn:active { transform: translateY(1px); }
     /* Body padding + internal layout. All children get consistent
        spacing without each one declaring its own margin. */
     .loras-body {
       display: flex; flex-direction: column;
       gap: 10px; padding: 12px 14px 14px;
-    }
-    .loras-actions {
-      display: flex; gap: 8px;
-      padding-top: 6px;
-      border-top: 1px dashed var(--border);
     }
     .lora-filter {
       width: 100%; padding: 6px 9px; border-radius: 6px;
@@ -5057,6 +5090,20 @@ HTML = r"""<!doctype html>
           <span class="loras-chevron" aria-hidden="true">▾</span>
           <span class="loras-title">LoRAs</span>
           <span class="loras-meta" id="lorasSummaryCount">none active</span>
+          <!-- Action buttons live in the header so they're visible
+               regardless of how far the user has scrolled inside the
+               LoRA list. Rescan is icon-only (the ↻ glyph reads as
+               refresh universally); Browse CivitAI is the primary CTA
+               for adding new LoRAs so it's a coloured button.
+               event.stopPropagation() keeps clicks from toggling the
+               <details> open/closed state. -->
+          <span class="loras-header-actions">
+            <button type="button" class="loras-icon-btn"
+                    title="Rescan mlx_models/loras/ for new files"
+                    onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()">↻</button>
+            <button type="button" class="loras-browse-btn"
+                    onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()">🔍 Browse CivitAI</button>
+          </span>
         </summary>
         <div class="loras-body" id="lorasBody">
           <!-- Filter/search box. Shows up only when 5+ LoRAs are
@@ -5069,15 +5116,11 @@ HTML = r"""<!doctype html>
           </div>
           <div class="hint" id="lorasEmpty">
             Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
-            to use them, or browse CivitAI below. Each LoRA picks up an
-            optional sidecar <code>.json</code> with name + trigger words +
-            recommended strength.
+            to use them, or click <strong>Browse CivitAI</strong> above.
+            Each LoRA picks up an optional sidecar <code>.json</code> with
+            name + trigger words + recommended strength.
           </div>
           <div class="loras-list" id="lorasList"></div>
-          <div class="loras-actions">
-            <button type="button" class="ghost-btn" onclick="refreshLoras()">↻ Rescan</button>
-            <button type="button" class="ghost-btn" onclick="openCivitaiModal()">🔍 Browse CivitAI</button>
-          </div>
         </div>
       </details>
       <div class="form-divider"></div>
