@@ -3,6 +3,7 @@
 # =============================================================================
 panel_queue.json
 panel_hidden.json
+panel_settings.json
 *.log
 *.tmp
 

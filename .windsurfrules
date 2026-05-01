@@ -310,6 +310,7 @@ endpoints are unauthenticated (loopback only).
 | `/status` | JSON | Snapshot of `STATE` — running flag, current job, queue, history (top 20), log tail, tier, memory pressure, helper alive flag, comfy PIDs, repo download state. Polled by the UI every ~1s. |
 | `/uploads` | JSON | Recent files in `panel_uploads/` for the picker's "click to reuse" strip. |
 | `/models` | JSON | Per-repo install completeness — driven by `required_files.json`. |
+| `/settings` | JSON | Returns `{settings, presets, default_preset}`. `settings` is the current `panel_settings.json` content. `presets` is the OUTPUT_PRESETS table (label + blurb + pix_fmt + crf per preset) so the UI doesn't duplicate it. |
 | `/file?path=…` | bytes (mp4/png/jpg) | Range-aware video serve so `<video>` tags can seek without re-downloading. |
 | `/image?path=…` | bytes (image) | Same idea for image previews. |
 | `/sidecar?path=…` | JSON | Per-output sidecar (job params, output stats) if it exists. |
@@ -330,6 +331,7 @@ endpoints are unauthenticated (loopback only).
 | `/output/show_all` | (none) | `{unhidden_count: int}` | Clear hidden set. |
 | `/upload` | multipart `image=<file>` | `{ok, path}` | Saves to `panel_uploads/<ts>_<safename>`. |
 | `/helper/restart` | (none) | `{ok}` | SIGTERM the helper subprocess; the next job auto-respawns it. Useful for picking up site-packages changes. |
+| `/settings` | `output_preset=<key>` (+ optional `output_pix_fmt`, `output_crf` for custom) | `{ok, settings, helper_restarted}` | Update + persist panel settings. If the codec changed, the helper is killed so the next job respawns it with the new env. Validation rejects unknown presets, unknown pix_fmt values, or CRF outside 0–30. |
 | `/stop` | (none) | `{ok}` | Cancel the current job (kills helper + mux). Worker advances. |
 | `/stop_comfy` | (none) | `{ok, killed}` | SIGTERM any ComfyUI process matching `LTX_COMFY_PATTERN`. |
 | `/open_pinokio` | (none) | `{ok}` | macOS-only: focus the Pinokio app. |
@@ -414,6 +416,43 @@ override `LTX_TIER_OVERRIDE=base|standard|high|pro` forces a tier
 The thresholds are intentional. M-Studio 64 GB is the canonical
 "standard" hardware. Anything below 48 GB cannot fit Q8 weights
 (transformer-dev.safetensors is 19.18 GiB plus working tensors).
+
+## 15a. `panel_settings.json` schema
+
+User-controllable preferences. Persisted at the install root, gitignored
+(per-user config, not part of the repo). Read at panel startup; mutated
+via `POST /settings`. The helper subprocess inherits codec env vars from
+this at spawn — when settings change, the panel kills the helper so the
+next job picks up new values.
+
+```jsonc
+{
+  "version": 1,
+  // Metadata so the UI knows which preset to highlight as active.
+  // "custom" means pix_fmt + crf were set manually outside any preset.
+  "output_preset": "standard" | "archival" | "web" | "custom",
+  "output_pix_fmt": "yuv420p" | "yuv444p" | "yuv422p"
+                  | "yuv420p10le" | "yuv422p10le" | "yuv444p10le",
+  "output_crf": "0".."30"   // string (passed via env vars)
+}
+```
+
+Preset table is the single source of truth, defined in `OUTPUT_PRESETS`
+in `mlx_ltx_panel.py`:
+
+| key | pix_fmt | crf | Approx 5s @ 1280×704 | Use case |
+|---|---|---|---|---|
+| `standard` ⭐ default | yuv420p | 18 | ~7 MB | Visually lossless, plays everywhere (X / IG / Discord) |
+| `archival` | yuv444p | 0 | ~50 MB | Mathematically lossless, post-processing master |
+| `web` | yuv420p | 23 | ~3 MB | Smallest, mobile / embedding |
+
+`+faststart` is always applied (codec patch) regardless of preset, so
+gallery thumbnails always render the first frame instantly.
+
+When adding a new preset: edit `OUTPUT_PRESETS` in `mlx_ltx_panel.py`
+and the `order` array in the settings modal JS (`openSettingsModal`).
+The blurb shown in the UI is read from the server at modal-open time,
+so server is the source of truth — no JS strings to keep in sync.
 
 ## 16. `required_files.json` schema
 

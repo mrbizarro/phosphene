@@ -194,15 +194,23 @@ Enhance — it appends an audio constraint to the prompt at submit time.
 
 ## Output format
 
-**Lossless H.264 by default** — `yuv444p`, `crf 0`. Your archive is
-the highest fidelity the renderer can produce. Web and social
-platforms will re-encode anyway. Override via env vars
-(`LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`) if you want `yuv420p`
-directly.
+Pick a preset from the **⚙ Settings** modal in the panel header. Three
+built-ins, plus a Custom mode for advanced overrides:
 
-**`+faststart`** is on. The `moov` atom sits at the front of the
-file so gallery thumbnails render the first frame instantly without
-downloading the full clip.
+| Preset | pix_fmt | CRF | ~Size (5s @ 1280×704) | Use case |
+|---|---|---|---|---|
+| **Standard** ⭐ default | yuv420p | 18 | ~7 MB | Visually lossless to most viewers. Plays everywhere — X, Instagram, Discord. The default for new installs. |
+| **Archival** | yuv444p | 0 | ~50 MB | Mathematically lossless. Use when you'll re-encode in post or need a master. |
+| **Web** | yuv420p | 23 | ~3 MB | Smallest files. For mobile, embedding, or quick previews. |
+| **Custom** | choose | 0–30 | varies | 10-bit HDR, format-specific delivery, etc. |
+
+Settings persist to `panel_settings.json` and apply to every new
+render. The helper subprocess restarts automatically when you change
+codec settings, so the change takes effect on the next render.
+
+**`+faststart`** is always on, regardless of preset. The `moov` atom
+sits at the front of the file so gallery thumbnails render the first
+frame instantly without downloading the full clip.
 
 For social uploads (X especially rejects `yuv444p`), re-encode with:
 

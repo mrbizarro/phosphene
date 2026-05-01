@@ -110,6 +110,187 @@ _REQUIRED = _load_required_files()
 _MIN_FILE_BYTES = int(_REQUIRED.get("min_size_bytes", 1024))
 
 
+# ---- panel settings: user-controllable preferences -------------------------
+# Persisted to panel_settings.json so the user's choice survives restarts.
+# Read at startup, exposed via /settings GET, mutated via /settings POST.
+# Currently covers output codec (the cause of the original "X rejects my
+# upload" complaint and the "videos are huge" complaint — lossless yuv444p
+# crf 0 is great for archives but wrong as a default for social workflows).
+#
+# Schema:
+#   {
+#     "version": 1,
+#     "output_preset": "standard" | "archival" | "web" | "custom",
+#     "output_pix_fmt": "yuv420p" | "yuv444p" | <other valid ffmpeg pix_fmt>,
+#     "output_crf": "0" .. "30" (string, since we pass it via env vars)
+#   }
+#
+# `output_preset` is metadata so the UI can show which preset is active even
+# after a reload. The actual ffmpeg behavior is driven by `output_pix_fmt`
+# and `output_crf` which get exported into the helper subprocess's env.
+
+# Preset table — single source of truth for the UI and the install default.
+# Sizes are rough estimates for a 5s 1280x704 H.264 clip (yuv420p crf 18 is
+# the long-standing "visually lossless" default for web video).
+OUTPUT_PRESETS: dict[str, dict[str, str]] = {
+    "archival": {
+        "pix_fmt": "yuv444p",
+        "crf": "0",
+        "label": "Archival (lossless)",
+        "blurb": "Mathematically lossless. ~50 MB per 5s clip. Use for "
+                 "post-processing or archive masters.",
+    },
+    "standard": {
+        "pix_fmt": "yuv420p",
+        "crf": "18",
+        "label": "Standard",
+        "blurb": "Visually lossless to ~95% of viewers. ~7 MB per 5s clip. "
+                 "Plays everywhere including X / Instagram / Discord. The "
+                 "default for new installs.",
+    },
+    "web": {
+        "pix_fmt": "yuv420p",
+        "crf": "23",
+        "label": "Web / social",
+        "blurb": "Smallest files. ~3 MB per 5s clip. For embedding, mobile, "
+                 "or quick previews where bandwidth matters more than peak "
+                 "fidelity.",
+    },
+}
+
+# Default preset for fresh installs. Switched from "archival" to "standard"
+# after multiple users reported X upload failures (X rejects yuv444p) and
+# disk-fill complaints about ~50 MB clips. Existing installs keep whatever
+# is in their panel_settings.json; new installs and panels with no settings
+# file yet get this default.
+DEFAULT_OUTPUT_PRESET = "standard"
+
+SETTINGS_FILE = ROOT / "panel_settings.json"
+_SETTINGS_LOCK = threading.Lock()
+
+
+def _settings_defaults() -> dict:
+    preset = OUTPUT_PRESETS[DEFAULT_OUTPUT_PRESET]
+    return {
+        "version": 1,
+        "output_preset": DEFAULT_OUTPUT_PRESET,
+        "output_pix_fmt": preset["pix_fmt"],
+        "output_crf": preset["crf"],
+    }
+
+
+def _load_settings() -> dict:
+    """Read panel_settings.json. Missing file → return + write the default
+    so first-run users get the sensible Standard preset. Corrupt file →
+    fall back to defaults but DON'T overwrite (preserves the bad file for
+    forensic inspection if it was edited by hand)."""
+    if not SETTINGS_FILE.exists():
+        defaults = _settings_defaults()
+        try:
+            SETTINGS_FILE.write_text(json.dumps(defaults, indent=2))
+        except Exception as exc:
+            sys.stderr.write(f"WARN: could not write {SETTINGS_FILE} ({exc})\n")
+        return defaults
+    try:
+        with SETTINGS_FILE.open("r") as fh:
+            data = json.load(fh)
+        # Backfill missing keys against defaults so older settings files
+        # don't trip over fields added in later versions.
+        defaults = _settings_defaults()
+        for k, v in defaults.items():
+            data.setdefault(k, v)
+        return data
+    except Exception as exc:
+        sys.stderr.write(f"WARN: panel_settings.json unreadable ({exc}); "
+                         f"using defaults until manually fixed\n")
+        return _settings_defaults()
+
+
+def _save_settings(settings: dict) -> None:
+    """Atomic write so a Pinokio kill mid-write can't leave a half-file."""
+    import tempfile, os as _os
+    fd, tmp = tempfile.mkstemp(prefix="panel_settings.", dir=str(ROOT))
+    try:
+        with _os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(settings, indent=2))
+            fh.flush()
+            _os.fsync(fh.fileno())
+        _os.replace(tmp, SETTINGS_FILE)
+    except Exception:
+        try: _os.unlink(tmp)
+        except OSError: pass
+        raise
+
+
+def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
+    """Validate user-submitted partial settings, return (clean, error_or_None).
+    Whitelist what we accept — never trust the form payload to be safe to
+    pass to ffmpeg / shell."""
+    out: dict = {}
+
+    if "output_preset" in patch:
+        preset = str(patch["output_preset"]).strip().lower()
+        if preset not in OUTPUT_PRESETS and preset != "custom":
+            return {}, f"unknown output_preset: {preset}"
+        out["output_preset"] = preset
+        if preset != "custom":
+            # Preset overrides any pix_fmt/crf in the same patch — picking
+            # "Standard" should always give Standard's values.
+            out["output_pix_fmt"] = OUTPUT_PRESETS[preset]["pix_fmt"]
+            out["output_crf"] = OUTPUT_PRESETS[preset]["crf"]
+            return out, None
+
+    # Custom path — validate pix_fmt + crf manually.
+    if "output_pix_fmt" in patch:
+        pf = str(patch["output_pix_fmt"]).strip().lower()
+        # ffmpeg has many pix_fmts; whitelist the ones LTX 2.3 actually
+        # produces correctly. Anything else is a footgun (color shifts,
+        # encoder errors).
+        ALLOWED_PIX_FMTS = {"yuv420p", "yuv422p", "yuv444p", "yuv420p10le",
+                            "yuv422p10le", "yuv444p10le"}
+        if pf not in ALLOWED_PIX_FMTS:
+            return {}, (f"output_pix_fmt must be one of: "
+                        f"{sorted(ALLOWED_PIX_FMTS)}")
+        out["output_pix_fmt"] = pf
+
+    if "output_crf" in patch:
+        try:
+            crf_i = int(str(patch["output_crf"]))
+        except (TypeError, ValueError):
+            return {}, "output_crf must be an integer 0-30"
+        if not 0 <= crf_i <= 30:
+            return {}, "output_crf must be between 0 (lossless) and 30 (low)"
+        out["output_crf"] = str(crf_i)
+
+    return out, None
+
+
+_SETTINGS = _load_settings()
+
+
+def get_settings() -> dict:
+    with _SETTINGS_LOCK:
+        return dict(_SETTINGS)
+
+
+def update_settings(patch: dict) -> tuple[dict, str | None]:
+    """Apply a validated patch + persist + return (current, error_or_None).
+    Caller is responsible for triggering a helper restart if codec settings
+    changed (the ffmpeg call inside the helper reads env vars at job time,
+    and the helper inherits env at spawn — so a running helper will keep
+    using whatever was active when it spawned)."""
+    clean, err = _validate_settings_patch(patch)
+    if err:
+        return get_settings(), err
+    with _SETTINGS_LOCK:
+        _SETTINGS.update(clean)
+        try:
+            _save_settings(_SETTINGS)
+        except Exception as exc:
+            return get_settings(), f"could not persist settings: {exc}"
+        return dict(_SETTINGS), None
+
+
 def _repos() -> list[dict]:
     """All repo entries from required_files.json (list, in order)."""
     return list(_REQUIRED.get("repos", []))
@@ -970,6 +1151,14 @@ class WarmHelper:
             env["LTX_GEMMA"] = str(GEMMA)
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
+            # Output codec env vars sourced from panel settings. The patched
+            # ffmpeg call inside ltx_core_mlx reads these at job time, so
+            # they need to be in the helper's env at spawn. When the user
+            # changes settings via /settings POST we kill the helper; the
+            # next job spawns it fresh and picks up the new values here.
+            _s = get_settings()
+            env["LTX_OUTPUT_PIX_FMT"] = _s.get("output_pix_fmt", "yuv420p")
+            env["LTX_OUTPUT_CRF"] = _s.get("output_crf", "18")
             push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
@@ -1825,6 +2014,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
             self._json(payload)
             return
+        if parsed.path == "/settings":
+            # Return current panel settings + the preset table so the UI
+            # can render preset pills with labels and blurbs without
+            # hardcoding any of it on the client side.
+            self._json({
+                "settings": get_settings(),
+                "presets": OUTPUT_PRESETS,
+                "default_preset": DEFAULT_OUTPUT_PRESET,
+            })
+            return
         if parsed.path == "/file":
             qs = parse_qs(parsed.query)
             try:
@@ -2022,6 +2221,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/helper/restart":
             HELPER.kill()
             self._json({"ok": True}); return
+
+        if path == "/settings":
+            # Accept partial-patch updates: only the fields the user
+            # actually changed need to be present. Validation lives in
+            # _validate_settings_patch — never trust the form payload.
+            payload: dict = {}
+            for k, v in form.items():
+                payload[k] = v[0] if isinstance(v, list) else v
+            prev = get_settings()
+            current, err = update_settings(payload)
+            if err:
+                self._json({"ok": False, "error": err, "settings": current}, 400)
+                return
+            # Codec env vars are read at helper SPAWN time. If the user
+            # changed pix_fmt or crf, kill the helper so the next job
+            # respawns it with the new env. Job in flight finishes with
+            # the OLD codec settings (we're not interrupting a render).
+            codec_changed = (
+                prev.get("output_pix_fmt") != current.get("output_pix_fmt") or
+                prev.get("output_crf") != current.get("output_crf")
+            )
+            if codec_changed:
+                push(
+                    f"settings: output codec → {current['output_pix_fmt']} "
+                    f"crf {current['output_crf']} ({current['output_preset']}). "
+                    f"Helper restarted; takes effect on next job."
+                )
+                HELPER.kill()
+            self._json({
+                "ok": True,
+                "settings": current,
+                "helper_restarted": codec_changed,
+            })
+            return
 
         if path == "/stop":
             stop_current_job()
@@ -2700,6 +2933,80 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
+    /* Header icon button — same height/feel as ghost-btn but icon-only.
+       Used for the settings cog. width:auto overrides the global
+       button{width:100%} rule. */
+    .icon-btn {
+      width: auto;
+      background: transparent; border: 1px solid var(--border);
+      color: var(--muted); padding: 4px 7px; border-radius: 6px;
+      cursor: pointer; display: inline-flex; align-items: center;
+      transition: border-color 120ms ease, color 120ms ease;
+    }
+    .icon-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+    .icon-btn svg { display: block; }
+
+    /* Settings modal — preset pills, advanced controls, Apply button.
+       Reuses the .models-modal frame so spacing/elevation match. */
+    .preset-grid {
+      display: grid; grid-template-columns: 1fr; gap: 8px;
+      margin: 12px 0;
+    }
+    .preset-card {
+      display: flex; align-items: flex-start; gap: 10px;
+      border: 1.5px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; cursor: pointer; user-select: none;
+      transition: border-color 120ms ease, background 120ms ease;
+      background: var(--panel-2);
+    }
+    .preset-card:hover { border-color: var(--accent); }
+    .preset-card.active {
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.18));
+    }
+    .preset-card input[type="radio"] {
+      width: auto; margin: 4px 0 0 0; flex-shrink: 0;
+      accent-color: var(--accent);
+    }
+    .preset-card .preset-text { flex: 1; min-width: 0; }
+    .preset-card .preset-label {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      margin: 0 0 4px 0;
+    }
+    .preset-card .preset-blurb {
+      font-size: 11px; color: var(--muted); line-height: 1.4;
+    }
+    .preset-card .preset-spec {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--accent-bright);
+      margin-top: 4px; letter-spacing: 0.02em;
+    }
+    .settings-section { margin-top: 14px; }
+    .settings-section h3 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px 0;
+    }
+    .settings-row { display: flex; gap: 10px; align-items: center; }
+    .settings-row label {
+      font-size: 11px; color: var(--muted); min-width: 70px;
+    }
+    .settings-foot {
+      display: flex; gap: 10px; justify-content: flex-end;
+      margin-top: 18px; padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .settings-status { color: var(--muted); font-size: 11px; flex: 1; align-self: center; }
+    .settings-status.ok { color: var(--success, #3fb950); }
+    .settings-status.err { color: var(--danger, #f85149); }
+    button.primary-btn {
+      width: auto;
+      background: var(--accent); color: white; border: 1px solid var(--accent);
+      padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500;
+      cursor: pointer;
+    }
+    button.primary-btn:hover { background: var(--accent-bright); }
+    button.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
     /* Models modal — opened by the header `models` pill. Layered on top
        of everything; the form/log keep working underneath while a
        download streams in (via the existing log panel at the bottom). */
@@ -2770,6 +3077,15 @@ HTML = r"""<!doctype html>
   <span id="modelsPill" class="pill" style="cursor:pointer" onclick="openModelsModal()" title="View / download model status">models…</span>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
+  <!-- Settings cog: opens the modal that lets users pick output codec
+       presets (Standard / Archival / Web / Custom). Sits between the
+       runtime pills and Stop Comfy so it's findable but not loud. -->
+  <button id="settingsBtn" class="icon-btn" onclick="openSettingsModal()" title="Output settings — codec, file size">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+  </button>
   <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
   <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
     <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
@@ -3073,6 +3389,66 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+
+<!-- ============== SETTINGS MODAL ============== -->
+<!-- Opened by the gear icon in the header. Lets users pick output codec
+     presets (Standard / Archival / Web) or set custom pix_fmt + crf.
+     Persisted to panel_settings.json; the helper subprocess restarts on
+     codec change so the new ffmpeg args take effect on next job. -->
+<div id="settingsModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeSettingsModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2>Settings</h2>
+      <button class="ghost-btn" onclick="closeSettingsModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Pick how rendered clips are encoded. Settings are saved to
+      <code>panel_settings.json</code> and apply to every new render.
+      Files already in the gallery are not re-encoded.
+    </div>
+
+    <div class="settings-section">
+      <h3>Output format</h3>
+      <div class="preset-grid" id="settingsPresets">
+        <!-- populated by openSettingsModal() from /settings -->
+      </div>
+    </div>
+
+    <div class="settings-section" id="settingsCustomSection" style="display:none">
+      <h3>Custom (advanced)</h3>
+      <div class="settings-row" style="margin-bottom:10px">
+        <label>pix_fmt</label>
+        <select id="settingsPixFmt" style="flex:1">
+          <option value="yuv420p">yuv420p — web standard, broad support</option>
+          <option value="yuv422p">yuv422p — pro, more chroma than 420p</option>
+          <option value="yuv444p">yuv444p — full chroma, no subsampling</option>
+          <option value="yuv420p10le">yuv420p10le — 10-bit, HDR-ready</option>
+          <option value="yuv422p10le">yuv422p10le — 10-bit pro</option>
+          <option value="yuv444p10le">yuv444p10le — 10-bit, full chroma</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <label>CRF</label>
+        <input type="range" id="settingsCrfRange" min="0" max="30" step="1"
+               style="flex:1; width:auto" oninput="document.getElementById('settingsCrfNum').value = this.value">
+        <input type="number" id="settingsCrfNum" min="0" max="30" step="1"
+               style="width:60px"
+               oninput="document.getElementById('settingsCrfRange').value = this.value">
+      </div>
+      <div class="hint" style="margin-top:6px">
+        0 = mathematically lossless · 18 = visually lossless ·
+        23 = web default · 28+ = lossy
+      </div>
+    </div>
+
+    <div class="settings-foot">
+      <span class="settings-status" id="settingsStatus"></span>
+      <button class="ghost-btn" onclick="closeSettingsModal()">Cancel</button>
+      <button class="primary-btn" id="settingsApplyBtn" onclick="applySettings()">Apply</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============== TIER MODAL ============== -->
 <!-- Opened by the "tier" pill in the header. Renders the detected
@@ -4286,6 +4662,125 @@ function openTierModal() {
   });
 }
 function closeTierModal() { document.getElementById('tierModal').style.display = 'none'; }
+
+// ====== Settings modal ======
+// Single-shot fetch on open (settings change rarely). The modal hydrates
+// preset cards from the /settings response so the labels and blurbs
+// match the server-side OUTPUT_PRESETS table — no preset content
+// duplicated in JS.
+let _settingsCache = null;
+
+async function openSettingsModal() {
+  const modal = document.getElementById('settingsModal');
+  modal.style.display = 'flex';
+  document.getElementById('settingsStatus').textContent = '';
+  document.getElementById('settingsStatus').className = 'settings-status';
+  try {
+    const r = await fetch('/settings');
+    _settingsCache = await r.json();
+  } catch (e) {
+    document.getElementById('settingsStatus').textContent = 'Could not load settings.';
+    document.getElementById('settingsStatus').className = 'settings-status err';
+    return;
+  }
+  const cur = _settingsCache.settings;
+  const presets = _settingsCache.presets;
+  // Render preset cards (Standard, Archival, Web, Custom).
+  const order = ['standard', 'archival', 'web'];
+  const grid = document.getElementById('settingsPresets');
+  grid.innerHTML = '';
+  for (const key of order) {
+    const p = presets[key];
+    const active = cur.output_preset === key ? 'active' : '';
+    const card = document.createElement('label');
+    card.className = `preset-card ${active}`;
+    card.dataset.preset = key;
+    card.innerHTML = `
+      <input type="radio" name="settingsPreset" value="${key}" ${cur.output_preset === key ? 'checked' : ''}>
+      <div class="preset-text">
+        <div class="preset-label">${escapeHtml(p.label)}</div>
+        <div class="preset-blurb">${escapeHtml(p.blurb)}</div>
+        <div class="preset-spec">pix_fmt=${p.pix_fmt} · crf=${p.crf}</div>
+      </div>`;
+    card.addEventListener('click', () => selectPreset(key));
+    grid.appendChild(card);
+  }
+  // Custom row.
+  const customActive = cur.output_preset === 'custom' ? 'active' : '';
+  const custom = document.createElement('label');
+  custom.className = `preset-card ${customActive}`;
+  custom.dataset.preset = 'custom';
+  custom.innerHTML = `
+    <input type="radio" name="settingsPreset" value="custom" ${cur.output_preset === 'custom' ? 'checked' : ''}>
+    <div class="preset-text">
+      <div class="preset-label">Custom</div>
+      <div class="preset-blurb">Set pix_fmt and CRF manually. For unusual workflows (10-bit HDR, archival masters at non-standard CRF, format-specific delivery).</div>
+      <div class="preset-spec">pix_fmt=${cur.output_pix_fmt} · crf=${cur.output_crf}</div>
+    </div>`;
+  custom.addEventListener('click', () => selectPreset('custom'));
+  grid.appendChild(custom);
+  // Pre-fill custom inputs with current values
+  document.getElementById('settingsPixFmt').value = cur.output_pix_fmt;
+  document.getElementById('settingsCrfRange').value = cur.output_crf;
+  document.getElementById('settingsCrfNum').value = cur.output_crf;
+  document.getElementById('settingsCustomSection').style.display =
+    cur.output_preset === 'custom' ? 'block' : 'none';
+}
+
+function closeSettingsModal() {
+  document.getElementById('settingsModal').style.display = 'none';
+}
+
+function selectPreset(key) {
+  document.querySelectorAll('#settingsPresets .preset-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.preset === key);
+    const r = c.querySelector('input[type="radio"]');
+    if (r) r.checked = (c.dataset.preset === key);
+  });
+  document.getElementById('settingsCustomSection').style.display =
+    key === 'custom' ? 'block' : 'none';
+  // Clear status so it doesn't claim "saved" after a fresh selection.
+  document.getElementById('settingsStatus').textContent = '';
+  document.getElementById('settingsStatus').className = 'settings-status';
+}
+
+async function applySettings() {
+  const status = document.getElementById('settingsStatus');
+  const btn = document.getElementById('settingsApplyBtn');
+  status.textContent = 'Saving…';
+  status.className = 'settings-status';
+  btn.disabled = true;
+  // Read which preset is selected. Custom path also sends pix_fmt + crf.
+  const checked = document.querySelector('#settingsPresets input[type="radio"]:checked');
+  const preset = checked ? checked.value : 'standard';
+  const fd = new FormData();
+  fd.set('output_preset', preset);
+  if (preset === 'custom') {
+    fd.set('output_pix_fmt', document.getElementById('settingsPixFmt').value);
+    fd.set('output_crf', document.getElementById('settingsCrfNum').value);
+  }
+  try {
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      status.textContent = data.error || `HTTP ${r.status}`;
+      status.className = 'settings-status err';
+      btn.disabled = false;
+      return;
+    }
+    status.textContent = data.helper_restarted
+      ? 'Saved. Helper restarted — takes effect on the next render.'
+      : 'Saved.';
+    status.className = 'settings-status ok';
+    btn.disabled = false;
+    // Refresh cache so a re-open shows the new values without a stale flash.
+    _settingsCache = { ...(_settingsCache || {}), settings: data.settings };
+  } catch (e) {
+    status.textContent = 'Network error: ' + (e.message || e);
+    status.className = 'settings-status err';
+    btn.disabled = false;
+  }
+}
 
 // ====== Models modal ======
 // Opens to /models snapshot. While open, the main poll() refreshes the
