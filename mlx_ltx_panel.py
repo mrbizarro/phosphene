@@ -4059,73 +4059,116 @@ HTML = r"""<!doctype html>
     .car-card.active .car-info-btn { opacity: 1; }
     .car-card .car-info-btn:hover { background: rgba(20,25,40,0.92); color: #fff; }
 
-    /* Output info modal layout. Reuses .models-modal scaffolding. */
+    /* Output info modal — clean detail-pane styling. Reuses
+       .models-modal scaffolding for the dim backdrop and centred card,
+       but the body is intentionally chrome-light: no nested boxes, no
+       coloured uppercase headers. Sections are separated by spacing
+       and a thin top-border on the section title — closer to a Linear
+       detail pane than a "developer console" dump. */
     .output-info-body {
-      display: flex; flex-direction: column; gap: 14px;
-      max-height: 70vh; overflow-y: auto; padding-right: 4px;
+      display: flex; flex-direction: column;
+      gap: 22px;
+      max-height: 70vh; overflow-y: auto;
+      padding: 4px 6px 4px 0;       /* breathing room around the scrollbar */
     }
-    .oi-section {
-      border: 1px solid var(--border); border-radius: 8px;
-      padding: 10px 12px; background: rgba(255,255,255,0.015);
-    }
+    .oi-section { /* no border, no background — separation is purely typographic */ }
     .oi-section-title {
-      font-size: 11px; font-weight: 600;
-      color: var(--accent-bright, #93a8ff);
-      text-transform: uppercase; letter-spacing: 0.06em;
-      margin-bottom: 8px;
-      display: flex; align-items: center; gap: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+    }
+    .oi-section-title .oi-count {
+      font-weight: 400; letter-spacing: 0;
+      text-transform: none; color: var(--muted);
     }
     .oi-grid {
-      display: grid; grid-template-columns: 110px 1fr;
-      gap: 4px 12px; margin: 0;
+      display: grid; grid-template-columns: 96px 1fr;
+      row-gap: 9px; column-gap: 16px;
+      margin: 0;
     }
     .oi-grid dt {
-      color: var(--muted); font-size: 11px;
-      align-self: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 400;
     }
     .oi-grid dd {
-      margin: 0; color: var(--text); font-size: 12px;
-      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin: 0;
+      color: var(--text);
+      font-size: 13px;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      min-width: 0;
     }
     .oi-grid dd code {
-      background: rgba(255,255,255,0.04); padding: 1px 6px;
-      border-radius: 4px; font-size: 11px;
+      background: rgba(255,255,255,0.04);
+      padding: 1px 6px; border-radius: 3px;
+      font-size: 11.5px;
+      color: var(--text);
     }
     .oi-prompt {
-      font-size: 12px; line-height: 1.5; color: var(--text);
-      background: var(--bg-2, #0a0c14);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 8px 10px; max-height: 200px; overflow-y: auto;
+      font-size: 12.5px; line-height: 1.55; color: var(--text);
+      background: rgba(255,255,255,0.025);
+      border-radius: 5px;
+      padding: 12px 14px;
+      max-height: 240px; overflow-y: auto;
       white-space: pre-wrap; word-break: break-word;
     }
     .oi-copy {
-      font-size: 10px; padding: 2px 8px;
-      border-radius: 4px; border: 1px solid var(--border);
-      background: rgba(255,255,255,0.04); color: var(--muted);
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
       cursor: pointer; font-weight: 500;
       letter-spacing: 0;
+      transition: color 100ms, border-color 100ms, background 100ms;
     }
-    .oi-copy:hover { color: var(--text); border-color: var(--accent); }
+    .oi-copy:hover {
+      color: var(--text); border-color: var(--accent);
+      background: rgba(47,129,247,0.07);
+    }
+    /* LoRA list — flat rows, separated by hairlines instead of each
+       row being its own card. Reads as a list, not a stack of cards. */
+    .oi-lora-list {
+      display: flex; flex-direction: column;
+    }
     .oi-lora-row {
-      display: flex; align-items: center; gap: 12px;
-      padding: 6px 8px; border-radius: 5px;
-      background: rgba(255,255,255,0.02);
-      border: 1px solid var(--border);
-      font-size: 12px; margin-bottom: 4px;
+      display: flex; align-items: center; gap: 14px;
+      padding: 9px 0; font-size: 13px;
     }
-    .oi-lora-row:last-child { margin-bottom: 0; }
+    .oi-lora-row + .oi-lora-row { border-top: 1px solid var(--border); }
     .oi-lora-row .oi-lora-name {
       flex: 1; color: var(--text); font-weight: 500;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
     }
     .oi-lora-row .oi-lora-strength {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: var(--muted); font-size: 11px;
+      color: var(--muted); font-size: 12px; flex: none;
     }
     .oi-actions {
       display: flex; gap: 8px; justify-content: flex-end;
       margin-top: 4px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
     }
+    .oi-actions .oi-primary {
+      padding: 7px 14px;
+      border-radius: 6px;
+      background: var(--accent); color: white;
+      border: 1px solid var(--accent);
+      font-size: 12px; font-weight: 600;
+      cursor: pointer;
+      transition: background 100ms;
+    }
+    .oi-actions .oi-primary:hover { background: var(--accent-bright, #58a6ff); }
     .car-card .info { padding: 6px 8px; font-size: 10px; }
     .car-card .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .car-card .sub { color: var(--muted); margin-top: 2px; }
@@ -6394,107 +6437,118 @@ function _humanDuration(s) {
 function renderOutputInfoBody(path, data) {
   const p = (data && data.params) || {};
   const loras = Array.isArray(p.loras) ? p.loras : [];
-  const fname = path.split('/').pop();
 
-  // Try to enrich each LoRA path with its display name + trigger words
-  // by looking it up in the cached _knownUserLoras list. If the LoRA was
-  // deleted or is an HF repo id, we fall back to the raw filename.
+  // Look up each LoRA's display name from the installed-LoRAs cache so
+  // the modal shows "Claymation Style" instead of the raw safetensors
+  // path. Falls back gracefully when a LoRA was deleted or is an HF id.
   const lookupLoraName = (loraPath) => {
     if (!loraPath) return '?';
     const known = (_knownUserLoras || []).find(l => l.path === loraPath);
     if (known) return known.name;
-    // HF repo path? Last two path segments are usually informative.
     if (loraPath.includes('/') && !loraPath.endsWith('.safetensors')) return loraPath;
     return loraPath.split('/').pop().replace(/\.safetensors$/, '');
   };
 
-  // Layout: stacked sections. Output → Generation → Prompt → LoRAs → Timing.
   const promptText = p.prompt || '';
   const promptAttr = JSON.stringify(promptText).replace(/"/g, '&quot;');
-  const seedAttr = JSON.stringify(String(p.seed_used != null ? p.seed_used : p.seed || '')).replace(/"/g, '&quot;');
-
-  let html = '';
-
-  // ---- Output section
-  html += `<div class="oi-section">
-    <div class="oi-section-title">Output</div>
-    <dl class="oi-grid">
-      <dt>Filename</dt><dd><code>${escapeHtml(fname)}</code></dd>
-      ${p.width && p.height ? `<dt>Dimensions</dt><dd>${p.width} × ${p.height}</dd>` : ''}
-      ${data.video_duration_sec != null ? `<dt>Duration</dt><dd>${data.video_duration_sec.toFixed(2)} s @ ${data.fps || 24} fps</dd>` : ''}
-      ${p.frames != null ? `<dt>Frames</dt><dd>${p.frames}</dd>` : ''}
-    </dl>
-  </div>`;
-
-  // ---- Generation section
+  const seedVal = String(p.seed_used != null ? p.seed_used : p.seed || '');
+  const seedAttr = JSON.stringify(seedVal).replace(/"/g, '&quot;');
+  const pathAttr = JSON.stringify(path).replace(/"/g, '&quot;');
   const modeLabel = ({
     t2v: 'Text → Video',
     i2v: 'Image → Video',
     i2v_clean_audio: 'Image → Video (clean audio)',
     keyframe: 'FFLF (first + last frame)',
     extend: 'Extend',
-  })[p.mode] || p.mode;
+  })[p.mode] || (p.mode || '—');
+
+  // Compose the dimensions + duration into a single "Format" line — fewer
+  // grid rows, easier to scan. We separate technical metadata (Format,
+  // Frames) from generation parameters (Mode, Quality, Seed, Steps).
+  const formatBits = [];
+  if (p.width && p.height) formatBits.push(`${p.width} × ${p.height}`);
+  if (data.video_duration_sec != null) formatBits.push(`${data.video_duration_sec.toFixed(2)} s @ ${data.fps || 24} fps`);
+
+  let html = '';
+
+  // ---- Output (technical) ----
   html += `<div class="oi-section">
-    <div class="oi-section-title">Generation</div>
+    <div class="oi-section-title"><span>Output</span></div>
     <dl class="oi-grid">
-      <dt>Mode</dt><dd>${escapeHtml(modeLabel || '—')}</dd>
-      <dt>Quality</dt><dd>${escapeHtml(p.quality || 'standard')}</dd>
-      <dt>Seed</dt><dd>
-        <code>${escapeHtml(String(p.seed_used != null ? p.seed_used : p.seed || ''))}</code>
-        <button class="oi-copy" type="button" onclick="_copyToClipboard(${seedAttr}, this)">Copy</button>
-      </dd>
-      ${p.steps != null ? `<dt>Steps</dt><dd>${p.steps}</dd>` : ''}
-      ${p.hdr ? `<dt>HDR</dt><dd>on</dd>` : ''}
-      ${p.label ? `<dt>Label</dt><dd>${escapeHtml(p.label)}</dd>` : ''}
+      ${formatBits.length ? `<dt>Format</dt><dd>${formatBits.join('  ·  ')}</dd>` : ''}
+      ${p.frames != null ? `<dt>Frames</dt><dd>${p.frames}</dd>` : ''}
     </dl>
   </div>`;
 
-  // ---- Prompt section (always rendered for t2v/i2v even if empty)
+  // ---- Generation parameters ----
+  const genRows = [];
+  genRows.push(`<dt>Mode</dt><dd>${escapeHtml(modeLabel)}</dd>`);
+  genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
+  if (seedVal) {
+    genRows.push(`<dt>Seed</dt><dd>
+      <code>${escapeHtml(seedVal)}</code>
+      <button class="oi-copy" type="button" onclick="_copyToClipboard(${seedAttr}, this)">Copy</button>
+    </dd>`);
+  }
+  if (p.steps != null) genRows.push(`<dt>Steps</dt><dd>${p.steps}</dd>`);
+  if (p.hdr) genRows.push(`<dt>HDR</dt><dd>On</dd>`);
+  if (p.label) genRows.push(`<dt>Label</dt><dd>${escapeHtml(p.label)}</dd>`);
+
+  html += `<div class="oi-section">
+    <div class="oi-section-title"><span>Generation</span></div>
+    <dl class="oi-grid">${genRows.join('')}</dl>
+  </div>`;
+
+  // ---- Prompt ----
   if (promptText) {
     html += `<div class="oi-section">
       <div class="oi-section-title">
-        Prompt
+        <span>Prompt</span>
         <button class="oi-copy" type="button" onclick="_copyToClipboard(${promptAttr}, this)">Copy</button>
       </div>
       <div class="oi-prompt">${escapeHtml(promptText)}</div>
     </div>`;
   }
 
-  // ---- LoRAs section
+  // ---- LoRAs (flat list, hairline-separated) ----
   if (loras.length) {
     const rows = loras.map(l => {
       const name = lookupLoraName(l.path);
+      const strength = (l.strength != null ? l.strength : 1).toFixed(2);
       return `<div class="oi-lora-row">
         <span class="oi-lora-name" title="${escapeHtml(l.path || '')}">${escapeHtml(name)}</span>
-        <span class="oi-lora-strength">strength ${(l.strength != null ? l.strength : 1).toFixed(2)}</span>
+        <span class="oi-lora-strength">strength ${strength}</span>
       </div>`;
     }).join('');
     html += `<div class="oi-section">
-      <div class="oi-section-title">LoRAs used (${loras.length})</div>
-      ${rows}
-    </div>`;
-  } else {
-    html += `<div class="oi-section">
-      <div class="oi-section-title">LoRAs used</div>
-      <div class="hint">— none —</div>
+      <div class="oi-section-title">
+        <span>LoRAs used</span>
+        <span class="oi-count">${loras.length}</span>
+      </div>
+      <div class="oi-lora-list">${rows}</div>
     </div>`;
   }
 
-  // ---- Timing + provenance
-  html += `<div class="oi-section">
-    <div class="oi-section-title">Timing</div>
-    <dl class="oi-grid">
-      ${data.started ? `<dt>Started</dt><dd>${escapeHtml(data.started)}</dd>` : ''}
-      ${data.elapsed_sec != null ? `<dt>Elapsed</dt><dd>${_humanDuration(data.elapsed_sec)}</dd>` : ''}
-      ${data.queue_id ? `<dt>Queue ID</dt><dd><code>${escapeHtml(data.queue_id)}</code></dd>` : ''}
-      ${data.model ? `<dt>Model</dt><dd><code>${escapeHtml(data.model.split('/').pop())}</code></dd>` : ''}
-    </dl>
-  </div>`;
+  // ---- Timing + provenance ----
+  const timingRows = [];
+  if (data.started) timingRows.push(`<dt>Started</dt><dd>${escapeHtml(data.started)}</dd>`);
+  if (data.elapsed_sec != null) timingRows.push(`<dt>Elapsed</dt><dd>${_humanDuration(data.elapsed_sec)}</dd>`);
+  if (data.queue_id) timingRows.push(`<dt>Queue ID</dt><dd><code>${escapeHtml(data.queue_id)}</code></dd>`);
+  if (data.model) timingRows.push(`<dt>Model</dt><dd><code>${escapeHtml(data.model.split('/').pop())}</code></dd>`);
+  if (timingRows.length) {
+    html += `<div class="oi-section">
+      <div class="oi-section-title"><span>Timing</span></div>
+      <dl class="oi-grid">${timingRows.join('')}</dl>
+    </div>`;
+  }
 
-  // ---- Action row at the bottom
+  // ---- Action row ----
   html += `<div class="oi-actions">
-    <button class="ghost-btn" type="button" onclick="closeOutputInfoModal(); selectOutput(${JSON.stringify(path).replace(/"/g,'&quot;')}); loadParams()">Load params into form</button>
     <button class="ghost-btn" type="button" onclick="closeOutputInfoModal()">Close</button>
+    <button class="oi-primary" type="button"
+            onclick="closeOutputInfoModal(); selectOutput(${pathAttr}); loadParams()">
+      Load params into form
+    </button>
   </div>`;
 
   return html;
