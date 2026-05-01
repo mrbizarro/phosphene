@@ -3,90 +3,140 @@
 </p>
 
 <p align="center">
-  <a href="https://x.com/AIBizarrothe">
-    <img src="assets/bizarro-avatar.jpg" width="48" height="48" style="border-radius: 50%;" alt="by Mr. Bizarro on X">
-  </a>
-  <br>
-  <em>by <a href="https://x.com/AIBizarrothe">Mr. Bizarro</a> — follow on X</em>
+  <strong>Local video and audio generation for Apple Silicon.</strong><br>
+  A free desktop panel for <a href="https://github.com/Lightricks/LTX-Video">LTX 2.3</a> running natively in <a href="https://github.com/ml-explore/mlx">MLX</a>.<br>
+  One-click install via <a href="https://pinokio.computer">Pinokio</a>. No cloud, no API key, no subscription.
 </p>
 
-# Local control panel for LTX Video 2.3 on Apple Silicon
-
-A polished web panel that wraps the [`dgrauet/ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx) MLX port of LTX Video 2.3. Runs entirely locally on Apple Silicon Macs — no cloud, no API keys, no subscription. Persistent batch queue, warm pipeline subprocess, image-to-video with auto cover-crop, lossless h264 output, output gallery with hide/unhide, extend mode for longer clips, and crash-safe queue resume.
-
-The CLI works but isn't ergonomic for batch generation. ComfyUI on Apple Silicon is currently broken/CPU-bound for LTX 2.3 (8 min per step on M4 Max in some reports). This panel fills the gap.
-
----
-
-## Credits — upstream work this is built on
-
-This is a wrapper, not a fork. All the hard model work belongs to the people below. The panel adds workflow, UX, and a few small fixes.
-
-- **[Lightricks](https://github.com/Lightricks/LTX-Video)** — original LTX Video model. The architecture, training, weights, and the joint audio+video design are all theirs. LTX 2.3 22B distilled is what generates every clip.
-- **[@dgrauet](https://github.com/dgrauet/ltx-2-mlx)** — the MLX port. Without their work there is no LTX on Apple Silicon worth talking about. Pure Apple-Metal port of the LTX-2 reference, three-package monorepo (inference, pipelines, training), and the Q4/Q8 quantized model bundles on Hugging Face.
-- **MLX team @ Apple** — the framework that makes Metal-native ML on Mac fast enough to be worth running locally.
-- **[mlx-community](https://huggingface.co/mlx-community)** — the Gemma-3-12B-it-4bit text encoder distribution.
+<p align="center">
+  <a href="https://x.com/AIBizarrothe">
+    <img src="assets/bizarro-avatar.jpg" width="40" height="40" style="border-radius: 50%;" alt="by Mr. Bizarro on X">
+  </a>
+  <br>
+  <em>by <a href="https://x.com/AIBizarrothe">Mr. Bizarro</a> on X</em>
+</p>
 
 ---
 
-## What this adds on top of the upstream stack
+## What it looks like
 
-The pieces below are what justify the panel existing as its own project. Most are not in upstream `ltx-2-mlx`, and a couple are bug fixes I plan to PR back.
+<p align="center">
+  <img src="assets/screenshot_panel_full.jpg" alt="Phosphene panel — full UI with mode pills, prompt area, output gallery" width="100%">
+</p>
 
-| What | Why it matters |
-|---|---|
-| **Persistent batch queue** with crash-resume | Submit 60 prompts, sleep, wake up to 60 clips. State written to `panel_queue.json` so a panel/Mac restart doesn't lose work-in-progress. |
-| **Warm helper subprocess** holding MLX pipelines | Spawning the CLI fresh per job is ~100 lines of redundant Python startup. Helper holds T2V / I2V / Extend pipelines lazily, auto-exits after 30 min idle. |
-| **Image cover-crop pre-flight** | Drop a 4K image into I2V; pipeline cover-crops to model-safe dims (multiples of 32) without distortion. Upload via drag-and-drop or path. |
-| **Lossless h264 output** *(yuv444p, crf 0)* | Upstream pipeline encodes with `yuv420p crf 18` — 4:2:0 chroma subsampling produces visible JPEG-style block artifacts on faces. Patched to `yuv444p crf 0` (no chroma subsampling, mathematically lossless), with env-var overrides. **Will PR upstream.** |
-| **Aspect + duration-driven sizing** | Pick aspect from a dropdown, type seconds, frames auto-snap to LTX's required `8k+1` rule. No more manually computing frame counts. |
-| **Extend mode** | Chain clips beyond the single-shot frame budget. Click "⏭ Extend" on any output, get one-click setup with that clip as the source. |
-| **Output gallery** with auto-thumbnails, hide/unhide, sidecar JSONs | Every render writes `.mp4.json` with full params. "↩ Load params" reproduces any past clip. Hide videos from the panel without deleting from disk. |
-| **Live status pills** — memory, swap, Comfy, helper, queue, job | Health dashboard at the top: never wonder if the Mac is swapping or if something silently died. |
-| **Auto-detect & stop ComfyUI** before 720p renders | ComfyUI idle costs ~27 GB; both alive at 720p+ thrashes on 64 GB Macs. Panel kills Comfy via `pgrep` (no hardcoded PID), opt-in per render. |
-| **`caffeinate -i`** while queue is non-empty | Display can sleep, system can't. Released automatically when queue drains. |
-| **Diegetic-dialogue prompt patterns documented** | LTX 2.3 produces voiceover by default; with the right phrasing (voice-quality descriptor + mouth beat before quote + tight framing) it produces in-mouth lipsync. Documented and enforced via the prompt examples in this repo. |
-| **Stop-current vs pause-queue separation** | Stop kills the running render and advances to the next; Pause holds the queue while the current finishes. |
+Single page, no node graph. Pick a mode, type a prompt, hit Generate.
+Outputs land in the gallery on the right. Every clip carries audio.
+
+<p align="center">
+  <img src="assets/screenshot_modes.jpg" alt="Mode and Quality pill selectors" width="65%">
+</p>
 
 ---
 
-## Requirements
+## What's different
 
-- Apple Silicon Mac (M1+). Memory bandwidth bottlenecks dominate — M4 Max / Ultra are 4–6× faster than base M-series.
-- macOS 14+
-- 32 GB RAM minimum (Q4); 64 GB+ recommended for 720p+ or longer clips
-- ~80 GB free disk for the Q4 model bundle
-- Python 3.11 (for the MLX pipeline). The panel itself runs on Python 3.9+ stdlib only.
-- ffmpeg with libx264 + AAC. Pinokio's bundled ffmpeg is auto-detected; Homebrew also works.
+The differentiator is **audio**. LTX 2.3 generates video and audio in
+**one forward pass** — they share the diffusion process, so timing is
+tied at the frame level. Footsteps land on the right frame. Lip
+movement matches dialogue. Ambient hum is conditioned on what you see.
+
+| | Phosphene | Wan / Hunyuan / Mochi (Mac) | Pika / Runway | ComfyUI + LTX 2.3 |
+|---|---|---|---|---|
+| Joint audio + video | ✅ one pass | ❌ silent | ✅ (cloud) | ✅ |
+| Native MLX (no torch shim) | ✅ | ❌ MPS shim | n/a | ❌ |
+| Local, no API | ✅ | ✅ | ❌ | ✅ |
+| One-click install | ✅ Pinokio | varies | n/a | ❌ node graph |
+| Persistent batch queue | ✅ crash-resume | ❌ | ✅ | ❌ |
+| Lossless H.264 output | ✅ yuv444p crf 0 | yuv420p | varies | yuv420p |
+
+---
+
+## Modes
+
+Four generation modes. All produce video + synced audio.
+
+| Mode | Inputs | Use case |
+|---|---|---|
+| **T2V** — text → video | prompt | The default. Type a scene, get 5 seconds with sound. |
+| **I2V** — image → video | prompt + reference image | Animate a still. Auto cover-crop to model dimensions. |
+| **FFLF** — first / last frame | prompt + start image + end image | Two images bookend the clip; the model fills the motion between. Requires Q8. |
+| **Extend** — continue a clip | existing mp4 + prompt | Append seconds onto a previous render. Audio continuous across the join. |
+
+Plus a **Prompt Enhance** button that uses Gemma 3 12B (4-bit, locally)
+to rewrite your prompt in the structure LTX 2.3 was trained on.
+
+---
+
+## Quality tiers
+
+Three render levels picked per-job. All use the same prompt; the model
+and step count change.
+
+| Tier | Model | Time @ 1280×704 | Use case |
+|---|---|---|---|
+| **Draft** | Q4 distilled | ~2 min (half resolution) | Iterate on prompts and seeds before committing. |
+| **Standard** | Q4 distilled | ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
+| **High** | Q8 two-stage + TeaCache | ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
+
+---
+
+## Hardware tiers
+
+The panel detects your Mac's RAM at boot and gates features to fit.
+Apple Silicon only — no Intel, no Linux, no Windows path. MLX is
+Apple-only by design.
+
+| RAM | Tier | What runs |
+|---|---|---|
+| < 48 GB | Compact | T2V / I2V at smaller dimensions (≤ 768 long-side) |
+| 48–79 GB | Comfortable | Full 1280×704 at all modes — the canonical tier (M-Studio 64 GB) |
+| 80–119 GB | Roomy | Longer clips, full Q8, FFLF unrestricted |
+| ≥ 120 GB | Studio | No clamps |
+
+LTX 2.3's working memory is real — there is no shortcut around it.
+Standard 1280×704 generation peaks around 22 GiB resident; High mode
+with the Q8 dev transformer (~19 GiB on disk) is closer to 38 GiB.
+The tier system enforces this honestly instead of letting you queue
+jobs that fall out of the OOM killer.
+
+---
 
 ## Install
 
 ### Option A — Pinokio one-click (recommended)
 
-1. Open Pinokio
-2. **Discover → Download from URL** → paste `https://github.com/mrbizarro/phosphene`
+1. Open Pinokio.
+2. **Discover → Download from URL** → paste
+   `https://github.com/mrbizarro/phosphene`
 3. Click **Install**. Pinokio handles the rest:
-   - Apple-Silicon hardware gate (refuses to install on Intel / Linux / Windows)
-   - Clones `dgrauet/ltx-2-mlx`, creates a Python 3.11 venv via `uv`, installs the MLX pipelines
-   - Applies the lossless h264 + I2V cleanup patches (idempotent, fails loud if upstream drifts)
-   - Downloads Q4 model (`dgrauet/ltx-2.3-mlx-q4`, ~25 GB) and Gemma 4-bit (~6 GB) via the Hugging Face CLI `hf download` (resumes if interrupted)
-   - The whole step is **resumable** — if a network hiccup interrupts the download, hit **Resume Install** and it picks up where it left off (clone + venv + already-downloaded model files are skipped, only missing pieces are pulled)
+   - Apple Silicon hardware gate
+   - Clones [`dgrauet/ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx),
+     creates a Python 3.11 venv via `uv`, installs the MLX pipelines
+     at the locked versions
+   - Applies the codec + memory-overlap patches (idempotent, fails
+     loud on upstream drift)
+   - Downloads Q4 model (~25 GB) + Gemma encoder (~7.5 GB) via `hf
+     download` — resumable
 4. Click **Start** → **Open Panel** → http://127.0.0.1:8198
 
-For the High quality tier (Q8 two-stage + TeaCache), download the Q8 model separately afterward (one-time, ~25 GB extra). See [Quality tiers](#quality-tiers) below.
+For the High quality tier (Q8 two-stage + TeaCache), download the Q8
+model afterward via the **Download Q8** button in the panel sidebar
+(one-time, ~25 GB extra).
 
-### Faster downloads (optional — recommended for Q8)
+### Faster downloads (recommended for Q8)
 
-Hugging Face throttles unauthenticated downloads. If your Q4 / Gemma / Q8 download is taking hours, log in once and downloads run **~10× faster** (especially the 25 GB Q8):
+Hugging Face throttles unauthenticated downloads. Log in once and
+downloads run **~10× faster**:
 
 ```bash
-# 1. Get a token (read-only is fine) at https://huggingface.co/settings/tokens
-# 2. Run once in Terminal — it's stored at ~/.cache/huggingface/token
+# Get a token (read-only is fine) at https://huggingface.co/settings/tokens
 hf auth login
 # Paste the token when prompted.
 ```
 
-Pinokio's `hf` binary reads from the same standard cache file, so future downloads in the panel auto-authenticate. No env var fiddling, no Pinokio config changes.
+The `hf` binary inside Pinokio's install reads from the same standard
+token file (`~/.cache/huggingface/token`), so future downloads
+auto-authenticate. No env var fiddling.
 
 ### Option B — manual
 
@@ -98,117 +148,174 @@ cd phosphene
 # 2. Clone ltx-2-mlx alongside (default panel layout assumes ./ltx-2-mlx/)
 git clone https://github.com/dgrauet/ltx-2-mlx.git ltx-2-mlx
 cd ltx-2-mlx
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e packages/ltx-core-mlx packages/ltx-pipelines-mlx
-deactivate
+uv venv --python 3.11 --seed env
+./env/bin/pip install ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx
+./env/bin/pip install pillow numpy 'huggingface-hub>=1.0' \
+  'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'
 cd ..
 
-# 3. Apply the lossless-output patch (until upstream PR lands)
-#    See PATCH below — one-line edit to ltx-core-mlx/.../video_vae.py
+# 3. Apply patches (codec + memory-overlap)
+./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py
 
-# 4. Run the panel — first generation auto-downloads model weights from HF
-python3 mlx_ltx_panel.py
+# 4. Run the panel
+./ltx-2-mlx/env/bin/python3.11 mlx_ltx_panel.py
 # → http://127.0.0.1:8198
 ```
 
-First render will pull `dgrauet/ltx-2.3-mlx-q4` (~25 GB) and `mlx-community/gemma-3-12b-it-4bit` (~6 GB) from Hugging Face into `~/.cache/huggingface/`. Subsequent renders are instant to start.
+> **Why the version pins?** `mlx 0.31.2` introduced a numerical change
+> that attenuates the LTX 2.3 vocoder output by ~22 dB (verified
+> empirically: same prompt + seed + weights → -42 dB peak on 0.31.2 vs
+> -9 dB peak on 0.31.1). Pinning to 0.31.1 is the recovery. See
+> `CLAUDE.md` for the full version-pin rationale.
 
-## Quality tiers
+---
 
-The panel exposes three render quality tiers via a dropdown in the form:
+## Prompting for sound
 
-| Tier | Model | Mode | Steps | ~Time (5s clip) | Use case |
-|---|---|---|---|---|---|
-| **Draft** | Q4 distilled | one-stage | 8 (smaller res) | ~3 min | Prompt scouting / seed picking. Same 8-step schedule as Standard but at half resolution — the Q4 distilled model uses a fixed 9-sigma schedule that needs the full walk to reach σ=0, so steps below 8 leave the output 70%+ noise. Draft halves resolution instead. |
-| **Standard** *(default)* | Q4 distilled | one-stage | 8 | ~7 min | Most renders |
-| **High** | **Q8** | two-stage HQ + TeaCache | stage1=15, stage2=3 | ~12 min | Keeper renders. Better face fidelity (Q8 + dev model + CFG anchor). |
-| **Keyframe (FFLF)** | **Q8** | two-stage interpolation | stage1=15, stage2=3 | ~5 min | First-frame / last-frame interpolation. Two images bookend the clip, model fills the motion between. Resolution clamped to 768 max-side on 64 GB Macs (full-res OOMs at the stage transition). |
+LTX 2.3 conditions audio on prompt content. A visual-only prompt
+produces near-silent ambient. A prompt with explicit audio cues
+produces layered foreground sound.
 
-Same-seed re-roll is the workflow: pick a seed at Draft (cheap), confirm at Standard, finalize at High when it matters. Each output's sidecar JSON has the seed; click "↩ Load params" to recreate the same shot at a different tier.
+| Prompt | Audio result |
+|---|---|
+| `"wizard in a forest"` | quiet room tone |
+| `"wizard in a forest — low whispered chant, ember crackle, distant owl"` | audible chant + crackle + owl, all timed to the visuals |
 
-### Enabling High tier (optional, ~25 GB extra)
+**Pro tip:** describe the soundscape the same way you describe the
+scene. Voice quality first ("clear, confident voice"), specific sound
+events, then ambient. The Prompt Enhance button enforces this
+structure automatically.
 
-Q8 is a separate download. Run this one-time inside the Pinokio install dir (or the manual install dir):
+If you don't want music in the output (because music is hard to
+remove cleanly in post), toggle the **🚫 No music** pill next to
+Enhance — it appends an audio constraint to the prompt at submit time.
+
+---
+
+## Output format
+
+**Lossless H.264 by default** — `yuv444p`, `crf 0`. Your archive is
+the highest fidelity the renderer can produce. Web and social
+platforms will re-encode anyway. Override via env vars
+(`LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`) if you want `yuv420p`
+directly.
+
+**`+faststart`** is on. The `moov` atom sits at the front of the
+file so gallery thumbnails render the first frame instantly without
+downloading the full clip.
+
+For social uploads (X especially rejects `yuv444p`), re-encode with:
 
 ```bash
-# Pinokio install: `hf` is on PATH via the "ai" bundle (huggingface_hub v1+
-# replaced the deprecated `huggingface-cli` shim with `hf`).
-hf download dgrauet/ltx-2.3-mlx-q8 --local-dir mlx_models/ltx-2.3-mlx-q8
-
-# Manual install (pinned to the venv's hf so version is known):
-ltx-2-mlx/.venv/bin/hf download dgrauet/ltx-2.3-mlx-q8 \
-  --local-dir mlx_models/ltx-2.3-mlx-q8
+ffmpeg -i in.mp4 \
+  -c:v h264_videotoolbox -profile:v high -pix_fmt yuv420p \
+  -b:v 8M -maxrate 12M -bufsize 16M \
+  -movflags +faststart \
+  -c:a aac -b:a 192k \
+  out.mp4
 ```
 
-The panel auto-detects Q8 on disk and enables the High option in the dropdown within ~2 seconds.
+---
+
+## Performance reference
+
+Wall-clock times on an **M4 Mac Studio, 64 GB**:
+
+| Mode | Resolution | Frames | Steps | ~Time |
+|---|---|---|---|---|
+| T2V Draft | 512×288 | 49 (2s) | 8 | ~35 s |
+| T2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
+| I2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
+| Extend (Q4 dev, cfg=1.0) | 768×416 | +6 latents (~2s) | 12 | ~12 min |
+| Extend (Q4 dev, cfg=3.0 "Quality") | 1280×704 | +6 latents | 12 | ~30 min |
+| High (Q8 two-stage) | 1280×704 | 121 | s1=15 + s2=3 | ~12 min |
+| FFLF (Q8) | 768×416 | 121 | s1=15 + s2=3 | ~5 min |
+
+M-Max divides by ~3×. M-Ultra by ~6×. Compact tier (< 48 GB) takes
+roughly 2× longer at clamped resolutions because of swap pressure.
+
+---
 
 ## Configuration via env vars
 
-The panel auto-detects everything by default but every path is overridable:
+Every path is overridable. Defaults are auto-detected.
 
 | Env var | Default | What |
 |---|---|---|
-| `LTX_STUDIO_ROOT` | dir of the panel script | repo root |
-| `LTX_MLX_PATH` | `$ROOT/ltx-2-mlx` | ltx-2-mlx clone location |
-| `LTX_HELPER_PYTHON` | `$LTX_MLX_PATH/.venv/bin/python3.11` | the Python that runs the MLX pipeline |
-| `LTX_GEMMA` | `mlx-community/gemma-3-12b-it-4bit` (HF) | Gemma encoder — set to local path to skip HF download |
-| `LTX_MODEL` | `dgrauet/ltx-2.3-mlx-q4` | LTX model id; flip to q8 if you have it |
-| `LTX_FFMPEG` | auto (PATH → Pinokio → Homebrew) | ffmpeg binary |
-| `LTX_PORT` | `8198` | panel HTTP port |
-| `LTX_HELPER_IDLE_TIMEOUT` | `1800` | helper auto-exits after this many seconds idle |
-| `LTX_HELPER_LOW_MEMORY` | `true` | drop pipeline weights between jobs to free RAM |
-| `LTX_OUTPUT_PIX_FMT` | `yuv444p` | output codec (lossless default) |
-| `LTX_OUTPUT_CRF` | `0` | h264 crf — 0=lossless, 18=visually lossless w/ smaller files |
+| `LTX_PORT` | `8198` | Panel HTTP port |
+| `LTX_MODEL` | `dgrauet/ltx-2.3-mlx-q4` | Q4 model path or HF id |
+| `LTX_MODEL_HQ` | `mlx_models/ltx-2.3-mlx-q8` | Q8 model path |
+| `LTX_GEMMA` | `mlx-community/gemma-3-12b-it-4bit` | Gemma encoder path or HF id |
+| `LTX_HELPER_PYTHON` | `ltx-2-mlx/env/bin/python3.11` | Python that runs the helper |
+| `LTX_HELPER_IDLE_TIMEOUT` | `1800` | Helper auto-exits after this many seconds idle |
+| `LTX_LOW_MEMORY` | `true` | Drop pipeline weights between jobs to free RAM |
+| `LTX_OUTPUT_PIX_FMT` | `yuv444p` | Output codec pix_fmt |
+| `LTX_OUTPUT_CRF` | `0` | H.264 CRF — 0 = lossless |
+| `LTX_TIER_OVERRIDE` | _(unset)_ | Force a hardware tier (`base \| standard \| high \| pro`) — testing only |
 
-## Patch — until upstream PR lands
+---
 
-In `ltx-2-mlx/packages/ltx-core-mlx/src/ltx_core_mlx/model/video_vae/video_vae.py`, find the line that builds the ffmpeg encode command (around line 379) and swap the codec:
+## Credits
 
-```python
-# OLD — produces JPEG-style chroma artifacts on faces:
-cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
+This is a wrapper, not a fork. All the hard model work belongs to:
 
-# NEW — lossless, no chroma subsampling, env-overridable:
-import os as _os
-_pix = _os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
-_crf = _os.environ.get("LTX_OUTPUT_CRF", "0")
-cmd.extend(["-c:v", "libx264", "-pix_fmt", _pix, "-crf", _crf, output_path])
-```
+- **[Lightricks](https://github.com/Lightricks/LTX-Video)** — original
+  LTX 2.3 model, weights, and joint audio + video architecture
+- **[@dgrauet](https://github.com/dgrauet/ltx-2-mlx)** — the MLX
+  port (`ltx-2-mlx`). Without their work there is no LTX on Apple
+  Silicon worth talking about. Q4 / Q8 quantized weights on Hugging
+  Face. Phosphene wraps their package.
+- **[Apple ML team](https://github.com/ml-explore/mlx)** — the MLX
+  framework that makes Metal-native ML on Mac fast enough to run
+  generative video locally
+- **[mlx-community](https://huggingface.co/mlx-community)** — the
+  Gemma 3 12B 4-bit text encoder distribution
+- **[@cocktailpeanut](https://twitter.com/cocktailpeanut)** —
+  Pinokio itself, which makes one-click installers like this
+  possible
 
-## Performance reference (base M4 Mac Studio, 64 GB)
+The panel adds: persistent batch queue, warm helper subprocess,
+hardware-tier feature gating, lossless H.264 + faststart output,
+output gallery with sidecar params, and the Pinokio install scripts.
 
-| Resolution | Frames | Steps | ~Time per render |
-|---|---|---|---|
-| 512×288 | 25 (1s) | 8 | ~30–60s |
-| 1280×704 | 121 (5s) | 8 | ~7 min |
-| 1280×704 | 241 (10s) | 8 | ~20 min |
-| 1408×800 | 121 (5s) | 8 | ~9 min |
+---
 
-M-Max tier divides by ~3–4×. M-Ultra by ~6×.
+## Known limits
 
-## Known issues
+- **Apple Silicon only.** No Intel, Linux, or Windows. MLX is
+  Apple-only by design.
+- **Memory pressure can SIGKILL the helper** on Macs at full RAM.
+  Patches in `patch_ltx_codec.py` reduce peak by ~6 GiB during I2V
+  denoise; closing Chrome, Slack, and iOS Simulator before a Standard
+  render is the safest single thing a user can do. The panel surfaces
+  the exit signal name (SIGKILL / SIGSEGV / SIGABRT) when the helper
+  dies non-gracefully so issues are diagnosable.
+- **Localhost only.** The panel binds to `127.0.0.1` with no auth.
+  Not designed for LAN exposure or tunneling.
+- **A2V (audio → video) not yet wired.** Upstream supports it; the
+  panel UI does not expose it. v1.1.
 
-Worth surfacing before you hit Install:
-
-- **High quality (Q8) and FFLF keyframing are opt-in**. The default install only pulls Q4 (~25 GB) + Gemma (~6 GB). Q8 is a separate menu action (~25 GB extra). On 64 GB Macs, FFLF at full resolution (1280×704) OOMs the helper at the stage-1 → stage-2 transition; the panel works around this by clamping keyframe-mode resolution to 768 max-side. Q8 two-stage HQ at 1280×704 fits, but back-to-back HQ jobs may push memory pressure higher than expected.
-- **The panel binds to localhost (127.0.0.1) only.** Don't tunnel it onto a LAN or expose it through ngrok / similar — there's no auth, no CSRF, and `/image?path=` will serve any image file the user account can read. It's designed for single-user local use.
-- **Reset is intentionally non-destructive** for your work. It removes the `ltx-2-mlx/` clone (the venv) so a fresh Install rebuilds cleanly. It does NOT delete `mlx_models/`, `mlx_outputs/`, `panel_uploads/`, `panel_queue.json`, or `panel_hidden.json` — those are your generations and config. Delete them manually via the Models/Outputs/Uploads file-browser entries in the Pinokio sidebar if you want a true factory reset.
-- **A few performance levers exist that aren't in the UI yet**. Check `mlx_ltx_panel.py` for environment variables: `LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`, `LTX_HELPER_LOW_MEMORY`, `LTX_HELPER_IDLE_TIMEOUT`. Override via shell env when starting the panel (or via the Pinokio `start.js` env block).
+---
 
 ## Roadmap
 
-- [ ] Submit the lossless-output patch as a PR upstream to `dgrauet/ltx-2-mlx`
-- [ ] **Pinokio one-click installer** — Pinokio's native `hf.download` step handles the 60 GB download with resume + progress out of the box; only Apple-Silicon gating needs custom logic. Reference templates: [pinokiofactory/MFLUX-WEBUI](https://github.com/pinokiofactory/MFLUX-WEBUI) (closest stylistic match — also Mac-only MLX), [pinokiofactory/comfy](https://github.com/pinokiofactory/comfy) (canonical reusable HF-download pattern via `hf.json` sub-script), [pinokiofactory/hunyuanvideo](https://github.com/pinokiofactory/hunyuanvideo) (precedent for tens-of-GB installer)
-- [ ] Q8 + two-stage mode for higher face fidelity (per Lightricks recommendations)
-- [ ] Auto-chain Extend (one-click 15s+ via base + extend×2 stitched)
-- [ ] Lazy first-run model downloader inside the panel itself (parallel to Pinokio path — for users who don't use Pinokio)
-- [ ] Env-var override for output destination dir per run
+- [ ] A2V mode in the panel (upstream `a2vid_two_stage.py` exists)
+- [ ] Pre-flight RAM advisory before submitting heavy jobs
+- [ ] In-app HF token field (currently requires `hf auth login` in
+      Terminal)
+- [ ] Audio mode dropdown: With music / Voice + ambient / SFX-only / Silent
+- [ ] Bisect `mlx 0.31.1 → 0.31.2` to identify and file the audio
+      regression upstream
 
-### Pinokio install — design notes
-
-The installer is a small folder with `pinokio.json` (metadata), `pinokio.js` (sidebar menu), `install.js` (clone → venv → `uv pip install` → `hf.download` × 2 → patch step), `start.js` (daemon-launch the panel and capture the localhost URL), and a reusable `hf.json` for the model downloads. Apple-Silicon gate is `{{platform !== 'darwin' || arch !== 'arm64'}}` + `notify` + `next: null` at the top of `install.js`. To get into Pinokio's "Discover" feed, tag the repo `pinokio` on GitHub; for an officially featured listing, publish under [pinokiofactory](https://github.com/pinokiofactory).
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE). LTX Video 2.3 weights are subject to Lightricks' license — read theirs separately.
+**Panel:** MIT — see [LICENSE](LICENSE).
+
+**LTX Video 2.3 weights:** Lightricks' own license. Read it before
+commercial use.
+
+**MLX framework:** Apache 2.0.
+
+**Gemma 3 12B weights:** Google's terms.
