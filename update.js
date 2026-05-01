@@ -1,24 +1,13 @@
 module.exports = {
   run: [
-    // ---- Persistent storage via fs.link (Y1.004+) -------------------------
-    // Mirror of the fs.link block in install.js. Running it on Update
-    // (in addition to Install) means existing pre-Y1.004 users get
-    // their mlx_models/, mlx_outputs/, panel_uploads/, and state/ moved
-    // into the persistent drive on their first Update — without having
-    // to do a full Reset first. After this runs once, all four of
-    // those paths are symlinks into the drive, and the next Reset
-    // preserves their content. Idempotent on repeat runs.
-    {
-      method: "fs.link",
-      params: {
-        drive: {
-          mlx_models:    "mlx_models",
-          mlx_outputs:   "mlx_outputs",
-          panel_uploads: "panel_uploads",
-          state:         "state"
-        }
-      }
-    },
+    // Note: fs.link is only declared in install.js, not here. New users
+    // get the persistent drive on their first Install; users coming from
+    // pre-Y1.004 will get it whenever they next reinstall (which is the
+    // recommended recovery path anyway — see README). Running fs.link on
+    // every Update would technically migrate their existing real folders
+    // into the drive without a Reset, but it conflates two concerns
+    // (durability of model assets vs. routine code updates) and adds a
+    // 36 GB merge step to a flow that should be fast.
 
     // Resilient pull for the panel repo (mrbizarro/phosphene). Plain
     // `git pull` was breaking for existing users after a history-rewrite

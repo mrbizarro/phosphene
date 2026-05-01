@@ -1,31 +1,37 @@
 #!/usr/bin/env bash
 #
-# Phosphene one-line recovery — gets a stuck install onto current main.
+# Phosphene git-repo recovery — escape hatch, NOT the recommended path.
 #
-# Why this exists:
-#   A one-time history scrub on 2026-05-01 (rewriting commit identities to
-#   anonymize an author leak) force-pushed origin/main on
-#   github.com/mrbizarro/phosphene. Any clone that existed before that push
-#   has commits in its local main that no longer exist on origin, so plain
+# The recommended fix when Pinokio Update silently does nothing is:
+#   In Pinokio: click Reset on the Phosphene panel, then Install.
+# That's clean, doesn't depend on running unaudited shell scripts, and
+# from Y1.004 onward Pinokio's fs.link drive preserves your models +
+# outputs + settings across Reset/Install anyway.
+#
+# This script exists for users who'd rather avoid re-downloading the
+# 36 GB of LTX weights — it resets only the git repo to current main,
+# leaving everything else untouched. Read the source before running.
+#
+# Why it's needed at all:
+#   A one-time history scrub on 2026-05-01 (rewriting commit identities
+#   to anonymize an author leak) force-pushed origin/main. Clones from
+#   before that push have orphaned commits in their local main, so
 #   `git pull` refuses to fast-forward and Pinokio's Update step silently
-#   stalls. From Y1.002 onward Pinokio's update.js + the in-panel
-#   "magic version pill" both fall back to `git reset --hard origin/main`
-#   on divergence — but to GET to Y1.002, an existing user needs this
-#   one-time fix.
+#   stalls. Y1.002+ has a self-recovering update.js — but to GET to
+#   Y1.002+, an existing pre-Y1.002 user needs either this script or
+#   the Reset+Install path.
 #
 # What it does:
 #   1. Locate the phosphene install dir (default: ~/pinokio/api/phosphene.git;
 #      override via PHOSPHENE_DIR=/path/to/install).
-#   2. Verify it's actually phosphene's repo (defensive: don't reset a
-#      repo that just happens to live there).
-#   3. Fetch origin and reset --hard to origin/main. Wipes the working
-#      tree and any local commits — which a Pinokio install isn't expected
-#      to have anyway. Models, queue, settings, and downloaded LoRAs all
+#   2. Verify it's actually phosphene's repo (defensive: refuse to reset
+#      a different repo that happens to live at that path).
+#   3. git fetch origin && git reset --hard origin/main. The working tree
+#      and any local commits get overwritten — which a Pinokio install
+#      isn't expected to have anyway. Models, queue, settings, LoRAs all
 #      live OUTSIDE git tracking, so they're untouched.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mrbizarro/phosphene/main/recover.sh | bash
-#   # — or after downloading —
+# Usage (read the script first, please):
 #   bash recover.sh
 #   # — or pointing at a non-default install dir —
 #   PHOSPHENE_DIR=/Volumes/AI/pinokio/api/phosphene.git bash recover.sh

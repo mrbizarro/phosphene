@@ -18,30 +18,24 @@
 
 ---
 
-> ### ⚠ Pinokio Update silently doing nothing? Stuck on an old version?
+> ### ⚠ Pinokio Update silently doing nothing?
 >
-> A one-time history scrub on 2026-05-01 made `git pull` refuse to
-> fast-forward for clones that pre-date it. If your Pinokio Update fires
-> but you don't see new features, you're on a divergent clone. One
-> command fixes it without losing your downloaded models or settings:
+> A one-time history scrub on 2026-05-01 left some clones unable to
+> fast-forward to current main, so Pinokio's Update appears to fire
+> but nothing changes. **Just reinstall** — that's the cleanest fix:
 >
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/mrbizarro/phosphene/main/recover.sh | bash
-> ```
+> 1. In Pinokio: **Reset** the Phosphene panel.
+> 2. **Install** it again.
 >
-> Or manually:
-> ```bash
-> cd ~/pinokio/api/phosphene.git && git fetch origin && git reset --hard origin/main
-> ```
+> Yes, this re-downloads the LTX weights (~36 GB). Annoying but quick on
+> a decent connection, and from this point on Pinokio's Reset preserves
+> your models because `install.js` declares an `fs.link` persistent drive
+> (Y1.004+). So this is a one-time inconvenience for clones that pre-date
+> 2026-05-01; future Reset → Install is fast and lossless.
 >
-> Then click **Update** in Pinokio (it'll succeed now), then **Stop → Start**.
-> Your `mlx_models/` (the ~36 GB of LTX weights), generated outputs, LoRAs,
-> and settings stay put.
->
-> **From Y1.002 onward** Update self-recovers from any future divergence
-> automatically, and **from Y1.004 onward** Pinokio's Reset → Reinstall
-> path also preserves models + outputs + settings via Pinokio's `fs.link`
-> drive — so a clean reinstall is no longer scary.
+> If you'd rather not re-download, the repo includes a `recover.sh` that
+> resets the git repo to current main without touching your `mlx_models/`.
+> See its header comment for usage. (Most users: just reinstall.)
 
 ---
 

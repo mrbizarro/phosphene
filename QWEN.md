@@ -169,9 +169,8 @@ new patch versions without a venv rebuild — used when we added
 - A history-rewrite + force-push on 2026-05-01 (to scrub identity
   leaks from old commits) broke `git pull` for every existing user
   whose local clone contained orphaned commits — Pinokio's Update
-  silently stalled for them and they couldn't get any new features.
-  GitHub aggressively GC'd the orphaned objects within hours, so the
-  pre-rewrite history is unrecoverable.
+  silently stalled for them. GitHub aggressively GC'd the orphaned
+  objects within hours, so the pre-rewrite history is unrecoverable.
 - **Do not run `git filter-branch`, `git rebase` (on shared history),
   `git push --force`, `git push --force-with-lease`, or anything else
   that rewrites already-published commits on `origin/main`. Ever.**
@@ -179,13 +178,30 @@ new patch versions without a venv rebuild — used when we added
   commit that reverts/fixes it.** The history is append-only.
 - If the user requests a history rewrite (e.g. "scrub my name"), say
   no and explain why: existing users get orphaned, their `git pull`
-  fails, the entire user base needs out-of-band recovery. Offer
-  alternatives instead — going-forward commits use the right
-  identity; old commits stay as they are.
-- The recovery infrastructure for the 2026-05-01 incident lives in
-  `recover.sh`, the README's "Stuck on an old version?" section, and
-  the resilient `update.js` (which now `fetch + reset --hard` falls
-  back automatically). Don't remove or weaken any of those.
+  fails, the entire user base needs out-of-band recovery.
+- Recovery from the 2026-05-01 incident — primary path is **Pinokio
+  Reset → Install** (clean, no shell scripts, models re-download is a
+  one-time cost). The `recover.sh` script is an escape hatch for users
+  who want to keep their downloaded models — kept in the repo with a
+  clear "read before running" header, NOT promoted as a `curl | bash`
+  command. Don't remove `recover.sh` or weaken `update.js`'s
+  fetch+reset fallback.
+
+### `fs.link` — orthogonal to the history-divergence story
+- `fs.link` is in `install.js` only (NOT `update.js`). It maps the
+  heavy/personal directories — `mlx_models/`, `mlx_outputs/`,
+  `panel_uploads/`, `state/` — to a Pinokio virtual drive that lives
+  outside the panel install dir. After a Pinokio Reset → Install, the
+  drive is rediscovered and the symlinks reattach, so models +
+  outputs + settings survive a clean reinstall.
+- Why install.js only: future users get the drive on first install;
+  existing pre-Y1.004 users get it whenever they next reinstall (which
+  is the recommended recovery path anyway). Adding `fs.link` to
+  update.js would technically migrate existing real folders into the
+  drive without a Reset, but it conflates routine code updates with a
+  one-time 36 GB merge step, so we keep them separate.
+- `fs.link` is unrelated to the 2026-05-01 history-rewrite incident
+  — don't conflate them in commit messages or docs.
 
 ### Commit message style
 - Subject line in imperative mood, 50–72 chars max, no trailing period.

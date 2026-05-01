@@ -1,6 +1,6 @@
 {
   "title": "Phosphene",
-  "description": "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. LoRA picker + CivitAI browser. Free, open source. — Update silently doing nothing on an existing install? Run recover.sh from the README (one-time fix for clones from before 2026-05-01).",
+  "description": "[MAC ONLY] Local generative video panel for Apple Silicon. Joint audio+video via LTX 2.3 (MLX). T2V, I2V, FFLF, Extend. Lossless h264. LoRA picker + CivitAI browser. Free, open source.",
   "icon": "icon.png",
   "links": [{
     "title": "Phosphene (panel by Mr. Bizarro)",
