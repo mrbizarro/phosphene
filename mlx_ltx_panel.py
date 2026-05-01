@@ -4243,13 +4243,15 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
-    /* LoRA picker — collapsible <details>. Earlier version was a tight
-       4-column grid (checkbox | name | slider | × ); user feedback was
-       "this layout sucks balls" — too cramped, no preview, trigger words
-       hard to spot, no obvious link back to the source. Rebuilt as a
-       card stack: each LoRA gets a video/image preview, name, clickable
-       trigger word chips that append to the prompt, a full-width
-       strength slider, and a clear Active toggle. */
+    /* LoRA picker — collapsible <details>. Compact list rows (Y1.007).
+       Earlier iterations went too far in opposite directions: the very
+       first version was a 4-column grid (cramped), then we rebuilt as
+       big card-stack with autoplaying video previews (too tall, hard
+       to scroll, distracting). User feedback: drop the previews, make
+       the rows quick to scan, keep large libraries usable.
+       This version: each LoRA = one ~32-44px row. Active rows expand
+       to show a strength slider inline; inactive rows are compact. A
+       filter box appears at top once 5+ LoRAs are installed. */
     .loras-summary {
       cursor: pointer; user-select: none; font-size: 12px;
       font-weight: 600; color: var(--text);
@@ -4257,124 +4259,128 @@ HTML = r"""<!doctype html>
       padding: 6px 0;
     }
     .loras-summary .hint { font-weight: 400; }
+    .lora-filter {
+      width: 100%; padding: 6px 9px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
+      color: var(--text); font-size: 12px;
+    }
+    .lora-filter:focus { outline: 1px solid var(--accent); }
     .loras-list {
-      display: flex; flex-direction: column; gap: 10px; margin-top: 8px;
+      display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+      max-height: 340px; overflow-y: auto;
+      padding-right: 2px;        /* avoid scrollbar overlap on row content */
     }
-    .lora-card {
+    .lora-row {
       position: relative;
-      border-radius: 9px;
-      border: 1px solid var(--border); background: var(--panel-2);
-      overflow: hidden;
-      transition: border-color 120ms ease, background 120ms ease;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      transition: border-color 100ms, background 100ms;
     }
-    .lora-card.active {
+    .lora-row.active {
       border-color: var(--accent);
-      background: var(--accent-dim, rgba(47,129,247,0.07));
+      background: var(--accent-dim, rgba(47,129,247,0.06));
     }
-    .lora-card .lora-thumb-wrap {
-      position: relative;
-      width: 100%; aspect-ratio: 16/9; background: var(--bg-2, #0a0c14);
-      overflow: hidden;
+    .lora-row .lora-row-main {
+      display: grid;
+      grid-template-columns: 18px 1fr auto auto;
+      gap: 8px; align-items: center;
+      padding: 7px 10px;
+      cursor: pointer; user-select: none;
     }
-    .lora-card .lora-thumb {
-      width: 100%; height: 100%; object-fit: cover; display: block;
+    .lora-row .lora-toggle-dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 1.5px solid var(--muted);
+      background: transparent;
+      transition: background 100ms, border-color 100ms;
+      box-sizing: border-box;
     }
-    .lora-card .lora-thumb-empty {
-      width: 100%; height: 100%;
-      display: flex; align-items: center; justify-content: center;
-      color: var(--muted); font-size: 11px;
-      background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(255,255,255,0.04));
+    .lora-row.active .lora-toggle-dot {
+      background: var(--accent); border-color: var(--accent);
+      box-shadow: inset 0 0 0 3px var(--bg, #0a0c14);
     }
-    .lora-card .lora-corner-actions {
-      position: absolute; top: 6px; right: 6px;
-      display: flex; gap: 4px; z-index: 2;
-    }
-    .lora-card .lora-corner-btn {
-      width: 28px; height: 28px; padding: 0;
-      border-radius: 6px; border: 1px solid rgba(0,0,0,0.4);
-      background: rgba(15,18,28,0.78); backdrop-filter: blur(4px);
-      color: rgba(255,255,255,0.85); font-size: 13px; line-height: 1;
-      cursor: pointer; display: inline-flex; align-items: center;
-      justify-content: center; text-decoration: none;
-    }
-    .lora-card .lora-corner-btn:hover { background: rgba(20,25,40,0.9); color: #fff; }
-    .lora-card .lora-corner-btn.danger:hover {
-      color: #ff8a8a; border-color: rgba(220,80,80,0.5);
-    }
-    .lora-card .lora-body { padding: 10px 12px 12px; }
-    .lora-card .lora-name {
-      font-size: 13px; font-weight: 600; color: var(--text);
+    .lora-row .lora-name {
+      font-size: 12px; font-weight: 500; color: var(--text);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      margin-bottom: 6px;
+      min-width: 0;
     }
-    .lora-card .lora-name .badge {
+    .lora-row .lora-name .badge {
       display: inline-block; font-size: 9px; font-weight: 600;
-      letter-spacing: 0.05em; text-transform: uppercase;
-      padding: 1px 6px; border-radius: 999px; margin-left: 6px;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 1px 5px; border-radius: 999px; margin-left: 6px;
       border: 1px solid var(--accent); color: var(--accent-bright);
       vertical-align: middle;
     }
-    .lora-card .trigger-chips {
-      display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px;
-    }
-    .lora-card .trigger-chip {
+    .lora-row .lora-name-meta {
+      font-size: 10px; color: var(--muted); margin-top: 1px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 10.5px; padding: 3px 8px; border-radius: 999px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--border);
-      color: var(--text);
-      cursor: pointer; user-select: none;
-      transition: background 100ms ease, border-color 100ms ease;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .lora-card .trigger-chip:hover {
-      background: rgba(90,124,255,0.15);
-      border-color: var(--accent);
+    .lora-row .lora-text {
+      min-width: 0; display: flex; flex-direction: column;
     }
-    .lora-card .trigger-chip.empty {
-      color: var(--muted); font-style: italic;
-      cursor: default; background: transparent; border: none;
-      padding: 0; font-family: inherit;
+    .lora-row .lora-row-actions {
+      display: flex; gap: 4px; align-items: center;
+      opacity: 0.4; transition: opacity 100ms;
     }
-    .lora-card .lora-strength-row {
+    .lora-row:hover .lora-row-actions,
+    .lora-row.active .lora-row-actions { opacity: 1; }
+    .lora-row .lora-icon-btn {
+      width: 22px; height: 22px; padding: 0;
+      border-radius: 4px; border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted); font-size: 12px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center; text-decoration: none;
+    }
+    .lora-row .lora-icon-btn:hover {
+      color: var(--text); border-color: var(--border);
+    }
+    .lora-row .lora-icon-btn.danger:hover {
+      color: #ff8a8a; border-color: rgba(220,80,80,0.5);
+    }
+    /* Expanded section (visible only on active rows) — strength slider
+       + trigger chips. Shows below the main row. */
+    .lora-row .lora-row-extra { display: none; }
+    .lora-row.active .lora-row-extra {
+      display: block;
+      padding: 0 10px 9px;
+      border-top: 1px dashed var(--border);
+      margin-top: 0;
+    }
+    .lora-row .lora-strength-row {
       display: flex; align-items: center; gap: 8px;
-      margin-bottom: 8px;
+      padding-top: 7px;
     }
-    .lora-card .lora-strength-row label {
-      font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
-      color: var(--muted); width: 56px; flex: none;
+    .lora-row .lora-strength-row label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--muted); width: 52px; flex: none;
     }
-    .lora-card .lora-strength-row input[type="range"] {
+    .lora-row .lora-strength-row input[type="range"] {
       flex: 1; min-width: 0; accent-color: var(--accent);
     }
-    .lora-card .lora-strength-row input[type="number"] {
-      width: 56px; padding: 3px 6px; font-size: 11px;
-      text-align: right;
+    .lora-row .lora-strength-row input[type="number"] {
+      width: 54px; padding: 2px 5px; font-size: 11px; text-align: right;
     }
-    .lora-card .lora-toggle-row {
-      display: flex; align-items: center; gap: 8px;
+    .lora-row .trigger-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; margin-top: 7px;
     }
-    .lora-card .lora-toggle {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 5px 10px; border-radius: 6px;
-      border: 1px solid var(--border); background: rgba(255,255,255,0.02);
-      font-size: 11px; font-weight: 600; color: var(--muted);
+    .lora-row .trigger-chip {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; padding: 2px 7px; border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border); color: var(--text);
       cursor: pointer; user-select: none;
+      transition: background 80ms, border-color 80ms;
     }
-    .lora-card.active .lora-toggle {
-      background: var(--accent, #5a7cff); color: #fff;
-      border-color: var(--accent, #5a7cff);
+    .lora-row .trigger-chip:hover {
+      background: rgba(90,124,255,0.18); border-color: var(--accent);
     }
-    .lora-card .lora-toggle input { display: none; }
-    .lora-card .lora-toggle .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--muted); transition: background 100ms;
+    .lora-row .trigger-chip.empty {
+      color: var(--muted); font-style: italic;
+      cursor: default; background: transparent; border: none; padding: 0;
+      font-family: inherit;
     }
-    .lora-card.active .lora-toggle .dot { background: #fff; }
-    .lora-card .lora-meta-link {
-      font-size: 11px; color: var(--muted); margin-left: auto;
-      text-decoration: none;
-    }
-    .lora-card .lora-meta-link:hover { color: var(--accent-bright, #93a8ff); }
     /* Brief flash on the prompt textarea when a trigger chip is clicked
        but the word is already present — visual ack that the click did
        fire (we just chose not to duplicate). */
@@ -4435,6 +4441,53 @@ HTML = r"""<!doctype html>
     .civitai-status-line { color: var(--muted); font-size: 11px; margin-top: 12px; }
     .civitai-status-line.err { color: var(--danger, #f85149); }
     .civitai-status-line.ok { color: var(--success, #3fb950); }
+
+    /* Inline CivitAI auth banner. Lives at the top of the browser modal,
+       above the search bar. Three states: missing (amber, has input),
+       set (green check, dismissable into a "change" link), or testing/error. */
+    .civitai-auth {
+      margin: 4px 0 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 12px; line-height: 1.45;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .civitai-auth.missing {
+      background: rgba(240,185,64,0.07);
+      border: 1px solid rgba(240,185,64,0.4);
+      color: var(--text);
+    }
+    .civitai-auth.missing strong { color: var(--warning, #f0b940); }
+    .civitai-auth.set {
+      background: rgba(63,185,80,0.06);
+      border: 1px solid rgba(63,185,80,0.35);
+      color: var(--text);
+    }
+    .civitai-auth.err {
+      background: rgba(220,80,80,0.06);
+      border: 1px solid rgba(220,80,80,0.4);
+      color: var(--text);
+    }
+    .civitai-auth .grow { flex: 1; min-width: 200px; }
+    .civitai-auth input[type="password"],
+    .civitai-auth input[type="text"] {
+      flex: 1; min-width: 180px;
+      padding: 6px 8px; border-radius: 5px;
+      border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
+      color: var(--text); font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .civitai-auth button {
+      padding: 6px 12px; border-radius: 5px;
+      background: var(--accent); color: white; border: none;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .civitai-auth button:disabled { opacity: 0.6; cursor: default; }
+    .civitai-auth a.changekey {
+      color: var(--accent-bright, #7e98ff);
+      cursor: pointer; text-decoration: none; font-size: 11px;
+    }
+    .civitai-auth a.changekey:hover { text-decoration: underline; }
 
     /* Header icon button — same height/feel as ghost-btn but icon-only.
        Used for the settings cog. width:auto overrides the global
@@ -4853,12 +4906,20 @@ HTML = r"""<!doctype html>
            a given session, and inline because hiding it behind a modal
            makes it easy to forget. Loaded from /loras on open; the
            "Browse CivitAI" affordance opens the search modal. -->
-      <details id="lorasDetails" style="margin-top:14px">
+      <details id="lorasDetails" open style="margin-top:14px">
         <summary class="loras-summary">
           <span>LoRAs</span>
           <span class="hint" id="lorasSummaryCount">none active</span>
         </summary>
         <div class="loras-body" id="lorasBody">
+          <!-- Filter/search box. Shows up only when 5+ LoRAs are
+               installed; below that it's just visual noise. Filters by
+               name AND trigger words (case-insensitive substring). -->
+          <div id="lorasFilterRow" style="display:none; margin: 6px 0 8px;">
+            <input type="text" id="lorasFilter" class="lora-filter"
+                   placeholder="Filter LoRAs… (name or trigger word)"
+                   oninput="renderLorasList()">
+          </div>
           <div class="hint" id="lorasEmpty" style="margin-top:8px">
             Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
             to use them, or browse CivitAI below. Each LoRA picks up an
@@ -4867,7 +4928,7 @@ HTML = r"""<!doctype html>
           </div>
           <div class="loras-list" id="lorasList"></div>
           <div class="loras-actions" style="margin-top:10px; display:flex; gap:8px">
-            <button type="button" class="ghost-btn" onclick="refreshLoras()">↻ Rescan folder</button>
+            <button type="button" class="ghost-btn" onclick="refreshLoras()">↻ Rescan</button>
             <button type="button" class="ghost-btn" onclick="openCivitaiModal()">🔍 Browse CivitAI</button>
           </div>
         </div>
@@ -4998,19 +5059,15 @@ HTML = r"""<!doctype html>
       with a sidecar JSON that carries the trigger words and recommended
       strength. The CivitAI page link stays in the sidecar for attribution.
     </div>
-    <!-- Auth hint shown only when the panel can't see CIVITAI_API_KEY.
-         CivitAI now requires a token for most LoRA downloads (even SFW).
-         Hidden by default; populated in openCivitaiModal() based on the
-         /loras response. -->
-    <div id="civitaiAuthHint" class="models-hint"
-         style="display:none; border-left:3px solid var(--warning, #d29922); padding-left:10px; margin-top:8px">
-      <strong>Heads up:</strong> CivitAI now requires an API token to
-      download LoRAs. Get one at
-      <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a>,
-      then set <code>CIVITAI_API_KEY</code> in your environment and restart
-      the panel. Browsing works without it; Install will fail with a 401
-      until the token is set.
-    </div>
+    <!-- Inline API-key banner. CivitAI requires a token to download LoRAs
+         (even SFW ones). Three states, all rendered in the same slot by
+         renderCivitaiAuthBanner():
+           - missing: amber, has an input + Save button
+           - set: green checkmark with a "change" link that re-shows the input
+           - error: red, shown after a failed test, with re-input + retry
+         The actual key is POSTed to /settings (same endpoint the cog
+         menu uses) so there's a single source of truth on disk. -->
+    <div id="civitaiAuthBanner" class="civitai-auth" style="display:none"></div>
     <div class="civitai-search-bar">
       <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
              oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
@@ -6672,16 +6729,11 @@ let _knownUserLoras = []; // last list_user_loras() snapshot, for the picker
 
 function _serializeLoras() {
   // What the helper actually needs is path + strength. Keep the rest in
-  // the in-memory list for UI rendering, drop it on the wire.
+  // the in-memory list for UI rendering, drop it on the wire. Summary
+  // count is updated by renderLorasList() which has fuller state — we
+  // don't touch it here to avoid two functions stomping each other.
   const slim = _activeLoras.map(l => ({ path: l.path, strength: l.strength }));
   document.getElementById('lorasJson').value = JSON.stringify(slim);
-  // Update summary count
-  const summary = document.getElementById('lorasSummaryCount');
-  if (summary) {
-    summary.textContent = _activeLoras.length === 0
-      ? 'none active'
-      : `${_activeLoras.length} active`;
-  }
 }
 
 function addLoraToActive(entry) {
@@ -6734,24 +6786,23 @@ async function refreshLoras() {
 function renderLorasList() {
   const wrap = document.getElementById('lorasList');
   const empty = document.getElementById('lorasEmpty');
+  const filterRow = document.getElementById('lorasFilterRow');
+  const filterInput = document.getElementById('lorasFilter');
   if (!wrap) return;
   // Combine: user-installed LoRAs (from /loras) plus any active LoRAs
   // that aren't user-installed (HF repo paths, e.g. from the HDR toggle).
-  const rows = [];
+  const allRows = [];
   const seen = new Set();
   for (const ul of _knownUserLoras) {
     const active = _activeLoras.find(a => a.path === ul.path);
     seen.add(ul.path);
-    rows.push({
+    allRows.push({
       path: ul.path,
       name: ul.name,
       trigger_words: ul.trigger_words || [],
       recommended_strength: ul.recommended_strength || 1.0,
       filename: ul.filename,
-      preview_url: ul.preview_url,
-      preview_type: ul.preview_type,
       civitai_url: ul.civitai_url,
-      size_bytes: ul.size_bytes,
       active: !!active,
       strength: active ? active.strength : (ul.recommended_strength || 1.0),
       kind: 'user',
@@ -6759,113 +6810,125 @@ function renderLorasList() {
   }
   for (const a of _activeLoras) {
     if (seen.has(a.path)) continue;
-    rows.push({
+    allRows.push({
       path: a.path,
       name: a.name || a.path,
       trigger_words: a.trigger_words || [],
       recommended_strength: 1.0,
       filename: null,
-      preview_url: null,
-      preview_type: null,
       civitai_url: null,
-      size_bytes: null,
       active: true,
       strength: a.strength,
       kind: 'remote',
     });
   }
 
-  if (rows.length === 0) {
+  // Empty state — collapse the filter box too.
+  if (allRows.length === 0) {
     wrap.innerHTML = '';
     if (empty) empty.style.display = '';
+    if (filterRow) filterRow.style.display = 'none';
     return;
   }
   if (empty) empty.style.display = 'none';
+  // Surface the filter input only when 5+ LoRAs are installed; below that
+  // the box is just visual noise.
+  if (filterRow) filterRow.style.display = (allRows.length >= 5) ? '' : 'none';
 
-  wrap.innerHTML = rows.map(r => loraCardHtml(r)).join('');
+  // Apply filter (case-insensitive substring on name + trigger words).
+  let rows = allRows;
+  const q = (filterInput && filterInput.value || '').trim().toLowerCase();
+  if (q) {
+    rows = allRows.filter(r => {
+      if (r.name && r.name.toLowerCase().includes(q)) return true;
+      for (const t of (r.trigger_words || [])) {
+        if (String(t).toLowerCase().includes(q)) return true;
+      }
+      return false;
+    });
+  }
+  // Sort: active rows first (so the user's selection floats to the top),
+  // then alphabetical by name. Stable enough for a UI list.
+  rows.sort((a, b) => {
+    if (a.active !== b.active) return a.active ? -1 : 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+
+  // Update header summary.
+  const summary = document.getElementById('lorasSummaryCount');
+  if (summary) {
+    const total = allRows.length;
+    const active = allRows.filter(r => r.active).length;
+    summary.textContent = `${total} installed · ${active} active${q ? ` · ${rows.length} match` : ''}`;
+  }
+
+  if (rows.length === 0) {
+    wrap.innerHTML = `<div class="hint" style="padding:8px 0;">No LoRAs match "${escapeHtml(q)}".</div>`;
+    return;
+  }
+  wrap.innerHTML = rows.map(r => loraRowHtml(r)).join('');
 }
 
-// Build a single LoRA card. Pulled out of renderLorasList so the markup
-// stays scannable. The card shows (top to bottom):
-//   1. Preview thumbnail (16:9 video or image; "no preview" placeholder).
-//   2. Corner buttons: open on CivitAI ↗, delete ×.
-//   3. Title row (filename ellipsis-truncated, HF badge for remote).
-//   4. Trigger word chips. Click → append to the prompt textarea so the
-//      user doesn't have to remember the exact spelling. Most LTX LoRAs
-//      need their trigger word in the prompt or they barely activate.
-//   5. Strength row: range slider + number input (-2..2, 0.05 step).
-//   6. Active toggle pill.
-function loraCardHtml(r) {
+// Build a single compact LoRA row. Inactive rows are ~36px tall (just
+// name + meta + corner actions). Active rows expand inline with the
+// strength slider and trigger chips. Click anywhere on the main row to
+// toggle activation.
+function loraRowHtml(r) {
   const pathHtml = escapeHtml(r.path);
+  const pathAttr = JSON.stringify(r.path).replace(/"/g, '&quot;');
   const nameHtml = escapeHtml(r.name);
   const nameAttr = JSON.stringify(r.name).replace(/"/g, '&quot;');
-  // Preview: <video> for .mp4 (autoplay/muted/loop = animated GIF feel),
-  // <img> otherwise, "no preview" placeholder when missing.
-  let thumbHtml;
-  if (!r.preview_url) {
-    thumbHtml = `<div class="lora-thumb-empty">no preview</div>`;
-  } else if (r.preview_type === 'video' || /\.mp4($|\?)/i.test(r.preview_url)) {
-    thumbHtml = `<video class="lora-thumb" src="${escapeHtml(r.preview_url)}"
-                        autoplay muted loop playsinline preload="metadata"></video>`;
-  } else {
-    thumbHtml = `<img class="lora-thumb" src="${escapeHtml(r.preview_url)}" alt="" loading="lazy">`;
-  }
-  // Corner actions: open on CivitAI when we know the page, then delete/×.
-  const cornerLinks = [];
+  // Trigger summary line under the name (when not expanded). Truncated.
+  const trigs = r.trigger_words || [];
+  const trigSummary = trigs.length
+    ? trigs.slice(0, 4).join(' · ') + (trigs.length > 4 ? ` +${trigs.length - 4}` : '')
+    : 'no trigger word';
+  // Corner actions — link to civitai page + delete (or remove for HF/remote).
+  const corner = [];
   if (r.civitai_url) {
-    cornerLinks.push(`<a class="lora-corner-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI to read instructions / examples">↗</a>`);
+    corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()">↗</a>`);
   }
   if (r.kind === 'user') {
-    cornerLinks.push(`<button class="lora-corner-btn danger" type="button" title="Delete from disk"
-                              onclick="deleteLora('${pathHtml}', '${escapeHtml(r.name)}')">×</button>`);
+    corner.push(`<button class="lora-icon-btn danger" type="button" title="Delete from disk"
+                         onclick="event.stopPropagation(); deleteLora(${pathAttr}, ${nameAttr})">×</button>`);
   } else {
-    cornerLinks.push(`<button class="lora-corner-btn" type="button" title="Remove from active set"
-                              onclick="removeLoraFromActive('${pathHtml}')">×</button>`);
+    corner.push(`<button class="lora-icon-btn" type="button" title="Remove from active set"
+                         onclick="event.stopPropagation(); removeLoraFromActive(${pathAttr})">×</button>`);
   }
-  // Trigger chips. If a LoRA has no triggers (e.g. style-only LoRAs that
-  // activate purely from style transfer) say so explicitly so the user
-  // doesn't think the metadata is missing.
-  const trigs = (r.trigger_words || []).slice(0, 8);
+  // Trigger chips for the expanded section. Same click-to-append behavior
+  // as before — chips prepend the trigger to the prompt textarea.
   const chipsHtml = trigs.length
-    ? trigs.map(w => {
+    ? trigs.slice(0, 12).map(w => {
         const wAttr = JSON.stringify(w).replace(/"/g, '&quot;');
-        return `<span class="trigger-chip" title="Click to append to prompt"
-                       onclick="appendTriggerToPrompt(${wAttr})">${escapeHtml(w)}</span>`;
+        return `<span class="trigger-chip" title="Click to add to prompt"
+                       onclick="event.stopPropagation(); appendTriggerToPrompt(${wAttr})">${escapeHtml(w)}</span>`;
       }).join('')
-    : `<span class="trigger-chip empty">no trigger word — applies as a style</span>`;
+    : `<span class="trigger-chip empty">style-only LoRA — no trigger word needed</span>`;
 
   return `
-    <div class="lora-card ${r.active ? 'active' : ''}" data-path="${pathHtml}">
-      <div class="lora-thumb-wrap">
-        ${thumbHtml}
-        <div class="lora-corner-actions">${cornerLinks.join('')}</div>
-      </div>
-      <div class="lora-body">
-        <div class="lora-name" title="${pathHtml}">
-          ${nameHtml}
-          ${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
+    <div class="lora-row ${r.active ? 'active' : ''}" data-path="${pathHtml}">
+      <div class="lora-row-main"
+           onclick="toggleLora(${pathAttr}, ${!r.active}, ${r.recommended_strength}, ${nameAttr})">
+        <div class="lora-toggle-dot"></div>
+        <div class="lora-text">
+          <div class="lora-name" title="${pathHtml}">
+            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
+          </div>
+          <div class="lora-name-meta" title="${escapeHtml(trigs.join(', '))}">${escapeHtml(trigSummary)}</div>
         </div>
-        <div class="trigger-chips">${chipsHtml}</div>
+        <div class="lora-row-actions">${corner.join('')}</div>
+      </div>
+      <div class="lora-row-extra">
         <div class="lora-strength-row">
           <label>strength</label>
           <input type="range" min="-2" max="2" step="0.05" value="${r.strength}"
-                 ${r.active ? '' : 'disabled'}
-                 oninput="this.nextElementSibling.value = this.value; setLoraStrength('${pathHtml}', this.value)">
+                 onclick="event.stopPropagation()"
+                 oninput="this.nextElementSibling.value = this.value; setLoraStrength(${pathAttr}, this.value)">
           <input type="number" min="-2" max="2" step="0.05" value="${r.strength}"
-                 ${r.active ? '' : 'disabled'}
-                 oninput="this.previousElementSibling.value = this.value; setLoraStrength('${pathHtml}', this.value)">
+                 onclick="event.stopPropagation()"
+                 oninput="this.previousElementSibling.value = this.value; setLoraStrength(${pathAttr}, this.value)">
         </div>
-        <div class="lora-toggle-row">
-          <label class="lora-toggle">
-            <input type="checkbox" ${r.active ? 'checked' : ''}
-                   onchange="toggleLora('${pathHtml}', this.checked, ${r.recommended_strength}, ${nameAttr})">
-            <span class="dot"></span>
-            <span>${r.active ? 'Active' : 'Inactive'}</span>
-          </label>
-          ${r.civitai_url
-            ? `<a class="lora-meta-link" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener">read on CivitAI →</a>`
-            : ''}
-        </div>
+        <div class="trigger-chips">${chipsHtml}</div>
       </div>
     </div>`;
 }
@@ -6940,17 +7003,91 @@ let _civitaiSearching = false;
 
 function openCivitaiModal() {
   document.getElementById('civitaiModal').style.display = 'flex';
-  // Pull /loras to populate the dir text + auth-status warning. Cheap
-  // call (no I/O beyond the loras dir scan + an env-var read).
+  // Pull /loras to populate the dir text and the auth-banner state.
   fetch('/loras').then(r => r.json()).then(d => {
     const dirEl = document.getElementById('civitaiTargetDir');
     if (dirEl && d.loras_dir) dirEl.textContent = d.loras_dir;
-    const hint = document.getElementById('civitaiAuthHint');
-    if (hint) hint.style.display = d.civitai_auth ? 'none' : 'block';
-  }).catch(() => {});
+    renderCivitaiAuthBanner(!!d.civitai_auth);
+  }).catch(() => { renderCivitaiAuthBanner(false); });
   document.getElementById('civitaiQuery').value = '';
   _civitaiCursor = '';
   civitaiSearch();
+}
+
+// Render the inline API-key banner at the top of the CivitAI browser.
+// Three states: set (✓ small green), missing (amber, prompts for key),
+// editing (input visible while user is changing/setting the key). The
+// banner is the primary surface for the key now — Settings still has
+// the field but most users won't need to dig there.
+function renderCivitaiAuthBanner(haveKey, mode) {
+  const box = document.getElementById('civitaiAuthBanner');
+  if (!box) return;
+  // Three visual modes: 'view' (default), 'edit' (showing input), 'err' (last save failed).
+  const m = mode || (haveKey ? 'view' : 'edit');
+  box.style.display = '';
+  box.classList.remove('missing','set','err');
+  if (m === 'view' && haveKey) {
+    box.classList.add('set');
+    box.innerHTML = `
+      <span><strong style="color:var(--success,#3fb950)">✓</strong> CivitAI API key set —
+      LoRA downloads will work.</span>
+      <span class="grow"></span>
+      <a class="changekey" onclick="renderCivitaiAuthBanner(true,'edit')">change key</a>`;
+    return;
+  }
+  // edit / missing mode — render input + Save.
+  box.classList.add(m === 'err' ? 'err' : 'missing');
+  const intro = m === 'err'
+    ? `<strong>That key didn't work.</strong> Double-check it from <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a> and try again.`
+    : haveKey
+      ? `Replace your CivitAI API key. The current one stays active until you save a new one.`
+      : `<strong>CivitAI requires an API key</strong> to download LoRAs. Get one at <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a> and paste it here:`;
+  box.innerHTML = `
+    <div class="grow" style="flex-basis:100%; margin-bottom:6px;">${intro}</div>
+    <input type="password" id="civitaiAuthInput" placeholder="paste API key — usually 32 hex chars"
+           autocomplete="off" spellcheck="false">
+    <button type="button" id="civitaiAuthSave" onclick="civitaiAuthSave()">Save & test</button>
+    ${haveKey ? '<a class="changekey" onclick="renderCivitaiAuthBanner(true,\'view\')">cancel</a>' : ''}`;
+  // Pressing Enter inside the input triggers save.
+  const inp = document.getElementById('civitaiAuthInput');
+  if (inp) inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); civitaiAuthSave(); }
+  });
+}
+
+async function civitaiAuthSave() {
+  const inp = document.getElementById('civitaiAuthInput');
+  const btn = document.getElementById('civitaiAuthSave');
+  if (!inp) return;
+  const key = (inp.value || '').trim();
+  if (!key) { inp.focus(); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  // Save via /settings (single source of truth for tokens). After save
+  // we hit /civitai/test to verify before flipping the banner to "set" —
+  // that catches the most common error (typo'd key) right at the moment
+  // the user pasted it, instead of failing later on the first download.
+  try {
+    const fd = new URLSearchParams();
+    fd.set('civitai_api_key', key);
+    const r = await fetch('/settings', { method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    // Verify
+    if (btn) btn.textContent = 'Testing…';
+    const t = await fetch('/civitai/test');
+    const td = await t.json();
+    if (!td.ok) {
+      renderCivitaiAuthBanner(false, 'err');
+      return;
+    }
+    renderCivitaiAuthBanner(true, 'view');
+    // Re-run the search so any 401-blocked thumbnails reload as authed.
+    civitaiSearch();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save & test'; }
+    renderCivitaiAuthBanner(false, 'err');
+  }
 }
 
 function closeCivitaiModal() {
@@ -7299,52 +7436,54 @@ function renderVersionPill() {
   pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy');
   pill.style.display = '';
 
+  // Pill text leads with the MEANING of the state, not the version code.
+  // Earlier build showed bare "Y1.005" which read as a label rather than
+  // a status — users didn't realize they could click it. Now every state
+  // uses plain English so a user glancing at the header understands at
+  // a glance whether they're current, behind, or need to restart.
+
   // Highest-priority state: a pull just happened and the panel needs a
-  // restart to load the new code. Different colour + text so the user
-  // sees the action they need to take, not the version info.
+  // restart to load the new code.
   if (_versionRestartPending) {
     pill.classList.add('pill-restart');
-    pill.textContent = '↻ restart phosphene';
+    pill.textContent = '↻ Restart Phosphene';
     const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
     pill.title = s.pull_requires_full_update
       ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
       : `Pulled ${v}. Click Stop → Start in Pinokio to apply.`;
     return;
   }
-  // Suppressed (dev branch / dirty tree / no git) — show the local label
-  // so the user can confirm what they're running, muted styling, with
-  // the reason in the tooltip.
+  // Suppressed (dev branch / dirty tree / no git).
   if (s.suppress_reason) {
     pill.classList.add('pill-dev');
-    pill.textContent = `${local} ⚙`;
+    pill.textContent = `${local} · dev`;
     pill.title = `Update check paused: ${s.suppress_reason}.`;
     return;
   }
-  // Behind origin/main — the eye-catching state. Tooltip explains the
-  // click action so first-timers know what'll happen.
+  // Behind origin/main — eye-catching action prompt.
   if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
     pill.classList.add('pill-update');
-    pill.textContent = `↑ ${remote}`;
-    pill.title = `Update available — you're on ${local}, latest is ${remote}. Click to pull.`;
+    pill.textContent = `↑ Update to ${remote}`;
+    pill.title = `You're on ${local}; latest is ${remote}. Click to pull the update.`;
     return;
   }
-  // Last check errored (offline). Show local label muted; click retries.
+  // Last check errored (offline).
   if (s.error) {
     pill.classList.add('pill-dev');
-    pill.textContent = local;
+    pill.textContent = `${local} · offline`;
     pill.title = `Couldn't reach github.com (${s.error}). Click to retry.`;
     return;
   }
-  // Current with origin/main — successful poll, behind == 0.
+  // Current with origin/main.
   if (s.checked_ts && (s.behind_by | 0) === 0) {
     pill.classList.add('pill-current');
-    pill.textContent = local;
-    pill.title = `You're on ${local}. Click to check for updates now.`;
+    pill.textContent = `✓ Up to date · ${local}`;
+    pill.title = `You're on ${local}, the latest version. Click to re-check now.`;
     return;
   }
   // First poll hasn't landed yet.
   pill.classList.add('pill-checking');
-  pill.textContent = local;
+  pill.textContent = `Checking · ${local}`;
   pill.title = 'Checking for updates…';
 }
 
