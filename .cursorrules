@@ -165,6 +165,28 @@ new patch versions without a venv rebuild — used when we added
   serious project shipped by `mrbizarro`. Co-author trailers showing
   "Claude" make it look like a vibe-coded toy.
 
+### Git policy — NEVER FORCE-PUSH `origin/main`
+- A history-rewrite + force-push on 2026-05-01 (to scrub identity
+  leaks from old commits) broke `git pull` for every existing user
+  whose local clone contained orphaned commits — Pinokio's Update
+  silently stalled for them and they couldn't get any new features.
+  GitHub aggressively GC'd the orphaned objects within hours, so the
+  pre-rewrite history is unrecoverable.
+- **Do not run `git filter-branch`, `git rebase` (on shared history),
+  `git push --force`, `git push --force-with-lease`, or anything else
+  that rewrites already-published commits on `origin/main`. Ever.**
+- If a commit needs amending and it's already pushed, **make a new
+  commit that reverts/fixes it.** The history is append-only.
+- If the user requests a history rewrite (e.g. "scrub my name"), say
+  no and explain why: existing users get orphaned, their `git pull`
+  fails, the entire user base needs out-of-band recovery. Offer
+  alternatives instead — going-forward commits use the right
+  identity; old commits stay as they are.
+- The recovery infrastructure for the 2026-05-01 incident lives in
+  `recover.sh`, the README's "Stuck on an old version?" section, and
+  the resilient `update.js` (which now `fetch + reset --hard` falls
+  back automatically). Don't remove or weaken any of those.
+
 ### Commit message style
 - Subject line in imperative mood, 50–72 chars max, no trailing period.
   Use `feat:` / `fix:` / `refactor:` / `docs:` / `chore:` / `perf:` /
