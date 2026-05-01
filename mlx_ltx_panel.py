@@ -297,6 +297,200 @@ def update_settings(patch: dict) -> tuple[dict, str | None]:
         return dict(_SETTINGS), None
 
 
+# ---- LoRA discovery + curated registry --------------------------------------
+# LTX 2.3 supports LoRAs via apply_loras() in ltx_core_mlx.loader.fuse_loras.
+# The pipeline's _pending_loras attribute is the integration hook — set it
+# before the pipeline's load() and the deltas get fused into the transformer
+# at quantization time. Path can be a local file (preferred for user-installed
+# LoRAs) or a HuggingFace repo ID (used for the curated Lightricks officials).
+#
+# Two sources of LoRAs surface in the UI:
+#
+# 1. **Curated** — official Lightricks LoRAs we know about. Pinned by repo
+#    ID so they always work without a separate download step (the helper
+#    snapshot_downloads them on first use). The HDR LoRA is exposed as a
+#    plain "HDR" toggle in the form; the rest live in the LoRA picker.
+#
+# 2. **User-installed** — anything dropped into mlx_models/loras/ as a
+#    .safetensors file. Optional sidecar JSON next to the .safetensors
+#    carries metadata (display name, trigger words, recommended strength,
+#    preview thumbnail, source). The CivitAI browser writes these sidecars
+#    automatically when it downloads a LoRA.
+
+LORAS_DIR = ROOT / "mlx_models" / "loras"
+
+# Curated Lightricks LoRAs. Keyed by short id; the UI exposes these next to
+# user-installed LoRAs in the picker, with `is_curated: true` so the front
+# end can render them differently (e.g. a "Lightricks" badge).
+CURATED_LORAS: dict[str, dict] = {
+    "hdr": {
+        "id": "hdr",
+        "name": "HDR",
+        "description": "Lightricks' official HDR LoRA. Boosts dynamic range "
+                       "and color depth. Exposed as a plain 'HDR' toggle in "
+                       "the form, not buried under LoRAs — most users won't "
+                       "want to know what's under the hood.",
+        "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
+        "default_strength": 1.0,
+        "trigger_words": [],          # HDR is conditioning-style, no trigger
+        "is_curated": True,
+        "is_hdr_toggle": True,         # treat specially in the UI
+    },
+    "motion-track": {
+        "id": "motion-track",
+        "name": "Motion Track Control",
+        "description": "Lightricks IC-LoRA for motion-tracked control. "
+                       "Pairs with a video conditioning input for motion "
+                       "transfer-style workflows.",
+        "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
+        "default_strength": 1.0,
+        "trigger_words": [],
+        "is_curated": True,
+        "is_hdr_toggle": False,
+    },
+    "union-control": {
+        "id": "union-control",
+        "name": "Union Control",
+        "description": "Lightricks IC-LoRA combining multiple control signals "
+                       "(depth, edges, pose) into one network.",
+        "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        "default_strength": 1.0,
+        "trigger_words": [],
+        "is_curated": True,
+        "is_hdr_toggle": False,
+    },
+}
+
+
+def _safe_loras_dir() -> Path:
+    """Ensure mlx_models/loras/ exists. Idempotent."""
+    LORAS_DIR.mkdir(parents=True, exist_ok=True)
+    return LORAS_DIR
+
+
+def _read_lora_sidecar(safetensors_path: Path) -> dict:
+    """Read sidecar JSON next to a .safetensors LoRA. Falls back to bare
+    filename + zero metadata when no sidecar is present, so users can
+    drop in a raw .safetensors and get a usable picker entry without
+    writing any metadata themselves.
+
+    Sidecar schema (inspired by CivitAI's model JSON, kept compatible
+    so a CivitAI download just writes its native shape):
+
+      {
+        "name": "Cinematic Post-Apocalyptic",
+        "description": "...",
+        "trigger_words": ["postapoc", "wasteland"],   // optional
+        "recommended_strength": 0.8,                   // 0.0..1.5 typical
+        "civitai_id": 2563394,                         // optional
+        "civitai_version_id": 2880457,                 // optional
+        "preview_url": "https://...",                  // optional
+        "base_model": "LTXV 2.3",
+        "downloaded_at": "2026-05-01T..."
+      }
+    """
+    sidecar = safetensors_path.with_suffix(".json")
+    meta = {
+        "name": safetensors_path.stem.replace("_", " ").replace("-", " "),
+        "description": "",
+        "trigger_words": [],
+        "recommended_strength": 1.0,
+        "preview_url": None,
+        "base_model": None,
+        "civitai_id": None,
+        "civitai_version_id": None,
+        "downloaded_at": None,
+    }
+    if sidecar.exists():
+        try:
+            with sidecar.open("r") as fh:
+                user = json.load(fh) or {}
+            for k in meta:
+                if k in user and user[k] is not None:
+                    meta[k] = user[k]
+        except Exception as exc:
+            sys.stderr.write(f"WARN: bad sidecar at {sidecar} ({exc}); "
+                             f"falling back to filename\n")
+    return meta
+
+
+def list_user_loras() -> list[dict]:
+    """Scan mlx_models/loras/ and return one entry per .safetensors found.
+    Filenames are matched case-insensitive on the extension; subdirectories
+    are not recursed (keeps the picker flat, no organizational ambiguity)."""
+    out: list[dict] = []
+    if not LORAS_DIR.exists():
+        return out
+    for path in sorted(LORAS_DIR.iterdir()):
+        if not path.is_file() or path.suffix.lower() != ".safetensors":
+            continue
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            continue
+        meta = _read_lora_sidecar(path)
+        out.append({
+            "id": f"user:{path.name}",
+            "name": meta["name"],
+            "description": meta["description"],
+            "path": str(path),
+            "filename": path.name,
+            "size_bytes": size_bytes,
+            "trigger_words": list(meta.get("trigger_words") or []),
+            "recommended_strength": float(meta.get("recommended_strength") or 1.0),
+            "preview_url": meta.get("preview_url"),
+            "base_model": meta.get("base_model"),
+            "civitai_id": meta.get("civitai_id"),
+            "civitai_version_id": meta.get("civitai_version_id"),
+            "downloaded_at": meta.get("downloaded_at"),
+            "is_curated": False,
+        })
+    return out
+
+
+def list_curated_loras() -> list[dict]:
+    """Curated entries surfaced in the UI even though the actual weights
+    are pulled lazily from HuggingFace at first use. We hide the HDR one
+    from the picker because it's exposed as a plain toggle elsewhere
+    (see is_hdr_toggle filtering on the JS side)."""
+    return [dict(v) for v in CURATED_LORAS.values()]
+
+
+def parse_loras_from_form(form: dict) -> list[dict]:
+    """Parse the loras=<JSON> form field that the UI submits with each job.
+    Shape on the wire is a JSON array of {id, path, strength}. We trust
+    `id` only for routing in this layer; what gets sent to the helper is
+    just the (path, strength) pair the fuser needs."""
+    raw = form.get("loras", [""])
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    out: list[dict] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            strength = float(item.get("strength", 1.0))
+        except (TypeError, ValueError):
+            strength = 1.0
+        # Clamp; LoRA strengths beyond ±2 are usually nonsense and risk
+        # numerical issues during fusion.
+        strength = max(-2.0, min(2.0, strength))
+        out.append({"path": path, "strength": strength})
+    return out
+
+
 def _repos() -> list[dict]:
     """All repo entries from required_files.json (list, in order)."""
     return list(_REQUIRED.get("repos", []))
@@ -614,6 +808,264 @@ def _kill_active_download() -> None:
 
 
 atexit.register(_kill_active_download)
+
+
+# ---- CivitAI bridge ---------------------------------------------------------
+# CivitAI is the de-facto LoRA distribution hub. We hit its public REST API
+# (no auth required for SFW; an optional CIVITAI_API_KEY env var unlocks
+# higher rate limits + NSFW listings tied to an account) and download via
+# urllib so we don't need a third-party HTTP dependency.
+#
+# Filtering: baseModels=LTXV%202.3 + types=LORA narrows to LTX-2.3 LoRAs.
+# CivitAI's response shape is documented at
+# https://github.com/civitai/civitai/wiki/REST-API-Reference but we trim
+# the response server-side so the panel only ships what the UI needs.
+
+CIVITAI_API_BASE = "https://civitai.com/api/v1"
+CIVITAI_USER_AGENT = "phosphene/1.0 (https://github.com/mrbizarro/phosphene)"
+
+
+def _civitai_request(path: str, params: dict | None = None,
+                     timeout: float = 20.0) -> dict:
+    """Minimal stdlib HTTP client for the CivitAI API. No third-party
+    deps so we don't pin requests / httpx into the install. Returns the
+    decoded JSON body or raises RuntimeError on non-2xx."""
+    import urllib.parse, urllib.request
+    url = f"{CIVITAI_API_BASE}{path}"
+    if params:
+        # urlencode handles the URL-quoting (spaces → %20 etc.) so
+        # baseModels=LTXV 2.3 makes it through unmangled.
+        url = url + "?" + urllib.parse.urlencode(params, doseq=True)
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": CIVITAI_USER_AGENT,
+    })
+    api_key = os.environ.get("CIVITAI_API_KEY", "").strip()
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            return json.loads(body)
+    except Exception as exc:
+        raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _civitai_search(query: str = "", nsfw: bool = False,
+                    cursor: str = "", limit: int = 20) -> dict:
+    """Search LTX-2.3 LoRAs. Returns the trimmed shape:
+        { "items": [{
+            "id", "name", "creator", "description", "tags", "downloads",
+            "rating", "nsfw", "preview_url", "version_id",
+            "download_url", "trigger_words", "recommended_strength",
+            "size_kb", "base_model"
+          }, ...],
+          "total_pages", "current_page" }
+    Each item carries everything the front end needs to render a card
+    AND everything the download endpoint needs to write a sidecar — no
+    second round-trip required to install."""
+    # CivitAI's /models endpoint uses cursor-style pagination
+    # (`nextCursor` in the response → pass back as `cursor` on the next
+    # request). Page numbers are deprecated for this endpoint. We expose
+    # the same cursor flow to the panel UI so it can render a "Load more"
+    # affordance without faking pagination on top of cursors.
+    params: dict[str, object] = {
+        "types": "LORA",
+        "baseModels": "LTXV 2.3",
+        "limit": limit,
+        "sort": "Most Downloaded",
+        # nsfw=True lets the API include NSFW results; the user's CivitAI
+        # account-level filter (if any) is unaffected. We surface the
+        # boolean on each item so the front end can render a warning.
+        "nsfw": "true" if nsfw else "false",
+    }
+    if query.strip():
+        params["query"] = query.strip()
+    if cursor:
+        params["cursor"] = cursor
+    raw = _civitai_request("/models", params=params)
+    items = []
+    for m in (raw.get("items") or []):
+        versions = m.get("modelVersions") or []
+        if not versions:
+            continue
+        v = versions[0]
+        files = v.get("files") or []
+        # Pick the first .safetensors file. CivitAI sometimes hosts
+        # multiple file variants (pruned, full, etc.); prefer the one
+        # marked `primary: true` if present, otherwise fall back to the
+        # first .safetensors.
+        primary = next((f for f in files if f.get("primary") and
+                        f.get("name", "").lower().endswith(".safetensors")),
+                       None) or next((f for f in files if
+                       f.get("name", "").lower().endswith(".safetensors")),
+                       None)
+        if not primary:
+            continue
+        images = v.get("images") or []
+        preview = next((img.get("url") for img in images if img.get("url")),
+                       None)
+        creator = (m.get("creator") or {}).get("username") or "unknown"
+        # CivitAI puts trigger words on the version (`trainedWords`).
+        trigger = list(v.get("trainedWords") or [])
+        items.append({
+            "id": m.get("id"),
+            "version_id": v.get("id"),
+            "name": m.get("name") or f"model-{m.get('id')}",
+            "creator": creator,
+            "description": (m.get("description") or "")[:600],
+            "tags": list(m.get("tags") or []),
+            "downloads": (m.get("stats") or {}).get("downloadCount"),
+            "rating": (m.get("stats") or {}).get("rating"),
+            "nsfw": bool(m.get("nsfw")),
+            "preview_url": preview,
+            "filename": primary.get("name"),
+            "size_kb": primary.get("sizeKB"),
+            "download_url": primary.get("downloadUrl"),
+            "trigger_words": trigger,
+            "recommended_strength": 1.0,    # CivitAI doesn't expose this; default
+            "base_model": v.get("baseModel"),
+            "civitai_url": f"https://civitai.com/models/{m.get('id')}",
+        })
+    metadata = raw.get("metadata") or {}
+    return {
+        "items": items,
+        "next_cursor": metadata.get("nextCursor"),
+        "has_more": bool(metadata.get("nextCursor")),
+    }
+
+
+def _civitai_download(download_url: str, meta: dict) -> dict:
+    """Download a CivitAI .safetensors into mlx_models/loras/ and write
+    a sidecar JSON. Returns { name, path, sidecar_path, size_bytes }.
+    Streams to a .partial file then renames atomically — a Pinokio kill
+    mid-download leaves nothing the next scan would mistake for a
+    complete LoRA."""
+    import urllib.parse, urllib.request
+    if not download_url:
+        raise RuntimeError("download_url required")
+    # Restrict to civitai.com to prevent the endpoint being used as a
+    # generic HTTP fetcher. Subdomains (e.g. images.civitai.com) are
+    # also OK because CivitAI sometimes redirects there.
+    parsed = urllib.parse.urlparse(download_url)
+    if parsed.scheme != "https" or not parsed.netloc.endswith("civitai.com"):
+        raise RuntimeError(f"refusing to download from {parsed.netloc}; "
+                           f"only civitai.com is allowed")
+    # CivitAI's download endpoint started requiring auth for many models
+    # in 2025+. The Authorization header sometimes works, but the
+    # canonical path is `?token=<key>` on the URL — and many CDN hops
+    # only honour the token in the URL. Try the URL form first when a
+    # key is available.
+    api_key_env = os.environ.get("CIVITAI_API_KEY", "").strip()
+    if api_key_env and "token=" not in (parsed.query or ""):
+        sep = "&" if parsed.query else "?"
+        download_url = download_url + sep + "token=" + urllib.parse.quote(api_key_env)
+    loras_dir = _safe_loras_dir()
+    # Filename from meta (preferred — preserves CivitAI's name) or fall
+    # back to the URL's last path segment.
+    fname = (meta.get("filename") or
+             os.path.basename(parsed.path) or
+             f"civitai_{meta.get('id', 'unknown')}.safetensors")
+    if not fname.lower().endswith(".safetensors"):
+        fname += ".safetensors"
+    # Sanitize aggressively — CivitAI names can contain spaces and
+    # weirder characters; the helper later passes this filename through
+    # the safetensors loader which is filesystem-only and fine with
+    # spaces, but the picker UI is calmer with snake_case.
+    safe_fname = re.sub(r"[^A-Za-z0-9._-]+", "_", fname).strip("_")
+    target = loras_dir / safe_fname
+    if target.exists():
+        # Don't silently re-download. Surface the conflict so the user
+        # can decide (the UI will offer a choice; for now just skip).
+        return {
+            "name": meta.get("name") or target.stem,
+            "path": str(target),
+            "size_bytes": target.stat().st_size,
+            "skipped": True,
+            "reason": "already exists",
+        }
+    tmp = target.with_suffix(target.suffix + ".partial")
+    push(f"[civitai] downloading {meta.get('name') or safe_fname}")
+    api_key = os.environ.get("CIVITAI_API_KEY", "").strip()
+    headers = {"User-Agent": CIVITAI_USER_AGENT}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(download_url, headers=headers)
+    bytes_written = 0
+    last_log = 0.0
+    try:
+        try:
+            resp_ctx = urllib.request.urlopen(req, timeout=60)
+        except urllib.request.HTTPError as he:
+            # Surface the 401 case with a clear remediation. CivitAI now
+            # requires API tokens for most LoRA downloads, even SFW ones,
+            # but the API key for the search endpoint is optional — so a
+            # user can browse without setting up auth and only hit this
+            # wall on first install.
+            if he.code == 401:
+                raise RuntimeError(
+                    "CivitAI returned 401 Unauthorized. CivitAI requires an "
+                    "API token for LoRA downloads. Get one at "
+                    "https://civitai.com/user/account, then set the "
+                    "CIVITAI_API_KEY environment variable before launching "
+                    "the panel (or in Pinokio's Phosphene start script). "
+                    "Restart Pinokio's Phosphene to pick it up."
+                )
+            raise
+        with resp_ctx as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            with tmp.open("wb") as fh:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    bytes_written += len(chunk)
+                    now = time.time()
+                    if now - last_log > 1.0:
+                        if total:
+                            pct = int(100 * bytes_written / total)
+                            push(f"[civitai] {pct}% · "
+                                 f"{bytes_written // (1024*1024)}/"
+                                 f"{total // (1024*1024)} MB")
+                        else:
+                            push(f"[civitai] {bytes_written // (1024*1024)} MB")
+                        last_log = now
+        os.replace(tmp, target)
+    except Exception:
+        try: tmp.unlink()
+        except OSError: pass
+        raise
+    push(f"[civitai] saved {target.name} ({bytes_written // (1024*1024)} MB)")
+    # Write the sidecar — kept tolerant of meta gaps so a partial
+    # payload still produces a usable picker entry.
+    sidecar = target.with_suffix(".json")
+    sidecar_data = {
+        "name": meta.get("name") or target.stem,
+        "description": meta.get("description") or "",
+        "trigger_words": list(meta.get("trigger_words") or []),
+        "recommended_strength": float(meta.get("recommended_strength") or 1.0),
+        "preview_url": meta.get("preview_url"),
+        "base_model": meta.get("base_model") or "LTXV 2.3",
+        "civitai_id": meta.get("id"),
+        "civitai_version_id": meta.get("version_id"),
+        "civitai_url": meta.get("civitai_url"),
+        "downloaded_at": iso_now(),
+        "downloaded_size_bytes": bytes_written,
+    }
+    try:
+        with sidecar.open("w") as fh:
+            json.dump(sidecar_data, fh, indent=2)
+    except Exception as exc:
+        push(f"[civitai] WARN: could not write sidecar ({exc})")
+    return {
+        "name": sidecar_data["name"],
+        "path": str(target),
+        "sidecar_path": str(sidecar),
+        "size_bytes": bytes_written,
+        "skipped": False,
+    }
+
 
 # Aspect presets — width × height (model-safe, multiples of 32)
 ASPECTS = {
@@ -1376,6 +1828,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
             "quality": f("quality", "standard"),  # draft / standard / high
+            # LoRAs the user has enabled for this job. The UI submits a
+            # JSON-encoded array via the `loras` form field; we parse +
+            # validate here so the worker / helper layers receive a clean
+            # list of {path, strength}. HDR toggle gets injected here too
+            # (see make_job_postprocess below).
+            "loras": parse_loras_from_form(form),
+            # HDR toggle. Stored separately from `loras` so the UI can
+            # render it as a plain checkbox without the user thinking of
+            # it as a LoRA. The worker resolves it to the curated HDR
+            # repo before submitting to the helper.
+            "hdr": f("hdr", "off") == "on",
         },
         "command": None,
         "raw_path": None,
@@ -1671,6 +2134,16 @@ def run_job_inner(job: dict) -> None:
         push(f"Run HIGH via helper: id={job['id']} mode={mode} {width}x{height} {frames}f · Q8 two-stage HQ + TeaCache")
     else:
         # Draft / Standard — Q4 one-stage with steps from form.
+        # Resolve LoRAs: user-picked entries from p["loras"] plus the
+        # HDR shortcut if enabled (the HDR LoRA is a curated Lightricks
+        # repo we know about, kept hidden from the picker because the
+        # user shouldn't have to think about it as a LoRA).
+        loras = list(p.get("loras") or [])
+        if p.get("hdr"):
+            loras.append({
+                "path": CURATED_LORAS["hdr"]["repo_id"],
+                "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
+            })
         job_spec = {
             "action": "generate",
             "id": job["id"],
@@ -1684,9 +2157,17 @@ def run_job_inner(job: dict) -> None:
                 "steps": p["steps"],
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
+                "loras": loras,
             },
         }
-        push(f"Run via helper: id={job['id']} mode={mode} quality={quality} {width}x{height} {frames}f")
+        if loras:
+            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} "
+                 f"{width}x{height} {frames}f · {len(loras)} LoRA"
+                 f"{'s' if len(loras) != 1 else ''}"
+                 f"{' (incl. HDR)' if p.get('hdr') else ''}")
+        else:
+            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} "
+                 f"{width}x{height} {frames}f")
 
     result = HELPER.run(job_spec)
     if "seed_used" in result:
@@ -2030,6 +2511,45 @@ class Handler(BaseHTTPRequestHandler):
                 "default_preset": DEFAULT_OUTPUT_PRESET,
             })
             return
+        if parsed.path == "/loras":
+            # Returns: { user: [user-installed], curated: [Lightricks
+            # officials minus hdr_toggle entries], loras_dir: <abs path>,
+            # civitai_auth: bool }.
+            # The HDR-toggle special-case is filtered out of `curated`
+            # because the UI exposes it as a plain checkbox elsewhere —
+            # showing it in the picker would just confuse users.
+            curated = [c for c in list_curated_loras()
+                       if not c.get("is_hdr_toggle")]
+            self._json({
+                "user": list_user_loras(),
+                "curated": curated,
+                "loras_dir": str(_safe_loras_dir()),
+                # True iff CIVITAI_API_KEY is set in this panel's env.
+                # Lets the front end show a hint when the key is missing,
+                # so users learn about it BEFORE clicking Install on a
+                # CivitAI card and getting a 401 surprise.
+                "civitai_auth": bool(os.environ.get("CIVITAI_API_KEY", "").strip()),
+            })
+            return
+        if parsed.path == "/civitai/search":
+            # Proxy CivitAI's API. Filtering down to LTX-Video LoRAs by
+            # baseModel ("LTXV 2.3" is the canonical string used on
+            # civitai.com for LTX-2.3 LoRAs as of 2026-05). Returns the
+            # subset of fields the panel cares about, plus a flat
+            # download_url that points at the .safetensors directly.
+            qs = parse_qs(urlparse(self.path).query)
+            query = qs.get("query", [""])[0]
+            nsfw = (qs.get("nsfw", ["false"])[0] or "false").lower() == "true"
+            cursor = qs.get("cursor", [""])[0]
+            limit = max(1, min(50, int(qs.get("limit", ["20"])[0] or "20")))
+            try:
+                results = _civitai_search(query=query, nsfw=nsfw,
+                                         cursor=cursor, limit=limit)
+                self._json(results)
+            except Exception as exc:
+                self._json({"error": f"civitai search failed: {exc}",
+                            "items": []}, 502)
+            return
         if parsed.path == "/file":
             qs = parse_qs(parsed.query)
             try:
@@ -2227,6 +2747,61 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/helper/restart":
             HELPER.kill()
             self._json({"ok": True}); return
+
+        if path == "/loras/refresh":
+            # Rescan mlx_models/loras/. The result is whatever
+            # list_user_loras returns — filesystem is the source of
+            # truth, no caching layer to invalidate.
+            self._json({
+                "ok": True,
+                "user": list_user_loras(),
+                "loras_dir": str(_safe_loras_dir()),
+            })
+            return
+
+        if path == "/loras/delete":
+            # Remove a user-installed LoRA (the .safetensors file plus
+            # its sidecar JSON if present). Path must be inside the
+            # loras dir — we resolve and bound-check to prevent
+            # path-traversal mischief from a hostile form payload.
+            target = form.get("path", [""])[0] or form.get("path", "")
+            if isinstance(target, list): target = target[0] if target else ""
+            try:
+                p = Path(target).resolve()
+                base = _safe_loras_dir().resolve()
+                if not str(p).startswith(str(base)) or not p.is_file():
+                    raise RuntimeError("path not inside loras dir")
+                if p.suffix.lower() != ".safetensors":
+                    raise RuntimeError("not a safetensors file")
+                p.unlink()
+                sidecar = p.with_suffix(".json")
+                if sidecar.exists():
+                    sidecar.unlink()
+                self._json({"ok": True, "removed": str(p)})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            return
+
+        if path == "/civitai/download":
+            # Triggers a download of a CivitAI LoRA into mlx_models/loras/.
+            # Streams progress through STATE['log'] like the model
+            # downloads do. Validates the requested URL points at
+            # civitai.com to prevent the endpoint being weaponized as
+            # a generic HTTP fetcher.
+            url = form.get("download_url", [""])[0] or form.get("download_url", "")
+            if isinstance(url, list): url = url[0] if url else ""
+            try:
+                meta_raw = form.get("meta", [""])[0] or form.get("meta", "")
+                if isinstance(meta_raw, list): meta_raw = meta_raw[0] if meta_raw else ""
+                meta = json.loads(meta_raw) if meta_raw else {}
+            except json.JSONDecodeError:
+                meta = {}
+            try:
+                result = _civitai_download(url, meta)
+                self._json({"ok": True, **result})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 400)
+            return
 
         if path == "/settings":
             # Accept partial-patch updates: only the fields the user
@@ -2939,6 +3514,109 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
+    /* LoRA picker — collapsible <details> styled to match the rest of
+       the form. Rows are individual LoRAs with name + strength slider +
+       strength number + remove button. The "active" state on a row
+       (checked) tints the border to make it clear which LoRAs will be
+       fused into the next render. */
+    .loras-summary {
+      cursor: pointer; user-select: none; font-size: 12px;
+      font-weight: 600; color: var(--text);
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0;
+    }
+    .loras-summary .hint { font-weight: 400; }
+    .loras-list {
+      display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+    }
+    .lora-row {
+      display: grid; grid-template-columns: 24px 1fr auto auto;
+      gap: 10px; align-items: center;
+      padding: 8px 10px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel-2);
+    }
+    .lora-row.active {
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.1));
+    }
+    .lora-row .lora-check { width: auto; margin: 0; accent-color: var(--accent); }
+    .lora-row .lora-name {
+      font-size: 12px; font-weight: 500; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .lora-row .lora-name .badge {
+      display: inline-block; font-size: 9px; font-weight: 600;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 1px 6px; border-radius: 999px; margin-left: 6px;
+      border: 1px solid var(--accent); color: var(--accent-bright);
+    }
+    .lora-row .lora-trigger {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--muted); margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .lora-row .lora-strength-row {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .lora-row input[type="range"] { width: 96px; }
+    .lora-row input[type="number"] {
+      width: 56px; padding: 3px 5px; font-size: 11px;
+    }
+    .lora-row .lora-remove {
+      width: auto; padding: 3px 7px; font-size: 11px;
+      background: transparent; border: 1px solid var(--border);
+      color: var(--muted); border-radius: 5px; cursor: pointer;
+    }
+    .lora-row .lora-remove:hover { color: var(--danger, #f85149); border-color: var(--danger, #f85149); }
+
+    /* CivitAI browser modal — grid of cards with thumbnail, name,
+       creator, downloads, NSFW indicator, and an Install button per
+       card. Layered on the .models-modal scaffold. */
+    .civitai-search-bar {
+      display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
+    }
+    .civitai-search-bar input[type="text"] { flex: 1; }
+    .civitai-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px; margin-top: 10px;
+    }
+    .civitai-card {
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--panel-2); overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .civitai-card .preview {
+      width: 100%; aspect-ratio: 16/10; background: var(--bg-2);
+      object-fit: cover; display: block;
+    }
+    .civitai-card .preview-empty {
+      width: 100%; aspect-ratio: 16/10; background: var(--bg-2);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 11px;
+    }
+    .civitai-card .body { padding: 10px 12px; flex: 1;
+      display: flex; flex-direction: column; gap: 4px; }
+    .civitai-card .ttl {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    .civitai-card .meta {
+      font-size: 10px; color: var(--muted);
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+    .civitai-card .nsfw-badge {
+      display: inline-block; font-size: 9px; font-weight: 700;
+      letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px;
+      background: rgba(248,81,73,0.15); border: 1px solid var(--danger, #f85149);
+      color: var(--danger, #f85149);
+    }
+    .civitai-card .actions { padding: 0 12px 12px; }
+    .civitai-card .actions button { width: 100%; }
+    .civitai-status-line { color: var(--muted); font-size: 11px; margin-top: 12px; }
+    .civitai-status-line.err { color: var(--danger, #f85149); }
+    .civitai-status-line.ok { color: var(--success, #3fb950); }
+
     /* Header icon button — same height/feel as ghost-btn but icon-only.
        Used for the settings cog. width:auto overrides the global
        button{width:100%} rule. */
@@ -3277,18 +3955,53 @@ HTML = r"""<!doctype html>
            default soundtrack tendency. Music is annoying in editing because
            it can't be cleanly removed without affecting the dialogue track.
            Recommended for clips you plan to score yourself in post. -->
-      <!-- Two controls on one row: Enhance button on the left, No-music
-           toggle pushed to the right edge with margin-left:auto. Same row
-           keeps the prompt-related actions visually grouped without
-           stacking them and wasting vertical space. -->
+      <!-- Three controls on one row: Enhance button on the left, then
+           HDR + No-music toggles pushed to the right. HDR is exposed as
+           a plain toggle even though it's implemented as a curated
+           Lightricks LoRA — most users don't care that it's a LoRA, they
+           just want HDR or not. -->
       <div class="row-actions" style="margin-top:8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
         <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
-        <label class="toggle-pill" id="noMusicPill" style="margin-left:auto" title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
+        <label class="toggle-pill" id="hdrPill" style="margin-left:auto"
+               title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer. First HDR job spawns a one-time download (~120 MB) of the LoRA weights from Hugging Face, then renders share the cache.">
+          <input type="checkbox" id="hdr" name="hdr">
+          <span class="toggle-dot"></span>
+          <span>HDR</span>
+        </label>
+        <label class="toggle-pill" id="noMusicPill"
+               title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
           <input type="checkbox" id="noMusic" name="no_music">
           <span class="toggle-dot"></span>
           <span>No music</span>
         </label>
       </div>
+
+      <!-- LoRA picker. Collapsible because most users won't touch it on
+           a given session, and inline because hiding it behind a modal
+           makes it easy to forget. Loaded from /loras on open; the
+           "Browse CivitAI" affordance opens the search modal. -->
+      <details id="lorasDetails" style="margin-top:14px">
+        <summary class="loras-summary">
+          <span>LoRAs</span>
+          <span class="hint" id="lorasSummaryCount">none active</span>
+        </summary>
+        <div class="loras-body" id="lorasBody">
+          <div class="hint" id="lorasEmpty" style="margin-top:8px">
+            Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
+            to use them, or browse CivitAI below. Each LoRA picks up an
+            optional sidecar <code>.json</code> with name + trigger words +
+            recommended strength.
+          </div>
+          <div class="loras-list" id="lorasList"></div>
+          <div class="loras-actions" style="margin-top:10px; display:flex; gap:8px">
+            <button type="button" class="ghost-btn" onclick="refreshLoras()">↻ Rescan folder</button>
+            <button type="button" class="ghost-btn" onclick="openCivitaiModal()">🔍 Browse CivitAI</button>
+          </div>
+        </div>
+      </details>
+      <!-- Hidden field; updated by the LoRA picker JS to a JSON-encoded
+           array of {path, strength} that make_job parses. -->
+      <input type="hidden" id="lorasJson" name="loras" value="">
 
       <!-- Advanced — power-user options. We trimmed two things in cleanup:
            1. Removed the "Enhance prompt" checkbox: it was labeled "CLI only,
@@ -3395,6 +4108,56 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+
+<!-- ============== CIVITAI MODAL ============== -->
+<!-- LoRA discovery + install modal. Hits /civitai/search to populate
+     the grid and /civitai/download to fetch a selected LoRA into
+     mlx_models/loras/ with a sidecar JSON capturing the metadata. -->
+<div id="civitaiModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeCivitaiModal()">
+  <div class="models-card" style="width: min(960px, 96vw)">
+    <div class="models-head">
+      <h2>Browse CivitAI for LTX 2.3 LoRAs</h2>
+      <button class="ghost-btn" onclick="closeCivitaiModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      LoRAs land in <code id="civitaiTargetDir">mlx_models/loras/</code>
+      with a sidecar JSON that carries the trigger words and recommended
+      strength. The CivitAI page link stays in the sidecar for attribution.
+    </div>
+    <!-- Auth hint shown only when the panel can't see CIVITAI_API_KEY.
+         CivitAI now requires a token for most LoRA downloads (even SFW).
+         Hidden by default; populated in openCivitaiModal() based on the
+         /loras response. -->
+    <div id="civitaiAuthHint" class="models-hint"
+         style="display:none; border-left:3px solid var(--warning, #d29922); padding-left:10px; margin-top:8px">
+      <strong>Heads up:</strong> CivitAI now requires an API token to
+      download LoRAs. Get one at
+      <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a>,
+      then set <code>CIVITAI_API_KEY</code> in your environment and restart
+      the panel. Browsing works without it; Install will fail with a 401
+      until the token is set.
+    </div>
+    <div class="civitai-search-bar">
+      <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
+             oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
+             onkeydown="if(event.key==='Enter'){ event.preventDefault(); civitaiSearch(); }">
+      <label class="toggle-pill" id="civitaiNsfwPill">
+        <input type="checkbox" id="civitaiNsfw">
+        <span class="toggle-dot"></span>
+        <span>Show NSFW</span>
+      </label>
+    </div>
+    <div class="civitai-grid" id="civitaiGrid">
+      <div class="hint">Loading…</div>
+    </div>
+    <div class="civitai-status-line" id="civitaiStatus"></div>
+    <div style="display:flex; justify-content:center; margin-top:14px">
+      <button type="button" class="ghost-btn" id="civitaiLoadMore"
+              style="display:none" onclick="civitaiLoadMore()">Load more</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============== SETTINGS MODAL ============== -->
 <!-- Opened by the gear icon in the header. Lets users pick output codec
@@ -4789,6 +5552,389 @@ async function applySettings() {
     btn.disabled = false;
   }
 }
+
+// ====== HDR toggle pill (header pill behavior, same as No-music) ======
+(function () {
+  const pill = document.getElementById('hdrPill');
+  const cb = document.getElementById('hdr');
+  if (!pill || !cb) return;
+  const sync = () => pill.classList.toggle('on', cb.checked);
+  cb.addEventListener('change', sync);
+  pill.addEventListener('click', () => setTimeout(sync, 0));
+  sync();
+})();
+
+// ====== CivitAI NSFW toggle pill (mirrors HDR toggle UX) ======
+(function () {
+  const pill = document.getElementById('civitaiNsfwPill');
+  const cb = document.getElementById('civitaiNsfw');
+  if (!pill || !cb) return;
+  const sync = () => pill.classList.toggle('on', cb.checked);
+  cb.addEventListener('change', sync);
+  pill.addEventListener('click', () => setTimeout(sync, 0));
+  sync();
+})();
+
+// ====== LoRA picker ======
+//
+// State model: an in-memory list of LoRA entries the user has added.
+// Adding can come from "Use" on a CivitAI install or from clicking a
+// row in the local list. Each entry:
+//   { path, name, strength, trigger_words, civitai_url }
+// On every change we mirror the list into the hidden #lorasJson field
+// so make_job's parse_loras_from_form picks them up at submit time.
+
+let _activeLoras = [];   // [{path, name, strength, trigger_words, ...}]
+let _knownUserLoras = []; // last list_user_loras() snapshot, for the picker
+
+function _serializeLoras() {
+  // What the helper actually needs is path + strength. Keep the rest in
+  // the in-memory list for UI rendering, drop it on the wire.
+  const slim = _activeLoras.map(l => ({ path: l.path, strength: l.strength }));
+  document.getElementById('lorasJson').value = JSON.stringify(slim);
+  // Update summary count
+  const summary = document.getElementById('lorasSummaryCount');
+  if (summary) {
+    summary.textContent = _activeLoras.length === 0
+      ? 'none active'
+      : `${_activeLoras.length} active`;
+  }
+}
+
+function addLoraToActive(entry) {
+  // Idempotent: same path twice = update strength only.
+  const existing = _activeLoras.find(l => l.path === entry.path);
+  if (existing) {
+    existing.strength = entry.strength;
+  } else {
+    _activeLoras.push(entry);
+  }
+  renderLorasList();
+  _serializeLoras();
+}
+
+function removeLoraFromActive(path) {
+  _activeLoras = _activeLoras.filter(l => l.path !== path);
+  renderLorasList();
+  _serializeLoras();
+}
+
+function setLoraStrength(path, strength) {
+  const e = _activeLoras.find(l => l.path === path);
+  if (!e) return;
+  e.strength = Math.max(-2, Math.min(2, parseFloat(strength) || 0));
+  _serializeLoras();
+}
+
+async function refreshLoras() {
+  let data;
+  try {
+    data = await (await fetch('/loras')).json();
+  } catch (e) {
+    return;
+  }
+  _knownUserLoras = data.user || [];
+  // Update displayed loras dir
+  if (data.loras_dir) {
+    const dirEl = document.getElementById('lorasDir');
+    if (dirEl) dirEl.textContent = data.loras_dir;
+  }
+  // If a row was previously active but the file is gone (deleted on
+  // disk), drop it from the active set so we don't submit a stale path.
+  const knownPaths = new Set(_knownUserLoras.map(l => l.path));
+  _activeLoras = _activeLoras.filter(l =>
+    knownPaths.has(l.path) || l.path.includes('/'));   // keep HF ids (no dir slash)
+  renderLorasList();
+  _serializeLoras();
+}
+
+function renderLorasList() {
+  const wrap = document.getElementById('lorasList');
+  const empty = document.getElementById('lorasEmpty');
+  if (!wrap) return;
+  // Combine: user-installed LoRAs (from /loras) plus any active LoRAs
+  // that aren't user-installed (e.g. from CivitAI not yet refreshed,
+  // unlikely but cover the case). Display each as a row with a
+  // checkbox for active state + a strength slider.
+  const rows = [];
+  const seen = new Set();
+  for (const ul of _knownUserLoras) {
+    const active = _activeLoras.find(a => a.path === ul.path);
+    seen.add(ul.path);
+    rows.push({
+      path: ul.path,
+      name: ul.name,
+      trigger_words: ul.trigger_words || [],
+      recommended_strength: ul.recommended_strength || 1.0,
+      filename: ul.filename,
+      civitai_url: ul.civitai_url,
+      active: !!active,
+      strength: active ? active.strength : (ul.recommended_strength || 1.0),
+      kind: 'user',
+    });
+  }
+  // Active LoRAs that aren't local files (e.g. HDR toggle target)
+  for (const a of _activeLoras) {
+    if (seen.has(a.path)) continue;
+    rows.push({
+      path: a.path,
+      name: a.name || a.path,
+      trigger_words: a.trigger_words || [],
+      recommended_strength: 1.0,
+      filename: null,
+      civitai_url: null,
+      active: true,
+      strength: a.strength,
+      kind: 'remote',
+    });
+  }
+
+  if (rows.length === 0) {
+    wrap.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  wrap.innerHTML = rows.map(r => {
+    const triggers = (r.trigger_words || []).slice(0, 3).join(', ');
+    return `
+      <div class="lora-row ${r.active ? 'active' : ''}" data-path="${escapeHtml(r.path)}">
+        <input type="checkbox" class="lora-check" ${r.active ? 'checked' : ''}
+               onchange="toggleLora('${escapeHtml(r.path)}', this.checked, ${r.recommended_strength}, ${JSON.stringify(r.name).replace(/"/g,'&quot;')})">
+        <div>
+          <div class="lora-name" title="${escapeHtml(r.path)}">
+            ${escapeHtml(r.name)}
+            ${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
+          </div>
+          ${triggers ? `<div class="lora-trigger" title="trigger words from sidecar">${escapeHtml(triggers)}</div>` : ''}
+        </div>
+        <div class="lora-strength-row">
+          <input type="range" min="-2" max="2" step="0.05" value="${r.strength}"
+                 ${r.active ? '' : 'disabled'}
+                 oninput="this.nextElementSibling.value = this.value; setLoraStrength('${escapeHtml(r.path)}', this.value)">
+          <input type="number" min="-2" max="2" step="0.05" value="${r.strength}"
+                 ${r.active ? '' : 'disabled'}
+                 oninput="this.previousElementSibling.value = this.value; setLoraStrength('${escapeHtml(r.path)}', this.value)">
+        </div>
+        ${r.kind === 'user'
+          ? `<button class="lora-remove" type="button" title="Delete from disk"
+                     onclick="deleteLora('${escapeHtml(r.path)}', '${escapeHtml(r.name)}')">×</button>`
+          : `<button class="lora-remove" type="button" title="Remove from active set"
+                     onclick="removeLoraFromActive('${escapeHtml(r.path)}')">×</button>`}
+      </div>`;
+  }).join('');
+}
+
+function toggleLora(path, on, recommended, name) {
+  if (on) {
+    addLoraToActive({ path, strength: recommended, name });
+  } else {
+    removeLoraFromActive(path);
+  }
+}
+
+async function deleteLora(path, name) {
+  if (!confirm(`Delete the LoRA file for "${name}" from disk? This is permanent.`)) {
+    return;
+  }
+  const fd = new FormData();
+  fd.set('path', path);
+  try {
+    const r = await fetch('/loras/delete', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      alert('Delete failed: ' + (data.error || `HTTP ${r.status}`));
+      return;
+    }
+    removeLoraFromActive(path);
+    refreshLoras();
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || e));
+  }
+}
+
+// ====== CivitAI modal ======
+
+let _civitaiCursor = '';
+let _civitaiSearching = false;
+
+function openCivitaiModal() {
+  document.getElementById('civitaiModal').style.display = 'flex';
+  // Pull /loras to populate the dir text + auth-status warning. Cheap
+  // call (no I/O beyond the loras dir scan + an env-var read).
+  fetch('/loras').then(r => r.json()).then(d => {
+    const dirEl = document.getElementById('civitaiTargetDir');
+    if (dirEl && d.loras_dir) dirEl.textContent = d.loras_dir;
+    const hint = document.getElementById('civitaiAuthHint');
+    if (hint) hint.style.display = d.civitai_auth ? 'none' : 'block';
+  }).catch(() => {});
+  document.getElementById('civitaiQuery').value = '';
+  _civitaiCursor = '';
+  civitaiSearch();
+}
+
+function closeCivitaiModal() {
+  document.getElementById('civitaiModal').style.display = 'none';
+}
+
+async function civitaiSearch() {
+  if (_civitaiSearching) return;
+  _civitaiSearching = true;
+  const grid = document.getElementById('civitaiGrid');
+  const status = document.getElementById('civitaiStatus');
+  const loadMore = document.getElementById('civitaiLoadMore');
+  status.textContent = '';
+  status.className = 'civitai-status-line';
+  grid.innerHTML = '<div class="hint">Loading…</div>';
+  loadMore.style.display = 'none';
+  _civitaiCursor = '';
+  try {
+    const params = new URLSearchParams();
+    const q = document.getElementById('civitaiQuery').value.trim();
+    if (q) params.set('query', q);
+    if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
+    params.set('limit', '24');
+    const r = await fetch('/civitai/search?' + params.toString());
+    const data = await r.json();
+    if (data.error) {
+      grid.innerHTML = '';
+      status.textContent = data.error;
+      status.className = 'civitai-status-line err';
+      return;
+    }
+    renderCivitaiGrid(data.items, /* append */ false);
+    _civitaiCursor = data.next_cursor || '';
+    if (data.has_more) loadMore.style.display = '';
+    if ((data.items || []).length === 0) {
+      grid.innerHTML = `<div class="hint">No LTX 2.3 LoRAs match "${escapeHtml(q || '')}"${document.getElementById('civitaiNsfw').checked ? '' : ' (try Show NSFW for more)'}.</div>`;
+    }
+  } catch (e) {
+    status.textContent = 'Network error: ' + (e.message || e);
+    status.className = 'civitai-status-line err';
+  } finally {
+    _civitaiSearching = false;
+  }
+}
+
+async function civitaiLoadMore() {
+  if (_civitaiSearching || !_civitaiCursor) return;
+  _civitaiSearching = true;
+  const loadMore = document.getElementById('civitaiLoadMore');
+  loadMore.disabled = true;
+  loadMore.textContent = 'Loading…';
+  try {
+    const params = new URLSearchParams();
+    const q = document.getElementById('civitaiQuery').value.trim();
+    if (q) params.set('query', q);
+    if (document.getElementById('civitaiNsfw').checked) params.set('nsfw', 'true');
+    params.set('limit', '24');
+    params.set('cursor', _civitaiCursor);
+    const r = await fetch('/civitai/search?' + params.toString());
+    const data = await r.json();
+    if (data.error) {
+      document.getElementById('civitaiStatus').textContent = data.error;
+      document.getElementById('civitaiStatus').className = 'civitai-status-line err';
+      return;
+    }
+    renderCivitaiGrid(data.items, /* append */ true);
+    _civitaiCursor = data.next_cursor || '';
+    loadMore.style.display = data.has_more ? '' : 'none';
+  } catch (e) {
+    document.getElementById('civitaiStatus').textContent = 'Network error: ' + (e.message || e);
+    document.getElementById('civitaiStatus').className = 'civitai-status-line err';
+  } finally {
+    _civitaiSearching = false;
+    loadMore.disabled = false;
+    loadMore.textContent = 'Load more';
+  }
+}
+
+function renderCivitaiGrid(items, append) {
+  const grid = document.getElementById('civitaiGrid');
+  if (!append) grid.innerHTML = '';
+  if (!items || items.length === 0) return;
+  const frag = document.createDocumentFragment();
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.className = 'civitai-card';
+    const sizeMb = it.size_kb ? (it.size_kb / 1024).toFixed(1) : '?';
+    const dl = it.downloads ? new Intl.NumberFormat().format(it.downloads) : '?';
+    const triggers = (it.trigger_words || []).slice(0, 3).join(', ');
+    const previewHtml = it.preview_url
+      ? `<img class="preview" src="${escapeHtml(it.preview_url)}" alt="" loading="lazy">`
+      : `<div class="preview-empty">no preview</div>`;
+    card.innerHTML = `
+      ${previewHtml}
+      <div class="body">
+        <div class="ttl" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</div>
+        <div class="meta">
+          <span>by ${escapeHtml(it.creator)}</span>
+          <span>↓ ${dl}</span>
+          <span>${sizeMb} MB</span>
+          ${it.nsfw ? '<span class="nsfw-badge">NSFW</span>' : ''}
+        </div>
+        ${triggers ? `<div class="meta"><span title="trigger words">trigger: ${escapeHtml(triggers)}</span></div>` : ''}
+      </div>
+      <div class="actions">
+        <button type="button" class="primary-btn" data-id="${it.id}">Install</button>
+      </div>`;
+    const btn = card.querySelector('button[data-id]');
+    btn.addEventListener('click', () => civitaiInstall(btn, it));
+    frag.appendChild(card);
+  }
+  grid.appendChild(frag);
+}
+
+async function civitaiInstall(btn, item) {
+  btn.disabled = true;
+  const origLabel = btn.textContent;
+  btn.textContent = 'Downloading…';
+  const fd = new FormData();
+  fd.set('download_url', item.download_url);
+  fd.set('meta', JSON.stringify(item));
+  try {
+    const r = await fetch('/civitai/download', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      const status = document.getElementById('civitaiStatus');
+      status.textContent = `Download failed: ${data.error || 'HTTP ' + r.status}`;
+      status.className = 'civitai-status-line err';
+      btn.disabled = false;
+      btn.textContent = origLabel;
+      return;
+    }
+    btn.textContent = data.skipped ? 'Already installed' : 'Installed ✓';
+    const status = document.getElementById('civitaiStatus');
+    status.textContent = data.skipped
+      ? `Already in ${data.path} — skipped.`
+      : `Saved to ${data.path}. Auto-enabled below.`;
+    status.className = 'civitai-status-line ok';
+    // Refresh the local picker so the new LoRA appears, then auto-enable.
+    await refreshLoras();
+    if (!data.skipped) {
+      addLoraToActive({
+        path: data.path,
+        name: data.name || item.name,
+        strength: item.recommended_strength || 1.0,
+        trigger_words: item.trigger_words || [],
+      });
+      // Open the LoRAs disclosure so the user sees the new entry without
+      // hunting for it after the modal closes.
+      const det = document.getElementById('lorasDetails');
+      if (det) det.open = true;
+    }
+  } catch (e) {
+    document.getElementById('civitaiStatus').textContent = 'Network error: ' + (e.message || e);
+    document.getElementById('civitaiStatus').className = 'civitai-status-line err';
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
+}
+
+// Boot: load the local LoRA list on page load so the picker isn't empty
+// when the user expands it for the first time.
+document.addEventListener('DOMContentLoaded', () => { refreshLoras(); });
 
 // ====== Models modal ======
 // Opens to /models snapshot. While open, the main poll() refreshes the

@@ -178,35 +178,200 @@ def release_pipelines(keep_kind=None):
         emit({"event": "log", "line": f"Released pipelines: {', '.join(freed)} (freeing RAM before next load)"})
 
 
-def get_pipe(kind: str):
-    """kind in {'t2v','i2v','extend'}"""
+# Track which LoRA set is fused into each cached pipeline. LoRAs are
+# fused INTO the model weights at load time (apply_loras in
+# ltx_core_mlx.loader.fuse_loras), so changing the LoRA set requires
+# reloading the pipeline. We invalidate the cache by LoRA-set fingerprint.
+_t2v_lora_key: tuple | None = None
+_i2v_lora_key: tuple | None = None
+_extend_lora_key: tuple | None = None
+
+
+def _lora_fingerprint(loras: list[dict] | None) -> tuple:
+    """Stable hashable representation of a LoRA list. Order-insensitive
+    so [{a,1},{b,2}] and [{b,2},{a,1}] hash to the same set — fusing
+    is commutative."""
+    if not loras:
+        return ()
+    return tuple(sorted(
+        (str(l.get("path", "")), float(l.get("strength", 1.0)))
+        for l in loras
+    ))
+
+
+def _resolve_lora_path(path: str) -> str:
+    """Resolve a LoRA path to a local .safetensors file.
+
+    The upstream `_pending_loras` hook calls SafetensorsStateDictLoader
+    which calls `mx.load(path)` — that only accepts a local filesystem
+    path, not a HuggingFace repo id. So when the panel sends a path that
+    looks like an HF id (`<org>/<repo>` without a file extension), we
+    resolve it here via `snapshot_download` and pick the largest
+    .safetensors in the resulting directory (the LoRA weights file).
+
+    Cached files land in ~/.cache/huggingface/, so the second job using
+    the same LoRA hits a no-op verify pass instead of a re-download."""
+    p = str(path)
+    # Already a local file
+    if os.path.isfile(p):
+        return p
+    # Looks like a filesystem path that didn't resolve. Filesystem paths
+    # are absolute (start with /) OR explicitly have a `.safetensors`
+    # extension. Bail with a clear error so the user knows the file
+    # they pointed at isn't on disk.
+    if p.startswith("/") or p.lower().endswith(".safetensors"):
+        raise FileNotFoundError(f"LoRA file not found: {p}")
+    # Looks like an HF repo id (`<org>/<repo>` form). Must contain exactly
+    # one forward slash and no path-traversal chars.
+    if p.count("/") != 1 or ".." in p:
+        raise FileNotFoundError(f"LoRA path neither a file nor an HF id: {p}")
+    emit({"event": "log",
+          "line": f"  resolving HF LoRA: {p} (snapshot_download …)"})
+    try:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
+    except ImportError as exc:
+        raise RuntimeError(
+            f"need huggingface_hub to resolve HF LoRA {p}: {exc}"
+        ) from exc
+    try:
+        repo_dir = snapshot_download(repo_id=p, allow_patterns=["*.safetensors"])
+    except GatedRepoError as exc:
+        # Most Lightricks LoRAs are gated — they require accepting a
+        # license on the model page AND an HF token authenticated with
+        # an account that has accepted. Translate the upstream traceback
+        # into something the user can act on.
+        raise RuntimeError(
+            f"This LoRA is gated on Hugging Face. To use it: "
+            f"(1) visit https://huggingface.co/{p} and click 'Agree and "
+            f"access repository' to accept the license. "
+            f"(2) get a token at https://huggingface.co/settings/tokens "
+            f"with read access. "
+            f"(3) run `hf auth login` in Terminal and paste the token. "
+            f"(4) restart the panel."
+        ) from None
+    except RepositoryNotFoundError:
+        raise RuntimeError(
+            f"Hugging Face repo not found: {p}. Check the repo id."
+        ) from None
+    except Exception as exc:
+        # Catch the generic 401 too — `snapshot_download` raises a
+        # different exception class for "not authenticated" (no token at
+        # all) than for "authenticated but not approved for this gated
+        # repo" (GatedRepoError). The string-match keeps both paths
+        # consistent for the user.
+        msg = str(exc)
+        if "401" in msg or "gated" in msg.lower():
+            raise RuntimeError(
+                f"Could not access HF LoRA {p} (401 Unauthorized). "
+                f"Accept the license at https://huggingface.co/{p} and "
+                f"run `hf auth login` in Terminal to set up your token, "
+                f"then restart the panel."
+            ) from None
+        raise
+    candidates = []
+    for name in os.listdir(repo_dir):
+        if name.lower().endswith(".safetensors"):
+            full = os.path.join(repo_dir, name)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            candidates.append((size, full))
+    if not candidates:
+        raise FileNotFoundError(
+            f"no .safetensors files found in HF repo {p}"
+        )
+    # Heuristic: pick the LARGEST .safetensors. LoRA repos sometimes
+    # ship smaller "auxiliary" files (e.g. scene embeddings) alongside
+    # the main weights — the main file is always biggest.
+    candidates.sort(reverse=True)
+    chosen = candidates[0][1]
+    emit({"event": "log",
+          "line": f"  resolved {p} -> {os.path.basename(chosen)} "
+                  f"({candidates[0][0] // (1024*1024)} MB)"})
+    return chosen
+
+
+def _attach_loras(pipe, loras: list[dict] | None) -> None:
+    """Set _pending_loras on a freshly-constructed pipeline. The upstream
+    base class checks this attribute inside load() and fuses the LoRA
+    deltas into the transformer weights before quantization. Path on the
+    wire may be a local file OR an HF repo id; we resolve HF ids to a
+    local .safetensors here so the loader (mx.load) sees an absolute
+    path it can actually open."""
+    if not loras:
+        return
+    pairs = []
+    for l in loras:
+        path = _resolve_lora_path(str(l["path"]))
+        strength = float(l.get("strength", 1.0))
+        pairs.append((path, strength))
+        emit({"event": "log",
+              "line": f"  + LoRA queued: {os.path.basename(path)} "
+                      f"(strength {strength:.2f})"})
+    pipe._pending_loras = pairs
+
+
+def get_pipe(kind: str, loras: list[dict] | None = None):
+    """kind in {'t2v','i2v','extend'}; loras is an optional list of
+    {path, strength} dicts. When the requested LoRA set differs from
+    the cached pipeline's, the pipeline is rebuilt — LoRA fusion is a
+    one-shot weight transformation, not a runtime toggle."""
     global _t2v_pipe, _i2v_pipe, _extend_pipe
+    global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
     from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+
+    fp = _lora_fingerprint(loras)
 
     with _pipe_lock:
         # Free any other pipelines before loading a new one — strict
         # one-pipeline-at-a-time policy keeps memory bounded.
         release_pipelines(keep_kind=kind)
         if kind == "i2v":
-            if _i2v_pipe is None:
-                emit({"event": "log", "line": "Loading I2V pipeline (first job is the slow one)..."})
-                _i2v_pipe = ImageToVideoPipeline(
+            if _i2v_pipe is None or _i2v_lora_key != fp:
+                if _i2v_pipe is not None and _i2v_lora_key != fp:
+                    emit({"event": "log",
+                          "line": f"LoRA set changed; reloading I2V pipeline."})
+                    _i2v_pipe = None
+                emit({"event": "log",
+                      "line": "Loading I2V pipeline (first job is the slow one)..."})
+                pipe = ImageToVideoPipeline(
                     model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                 )
+                _attach_loras(pipe, loras)
+                _i2v_pipe = pipe
+                _i2v_lora_key = fp
             return _i2v_pipe
         if kind == "extend":
-            if _extend_pipe is None:
-                emit({"event": "log", "line": "Loading Extend pipeline (heavier — uses dev transformer)..."})
-                _extend_pipe = ExtendPipeline(
+            if _extend_pipe is None or _extend_lora_key != fp:
+                if _extend_pipe is not None and _extend_lora_key != fp:
+                    emit({"event": "log",
+                          "line": f"LoRA set changed; reloading Extend pipeline."})
+                    _extend_pipe = None
+                emit({"event": "log",
+                      "line": "Loading Extend pipeline (heavier — uses dev transformer)..."})
+                pipe = ExtendPipeline(
                     model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                 )
+                _attach_loras(pipe, loras)
+                _extend_pipe = pipe
+                _extend_lora_key = fp
             return _extend_pipe
         # t2v
-        if _t2v_pipe is None:
-            emit({"event": "log", "line": "Loading T2V pipeline (first job is the slow one)..."})
-            _t2v_pipe = TextToVideoPipeline(
+        if _t2v_pipe is None or _t2v_lora_key != fp:
+            if _t2v_pipe is not None and _t2v_lora_key != fp:
+                emit({"event": "log",
+                      "line": f"LoRA set changed; reloading T2V pipeline."})
+                _t2v_pipe = None
+            emit({"event": "log",
+                  "line": "Loading T2V pipeline (first job is the slow one)..."})
+            pipe = TextToVideoPipeline(
                 model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
             )
+            _attach_loras(pipe, loras)
+            _t2v_pipe = pipe
+            _t2v_lora_key = fp
         return _t2v_pipe
 
 
@@ -382,8 +547,19 @@ for line in sys.__stdin__:
             # the actual gen (denoising / VAE decode). Without this the
             # last visible line was the original "Loading I2V pipeline..."
             # message and users had no idea where to look.
-            emit({"event": "log", "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')}"})
-            pipe = get_pipe("i2v" if needs_image else "t2v")
+            # LoRAs (optional). Each is {"path": str, "strength": float}.
+            # Path may be a local file or a HuggingFace repo id; the
+            # safetensors loader handles both transparently. Empty list
+            # behaves identically to the no-LoRA path (cache key matches
+            # the unloaded baseline).
+            loras = p.get("loras") or []
+            if loras:
+                emit({"event": "log",
+                      "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')} loras={len(loras)}"})
+            else:
+                emit({"event": "log",
+                      "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')}"})
+            pipe = get_pipe("i2v" if needs_image else "t2v", loras=loras)
             emit({"event": "log", "line": "step:get_pipe done"})
 
             kwargs = dict(
@@ -440,7 +616,10 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
-            pipe = get_pipe("extend")
+            # Extend supports LoRAs via the same _pending_loras hook;
+            # the dev transformer picks them up at load time just like T2V/I2V.
+            loras = p.get("loras") or []
+            pipe = get_pipe("extend", loras=loras)
             video_path = p["video_path"]
             if not os.path.exists(video_path):
                 raise RuntimeError(f"source video not found: {video_path}")

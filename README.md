@@ -170,6 +170,60 @@ cd ..
 
 ---
 
+## LoRAs
+
+LTX 2.3 supports LoRA adapters — small files that fuse into the model
+weights to add a style, effect, or specialization. Phosphene exposes
+them three ways:
+
+### HDR — one-click toggle
+
+The official Lightricks **HDR** LoRA is exposed as a plain toggle in
+the form (next to *Enhance with Gemma*). Click it on, generate. First
+HDR job triggers a one-time ~330 MB download of the LoRA weights from
+Hugging Face; subsequent jobs share the cache.
+
+The HDR LoRA is **gated** — you'll need to accept Lightricks' license
+at https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-HDR and run
+`hf auth login` once. The panel surfaces a clear error pointing at
+both steps if you haven't.
+
+### Custom LoRAs from disk
+
+Drop any `.safetensors` LoRA into `mlx_models/loras/` and it appears
+in the LoRA picker (collapsible section above the prompt). Each row
+gets an enable checkbox + strength slider (-2.0 to 2.0, clamped).
+
+Optional sidecar metadata: a `<name>.json` next to the `.safetensors`
+carries `name`, `description`, `trigger_words`, `recommended_strength`,
+and a `preview_url`. The CivitAI installer below writes these
+automatically.
+
+### CivitAI browser
+
+Built into the LoRA picker: **Browse CivitAI** opens a modal that
+searches CivitAI filtered to `LTXV 2.3` LoRAs. Click Install on a
+card → downloads into `mlx_models/loras/` + writes the sidecar.
+
+CivitAI requires an API token for downloads as of 2025. Set
+`CIVITAI_API_KEY` in your environment (get a key at
+[civitai.com/user/account](https://civitai.com/user/account))
+before launching the panel, or the modal will warn you and Install
+will fail with a clear remediation hint.
+
+### How fusion works
+
+LoRAs are fused into the transformer weights at pipeline load time.
+This is *weight-level* fusion, not a runtime adapter — switching the
+LoRA set forces a pipeline reload (~30s on a cold cache, instant on a
+warm one). The panel detects no-op LoRA changes and reuses the cached
+pipeline when the set is the same.
+
+Strengths beyond ±1.5 are unusual and may produce numerical artifacts
+in the fused weights; the panel clamps to ±2.0 as a safety rail.
+
+---
+
 ## Prompting for sound
 
 LTX 2.3 conditions audio on prompt content. A visual-only prompt

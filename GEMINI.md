@@ -311,6 +311,8 @@ endpoints are unauthenticated (loopback only).
 | `/uploads` | JSON | Recent files in `panel_uploads/` for the picker's "click to reuse" strip. |
 | `/models` | JSON | Per-repo install completeness — driven by `required_files.json`. |
 | `/settings` | JSON | Returns `{settings, presets, default_preset}`. `settings` is the current `panel_settings.json` content. `presets` is the OUTPUT_PRESETS table (label + blurb + pix_fmt + crf per preset) so the UI doesn't duplicate it. |
+| `/loras` | JSON | Returns `{user, curated, loras_dir, civitai_auth}`. `user` is the scanned `mlx_models/loras/*.safetensors` list (each with sidecar metadata if present). `curated` is the curated Lightricks repo registry minus the HDR-toggle entry (which is exposed as a plain checkbox, not in the picker). `civitai_auth` is True iff `CIVITAI_API_KEY` is set in the panel's env. |
+| `/civitai/search` | JSON | Proxies CivitAI's `/api/v1/models` filtered to `types=LORA&baseModels=LTXV 2.3`. Query params: `query`, `nsfw` (bool), `cursor` (CivitAI uses cursor pagination), `limit`. Returns `{items, next_cursor, has_more}` with each item carrying `{id, version_id, name, creator, description, downloads, nsfw, preview_url, filename, size_kb, download_url, trigger_words, base_model, civitai_url}`. |
 | `/file?path=…` | bytes (mp4/png/jpg) | Range-aware video serve so `<video>` tags can seek without re-downloading. |
 | `/image?path=…` | bytes (image) | Same idea for image previews. |
 | `/sidecar?path=…` | JSON | Per-output sidecar (job params, output stats) if it exists. |
@@ -332,6 +334,9 @@ endpoints are unauthenticated (loopback only).
 | `/upload` | multipart `image=<file>` | `{ok, path}` | Saves to `panel_uploads/<ts>_<safename>`. |
 | `/helper/restart` | (none) | `{ok}` | SIGTERM the helper subprocess; the next job auto-respawns it. Useful for picking up site-packages changes. |
 | `/settings` | `output_preset=<key>` (+ optional `output_pix_fmt`, `output_crf` for custom) | `{ok, settings, helper_restarted}` | Update + persist panel settings. If the codec changed, the helper is killed so the next job respawns it with the new env. Validation rejects unknown presets, unknown pix_fmt values, or CRF outside 0–30. |
+| `/loras/refresh` | (none) | `{ok, user, loras_dir}` | Rescan `mlx_models/loras/`. Filesystem is the source of truth; no caching layer to invalidate. |
+| `/loras/delete` | `path=<abs path>` | `{ok, removed}` | Delete a user-installed LoRA + its sidecar. Path must resolve inside `mlx_models/loras/` to prevent traversal. |
+| `/civitai/download` | `download_url=<civitai url>`, `meta=<json>` | `{ok, name, path, sidecar_path, size_bytes, skipped}` | Stream-download a LoRA from CivitAI into `mlx_models/loras/`, write a sidecar JSON. Refuses non-civitai.com hosts. Writes to a `.partial` then atomic-renames so a kill mid-write leaves nothing the next scan would mistake for a complete file. Surfaces 401 with a remediation hint pointing at `CIVITAI_API_KEY`. |
 | `/stop` | (none) | `{ok}` | Cancel the current job (kills helper + mux). Worker advances. |
 | `/stop_comfy` | (none) | `{ok, killed}` | SIGTERM any ComfyUI process matching `LTX_COMFY_PATTERN`. |
 | `/open_pinokio` | (none) | `{ok}` | macOS-only: focus the Pinokio app. |
@@ -453,6 +458,139 @@ When adding a new preset: edit `OUTPUT_PRESETS` in `mlx_ltx_panel.py`
 and the `order` array in the settings modal JS (`openSettingsModal`).
 The blurb shown in the UI is read from the server at modal-open time,
 so server is the source of truth — no JS strings to keep in sync.
+
+## 15b. LoRA system
+
+LTX 2.3 supports LoRA adapters via the upstream `apply_loras()` function
+in `ltx_core_mlx.loader.fuse_loras`. The fusion is **weight-level**: at
+pipeline load time, each LoRA's `(lora_A, lora_B)` matrix pair is
+multiplied + added to the corresponding base-model weight, modified in
+place, then quantized. This is *not* a runtime adapter — switching
+LoRAs requires reloading the pipeline.
+
+### Integration hook
+
+The base `TextToVideoPipeline.load()` checks
+`getattr(self, "_pending_loras", None)` and, if present, calls
+`_fuse_pending_loras(transformer_weights, lora_paths)` before
+quantizing the transformer. Set `pipe._pending_loras = [(path, strength), ...]`
+between construction and the first job.
+
+The wrapper in `mlx_warm_helper.py:_attach_loras` does this. It also
+resolves HuggingFace repo IDs (`Lightricks/LTX-2.3-22b-IC-LoRA-HDR`)
+to local files via `snapshot_download`, picking the largest
+`.safetensors` in the repo (LoRA repos sometimes ship auxiliary files
+like scene embeddings alongside the main weights).
+
+### Pipeline cache invalidation
+
+`get_pipe(kind, loras=...)` keys the cache on `(kind, frozen LoRA set)`.
+Changing the LoRA set forces a pipeline rebuild — the cached pipeline's
+weights have the previous LoRA set fused in and there's no clean way
+to "unfuse." Cost is the standard ~30s pipeline reload.
+
+The frozen LoRA set is order-insensitive (set hash, not list hash) —
+fusion is commutative so `[A, B]` and `[B, A]` produce identical
+weights and should hit the same cache entry.
+
+### `mlx_models/loras/` directory
+
+User-installed LoRAs live as `<name>.safetensors` files at the install
+root's `mlx_models/loras/` directory. An optional sidecar JSON next to
+each `.safetensors` carries display metadata:
+
+```jsonc
+{
+  "name": "Crisp Enhance",
+  "description": "Sharper detail and edge enhancement.",
+  "trigger_words": [],                      // optional, prepended to prompt at submit
+  "recommended_strength": 0.8,              // 0.0..1.5 typical, displayed as default in slider
+  "preview_url": "https://...",             // optional, shown in the picker
+  "base_model": "LTXV 2.3",
+  "civitai_id": 2530917,                    // optional, for attribution
+  "civitai_version_id": 2844417,
+  "civitai_url": "https://civitai.com/models/2530917",
+  "downloaded_at": "2026-05-01T..."
+}
+```
+
+Sidecar absent → panel falls back to the filename as the display name
+and zero metadata. Sidecar shape matches the JSON `_civitai_download`
+writes, so a CivitAI install lands a usable picker entry without any
+hand-editing.
+
+### Curated LoRA registry
+
+`CURATED_LORAS` in `mlx_ltx_panel.py` lists Lightricks' official LoRAs
+that we know about. Currently:
+
+| key | repo | UI surface | Note |
+|---|---|---|---|
+| `hdr` | `Lightricks/LTX-2.3-22b-IC-LoRA-HDR` | "HDR" toggle in form | Hidden from picker (`is_hdr_toggle: True`); exposed as a plain checkbox |
+| `motion-track` | `Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control` | Listed in picker | IC-LoRA, needs video conditioning (not yet wired in panel UI) |
+| `union-control` | `Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control` | Listed in picker | Same |
+
+All three are **gated** on Hugging Face — users must accept the license
+on the model page AND have a valid HF token (`hf auth login`) before
+the helper's `snapshot_download` will work. The helper translates the
+upstream `GatedRepoError` into a clear actionable error.
+
+### Job spec extension
+
+The `generate` and `extend` actions accept an optional `loras` param:
+
+```jsonc
+{
+  "action": "generate",
+  "id": "...",
+  "params": {
+    "mode": "t2v",
+    "prompt": "...",
+    "loras": [
+      {"path": "/abs/path/to/style.safetensors", "strength": 0.8},
+      {"path": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR", "strength": 1.0}
+    ],
+    ...
+  }
+}
+```
+
+Path may be a local file or an HF repo id. Strength is clamped to
+±2.0 by the panel before sending; values outside the typical 0.0..1.5
+range are usually nonsense and risk numerical issues during fusion.
+
+### HDR toggle semantics
+
+The `hdr` boolean on the job (separate from `loras`) is a UI shortcut.
+Worker-side, `run_job_inner` resolves it to
+`{"path": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR", "strength": 1.0}`
+and appends to the LoRA list before calling the helper. Users see
+"HDR" as a feature; the LoRA implementation is hidden.
+
+### CivitAI bridge
+
+CivitAI's REST API is the de-facto LoRA distribution hub for LTX 2.3.
+Two endpoints proxy through the panel:
+
+- `/civitai/search` filtered to `baseModels=LTXV 2.3` (the canonical
+  string CivitAI uses for LTX-2.3 LoRAs as of 2026-05). Cursor-paginated.
+- `/civitai/download` streams a `.safetensors` into `mlx_models/loras/`
+  + writes a sidecar JSON.
+
+Both endpoints accept an optional `CIVITAI_API_KEY` env var. As of 2025,
+CivitAI requires a token for most LoRA downloads (search still works
+without). The token goes in `?token=<key>` on the URL — many CDN hops
+only honor that form, not the Authorization header.
+
+### Adding a new curated LoRA
+
+1. Edit `CURATED_LORAS` in `mlx_ltx_panel.py` with `id`, `name`,
+   `description`, `repo_id`, `default_strength`, and either
+   `is_hdr_toggle: True` (= surfaces as a header pill, hidden from
+   picker) or `False` (= shows in picker as a usable entry).
+2. If `is_hdr_toggle`, also add the HTML toggle pill (next to "No
+   music"), the JS sync block, and the `make_job` resolution that maps
+   the boolean to the curated repo id.
 
 ## 16. `required_files.json` schema
 
