@@ -1,6 +1,12 @@
 # =============================================================================
 # Runtime state — regenerated on every run, never commit
 # =============================================================================
+# Y1.004+: state lives in <repo>/state/ which fs.link maps to a persistent
+# drive outside the panel install. Pre-Y1.004 root-level paths are kept
+# below so existing installs don't leak files into commits during the
+# one-time migration window (state files get moved into state/ on first
+# Y1.004 boot — see _migrate_state_dir in mlx_ltx_panel.py).
+state/
 panel_queue.json
 panel_hidden.json
 panel_settings.json

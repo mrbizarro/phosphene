@@ -75,8 +75,14 @@ MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
 # Q8 model is detected on disk so the High quality tier can be conditionally enabled.
 Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
 COMFY_PATTERN = os.environ.get("LTX_COMFY_PATTERN", "pinokio/api/comfy.git.*main\\.py")
-QUEUE_FILE = ROOT / "panel_queue.json"
-HIDDEN_FILE = ROOT / "panel_hidden.json"
+# State files (queue + hidden + settings) live in <ROOT>/state/, which
+# Pinokio's fs.link maps to a virtual drive that survives Reset. The
+# directory is auto-created on first run; existing pre-Y1.004 installs
+# get a one-time migration of root-level files into state/ at startup
+# (see _migrate_state_dir below) so users don't lose their queue.
+STATE_DIR = Path(os.environ.get("LTX_STATE_DIR", str(ROOT / "state")))
+QUEUE_FILE = STATE_DIR / "panel_queue.json"
+HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 FPS = 24
@@ -171,7 +177,7 @@ OUTPUT_PRESETS: dict[str, dict[str, str]] = {
 # file yet get this default.
 DEFAULT_OUTPUT_PRESET = "standard"
 
-SETTINGS_FILE = ROOT / "panel_settings.json"
+SETTINGS_FILE = STATE_DIR / "panel_settings.json"
 _SETTINGS_LOCK = threading.Lock()
 
 
@@ -196,6 +202,48 @@ def _settings_defaults() -> dict:
         # a real new problem still surfaces. UI-only; no security impact.
         "models_card_dismissed": False,
     }
+
+
+def _ensure_state_dir() -> None:
+    """Create <ROOT>/state/ if it doesn't exist. Idempotent. Called at
+    startup before any state-file load so loaders can assume the dir is
+    there. When fs.link is wired in install.js, this directory is a
+    symlink into the persistent drive — Pinokio Reset deletes the
+    panel install but leaves the linked target intact."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        sys.stderr.write(f"WARN: could not create {STATE_DIR} ({exc})\n")
+
+
+def _migrate_state_dir() -> None:
+    """One-time migration: move pre-Y1.004 root-level state files into
+    <ROOT>/state/. Existing users who Update from Y1.003- to Y1.004+
+    have panel_settings.json + panel_queue.json + panel_hidden.json at
+    the repo root; we move them so the new SETTINGS_FILE / QUEUE_FILE /
+    HIDDEN_FILE constants find them. Idempotent — only moves files that
+    exist at the source AND don't exist at the destination, so a user
+    who already has Y1.004 state in place doesn't get clobbered."""
+    _ensure_state_dir()
+    pairs = [
+        (ROOT / "panel_settings.json", SETTINGS_FILE),
+        (ROOT / "panel_queue.json", QUEUE_FILE),
+        (ROOT / "panel_hidden.json", HIDDEN_FILE),
+    ]
+    for src, dst in pairs:
+        try:
+            if src.exists() and src.is_file() and not dst.exists():
+                # Move (not copy) so old root-level files don't linger
+                # and re-confuse a second migration pass.
+                shutil.move(str(src), str(dst))
+                sys.stderr.write(f"NOTE: migrated {src.name} → state/\n")
+        except OSError as exc:
+            sys.stderr.write(f"WARN: could not migrate {src.name} ({exc})\n")
+
+
+# Run the migration once at module import, before any settings load. Cheap
+# (just a few existence checks in the no-op case) and side-effect-safe.
+_migrate_state_dir()
 
 
 def _load_settings() -> dict:
@@ -228,7 +276,7 @@ def _load_settings() -> dict:
 def _save_settings(settings: dict) -> None:
     """Atomic write so a Pinokio kill mid-write can't leave a half-file."""
     import tempfile, os as _os
-    fd, tmp = tempfile.mkstemp(prefix="panel_settings.", dir=str(ROOT))
+    fd, tmp = tempfile.mkstemp(prefix="panel_settings.", dir=str(STATE_DIR))
     try:
         with _os.fdopen(fd, "w") as fh:
             fh.write(json.dumps(settings, indent=2))

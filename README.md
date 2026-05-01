@@ -22,19 +22,26 @@
 >
 > A one-time history scrub on 2026-05-01 made `git pull` refuse to
 > fast-forward for clones that pre-date it. If your Pinokio Update fires
-> but you don't see new features, you're hitting that — one command
-> fixes it permanently:
+> but you don't see new features, you're on a divergent clone. One
+> command fixes it without losing your downloaded models or settings:
 >
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/mrbizarro/phosphene/main/recover.sh | bash
+> ```
+>
+> Or manually:
 > ```bash
 > cd ~/pinokio/api/phosphene.git && git fetch origin && git reset --hard origin/main
 > ```
 >
-> Or download and run [`recover.sh`](./recover.sh):
-> `curl -fsSL https://raw.githubusercontent.com/mrbizarro/phosphene/main/recover.sh | bash`
->
 > Then click **Update** in Pinokio (it'll succeed now), then **Stop → Start**.
-> From **Y1.002 onward** Update self-recovers from any future divergence
-> automatically, so this is a one-time fix.
+> Your `mlx_models/` (the ~36 GB of LTX weights), generated outputs, LoRAs,
+> and settings stay put.
+>
+> **From Y1.002 onward** Update self-recovers from any future divergence
+> automatically, and **from Y1.004 onward** Pinokio's Reset → Reinstall
+> path also preserves models + outputs + settings via Pinokio's `fs.link`
+> drive — so a clean reinstall is no longer scary.
 
 ---
 

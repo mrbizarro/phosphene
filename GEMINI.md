@@ -446,11 +446,18 @@ The thresholds are intentional. M-Studio 64 GB is the canonical
 
 ## 15a. `panel_settings.json` schema
 
-User-controllable preferences. Persisted at the install root, gitignored
-(per-user config, not part of the repo). Read at panel startup; mutated
-via `POST /settings`. The helper subprocess inherits codec env vars from
-this at spawn — when settings change, the panel kills the helper so the
-next job picks up new values.
+User-controllable preferences. Persisted at `<repo>/state/panel_settings.json`
+(Y1.004+); pre-Y1.004 lived at `<repo>/panel_settings.json` and is migrated
+on first boot by `_migrate_state_dir()`. State directory is gitignored.
+
+The whole `state/` dir is symlinked into Pinokio's fs.link drive so it
+survives Reset → Reinstall (see "Persistent storage / fs.link" in install.js
++ update.js). All persisted-state files (`panel_settings.json`,
+`panel_queue.json`, `panel_hidden.json`) live there.
+
+Read at panel startup; mutated via `POST /settings`. The helper subprocess
+inherits codec env vars from this at spawn — when settings change, the
+panel kills the helper so the next job picks up new values.
 
 ```jsonc
 {

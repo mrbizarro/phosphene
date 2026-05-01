@@ -35,6 +35,40 @@ module.exports = {
       next: null
     },
 
+    // ---- Persistent storage via fs.link (Y1.004+) -------------------------
+    // Pinokio's fs.link maps these directories to a virtual drive that
+    // lives OUTSIDE the panel install dir, so a Reset (which deletes
+    // and re-clones the install) leaves the heavy assets intact. After
+    // Reset → Install, fs.link re-creates the symlinks back into the
+    // fresh clone and the drive is rediscovered automatically.
+    //
+    // What's in the drive:
+    //   mlx_models/    LTX 2.3 weights (~36 GB), Gemma encoder, LoRAs
+    //   mlx_outputs/   generated videos
+    //   panel_uploads/ user-uploaded reference images
+    //   state/         panel_settings.json, panel_queue.json, panel_hidden.json
+    //
+    // What's NOT linked:
+    //   ltx-2-mlx/env/ — venv has historically been buggy under fs.link
+    //                    (Python-version-restricted, pip mismatches);
+    //                    rebuilds in ~5 min anyway. Models are the
+    //                    expensive thing to lose, not the venv.
+    //
+    // First-run merge: if real folders already exist with content (e.g.
+    // an upgrade from Y1.003-), fs.link merges them INTO the drive
+    // before replacing them with symlinks. Idempotent on repeat runs.
+    {
+      method: "fs.link",
+      params: {
+        drive: {
+          mlx_models:    "mlx_models",
+          mlx_outputs:   "mlx_outputs",
+          panel_uploads: "panel_uploads",
+          state:         "state"
+        }
+      }
+    },
+
     // ---- Clone ltx-2-mlx (skip if already cloned) -------------------------
     // Re-running install when the clone exists used to fail with
     // "destination path 'ltx-2-mlx' already exists and is not an empty
