@@ -5763,7 +5763,12 @@ async function clearToken(which) {
   if (which === 'civitai') fd.set('civitai_api_key', '');
   if (which === 'hf')      fd.set('hf_token', '');
   try {
-    const r = await fetch('/settings', { method: 'POST', body: fd });
+    // urlencoded body — see applySettings for why.
+    const r = await fetch('/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(fd),
+    });
     const data = await r.json();
     if (!r.ok || data.error) {
       alert('Could not clear: ' + (data.error || `HTTP ${r.status}`));
@@ -5817,7 +5822,16 @@ async function applySettings() {
   const hfInput = document.getElementById('hfTokenInput').value.trim();
   if (hfInput)  fd.set('hf_token', hfInput);
   try {
-    const r = await fetch('/settings', { method: 'POST', body: fd });
+    // Convert FormData → URLSearchParams so the body is sent as
+    // x-www-form-urlencoded — the panel's parse_qs only understands
+    // that wire format, NOT the multipart/form-data fetch sends by
+    // default with FormData. This bug silently turned every settings
+    // save into a no-op (server saw empty payload) until caught.
+    const r = await fetch('/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(fd),
+    });
     const data = await r.json();
     if (!r.ok || data.error) {
       status.textContent = data.error || `HTTP ${r.status}`;
@@ -6027,7 +6041,11 @@ async function deleteLora(path, name) {
   const fd = new FormData();
   fd.set('path', path);
   try {
-    const r = await fetch('/loras/delete', { method: 'POST', body: fd });
+    const r = await fetch('/loras/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(fd),
+    });
     const data = await r.json();
     if (!r.ok || !data.ok) {
       alert('Delete failed: ' + (data.error || `HTTP ${r.status}`));
@@ -6192,7 +6210,11 @@ async function civitaiInstall(btn, item) {
   fd.set('download_url', item.download_url);
   fd.set('meta', JSON.stringify(item));
   try {
-    const r = await fetch('/civitai/download', { method: 'POST', body: fd });
+    const r = await fetch('/civitai/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(fd),
+    });
     const data = await r.json();
     if (!r.ok || !data.ok) {
       const status = document.getElementById('civitaiStatus');
