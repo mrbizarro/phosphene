@@ -1,103 +1,124 @@
-# Phosphene — Pinokio article (paste into beta.pinokio.co/posts/new)
+# Phosphene — Pinokio article (paste into beta.pinokio.co/compose)
 
-Tone: informal, friendly, technical claim up front but no jargon dump.
-Length: short enough to read in 90 seconds. People scroll.
+Tone: neutral, factual, comparative. Reads like a product description, not a
+launch announcement. The audience is people evaluating which local video tool
+to install — give them facts to decide with.
 
-Suggested title (pick one):
-- **Phosphene — local video + audio on a Mac, with sound, in one pass.**
-- **Phosphene: a free Mac panel for LTX 2.3 (joint audio + video, runs in MLX)**
-- **I made a thing: Phosphene — generative video on Apple Silicon, with sound built in**
+Title (pick one):
+- **Phosphene — local video and audio generation for Apple Silicon**
+- **Phosphene: LTX 2.3 in MLX, with synced audio, on a Mac**
 
-Recommended: the first one. The "with sound, in one pass" phrasing is the hook.
+Recommended: the first. Short, descriptive, says exactly what it is.
 
 ---
 
 ## ARTICLE BODY (paste this part)
 
-Hey Pinokio 👋
+Phosphene is a free desktop panel for generating video on Apple Silicon Macs. It wraps Lightricks' LTX 2.3 model running natively on Apple's MLX framework, and exposes a one-click install through Pinokio.
 
-Quick story: I've been using LTX 2.3 locally for a few weeks (the MLX port from [@dgrauet](https://github.com/dgrauet/ltx-2-mlx) is genuinely incredible — pure Apple Metal, no CUDA cosplay), and the thing that kept blowing my mind is **the audio**. LTX 2.3 doesn't generate video and then bolt on a soundtrack — it generates **video and audio jointly, in one forward pass.** Footsteps land on the right frame. Lip movement matches the chant. Ambient hum is tied to the visual.
+The differentiator is audio. LTX 2.3 generates video and audio in a single forward pass — they share the same diffusion process, so timing is tied at the frame level. Footsteps land on the correct frame. Lip movement matches dialogue. Ambient sound is conditioned on the visual content. Most other local video models (Wan, Hunyuan, Mochi) generate silent video; you add audio in post.
 
-Built a panel for it called **Phosphene**. It's a Pinokio one-click install. Mac-only (Apple Silicon — sorry, the architecture won't run on Intel, Linux, or Windows).
+[ATTACH: phosphene_banner.png]
 
-[ATTACH: assets/phosphene_banner.png — the hero phosphene field render]
+### What it can do
 
-### What it does
+Four generation modes:
 
-Four generation modes, all with synced audio:
+- **Text → video** — describe a scene, get a 5-second clip with synthesized audio
+- **Image → video** — start from a still, animate from there with synced audio
+- **First-frame / Last-frame** — provide two images, the model interpolates the middle
+- **Extend** — append seconds onto an existing clip, audio continuous across the join
 
-- **T2V** — text → video + audio. Type a scene, get a 5-second clip with sound.
-- **I2V** — start from a still image. Cover-crops to model dimensions, animates from there.
-- **FFLF** — first frame + last frame. Drop in two images, the model fills the middle (great for stylized morphs).
-- **Extend** — feed it an existing clip, get N more seconds tacked on. Stitch a few of these together for a real shot.
+Plus prompt rewriting via a local Gemma 3 12B 4-bit text encoder. The same model that reads your prompt for the diffusion stage can also rewrite the prompt in the format LTX 2.3 was trained on. Runs offline, takes a few seconds.
 
-Plus a **prompt enhance** button that uses Gemma 3 12B (locally!) to rewrite your prompt in the structure LTX 2.3 was trained on. Saves the trial-and-error.
+### Quality tiers
 
-### Numbers (M4 Mac Studio 64 GB)
+Three quality levels, picked per-job:
 
-- 5-sec clip, 1280×704, Standard quality: **~7 minutes**
-- High quality (Q8): ~12 minutes
-- FFLF interpolation: ~5 minutes
+- **Draft** — half resolution, ~2 minutes. For iterating on prompts.
+- **Standard** — full 1280×704, ~7 minutes. The daily driver. Q4 distilled (~25 GB on disk).
+- **High** — Q8 two-stage with TeaCache acceleration, ~12 minutes. Adds ~25 GB. Optional download — a button in the panel pulls it on demand. Required for FFLF.
 
-Slower than an H100. Faster than a credit card. No queue, no API key, no monthly bill.
+### Hardware compatibility
 
-### Hardware tiers
+Apple Silicon only. The panel detects your Mac's RAM at boot and gates features accordingly:
 
-The panel auto-detects your Mac's RAM and gates accordingly:
-
-| RAM | Tier | What runs |
+| RAM | Tier | Behavior |
 |---|---|---|
-| 32 GB | Compact | Lower res, shorter clips |
-| 64 GB | Comfortable | Full 1280×704 (the sweet spot) |
-| 96 GB | High | Longer clips + Q8 |
-| 128+ GB | Pro | Everything, no clamps |
+| 32 GB | Compact | Lower resolution, shorter clips |
+| 64 GB | Comfortable | Full 1280×704 baseline |
+| 96 GB | High | Longer clips, full Q8 |
+| 128+ GB | Pro | No clamps |
 
-Generative video is genuinely memory-hungry — there's no shortcut. But on a 64 GB Mac it's a real workflow.
+This is enforced because LTX 2.3's working tensor footprint is real — there is no way to run a full 1280×704 5-second generation in less than ~30 GB of resident memory. The tier system is honest about it rather than letting users queue jobs that will fall out of the OOM killer.
 
-[ATTACH: a generated hero clip — assets/phosphene_hero_x.mp4 — with sound on, *please*]
+Intel Macs and other platforms are not supported. There is no port path for them — MLX is Apple-only by design.
 
-### What the audio actually does
+### Audio behavior
 
-Most local video models (Wan, Hunyuan, Mochi) ship video only. You add music in post. LTX 2.3 generates *both* and the timing is tied — three audio events in five seconds (lighter strike, strike, exhale) sync to specific frames. Skeptics will replay the clip three times to check the sync. That's the conversion moment.
+Audio quality is conditioned on the prompt. A visual-only prompt produces faint ambient sound, which can read as "near-silent." A prompt with explicit audio cues produces layered foreground sound.
 
-**Pro tip:** describe the soundscape in your prompt. "Wizard in forest" gives you near-silent ambient. "Wizard in forest, low whispered chant, ember crackle, distant owl" gives you a layered audio bed. The audio model is conditional on prompt cues — feed it cues.
+Compare:
 
-### Credits
+- *"Wizard in forest"* → quiet room tone
+- *"Wizard in forest, low whispered chant, ember crackle, distant owl hoot"* → audible chant + crackle + owl, all timed to the visuals
 
-Phosphene is a panel on top of three other people's work:
+This is documented behavior of LTX 2.3, not a Phosphene quirk. The panel's prompt placeholder text now nudges users toward the second pattern.
 
-- **[@Lightricks](https://www.lightricks.com/)** — the LTX 2.3 model and the open weights
-- **[@dgrauet](https://github.com/dgrauet/ltx-2-mlx)** — the MLX port (this is the work)
-- **[Apple's MLX team](https://github.com/ml-explore/mlx)** — the framework
-- **[@cocktailpeanut](https://twitter.com/cocktailpeanut)** — Pinokio itself, which is why one-click installers like this exist
+### How it differs from existing tools
 
-I just glued things together with a UI on top.
+Compared to other locally-runnable video models on a Mac:
 
-### Try it
+- **vs. ComfyUI workflows** — ComfyUI runs LTX 2.3 too, but in a node graph that requires building per-job. Phosphene is a fixed panel: prompt, mode, dimensions, generate. No graph maintenance.
+- **vs. native PyTorch builds (Wan, Mochi, Hunyuan)** — those run on torch via MPS, which is a compatibility shim, not native Metal. MLX runs the model directly in Apple's compute framework. The result is meaningful speed and memory differences on the same hardware.
+- **vs. cloud / API services (Pika, Runway)** — those generate faster on H100s but require accounts, queue time, monthly subscriptions, and upload of source images. Phosphene runs with no network beyond the initial weight download.
+- **vs. silent local video models** — joint audio synthesis is, at the time of writing, unique to LTX 2.3 among models with usable Mac runtimes.
 
-It's in Pinokio Discover — search **Phosphene**.
+### Output format
 
-Or: [github.com/mrbizarro/phosphene](https://github.com/mrbizarro/phosphene) for the source. Free, MIT licensed (panel — model has Lightricks' license, read it before commercial use).
+Lossless H.264 by default — yuv444p, CRF 0 — so your archive is the highest fidelity the renderer can produce. Web/social platforms will re-encode anyway. Override via env variables (`LTX_OUTPUT_PIX_FMT`, `LTX_OUTPUT_CRF`) if you want yuv420p directly.
 
-If something breaks, file an issue. If you want to fix something, PRs welcome. If you make something weird with it, tag me on X — [@AIBizarrothe](https://x.com/AIBizarrothe).
+The `+faststart` movflag is on, so the moov atom is at the front of the file. Gallery thumbnails decode the first frame instantly without downloading the full clip.
 
-Cheers 🎬🔊
+### Install
+
+Search **Phosphene** in Pinokio's Discover tab and click Install. Pinokio handles the venv, Python 3.11 pin, MLX pipeline install, codec patches, and ~31 GB of model downloads (Q4 LTX 2.3 + Gemma text encoder). Resumable — if a download is interrupted, hitting Install again picks up where it left off.
+
+Optional: run `hf auth login` in Terminal first to authenticate the Hugging Face downloads. Anonymous downloads are throttled; authenticated downloads are roughly 10× faster, which matters for the optional 25 GB Q8 model.
+
+[ATTACH: phosphene_hero_x.mp4]
+
+### License + credits
+
+Phosphene panel: MIT.
+LTX 2.3 weights: Lightricks' own license — read it before commercial use.
+MLX framework: Apache 2.0 (Apple).
+Gemma weights: Google's terms.
+
+Built on:
+
+- LTX 2.3 model — [Lightricks](https://www.lightricks.com)
+- MLX port (`ltx-2-mlx`) — [@dgrauet](https://github.com/dgrauet/ltx-2-mlx)
+- MLX framework — [Apple ML](https://github.com/ml-explore/mlx)
+- Pinokio runtime — [@cocktailpeanut](https://twitter.com/cocktailpeanut)
+
+Source: [github.com/mrbizarro/phosphene](https://github.com/mrbizarro/phosphene). Issues and PRs welcome.
 
 ---
 
-## ASSETS TO UPLOAD WITH THE POST
+## ASSETS
 
-In order of importance:
+1. **`assets/phosphene_banner.png`** — first [ATTACH:] marker (banner illustration)
+2. **`assets/phosphene_hero_x.mp4`** (~5 MB) — second [ATTACH:] marker. The wizard generation we ran tonight, X-encoded for browser playback.
 
-1. **Hero video clip** — `mlx_outputs/<the latest standard wizard clip>.mp4` once today's hero generation finishes. Re-encode for web (yuv420p + faststart) before upload.
-2. **Banner image** — `assets/phosphene_banner.png` (the "Phosphene field" hero illustration with the wordmark)
-3. **Logo** — `assets/phosphene_logo.png` (square mark + wordmark for the post sidebar / thumbnail)
-4. **Optional second video** — any of your earlier I2V or Extend outputs that have good visuals + audio sync
+If beta.pinokio.co's compose form supports markdown, paste as-is. If it strips formatting, the structure still reads — short paragraphs, bullet lists, no nested elements.
 
-## NOTES FOR YOU (Salo)
+---
 
-- The article is in the user's voice ("I made a thing"), not yours — so you're the speaker, but it's casual ("hey Pinokio 👋").
-- Don't paste the title section, that's just for picking. Start the post body at "Hey Pinokio".
-- The "ATTACH:" markers are inline placeholders — when posting, drop the actual image or video at that spot.
-- If beta.pinokio.co supports markdown, paste as-is. If it strips formatting, the structure still reads okay because I used short paragraphs and bullets.
-- Cross-link this post in your X thread (variant C from launch/02_twitter.md) once it's up. They amplify each other.
+## NOTES
+
+- No emoji except the section headers if the form auto-renders them. Removed the casual opener entirely.
+- Comparative section now exists and names the alternatives by name. That's what an evaluator wants to see.
+- Audio quality framing is honest about prompt conditioning — preempts the "audio sounds quiet" complaint that keeps coming up.
+- Numbers are concrete (32/64/96/128 GB tiers, 7 min Standard, 25 GB Q8) instead of "fast on a Mac".
+- HF auth login mentioned because it actually solves the slow-download issue users hit.
