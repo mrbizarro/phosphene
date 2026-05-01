@@ -570,6 +570,202 @@ def list_curated_loras() -> list[dict]:
     return [dict(v) for v in CURATED_LORAS.values()]
 
 
+# ---- Version check / update notifier ----------------------------------------
+# Phosphene ships fixes often (multiple commits a day in active periods) and
+# users keep telling us "I clicked Update but I don't see anything new" — by
+# the time their feedback lands, we've usually pushed three more commits.
+# This module surfaces a small "Update available" pill in the header when the
+# local install is behind origin/main, so users notice mismatch immediately
+# instead of finding out later via a friend's tweet.
+#
+# How it works:
+#   1. At startup we read the local commit SHA via `git rev-parse HEAD` and
+#      branch name via `git rev-parse --abbrev-ref HEAD`. Stored once.
+#   2. A daemon thread polls the GitHub commits API every 30 minutes (no
+#      auth, public repo, well within unauthenticated rate limit).
+#   3. We list `origin/main` commits newest-first and find the index of the
+#      local SHA. If found at index N, we are N commits behind. If not found
+#      in the first 30 commits, we report "30+ behind".
+#   4. The /version endpoint returns the snapshot; the UI renders a pill
+#      that links to the version modal listing each unseen commit.
+#
+# Suppressed cases (no pill rendered):
+#   - User is on a non-main branch (local dev / fork)
+#   - User has uncommitted local changes (in-progress work; we'd be wrong
+#     to call them "behind")
+#   - We can't reach the GitHub API (offline; suppress silently — we don't
+#     bug users with red error toasts every 30 minutes)
+
+_VERSION_LOCK = threading.Lock()
+_VERSION_REPO_OWNER = "mrbizarro"
+_VERSION_REPO_NAME = "phosphene"
+_VERSION_POLL_INTERVAL_SEC = 30 * 60          # 30 minutes between checks
+_VERSION_STARTUP_DELAY_SEC = 30                # don't compete with boot
+_VERSION_STATE: dict = {
+    "local_sha": None,            # 40-char hex of HEAD at panel start
+    "local_short": None,           # 7-char display form
+    "local_branch": None,          # branch name (e.g. "main") or "(detached)"
+    "local_dirty": False,          # uncommitted changes in the working tree
+    "remote_sha": None,            # latest sha on origin/main per GitHub API
+    "remote_short": None,
+    "behind_by": 0,                # number of commits between local and remote (0 = current)
+    "behind_more_than": False,     # True when behind > 30 (we cap the API response)
+    "commits_ahead": [],           # list of {sha, short, message, author, date} for the modal
+    "checked_ts": None,            # epoch seconds of last successful poll
+    "error": None,                 # last failure reason (None when last check OK)
+    "suppress_reason": None,       # set when we deliberately skip checking (dev mode, dirty, etc.)
+}
+
+
+def _git_capture(args: list[str], cwd: Path = ROOT) -> str | None:
+    """Run a git subcommand and return stripped stdout (or None on any failure).
+    No exceptions ever escape — we never want a missing git binary to crash
+    the panel boot."""
+    try:
+        out = subprocess.check_output(
+            ["git"] + args, cwd=str(cwd), stderr=subprocess.DEVNULL,
+        )
+        return out.decode("utf-8", "replace").strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+
+def _detect_local_install_state() -> None:
+    """Populate _VERSION_STATE.local_* fields. Called once at startup; result
+    doesn't change while the panel is running (no auto-pull on the user's
+    behalf). Pinokio's Update step kills + restarts the panel, so a fresh
+    detect runs after every Update."""
+    sha = _git_capture(["rev-parse", "HEAD"])
+    branch = _git_capture(["rev-parse", "--abbrev-ref", "HEAD"]) or "(unknown)"
+    # `git status --porcelain` empty = clean tree.
+    porcelain = _git_capture(["status", "--porcelain"])
+    dirty = bool(porcelain and porcelain.strip())
+    with _VERSION_LOCK:
+        _VERSION_STATE["local_sha"] = sha
+        _VERSION_STATE["local_short"] = sha[:7] if sha else None
+        _VERSION_STATE["local_branch"] = branch
+        _VERSION_STATE["local_dirty"] = dirty
+        # Suppress remote checks when the user is clearly running their own
+        # variant — we'd be wrong to nag them about being "behind."
+        if not sha:
+            _VERSION_STATE["suppress_reason"] = "not a git checkout"
+        elif branch != "main":
+            _VERSION_STATE["suppress_reason"] = f"on branch '{branch}', not main"
+        elif dirty:
+            _VERSION_STATE["suppress_reason"] = "local changes uncommitted"
+        else:
+            _VERSION_STATE["suppress_reason"] = None
+
+
+def _fetch_remote_commits(limit: int = 30) -> list[dict] | None:
+    """GET the latest N commits on origin/main from the public GitHub API.
+    Returns a list of raw commit dicts (newest first), or None on any error.
+    Caller is expected to handle None gracefully — we don't show errors to
+    the user every 30 minutes when their wifi is flaky."""
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    url = (f"https://api.github.com/repos/{_VERSION_REPO_OWNER}/"
+           f"{_VERSION_REPO_NAME}/commits?sha=main&per_page={limit}")
+    req = _urlreq.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "phosphene-panel-version-check",
+    })
+    try:
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(data, list):
+            return None
+        return data
+    except (_urlerr.URLError, _urlerr.HTTPError, OSError, ValueError, TimeoutError):
+        return None
+
+
+def _check_remote_once() -> None:
+    """Run one remote check, mutate _VERSION_STATE accordingly. Idempotent.
+    Safe to call from a background thread or from a /version/check endpoint."""
+    with _VERSION_LOCK:
+        suppress = _VERSION_STATE["suppress_reason"]
+        local_sha = _VERSION_STATE["local_sha"]
+    if suppress:
+        return                             # never poll in suppressed states
+    commits = _fetch_remote_commits(limit=30)
+    if commits is None:
+        with _VERSION_LOCK:
+            _VERSION_STATE["error"] = "could not reach github.com"
+        return
+    if not commits:
+        with _VERSION_LOCK:
+            _VERSION_STATE["error"] = "github returned no commits"
+        return
+    remote_sha = commits[0].get("sha")
+    if not remote_sha:
+        with _VERSION_LOCK:
+            _VERSION_STATE["error"] = "github response missing sha"
+        return
+
+    # Find local SHA in the list. If it's at index N, we are N commits behind.
+    behind_by = None
+    for i, c in enumerate(commits):
+        if c.get("sha") == local_sha:
+            behind_by = i
+            break
+    if behind_by is None:
+        # Local is older than what fits in the window OR has been rebased
+        # away. Either way, "30+" is a fine UX answer — the modal will say
+        # "many updates available, please run Pinokio Update."
+        behind_by = len(commits)
+        more = True
+    else:
+        more = False
+
+    # Slim each commit dict down to what the modal renders. Keep only the
+    # commits the user is missing.
+    ahead: list[dict] = []
+    for c in commits[:behind_by]:
+        commit = c.get("commit") or {}
+        author = (commit.get("author") or {}).get("name") or "unknown"
+        date = (commit.get("author") or {}).get("date") or ""
+        msg = (commit.get("message") or "").splitlines()[0]   # first line only
+        sha = c.get("sha") or ""
+        ahead.append({
+            "sha": sha,
+            "short": sha[:7],
+            "message": msg,
+            "author": author,
+            "date": date,
+        })
+
+    with _VERSION_LOCK:
+        _VERSION_STATE["remote_sha"] = remote_sha
+        _VERSION_STATE["remote_short"] = remote_sha[:7]
+        _VERSION_STATE["behind_by"] = behind_by
+        _VERSION_STATE["behind_more_than"] = more
+        _VERSION_STATE["commits_ahead"] = ahead
+        _VERSION_STATE["checked_ts"] = time.time()
+        _VERSION_STATE["error"] = None
+
+
+def version_check_loop() -> None:
+    """Daemon thread entry: detect local state once, then poll the remote
+    every _VERSION_POLL_INTERVAL_SEC. First poll happens after a 30s
+    delay so we don't compete with boot-time work."""
+    _detect_local_install_state()
+    time.sleep(_VERSION_STARTUP_DELAY_SEC)
+    while True:
+        try:
+            _check_remote_once()
+        except Exception as exc:                          # belt + braces
+            sys.stderr.write(f"WARN: version check raised: {exc}\n")
+        time.sleep(_VERSION_POLL_INTERVAL_SEC)
+
+
+def get_version_state() -> dict:
+    """Snapshot of _VERSION_STATE for the /version endpoint. Returns a copy
+    so the caller can't mutate the live state under the lock."""
+    with _VERSION_LOCK:
+        return dict(_VERSION_STATE)
+
+
 def parse_loras_from_form(form: dict) -> list[dict]:
     """Parse the loras=<JSON> form field that the UI submits with each job.
     Shape on the wire is a JSON array of {id, path, strength}. We trust
@@ -2661,6 +2857,12 @@ class Handler(BaseHTTPRequestHandler):
                 "default_preset": DEFAULT_OUTPUT_PRESET,
             })
             return
+        if parsed.path == "/version":
+            # Snapshot of the version-check state. Cheap (just a dict copy
+            # under a lock); the UI polls this every ~5 minutes to render
+            # the "Update available" pill in the header.
+            self._json(get_version_state())
+            return
         if parsed.path == "/civitai/test":
             # Sanity-check the saved CivitAI key by hitting an
             # auth-required endpoint and reporting back the upstream
@@ -2967,6 +3169,17 @@ class Handler(BaseHTTPRequestHandler):
             HELPER.kill()
             self._json({"ok": True}); return
 
+        if path == "/version/check":
+            # Force an immediate remote check (UI button in the version
+            # modal). Runs synchronously so the client gets the fresh
+            # state in the response — at most a 10s round-trip to GitHub.
+            try:
+                _check_remote_once()
+                self._json({"ok": True, "state": get_version_state()})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            return
+
         if path == "/loras/refresh":
             # Rescan mlx_models/loras/. The result is whatever
             # list_user_loras returns — filesystem is the source of
@@ -3242,6 +3455,39 @@ HTML = r"""<!doctype html>
     .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.5); }
     .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.5); }
     .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+    /* "Update available" pill — same shape as other pills, distinct
+       colour so it pulls the eye. Subtle glow animation so users notice
+       it appearing without it screaming. */
+    .pill-update {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.55);
+      background: rgba(240,185,64,0.08);
+      font-weight: 600;
+      animation: glow-update 2.4s ease-in-out infinite;
+    }
+    .pill-update:hover { background: rgba(240,185,64,0.18); }
+    @keyframes glow-update {
+      0%,100% { box-shadow: 0 0 0 0 rgba(240,185,64,0.0); }
+      50%     { box-shadow: 0 0 0 3px rgba(240,185,64,0.18); }
+    }
+    /* Version modal — commit list rows. Lives inside .models-modal /
+       .models-list scaffolding so spacing matches the other modals. */
+    .version-commit {
+      padding: 8px 10px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel-2);
+      margin-bottom: 6px; list-style: none;
+    }
+    .version-commit .version-commit-msg {
+      font-size: 12.5px; font-weight: 500; color: var(--text);
+      line-height: 1.35;
+    }
+    .version-commit .version-commit-meta {
+      font-size: 10.5px; color: var(--muted); margin-top: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .version-commit .version-commit-meta code {
+      color: var(--accent-bright, #93a8ff); padding: 0; background: none;
+    }
     @keyframes pulse { 50% { opacity: 0.7; } }
     .spacer { flex: 1; }
     .ghost-btn {
@@ -4142,6 +4388,13 @@ HTML = r"""<!doctype html>
   <span id="modelsPill" class="pill" style="cursor:pointer" onclick="openModelsModal()" title="View / download model status">models…</span>
   <span id="queuePill" class="pill">queue 0</span>
   <span id="jobPill" class="pill">idle</span>
+  <!-- Update-available pill. Hidden by default; renders only when the
+       /version poller finds the install behind origin/main. Click → modal
+       listing the unseen commits. We do this because users keep telling
+       us "I clicked Update but I don't see anything" — by the time they
+       do, we've usually pushed three more fixes. -->
+  <span id="versionPill" class="pill pill-update" style="cursor:pointer; display:none"
+        onclick="openVersionModal()" title="Click to see what's new and how to update">↑ Update available</span>
   <!-- Settings cog: opens the modal that lets users pick output codec
        presets (Standard / Video production / Web / Custom). Sits between the
        runtime pills and Stop Comfy so it's findable but not loud. -->
@@ -4694,6 +4947,34 @@ HTML = r"""<!doctype html>
     <div class="models-hint" id="modelsHint">Loading…</div>
     <ul class="models-list" id="modelsList"></ul>
     <div class="models-foot" id="modelsFoot"></div>
+  </div>
+</div>
+
+<!-- ============== VERSION MODAL ============== -->
+<!-- Opened by the "Update available" pill. Lists every commit the user is
+     missing (newest first) with the message + author + date, plus a clear
+     "how to update" instruction block. We don't auto-update — the user has
+     to click Pinokio's Stop → Update → Start cycle, which also re-runs
+     install/patch hooks defined in update.js. -->
+<div id="versionModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeVersionModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2>Update available</h2>
+      <button class="ghost-btn" onclick="closeVersionModal()">Close</button>
+    </div>
+    <div class="models-hint" id="versionModalHint">Loading…</div>
+    <div id="versionModalUpdateSteps" style="display:none; margin: 8px 0 14px; padding: 10px 12px; border-radius: 8px; background: rgba(240,185,64,0.07); border: 1px solid rgba(240,185,64,0.35); font-size: 12px; color: var(--text);">
+      <strong style="display:block; margin-bottom: 4px; color: var(--warning,#f0b940);">How to apply</strong>
+      In Pinokio: click <strong>Stop</strong>, then <strong>Update</strong>, then <strong>Start</strong>.
+      Your queue + settings are preserved across restarts. After Start, do a
+      hard refresh of this page (<code>Cmd+Shift+R</code>) so the iframe
+      reloads the new HTML.
+    </div>
+    <ul class="models-list" id="versionCommitsList" style="margin-top: 4px;"></ul>
+    <div class="models-foot" id="versionModalFoot">
+      <button class="ghost-btn" type="button" onclick="versionCheckNow()">↻ Check again now</button>
+      <span id="versionLastCheckedHint" style="margin-left: 10px; color: var(--muted); font-size: 11px;"></span>
+    </div>
   </div>
 </div>
 
@@ -6753,6 +7034,153 @@ async function cancelDownload() {
   refreshModelsModal();
 }
 
+// ====== Version check / "Update available" pill ======
+//
+// Backend: a daemon thread polls GitHub every 30 minutes and exposes the
+// result at /version. We poll /version every 5 minutes from JS (cheap; just
+// a JSON read of pre-computed state). The pill is hidden when there's
+// nothing to surface (current install is on origin/main HEAD, or the user
+// is on a non-main branch / has uncommitted changes / first poll hasn't
+// landed yet).
+//
+// Rationale: users keep telling us "I clicked Update but I don't see any
+// new features" — and by the time their feedback reaches us we've usually
+// pushed three more commits. A small in-panel notification closes that
+// loop fast. Inspired by Claude Code's bottom-right "new version" hint.
+
+let _versionState = null;
+
+async function refreshVersionPill() {
+  try {
+    const r = await fetch('/version');
+    _versionState = await r.json();
+  } catch (e) {
+    return;             // network blip; don't blow away last good state
+  }
+  renderVersionPill();
+}
+
+function renderVersionPill() {
+  const pill = document.getElementById('versionPill');
+  if (!pill) return;
+  const s = _versionState || {};
+  // Hide cases:
+  //   - we haven't checked yet (no checked_ts)
+  //   - we're suppressing (dev branch, dirty tree, no git)
+  //   - we're current (behind_by === 0)
+  //   - last check errored (offline; don't false-positive)
+  if (!s.checked_ts || s.suppress_reason || s.error || (s.behind_by | 0) === 0) {
+    pill.style.display = 'none';
+    return;
+  }
+  pill.style.display = '';
+  const n = s.behind_by | 0;
+  const more = !!s.behind_more_than;
+  pill.textContent = more ? `↑ ${n}+ updates` : (n === 1 ? '↑ 1 update' : `↑ ${n} updates`);
+}
+
+function _humanRelativeTime(epochSec) {
+  if (!epochSec) return '';
+  const delta = Math.max(1, Math.round(Date.now()/1000 - epochSec));
+  if (delta < 60) return `${delta}s ago`;
+  if (delta < 3600) return `${Math.round(delta/60)} min ago`;
+  if (delta < 86400) return `${Math.round(delta/3600)} h ago`;
+  return `${Math.round(delta/86400)} days ago`;
+}
+
+function openVersionModal() {
+  const modal = document.getElementById('versionModal');
+  modal.style.display = 'flex';
+  renderVersionModal();
+  // Re-fetch on open so the user sees fresh data even if the 5-min poll
+  // hasn't come around yet. /version itself is just a dict read; the
+  // 30-min remote-check cadence is independent.
+  refreshVersionPill().then(renderVersionModal);
+}
+
+function closeVersionModal() {
+  document.getElementById('versionModal').style.display = 'none';
+}
+
+function renderVersionModal() {
+  const s = _versionState || {};
+  const hint = document.getElementById('versionModalHint');
+  const list = document.getElementById('versionCommitsList');
+  const stepsBox = document.getElementById('versionModalUpdateSteps');
+  const lastChecked = document.getElementById('versionLastCheckedHint');
+  if (!hint || !list) return;
+
+  const local = s.local_short ? `<code>${escapeHtml(s.local_short)}</code>` : '<em>unknown</em>';
+  const remote = s.remote_short ? `<code>${escapeHtml(s.remote_short)}</code>` : '<em>unknown</em>';
+  const branch = s.local_branch ? escapeHtml(s.local_branch) : '?';
+
+  // Status line
+  if (s.suppress_reason) {
+    hint.innerHTML =
+      `Update check is paused: <strong>${escapeHtml(s.suppress_reason)}</strong>. ` +
+      `Local install: ${local} on branch <code>${branch}</code>.`;
+    stepsBox.style.display = 'none';
+    list.innerHTML = '';
+  } else if (s.error) {
+    hint.innerHTML =
+      `Couldn't reach github.com to check for updates (${escapeHtml(s.error)}). ` +
+      `Local install: ${local}. Try the button below once you're online.`;
+    stepsBox.style.display = 'none';
+    list.innerHTML = '';
+  } else if ((s.behind_by | 0) === 0) {
+    hint.innerHTML =
+      `You're on the latest commit (${local}). No updates needed.`;
+    stepsBox.style.display = 'none';
+    list.innerHTML = '';
+  } else {
+    const n = s.behind_by | 0;
+    const more = !!s.behind_more_than;
+    hint.innerHTML =
+      `You're <strong>${more ? n + '+' : n}</strong> commit${n === 1 ? '' : 's'} ` +
+      `behind <code>main</code>. Local: ${local} → Remote: ${remote}.`;
+    stepsBox.style.display = '';
+    // Render newest commits first.
+    const items = (s.commits_ahead || []).map(c => {
+      const date = c.date ? new Date(c.date).toLocaleString() : '';
+      return `<li class="version-commit">
+        <div class="version-commit-msg">${escapeHtml(c.message || '(no message)')}</div>
+        <div class="version-commit-meta">
+          <code>${escapeHtml(c.short || '')}</code>
+          · ${escapeHtml(c.author || '')}
+          ${date ? '· <span title="commit author date">' + escapeHtml(date) + '</span>' : ''}
+        </div>
+      </li>`;
+    }).join('');
+    list.innerHTML = items || '<li><em>No commit list (rate-limited?). Run Pinokio Update anyway.</em></li>';
+  }
+  // Last-checked hint always shown if we have any timestamp.
+  if (s.checked_ts) {
+    lastChecked.textContent = `Last checked ${_humanRelativeTime(s.checked_ts)}`;
+  } else {
+    lastChecked.textContent = '';
+  }
+}
+
+async function versionCheckNow() {
+  const btn = event && event.target;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const r = await fetch('/version/check', { method: 'POST' });
+    const data = await r.json();
+    if (data && data.state) _versionState = data.state;
+  } catch (e) { /* swallow — modal still re-renders from prior state */ }
+  if (btn) { btn.disabled = false; btn.textContent = orig; }
+  renderVersionPill();
+  renderVersionModal();
+}
+
+// Boot: first /version read happens 2 seconds after DOM ready (gives the
+// panel's startup-delay thread time to complete its first remote check),
+// then every 5 minutes thereafter.
+setTimeout(refreshVersionPill, 2000);
+setInterval(refreshVersionPill, 5 * 60 * 1000);
+
 // ====== Init ======
 setInterval(poll, 1500);
 poll();
@@ -6784,6 +7212,7 @@ if __name__ == "__main__":
     load_hidden()
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
+    threading.Thread(target=version_check_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"LTX MLX Studio: http://127.0.0.1:{PORT}", flush=True)
     print(f"queue: {len(STATE['queue'])} pending, hidden: {len(HIDDEN_PATHS)}", flush=True)
