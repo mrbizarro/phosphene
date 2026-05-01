@@ -7465,6 +7465,43 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListene
 """
 
 
+def _diagnose_port_busy(port: int) -> str:
+    """Best-effort diagnosis of WHO holds the port, for the pre-flight error
+    message. Returns a single human-readable line. Never raises — if any
+    detection step fails we just return a generic hint, since the goal is
+    a friendlier error than a bare OSError, not a forensic report."""
+    # Step 1: ask the existing listener if it's a phosphene panel. If it is,
+    # the user almost certainly clicked Start when one was already running
+    # (e.g. closed the Pinokio window without Stop). Tell them how to recover.
+    try:
+        import urllib.request as _urlreq
+        with _urlreq.urlopen(f"http://127.0.0.1:{port}/version", timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        v = data.get("local_version") or data.get("local_short") or "?"
+        return (f"another phosphene panel is already running on port {port} "
+                f"(version {v}). Open it at http://127.0.0.1:{port}, or click "
+                f"Stop in Pinokio before clicking Start.")
+    except Exception:
+        pass
+    # Step 2: try lsof to identify whatever process IS listening.
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-nPi", f":{port}"], stderr=subprocess.DEVNULL, timeout=2,
+        ).decode("utf-8", "replace")
+        # First column is COMMAND, second is PID. Skip the header line.
+        lines = [l for l in out.splitlines()[1:] if l.strip()]
+        if lines:
+            cols = lines[0].split()
+            cmd = cols[0] if cols else "?"
+            pid = cols[1] if len(cols) > 1 else "?"
+            return (f"port {port} is held by another process: {cmd} (pid {pid}). "
+                    f"Close it (or run `kill {pid}`) and click Start again.")
+    except Exception:
+        pass
+    return (f"port {port} is already in use by another process. Close whatever "
+            f"is on it and click Start again.")
+
+
 if __name__ == "__main__":
     OUTPUT.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
@@ -7472,7 +7509,21 @@ if __name__ == "__main__":
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=version_check_loop, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    # Pre-flight: bind in a try/except so a busy port surfaces an actionable
+    # one-liner instead of a 6-frame Python traceback. The bare OSError
+    # ("[Errno 48] Address already in use") was confusing users who'd closed
+    # Pinokio without Stop and then clicked Start — they'd see a wall of
+    # stack trace pointing at socketserver.py with no hint that the fix was
+    # "kill the other panel" or "click Stop first."
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == 48 or "Address already in use" in str(exc):
+            print("─" * 64, flush=True)
+            print(f"Phosphene can't start: {_diagnose_port_busy(PORT)}", flush=True)
+            print("─" * 64, flush=True)
+            sys.exit(1)
+        raise
     print(f"LTX MLX Studio: http://127.0.0.1:{PORT}", flush=True)
     print(f"queue: {len(STATE['queue'])} pending, hidden: {len(HIDDEN_PATHS)}", flush=True)
     try:
