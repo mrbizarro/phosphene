@@ -903,8 +903,18 @@ def _civitai_search(query: str = "", nsfw: bool = False,
         if not primary:
             continue
         images = v.get("images") or []
-        preview = next((img.get("url") for img in images if img.get("url")),
-                       None)
+        # Prefer the first image-type preview if any exist (some LTX LoRAs
+        # ship both video MP4s AND still images). Fall back to the first
+        # entry of any type. We pass the type back to the client so the
+        # renderer can pick <img> vs <video> appropriately — for LTX
+        # video LoRAs the previews are usually MP4s, which would just
+        # 404 inside an <img> tag.
+        preview_obj = (
+            next((img for img in images if img.get("type") == "image" and img.get("url")), None)
+            or next((img for img in images if img.get("url")), None)
+        )
+        preview = preview_obj.get("url") if preview_obj else None
+        preview_type = preview_obj.get("type") if preview_obj else None
         creator = (m.get("creator") or {}).get("username") or "unknown"
         # CivitAI puts trigger words on the version (`trainedWords`).
         trigger = list(v.get("trainedWords") or [])
@@ -919,6 +929,7 @@ def _civitai_search(query: str = "", nsfw: bool = False,
             "rating": (m.get("stats") or {}).get("rating"),
             "nsfw": bool(m.get("nsfw")),
             "preview_url": preview,
+            "preview_type": preview_type,        # "image" | "video" | None
             "filename": primary.get("name"),
             "size_kb": primary.get("sizeKB"),
             "download_url": primary.get("downloadUrl"),
@@ -5861,9 +5872,21 @@ function renderCivitaiGrid(items, append) {
     const sizeMb = it.size_kb ? (it.size_kb / 1024).toFixed(1) : '?';
     const dl = it.downloads ? new Intl.NumberFormat().format(it.downloads) : '?';
     const triggers = (it.trigger_words || []).slice(0, 3).join(', ');
-    const previewHtml = it.preview_url
-      ? `<img class="preview" src="${escapeHtml(it.preview_url)}" alt="" loading="lazy">`
-      : `<div class="preview-empty">no preview</div>`;
+    // LTX is a video model so most LoRAs ship animated previews. Render
+    // <video> for videos (autoplay muted loop = looks like an animated
+    // GIF, no user interaction needed) and <img> for stills. Both share
+    // the .preview class so the card height is stable while images
+    // load. CivitAI's CDN sets `Access-Control-Allow-Origin: *` so
+    // cross-origin loads work without a panel-side proxy.
+    let previewHtml;
+    if (!it.preview_url) {
+      previewHtml = `<div class="preview-empty">no preview</div>`;
+    } else if (it.preview_type === 'video' || /\.mp4($|\?)/i.test(it.preview_url)) {
+      previewHtml = `<video class="preview" src="${escapeHtml(it.preview_url)}"
+                            autoplay muted loop playsinline preload="metadata"></video>`;
+    } else {
+      previewHtml = `<img class="preview" src="${escapeHtml(it.preview_url)}" alt="" loading="lazy">`;
+    }
     card.innerHTML = `
       ${previewHtml}
       <div class="body">
