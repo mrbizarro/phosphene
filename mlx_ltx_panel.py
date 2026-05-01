@@ -770,7 +770,13 @@ def _fetch_remote_commits(limit: int = 30) -> list[dict] | None:
 
 def _check_remote_once() -> None:
     """Run one remote check, mutate _VERSION_STATE accordingly. Idempotent.
-    Safe to call from a background thread or from a /version/check endpoint."""
+    Safe to call from a background thread or from a /version/check endpoint.
+    Re-detects local state (HEAD, branch, dirty) at the top of every call so
+    a tree that was dirty when the panel started but is clean now (e.g. user
+    just committed) gets picked up without needing a panel restart. The
+    earlier build only ran _detect_local_install_state once at startup,
+    which left the suppress_reason stale across the panel's lifetime."""
+    _detect_local_install_state()
     with _VERSION_LOCK:
         suppress = _VERSION_STATE["suppress_reason"]
         local_sha = _VERSION_STATE["local_sha"]
@@ -2265,6 +2271,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
             "quality": f("quality", "standard"),  # draft / standard / high
+            "accel": f("accel", "off"),            # off / boost / turbo
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2288,6 +2295,10 @@ def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
     quality = p.get("quality", "standard")
+    if p.get("accel") not in ("off", "boost", "turbo"):
+        p["accel"] = "off"
+    if quality == "high" or mode in ("extend", "keyframe"):
+        p["accel"] = "off"
 
     # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
     # sigma=0. Truncating below 8 steps leaves the image partially denoised
@@ -2595,15 +2606,16 @@ def run_job_inner(job: dict) -> None:
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
+                "accel": p.get("accel", "off"),
             },
         }
         if loras:
-            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} "
+            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
                  f"{width}x{height} {frames}f · {len(loras)} LoRA"
                  f"{'s' if len(loras) != 1 else ''}"
                  f"{' (incl. HDR)' if p.get('hdr') else ''}")
         else:
-            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} "
+            push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
                  f"{width}x{height} {frames}f")
 
     result = HELPER.run(job_spec)
@@ -4965,6 +4977,14 @@ HTML = r"""<!doctype html>
       </div>
       <input type="hidden" name="quality" id="quality" value="standard">
 
+      <h2>Speed</h2>
+      <div class="pill-group cols-3" id="accelGroup">
+        <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
+        <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">faster · conservative</span></button>
+        <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">fastest · experimental</span></button>
+      </div>
+      <input type="hidden" name="accel" id="accel" value="off">
+
       <div id="warnBanner" class="warn-banner"></div>
 
       <!-- Mode-specific: image (I2V).
@@ -5594,6 +5614,7 @@ function setMode(mode) {
   if (mode === 'keyframe') {
     setQuality('high');
   }
+  updateAccelAvailability();
   updateDerived();
   // Refresh the inline models card immediately — switching to FFLF when
   // Q8 is missing should surface the Download Q8 CTA without waiting for
@@ -5604,7 +5625,23 @@ function setQuality(q) {
   document.getElementById('quality').value = q;
   document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.quality === q));
   applyQuality();
+  updateAccelAvailability();
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
+}
+function setAccel(a) {
+  const allowed = document.getElementById('quality').value !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe';
+  const v = allowed ? a : 'off';
+  document.getElementById('accel').value = v;
+  document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.accel === v));
+  updateDerived();
+}
+function updateAccelAvailability() {
+  const allowed = document.getElementById('quality').value !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe';
+  document.querySelectorAll('#accelGroup .pill-btn').forEach(b => {
+    const disabled = !allowed && b.dataset.accel !== 'off';
+    b.classList.toggle('disabled', disabled);
+  });
+  if (!allowed && document.getElementById('accel').value !== 'off') setAccel('off');
 }
 function setAspect(a) {
   document.getElementById('aspect').value = a;
@@ -5625,6 +5662,7 @@ function setExtendMode(m) {
 
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
+document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setAccel(b.dataset.accel); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 
@@ -5756,8 +5794,10 @@ function updateDerived() {
   if (h === 704 && w % 16 === 0) ph = 720;
   const padded = (pw !== w || ph !== h) && mode === 'i2v_clean_audio';
   const finalRes = padded ? `${w}×${h} → <strong>${pw}×${ph}</strong>` : `<strong>${w}×${h}</strong>`;
+  const accel = document.getElementById('accel')?.value || 'off';
+  const accelText = accel === 'off' ? '' : ` · ${accel === 'turbo' ? 'Turbo' : 'Boost'}`;
 
-  document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps · ${finalRes} · Steps ${document.getElementById('steps').value}`;
+  document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps · ${finalRes} · Steps ${document.getElementById('steps').value}${accelText}`;
 
   const warns = [];
   if (w % 32 !== 0) warns.push(`Width ${w} isn't a multiple of 32 (closest ${Math.round(w/32)*32})`);
@@ -6342,6 +6382,8 @@ async function loadParams() {
   else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
   else setMode('t2v');
+  if (p.quality) setQuality(p.quality);
+  if (p.accel) setAccel(p.accel);
   document.getElementById('prompt').value = p.prompt || '';
   if (p.width) document.getElementById('width').value = p.width;
   if (p.height) document.getElementById('height').value = p.height;
@@ -6484,6 +6526,9 @@ function renderOutputInfoBody(path, data) {
   const genRows = [];
   genRows.push(`<dt>Mode</dt><dd>${escapeHtml(modeLabel)}</dd>`);
   genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
+  if (p.accel && p.accel !== 'off') {
+    genRows.push(`<dt>Speed</dt><dd>${escapeHtml(p.accel.replace(/^./, c => c.toUpperCase()))}</dd>`);
+  }
   if (seedVal) {
     genRows.push(`<dt>Seed</dt><dd>
       <code>${escapeHtml(seedVal)}</code>
