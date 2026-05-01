@@ -1,20 +1,51 @@
 module.exports = {
   run: [
-    // Pull our panel repo (Phosphene fixes from mrbizarro/phosphene)
+    // Resilient pull for the panel repo (mrbizarro/phosphene). Plain
+    // `git pull` was breaking for existing users after a history-rewrite
+    // event on origin (commit identities were scrubbed; force-push
+    // landed; existing clones could no longer fast-forward because
+    // their local history didn't match origin's anymore).
+    //
+    // The new sequence:
+    //   1. git fetch origin
+    //   2. try a fast-forward pull. Works for everyone whose history
+    //      lines up with origin/main (i.e. fresh installs and most
+    //      users post-recovery).
+    //   3. if step 2 fails, fall back to `git reset --hard origin/main`.
+    //      A Pinokio-installed panel is not a place users keep local
+    //      commits, so wiping the working tree to match origin is the
+    //      Right Thing — it's what they meant by clicking Update.
+    //
+    // The compound shell command runs through Pinokio's shell.run with
+    // && / || so any path that resolves to "we're now on origin/main
+    // HEAD" finishes 0; any other state finishes non-zero and the user
+    // sees the error. We add a final `git rev-parse --short HEAD` so the
+    // log shows what we ended up on, even on the happy path.
     {
       method: "shell.run",
-      params: { message: "git pull" }
+      params: {
+        message: [
+          "git fetch origin",
+          "git pull --ff-only origin main || (echo 'history diverged from origin (likely a force-push); falling back to reset --hard' && git reset --hard origin/main)",
+          "git rev-parse --short HEAD"
+        ]
+      }
     },
-    // Pull ltx-2-mlx HEAD. (We previously pinned to dcd639e thinking audio
-    // regressed in dgrauet's commits; turned out the audio bug was in mlx
-    // 0.31.2 itself. HEAD has the APIs the panel needs — cfg_scale on
-    // extend_from_video, the I2V structure our OOM patch targets, etc.
-    // git fetch + checkout main is idempotent.)
+    // Pull ltx-2-mlx HEAD with the same pattern. (We previously pinned
+    // to dcd639e thinking audio regressed in dgrauet's commits; turned
+    // out the audio bug was in mlx 0.31.2 itself. HEAD has the APIs the
+    // panel needs — cfg_scale on extend_from_video, the I2V structure
+    // our OOM patch targets, etc.)
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
-        message: ["git fetch origin", "git checkout main", "git pull --ff-only origin main"]
+        message: [
+          "git fetch origin",
+          "git checkout main || true",
+          "git pull --ff-only origin main || (echo 'ltx-2-mlx history diverged; resetting' && git reset --hard origin/main)",
+          "git rev-parse --short HEAD"
+        ]
       }
     },
     // Force-downgrade mlx to 0.31.1 — fixes 22 dB audio regression on mlx

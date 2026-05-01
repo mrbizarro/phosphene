@@ -604,16 +604,26 @@ _VERSION_STARTUP_DELAY_SEC = 30                # don't compete with boot
 _VERSION_STATE: dict = {
     "local_sha": None,            # 40-char hex of HEAD at panel start
     "local_short": None,           # 7-char display form
+    "local_version": None,         # human label from /VERSION file (e.g. "Y1.001")
     "local_branch": None,          # branch name (e.g. "main") or "(detached)"
     "local_dirty": False,          # uncommitted changes in the working tree
     "remote_sha": None,            # latest sha on origin/main per GitHub API
     "remote_short": None,
+    "remote_version": None,        # /VERSION file at origin/main (raw fetch)
     "behind_by": 0,                # number of commits between local and remote (0 = current)
     "behind_more_than": False,     # True when behind > 30 (we cap the API response)
-    "commits_ahead": [],           # list of {sha, short, message, author, date} for the modal
+    "commits_ahead": [],           # list of {sha, short, message, author, date} for the dropdown
     "checked_ts": None,            # epoch seconds of last successful poll
     "error": None,                 # last failure reason (None when last check OK)
     "suppress_reason": None,       # set when we deliberately skip checking (dev mode, dirty, etc.)
+    # Pull state — populated only when the user clicks the magic button on
+    # the pill while behind. Kept on _VERSION_STATE so the UI can render a
+    # "restart needed" pill without a separate state store.
+    "pull_state": "idle",          # idle | pulling | pulled | error
+    "pull_message": None,          # human-readable result line (last git output line, or error)
+    "pull_pulled_to_short": None,  # SHA we ended up at after the pull
+    "pull_pulled_to_version": None,# VERSION label after the pull
+    "pull_requires_full_update": False,  # True if the diff touched deps/patches
 }
 
 
@@ -630,6 +640,34 @@ def _git_capture(args: list[str], cwd: Path = ROOT) -> str | None:
         return None
 
 
+def _read_local_version() -> str | None:
+    """Return the contents of <repo>/VERSION as a single stripped string,
+    or None if the file is missing / unreadable. We use this to surface a
+    human-friendly label like 'Y1.001' instead of raw 7-char SHAs in the
+    header pill. Older checkouts that predate this file fall back to the
+    short SHA in the UI without breaking."""
+    try:
+        v = (ROOT / "VERSION").read_text().strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _fetch_raw_text(url: str, timeout: int = 10) -> str | None:
+    """GET a public URL and return its body as a stripped string, or None
+    on any error. Used for the raw VERSION-file fetch from origin/main on
+    GitHub — `https://raw.githubusercontent.com/.../main/VERSION`. No
+    auth, no rate-limit headers worth honouring at this volume (one
+    request per 30-min poll)."""
+    import urllib.request as _urlreq
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "phosphene-panel-version-check"})
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
 def _detect_local_install_state() -> None:
     """Populate _VERSION_STATE.local_* fields. Called once at startup; result
     doesn't change while the panel is running (no auto-pull on the user's
@@ -640,9 +678,11 @@ def _detect_local_install_state() -> None:
     # `git status --porcelain` empty = clean tree.
     porcelain = _git_capture(["status", "--porcelain"])
     dirty = bool(porcelain and porcelain.strip())
+    local_version = _read_local_version()
     with _VERSION_LOCK:
         _VERSION_STATE["local_sha"] = sha
         _VERSION_STATE["local_short"] = sha[:7] if sha else None
+        _VERSION_STATE["local_version"] = local_version
         _VERSION_STATE["local_branch"] = branch
         _VERSION_STATE["local_dirty"] = dirty
         # Suppress remote checks when the user is clearly running their own
@@ -735,9 +775,19 @@ def _check_remote_once() -> None:
             "date": date,
         })
 
+    # Fetch the upstream VERSION file in parallel with the commits API so
+    # the pill can show the human-friendly label (Y1.NNN). This is a raw
+    # GET on raw.githubusercontent.com — no rate limit concern at our
+    # 30-min cadence. Tolerate missing-file silently: older origin/main
+    # commits predate VERSION, and we still have the SHA fallback.
+    remote_version = _fetch_raw_text(
+        f"https://raw.githubusercontent.com/{_VERSION_REPO_OWNER}/"
+        f"{_VERSION_REPO_NAME}/main/VERSION"
+    )
     with _VERSION_LOCK:
         _VERSION_STATE["remote_sha"] = remote_sha
         _VERSION_STATE["remote_short"] = remote_sha[:7]
+        _VERSION_STATE["remote_version"] = remote_version
         _VERSION_STATE["behind_by"] = behind_by
         _VERSION_STATE["behind_more_than"] = more
         _VERSION_STATE["commits_ahead"] = ahead
@@ -3170,14 +3220,121 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True}); return
 
         if path == "/version/check":
-            # Force an immediate remote check (UI button in the version
-            # modal). Runs synchronously so the client gets the fresh
+            # Force an immediate remote check (UI button on the version
+            # pill). Runs synchronously so the client gets the fresh
             # state in the response — at most a 10s round-trip to GitHub.
             try:
                 _check_remote_once()
                 self._json({"ok": True, "state": get_version_state()})
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, 500)
+            return
+
+        if path == "/version/pull":
+            # The "magic button" path — when the pill is in the behind
+            # state and the user clicks it, this endpoint runs git pull
+            # on the panel repo and reports back. The user still has to
+            # restart phosphene in Pinokio to load the new code (we can't
+            # restart ourselves from inside our own process), but we
+            # surface that clearly via the pull_state field.
+            #
+            # If the pulled diff touches dependency manifests / patch
+            # scripts (anything that update.js does in addition to
+            # `git pull`), we set pull_requires_full_update=True and the
+            # UI nudges the user toward Pinokio's full Update flow
+            # instead of just Stop+Start.
+            with _VERSION_LOCK:
+                _VERSION_STATE["pull_state"] = "pulling"
+                _VERSION_STATE["pull_message"] = None
+                _VERSION_STATE["pull_pulled_to_short"] = None
+                _VERSION_STATE["pull_pulled_to_version"] = None
+                _VERSION_STATE["pull_requires_full_update"] = False
+            try:
+                # Capture HEAD before the pull so we can diff afterwards.
+                pre_sha = _git_capture(["rev-parse", "HEAD"]) or ""
+                # Step 1: fetch — populates origin/main without touching HEAD.
+                fetch_proc = subprocess.run(
+                    ["git", "-C", str(ROOT), "fetch", "origin"],
+                    capture_output=True, timeout=60,
+                )
+                if fetch_proc.returncode != 0:
+                    raise RuntimeError(
+                        (fetch_proc.stdout + fetch_proc.stderr).decode("utf-8", "replace").strip()
+                        or f"git fetch exited {fetch_proc.returncode}")
+                # Step 2: try a fast-forward pull. Happy path for fresh installs
+                # whose local history lines up with origin/main.
+                pull_proc = subprocess.run(
+                    ["git", "-C", str(ROOT), "pull", "--ff-only", "origin", "main"],
+                    capture_output=True, timeout=60,
+                )
+                pull_out = (pull_proc.stdout + pull_proc.stderr).decode("utf-8", "replace").strip()
+                # Step 3: if the fast-forward refused (history diverged from
+                # origin — e.g. because of a past force-push that scrubbed
+                # commit identities), fall back to a hard reset onto
+                # origin/main. A Pinokio-installed panel is not a place
+                # users keep local commits, so this is the Right Thing —
+                # it's what they meant by clicking Update.
+                if pull_proc.returncode != 0:
+                    reset_proc = subprocess.run(
+                        ["git", "-C", str(ROOT), "reset", "--hard", "origin/main"],
+                        capture_output=True, timeout=30,
+                    )
+                    reset_out = (reset_proc.stdout + reset_proc.stderr).decode("utf-8", "replace").strip()
+                    if reset_proc.returncode != 0:
+                        raise RuntimeError(
+                            f"fast-forward refused and reset --hard failed.\n"
+                            f"pull: {pull_out}\nreset: {reset_out}")
+                    pull_out = (
+                        f"history diverged from origin (likely a past force-push); "
+                        f"recovered via reset --hard origin/main\n{reset_out}"
+                    )
+                # Refresh local fields (HEAD, version) before computing the diff.
+                _detect_local_install_state()
+                post_sha = _git_capture(["rev-parse", "HEAD"]) or ""
+
+                # Did the pull touch anything that needs the heavier Pinokio
+                # Update.js (pip reinstalls + patch reapply)? If so, flag it.
+                deps_touched = False
+                if pre_sha and post_sha and pre_sha != post_sha:
+                    diff_out = _git_capture(
+                        ["diff", "--name-only", f"{pre_sha}..{post_sha}"]
+                    ) or ""
+                    deps_signals = (
+                        "install.js", "update.js", "pinokio.js", "download_q8.js",
+                        "patch_ltx_codec.py", "required_files.json",
+                        "requirements.txt", "pyproject.toml", "setup.py",
+                    )
+                    for line in diff_out.splitlines():
+                        if line in deps_signals or line.startswith("ltx-2-mlx/"):
+                            deps_touched = True
+                            break
+
+                with _VERSION_LOCK:
+                    _VERSION_STATE["pull_state"] = "pulled"
+                    _VERSION_STATE["pull_message"] = (pull_out.splitlines() or ["pulled"])[-1]
+                    _VERSION_STATE["pull_pulled_to_short"] = _VERSION_STATE["local_short"]
+                    _VERSION_STATE["pull_pulled_to_version"] = _VERSION_STATE["local_version"]
+                    _VERSION_STATE["pull_requires_full_update"] = deps_touched
+
+                # Re-run the remote check so behind_by recalculates to 0
+                # (normally) or to whatever new commits landed in the
+                # window since we pulled.
+                try:
+                    _check_remote_once()
+                except Exception:
+                    pass
+
+                self._json({"ok": True, "state": get_version_state()})
+            except subprocess.TimeoutExpired:
+                with _VERSION_LOCK:
+                    _VERSION_STATE["pull_state"] = "error"
+                    _VERSION_STATE["pull_message"] = "git pull timed out (60s)"
+                self._json({"ok": False, "error": "git pull timed out", "state": get_version_state()}, 504)
+            except Exception as exc:
+                with _VERSION_LOCK:
+                    _VERSION_STATE["pull_state"] = "error"
+                    _VERSION_STATE["pull_message"] = str(exc)
+                self._json({"ok": False, "error": str(exc), "state": get_version_state()}, 500)
             return
 
         if path == "/loras/refresh":
@@ -3492,23 +3649,24 @@ HTML = r"""<!doctype html>
       color: var(--muted);
       border-color: var(--border);
     }
-    /* Version modal — commit list rows. Lives inside .models-modal /
-       .models-list scaffolding so spacing matches the other modals. */
-    .version-commit {
-      padding: 8px 10px; border-radius: 6px;
-      border: 1px solid var(--border); background: var(--panel-2);
-      margin-bottom: 6px; list-style: none;
+    /* Restart — set after a successful /version/pull. The user needs to
+       click Stop+Start in Pinokio for the new code to take effect; this
+       state nudges them to do that. Accent-blue so it reads as an
+       actionable next-step, not a problem. */
+    .pill-restart {
+      color: var(--accent-bright, #7e98ff);
+      border-color: rgba(126,152,255,0.55);
+      background: rgba(126,152,255,0.08);
+      font-weight: 600;
+      animation: glow-update 2.4s ease-in-out infinite;
     }
-    .version-commit .version-commit-msg {
-      font-size: 12.5px; font-weight: 500; color: var(--text);
-      line-height: 1.35;
-    }
-    .version-commit .version-commit-meta {
-      font-size: 10.5px; color: var(--muted); margin-top: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    .version-commit .version-commit-meta code {
-      color: var(--accent-bright, #93a8ff); padding: 0; background: none;
+    .pill-restart:hover { background: rgba(126,152,255,0.18); }
+    /* Busy — temporary in-flight state during /version/check and
+       /version/pull round-trips. Faded so the user knows the click
+       registered without us flashing alarming colours. */
+    .pill-busy {
+      opacity: 0.7; pointer-events: none;
+      animation: none !important;
     }
     @keyframes pulse { 50% { opacity: 0.7; } }
     .spacer { flex: 1; }
@@ -4415,15 +4573,16 @@ HTML = r"""<!doctype html>
        listing the unseen commits. We do this because users keep telling
        us "I clicked Update but I don't see anything" — by the time they
        do, we've usually pushed three more fixes. -->
-  <!-- Version pill. Always visible so users learn where to look — when an
-       update lands the pill changes colour/text and pulses, so the change
-       is noticed even by people who've never read the modal. States:
-         pill-current  ✓ <sha>      → on origin/main HEAD, all good
-         pill-update   ↑ N updates  → behind origin/main (amber pulse)
-         pill-dev      ⚙ <sha>      → non-main branch / dirty tree / no git
-         pill-checking · <sha>     → first poll hasn't completed yet -->
+  <!-- Version pill — the "magic button". Always visible so users learn
+       where to look. Clicking does the right thing for the state:
+         pill-current   Y1.001          click → re-check GitHub now
+         pill-update    ↑ Y1.002        click → git pull (then restart)
+         pill-restart   ↻ restart       click → just a reminder hint
+         pill-dev       Y1.001 ⚙        click → toast with reason
+         pill-checking  Y1.001          (idle, while first poll runs)
+       No modal — confirm() + small toast for everything. -->
   <span id="versionPill" class="pill pill-checking" style="cursor:pointer"
-        onclick="openVersionModal()" title="Click to see version + check for updates">phosphene · …</span>
+        onclick="versionPillClick()" title="Phosphene version">phosphene · …</span>
   <!-- Settings cog: opens the modal that lets users pick output codec
        presets (Standard / Video production / Web / Custom). Sits between the
        runtime pills and Stop Comfy so it's findable but not loud. -->
@@ -4979,33 +5138,9 @@ HTML = r"""<!doctype html>
   </div>
 </div>
 
-<!-- ============== VERSION MODAL ============== -->
-<!-- Opened by the "Update available" pill. Lists every commit the user is
-     missing (newest first) with the message + author + date, plus a clear
-     "how to update" instruction block. We don't auto-update — the user has
-     to click Pinokio's Stop → Update → Start cycle, which also re-runs
-     install/patch hooks defined in update.js. -->
-<div id="versionModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeVersionModal()">
-  <div class="models-card">
-    <div class="models-head">
-      <h2 id="versionModalTitle">Phosphene version</h2>
-      <button class="ghost-btn" onclick="closeVersionModal()">Close</button>
-    </div>
-    <div class="models-hint" id="versionModalHint">Loading…</div>
-    <div id="versionModalUpdateSteps" style="display:none; margin: 8px 0 14px; padding: 10px 12px; border-radius: 8px; background: rgba(240,185,64,0.07); border: 1px solid rgba(240,185,64,0.35); font-size: 12px; color: var(--text);">
-      <strong style="display:block; margin-bottom: 4px; color: var(--warning,#f0b940);">How to apply</strong>
-      In Pinokio: click <strong>Stop</strong>, then <strong>Update</strong>, then <strong>Start</strong>.
-      Your queue + settings are preserved across restarts. After Start, do a
-      hard refresh of this page (<code>Cmd+Shift+R</code>) so the iframe
-      reloads the new HTML.
-    </div>
-    <ul class="models-list" id="versionCommitsList" style="margin-top: 4px;"></ul>
-    <div class="models-foot" id="versionModalFoot">
-      <button class="ghost-btn" type="button" onclick="versionCheckNow()">↻ Check again now</button>
-      <span id="versionLastCheckedHint" style="margin-left: 10px; color: var(--muted); font-size: 11px;"></span>
-    </div>
-  </div>
-</div>
+<!-- (Version modal removed in the magic-button rewrite. Pill itself is the
+     full UI now: click while behind → confirm + git pull; click while
+     current → live re-check. See versionPillClick() in the JS section.) -->
 
 <!-- ============== BOTTOM TABBED PANE ============== -->
 <aside class="bottom-pane" id="bottomPane">
@@ -7063,21 +7198,27 @@ async function cancelDownload() {
   refreshModelsModal();
 }
 
-// ====== Version check / "Update available" pill ======
+// ====== Version pill (the "magic button") ======
 //
-// Backend: a daemon thread polls GitHub every 30 minutes and exposes the
-// result at /version. We poll /version every 5 minutes from JS (cheap; just
-// a JSON read of pre-computed state). The pill is hidden when there's
-// nothing to surface (current install is on origin/main HEAD, or the user
-// is on a non-main branch / has uncommitted changes / first poll hasn't
-// landed yet).
+// One always-visible pill in the header that changes content + colour
+// based on /version state. Clicking it does the right thing for the
+// current state — no modal, no nested click flows.
 //
-// Rationale: users keep telling us "I clicked Update but I don't see any
-// new features" — and by the time their feedback reaches us we've usually
-// pushed three more commits. A small in-panel notification closes that
-// loop fast. Inspired by Claude Code's bottom-right "new version" hint.
+// Backend: a daemon thread polls GitHub every 30 minutes (commits API
+// for the SHA + raw VERSION file for the human-friendly Y1.NNN label)
+// and exposes the result at /version. The JS polls /version every 5
+// minutes (cheap; pre-computed dict read). When the user clicks while
+// behind, /version/pull does the actual `git pull` server-side; the
+// user still has to Stop+Start phosphene in Pinokio to apply.
+//
+// Rationale: users keep telling us "I clicked Update but I don't see
+// the new features" — by the time the feedback reaches us we've usually
+// pushed three more commits. The pill turns the loop from
+// "hope-they-noticed" into a literal one-click action.
 
 let _versionState = null;
+let _versionRestartPending = false;   // set after a successful /version/pull;
+                                      // pill turns into a "restart" reminder.
 
 async function refreshVersionPill() {
   try {
@@ -7089,173 +7230,160 @@ async function refreshVersionPill() {
   renderVersionPill();
 }
 
+function _versionDisplayLabel(s) {
+  // Prefer the human Y1.NNN VERSION file label. Fall back to the short
+  // SHA for older checkouts that predate the VERSION file. Last-resort
+  // ellipsis when nothing's known yet.
+  return s.local_version || s.local_short || '…';
+}
+
+function _versionRemoteLabel(s) {
+  return s.remote_version || s.remote_short || 'latest';
+}
+
 function renderVersionPill() {
   const pill = document.getElementById('versionPill');
   if (!pill) return;
   const s = _versionState || {};
-  // Always show the pill. Users can build a habit of glancing at this
-  // spot, so when the colour/text changes (a new commit lands upstream)
-  // they notice instantly. Four mutually-exclusive states; pick one.
-  const short = s.local_short || '…';
-  // Reset state classes — we set the right one below.
-  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking');
+  const local = _versionDisplayLabel(s);
+  const remote = _versionRemoteLabel(s);
+  // Reset every state class; exactly one is added below.
+  pill.classList.remove('pill-update','pill-current','pill-dev','pill-checking','pill-restart','pill-busy');
   pill.style.display = '';
 
-  // Behind origin/main — most attention-grabbing state.
-  if (!s.suppress_reason && !s.error && s.checked_ts && (s.behind_by | 0) > 0) {
-    const n = s.behind_by | 0;
-    const more = !!s.behind_more_than;
+  // Highest-priority state: a pull just happened and the panel needs a
+  // restart to load the new code. Different colour + text so the user
+  // sees the action they need to take, not the version info.
+  if (_versionRestartPending) {
+    pill.classList.add('pill-restart');
+    pill.textContent = '↻ restart phosphene';
+    const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
+    pill.title = s.pull_requires_full_update
+      ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
+      : `Pulled ${v}. Click Stop → Start in Pinokio to apply.`;
+    return;
+  }
+  // Suppressed (dev branch / dirty tree / no git) — show the local label
+  // so the user can confirm what they're running, muted styling, with
+  // the reason in the tooltip.
+  if (s.suppress_reason) {
+    pill.classList.add('pill-dev');
+    pill.textContent = `${local} ⚙`;
+    pill.title = `Update check paused: ${s.suppress_reason}.`;
+    return;
+  }
+  // Behind origin/main — the eye-catching state. Tooltip explains the
+  // click action so first-timers know what'll happen.
+  if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
     pill.classList.add('pill-update');
-    pill.textContent = more ? `↑ ${n}+ updates` : (n === 1 ? '↑ 1 update' : `↑ ${n} updates`);
-    pill.title = `Click for the list of new commits and how to update.`;
+    pill.textContent = `↑ ${remote}`;
+    pill.title = `Update available — you're on ${local}, latest is ${remote}. Click to pull.`;
     return;
   }
-  // Suppressed (dev branch / dirty tree / no git). Show the local SHA so
-  // the user can confirm what they're running, with the reason in the tooltip.
-  if (s.suppress_reason) {
+  // Last check errored (offline). Show local label muted; click retries.
+  if (s.error) {
     pill.classList.add('pill-dev');
-    pill.textContent = `⚙ ${short}`;
-    pill.title = `Update check paused: ${s.suppress_reason}. Click for details.`;
+    pill.textContent = local;
+    pill.title = `Couldn't reach github.com (${s.error}). Click to retry.`;
     return;
   }
-  // Last check errored (offline). Show local SHA, neutral colour. We don't
-  // false-positive an "update available" badge when we genuinely don't know.
-  if (s.error && s.local_short) {
-    pill.classList.add('pill-dev');
-    pill.textContent = `⚙ ${short}`;
-    pill.title = `Couldn't reach github.com — showing last known local version. Click for details.`;
-    return;
-  }
-  // Current with origin/main — we have a successful poll AND behind == 0.
-  if (s.checked_ts && (s.behind_by | 0) === 0 && s.local_short) {
+  // Current with origin/main — successful poll, behind == 0.
+  if (s.checked_ts && (s.behind_by | 0) === 0) {
     pill.classList.add('pill-current');
-    pill.textContent = `✓ ${short}`;
-    pill.title = `You're on the latest commit (${short}). Click for details.`;
+    pill.textContent = local;
+    pill.title = `You're on ${local}. Click to check for updates now.`;
     return;
   }
-  // First poll hasn't landed yet — quiet placeholder.
+  // First poll hasn't landed yet.
   pill.classList.add('pill-checking');
-  pill.textContent = s.local_short ? `· ${short}` : 'phosphene · …';
-  pill.title = `Checking for updates…`;
+  pill.textContent = local;
+  pill.title = 'Checking for updates…';
 }
 
-function _humanRelativeTime(epochSec) {
-  if (!epochSec) return '';
-  const delta = Math.max(1, Math.round(Date.now()/1000 - epochSec));
-  if (delta < 60) return `${delta}s ago`;
-  if (delta < 3600) return `${Math.round(delta/60)} min ago`;
-  if (delta < 86400) return `${Math.round(delta/3600)} h ago`;
-  return `${Math.round(delta/86400)} days ago`;
-}
-
-function openVersionModal() {
-  const modal = document.getElementById('versionModal');
-  modal.style.display = 'flex';
-  renderVersionModal();
-  // Re-fetch on open so the user sees fresh data even if the 5-min poll
-  // hasn't come around yet. /version itself is just a dict read; the
-  // 30-min remote-check cadence is independent.
-  refreshVersionPill().then(renderVersionModal);
-}
-
-function closeVersionModal() {
-  document.getElementById('versionModal').style.display = 'none';
-}
-
-function renderVersionModal() {
+// One click — does the right thing for the current state. Magic button.
+async function versionPillClick() {
+  if (_versionRestartPending) {
+    // Educational click: tell the user what's needed.
+    const s = _versionState || {};
+    const tip = s.pull_requires_full_update
+      ? "Pulled. Because this update touched Python deps / patches, use Pinokio's Update button (it reinstalls + reapplies patches). After that click Start."
+      : "Pulled. Click Stop, then Start in Pinokio to apply (your queue and settings are preserved).";
+    alert(tip);
+    return;
+  }
   const s = _versionState || {};
-  const hint = document.getElementById('versionModalHint');
-  const list = document.getElementById('versionCommitsList');
-  const stepsBox = document.getElementById('versionModalUpdateSteps');
-  const lastChecked = document.getElementById('versionLastCheckedHint');
-  const title = document.getElementById('versionModalTitle');
-  if (!hint || !list) return;
-
-  const local = s.local_short ? `<code>${escapeHtml(s.local_short)}</code>` : '<em>unknown</em>';
-  const remote = s.remote_short ? `<code>${escapeHtml(s.remote_short)}</code>` : '<em>unknown</em>';
-  const branch = s.local_branch ? escapeHtml(s.local_branch) : '?';
-
-  // State-aware modal title — "Update available" only when actually behind.
-  // Other states get a less alarming heading so opening the modal in normal
-  // conditions doesn't feel scary.
-  let titleText = 'Phosphene version';
-  if (s.checked_ts && !s.suppress_reason && !s.error && (s.behind_by | 0) > 0) {
-    const n = s.behind_by | 0;
-    titleText = `Update available · ${s.behind_more_than ? n + '+' : n} new commit${n === 1 ? '' : 's'}`;
-  } else if (s.checked_ts && !s.error && (s.behind_by | 0) === 0) {
-    titleText = 'You\'re on the latest version';
-  }
-  if (title) title.textContent = titleText;
-
-  // Status line
   if (s.suppress_reason) {
-    hint.innerHTML =
-      `Update check is paused: <strong>${escapeHtml(s.suppress_reason)}</strong>. ` +
-      `Local install: ${local} on branch <code>${branch}</code>.`;
-    stepsBox.style.display = 'none';
-    list.innerHTML = '';
-  } else if (s.error) {
-    hint.innerHTML =
-      `Couldn't reach github.com to check for updates (${escapeHtml(s.error)}). ` +
-      `Local install: ${local}. Try the button below once you're online.`;
-    stepsBox.style.display = 'none';
-    list.innerHTML = '';
-  } else if ((s.behind_by | 0) === 0 && s.checked_ts) {
-    // Reward state — make it clear and reassuring rather than empty.
-    hint.innerHTML =
-      `<span style="color:var(--success,#8ec07c)">✓</span> ` +
-      `You're on the latest commit (${local}). ` +
-      `When new commits land on <code>main</code>, this pill turns amber and pulses — ` +
-      `you'll know without having to look.`;
-    stepsBox.style.display = 'none';
-    list.innerHTML = '';
-  } else if (!s.checked_ts) {
-    // First poll hasn't completed yet (or panel just started).
-    hint.innerHTML =
-      `Checking github.com for updates… Local install: ${local}.`;
-    stepsBox.style.display = 'none';
-    list.innerHTML = '';
-  } else {
-    const n = s.behind_by | 0;
-    const more = !!s.behind_more_than;
-    hint.innerHTML =
-      `You're <strong>${more ? n + '+' : n}</strong> commit${n === 1 ? '' : 's'} ` +
-      `behind <code>main</code>. Local: ${local} → Remote: ${remote}.`;
-    stepsBox.style.display = '';
-    // Render newest commits first.
-    const items = (s.commits_ahead || []).map(c => {
-      const date = c.date ? new Date(c.date).toLocaleString() : '';
-      return `<li class="version-commit">
-        <div class="version-commit-msg">${escapeHtml(c.message || '(no message)')}</div>
-        <div class="version-commit-meta">
-          <code>${escapeHtml(c.short || '')}</code>
-          · ${escapeHtml(c.author || '')}
-          ${date ? '· <span title="commit author date">' + escapeHtml(date) + '</span>' : ''}
-        </div>
-      </li>`;
-    }).join('');
-    list.innerHTML = items || '<li><em>No commit list (rate-limited?). Run Pinokio Update anyway.</em></li>';
+    alert(`Update check is paused: ${s.suppress_reason}.\n\n` +
+          `Phosphene only checks GitHub when you're on a clean main branch. ` +
+          `Commit your local changes (or switch back to main) to re-enable updates.`);
+    return;
   }
-  // Last-checked hint always shown if we have any timestamp.
-  if (s.checked_ts) {
-    lastChecked.textContent = `Last checked ${_humanRelativeTime(s.checked_ts)}`;
-  } else {
-    lastChecked.textContent = '';
+  // Behind: pull the update.
+  if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
+    await versionDoPull();
+    return;
   }
+  // Current OR error OR pre-first-poll: re-check now.
+  await versionDoRefresh();
 }
 
-async function versionCheckNow() {
-  const btn = event && event.target;
-  const orig = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+async function versionDoRefresh() {
+  const pill = document.getElementById('versionPill');
+  pill.classList.add('pill-busy');
+  const origText = pill.textContent;
+  pill.textContent = '⟳ checking…';
   try {
     const r = await fetch('/version/check', { method: 'POST' });
     const data = await r.json();
     if (data && data.state) _versionState = data.state;
-  } catch (e) { /* swallow — modal still re-renders from prior state */ }
-  if (btn) { btn.disabled = false; btn.textContent = orig; }
+  } catch (e) {
+    // Leave _versionState as-is so the pill returns to the prior render
+    // instead of flashing to "unknown".
+  }
+  pill.classList.remove('pill-busy');
   renderVersionPill();
-  renderVersionModal();
+}
+
+async function versionDoPull() {
+  const s = _versionState || {};
+  const target = _versionRemoteLabel(s);
+  const local = _versionDisplayLabel(s);
+  const ok = confirm(
+    `Pull update from ${local} → ${target}?\n\n` +
+    `This runs git pull on your phosphene install. After it succeeds, ` +
+    `you'll need to click Stop, then Start in Pinokio to load the new code. ` +
+    `Your queue and settings are preserved across restarts.`
+  );
+  if (!ok) return;
+  const pill = document.getElementById('versionPill');
+  pill.classList.add('pill-busy');
+  pill.textContent = '⟳ pulling…';
+  try {
+    const r = await fetch('/version/pull', { method: 'POST' });
+    const data = await r.json();
+    if (data && data.state) _versionState = data.state;
+    if (!r.ok || !data.ok) {
+      pill.classList.remove('pill-busy');
+      renderVersionPill();
+      alert(`Pull failed:\n\n${(data && data.error) || 'unknown error'}\n\n` +
+            `Tip: try the full Pinokio Update button instead — it also handles ` +
+            `cases where you have local changes that block a fast-forward.`);
+      return;
+    }
+    _versionRestartPending = true;
+    pill.classList.remove('pill-busy');
+    renderVersionPill();
+    const newVersion = (data.state && (data.state.pull_pulled_to_version || data.state.pull_pulled_to_short)) || 'new version';
+    const fullUpdateNote = data.state && data.state.pull_requires_full_update
+      ? `\n\n⚠ This update touched Python dependencies / patches. Use ` +
+        `Pinokio's Update button (not just Stop+Start) so deps reinstall.`
+      : '';
+    alert(`Pulled to ${newVersion}.\n\nClick Stop, then Start in Pinokio to apply.${fullUpdateNote}`);
+  } catch (e) {
+    pill.classList.remove('pill-busy');
+    renderVersionPill();
+    alert(`Pull failed: ${e.message || e}`);
+  }
 }
 
 // Boot: first /version read happens 2 seconds after DOM ready (gives the
