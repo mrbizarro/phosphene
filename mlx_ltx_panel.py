@@ -5215,6 +5215,14 @@ HTML = r"""<!doctype html>
       font-size: 12px; padding: 5px 9px;
     }
     .token-row .token-row-input button { flex-shrink: 0; }
+    /* The primary action on each token row. Sized small to fit inline,
+       but visually weighted as the main button so users naturally click
+       it instead of leaving the modal without saving. */
+    .token-row .token-savetest {
+      padding: 5px 11px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
 
     .settings-foot {
       display: flex; gap: 10px; justify-content: flex-end;
@@ -5883,8 +5891,8 @@ HTML = r"""<!doctype html>
                  oninput="onTokenInput('civitai')">
           <button type="button" class="ghost-btn" id="civitaiKeyToggle"
                   onclick="toggleTokenVisibility('civitaiKeyInput', this)">show</button>
-          <button type="button" class="ghost-btn"
-                  onclick="testToken('civitai')">test</button>
+          <button type="button" class="primary-btn token-savetest"
+                  onclick="testToken('civitai')" title="Save the pasted key and verify it with CivitAI">save & test</button>
           <button type="button" class="ghost-btn" id="civitaiKeyClear"
                   onclick="clearToken('civitai')" style="display:none">clear</button>
         </div>
@@ -5907,8 +5915,8 @@ HTML = r"""<!doctype html>
                  oninput="onTokenInput('hf')">
           <button type="button" class="ghost-btn" id="hfTokenToggle"
                   onclick="toggleTokenVisibility('hfTokenInput', this)">show</button>
-          <button type="button" class="ghost-btn"
-                  onclick="testToken('hf')">test</button>
+          <button type="button" class="primary-btn token-savetest"
+                  onclick="testToken('hf')" title="Save the pasted token and verify it with Hugging Face">save & test</button>
           <button type="button" class="ghost-btn" id="hfTokenClear"
                   onclick="clearToken('hf')" style="display:none">clear</button>
         </div>
@@ -7703,8 +7711,19 @@ async function openSettingsModal() {
   // to change.
   setTokenStatus('civitaiKey', cur.has_civitai_key);
   setTokenStatus('hfToken', cur.has_hf_token);
-  document.getElementById('civitaiKeyInput').value = '';
-  document.getElementById('hfTokenInput').value = '';
+  // Placeholders reflect the saved state so an empty input doesn't read
+  // as "no token here" when there is one. The asterisks make it clear
+  // something's persisted; the hint reminds users they paste to replace.
+  const civInput = document.getElementById('civitaiKeyInput');
+  const hfInput = document.getElementById('hfTokenInput');
+  civInput.value = '';
+  hfInput.value = '';
+  civInput.placeholder = cur.has_civitai_key
+    ? '•••••••••• saved — paste new to replace'
+    : '32-char API key';
+  hfInput.placeholder = cur.has_hf_token
+    ? '•••••••••• saved — paste new to replace'
+    : 'hf_…';
   document.getElementById('civitaiKeyClear').style.display = cur.has_civitai_key ? '' : 'none';
   document.getElementById('hfTokenClear').style.display = cur.has_hf_token ? '' : 'none';
 }
@@ -7742,17 +7761,61 @@ function toggleTokenVisibility(inputId, btn) {
   }
 }
 
-// Hits /civitai/test or /hf/test which makes an auth-required upstream
-// request with the saved key. Lets the user verify their token works
-// without paying for a 300 MB download to find out it doesn't.
+// Save-then-test in one click. The /civitai/test and /hf/test endpoints
+// use the saved key, not the current input field. Pre-Y1.023 the user
+// had to: paste → click Apply → click Test. That left a footgun: users
+// pasted, clicked Test, saw it fail (because nothing was saved yet),
+// closed the modal thinking the panel was broken. The token never
+// landed in panel_settings.json, gated downloads kept failing.
+//
+// Now Test does Save first when the input has a value, so a single
+// click works. If the save fails (validator rejects malformed token),
+// we surface the error inline next to the field instead of just at
+// the bottom of the modal.
 async function testToken(which) {
   const path = which === 'civitai' ? '/civitai/test' : '/hf/test';
   const resultId = which === 'civitai' ? 'civitaiTestResult' : 'hfTestResult';
+  const inputId = which === 'civitai' ? 'civitaiKeyInput' : 'hfTokenInput';
+  const fieldName = which === 'civitai' ? 'civitai_api_key' : 'hf_token';
+  const statusPrefix = which === 'civitai' ? 'civitaiKey' : 'hfToken';
+  const clearBtnId = which === 'civitai' ? 'civitaiKeyClear' : 'hfTokenClear';
   const result = document.getElementById(resultId);
   if (!result) return;
-  const original = result.innerHTML;
   result.textContent = 'Testing…';
   result.style.color = 'var(--muted)';
+
+  // If the input has content, save it first. Empty input means "test
+  // the already-saved token" — the legitimate use after the panel is
+  // configured.
+  const inputEl = document.getElementById(inputId);
+  const inputValue = inputEl ? inputEl.value.trim() : '';
+  if (inputValue) {
+    try {
+      const fd = new URLSearchParams();
+      fd.set(fieldName, inputValue);
+      const saveResp = await fetch('/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: fd,
+      });
+      const saveData = await saveResp.json();
+      if (!saveResp.ok || saveData.error) {
+        result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> ${escapeHtml(saveData.error || `HTTP ${saveResp.status}`)}`;
+        return;
+      }
+      // Save succeeded — reflect the persisted state in the UI.
+      inputEl.value = '';
+      _settingsCache = { ...(_settingsCache || {}), settings: saveData.settings };
+      setTokenStatus(statusPrefix, true);
+      const clearBtn = document.getElementById(clearBtnId);
+      if (clearBtn) clearBtn.style.display = '';
+    } catch (e) {
+      result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> Save failed: ${escapeHtml(e.message || String(e))}`;
+      return;
+    }
+  }
+
+  // Now hit the test endpoint, which reads the freshly-saved token.
   try {
     const r = await fetch(path);
     const data = await r.json();
