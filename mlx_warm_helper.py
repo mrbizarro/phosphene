@@ -32,6 +32,7 @@ MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
 GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
 IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
+MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
 _real_stdout = sys.stdout
 _emit_lock = threading.Lock()
@@ -500,8 +501,9 @@ def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
 # Optional model-based ×2 upscale that runs on the video latent BEFORE the VAE
 # decode, giving real detail recovery instead of the ffmpeg Lanczos resize that
 # the panel's lightweight export path uses. The model file is a 1 GB
-# safetensors that ships in mlx_models/ltx-2.3-mlx-q8/ (downloaded by
-# install.js, retryable via Pinokio's "Download LTX upscaler" menu item).
+# safetensors under mlx_models/ltx-2.3-mlx-q8/. This path is intentionally
+# disabled in public builds unless LTX_ENABLE_MODEL_UPSCALE=1 because the
+# doubled latent + VAE decode peak can freeze 64 GB Macs under pressure.
 # We hand-roll the loader rather than instantiating the HQ pipeline because
 # we only want the upsampler — not the Q8 dev transformer that costs ~25 GB.
 _UPSCALER_CACHE = None
@@ -961,12 +963,16 @@ for line in sys.__stdin__:
             upscale_method = (p.get("upscale_method") or "lanczos").strip().lower()
             upscale_target = (p.get("upscale") or "off").strip().lower()
             use_model_upscale = (
-                upscale_method == "model"
+                MODEL_UPSCALE_ENABLED
+                and upscale_method == "model"
                 and upscale_target in ("fit_720p", "x2")
                 and upscaler_available()
             )
-            if upscale_method == "model" and upscale_target in ("fit_720p", "x2") and not upscaler_available():
-                emit({"event": "log", "line": "Sharper upscale requested but model weights missing — falling back to Lanczos."})
+            if upscale_method == "model" and upscale_target in ("fit_720p", "x2"):
+                if not MODEL_UPSCALE_ENABLED:
+                    emit({"event": "log", "line": "Sharper upscale is lab-only in this build — falling back to Lanczos."})
+                elif not upscaler_available():
+                    emit({"event": "log", "line": "Sharper upscale requested but model weights missing — falling back to Lanczos."})
 
             if use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})

@@ -74,18 +74,6 @@
         "vocoder.safetensors",
         "spatial_upscaler_x2_v1_1.safetensors"
       ]
-    },
-    {
-      "key": "ltx_upscaler",
-      "kind": "optional",
-      "name": "LTX 2.3 — Spatial upscaler x2",
-      "blurb": "Optional. Official LTX latent x2 upscaler (~1 GB) for model-backed upscale experiments.",
-      "repo_id": "dgrauet/ltx-2.3-mlx-q8",
-      "local_dir": "mlx_models/ltx-2.3-mlx-q8",
-      "size_gb": 1,
-      "files": [
-        "spatial_upscaler_x2_v1_1.safetensors"
-      ]
     }
   ],
 

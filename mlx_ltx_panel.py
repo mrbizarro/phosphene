@@ -85,6 +85,7 @@ QUEUE_FILE = STATE_DIR / "panel_queue.json"
 HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
+MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").strip().lower() in ("1", "true", "yes", "on")
 FPS = 24
 
 # ---- Profile (production vs dev) ---------------------------------------------
@@ -2186,6 +2187,7 @@ class WarmHelper:
             env["LTX_GEMMA"] = str(GEMMA)
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
+            env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
             # Output codec env vars sourced from panel settings. The patched
             # ffmpeg call inside ltx_core_mlx reads these at job time, so
             # they need to be in the helper's env at spawn. When the user
@@ -2510,7 +2512,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
             "upscale": upscale,                     # off / fit_720p / x2
-            "upscale_method": f("upscale_method", "lanczos"),   # lanczos / model
+            "upscale_method": (
+                "model"
+                if MODEL_UPSCALE_ENABLED and f("upscale_method", "lanczos") == "model"
+                else "lanczos"
+            ),   # lanczos / model (model is lab-only; see LTX_ENABLE_MODEL_UPSCALE)
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -3645,7 +3651,6 @@ class Handler(BaseHTTPRequestHandler):
                     ) or ""
                     deps_signals = (
                         "install.js", "update.js", "pinokio.js", "download_q8.js",
-                        "download_upscaler.js",
                         "patch_ltx_codec.py", "required_files.json",
                         "requirements.txt", "pyproject.toml", "setup.py",
                     )
@@ -3900,6 +3905,7 @@ def page() -> str:
         "default_audio": str(AUDIO_DEFAULT),
         "fps": FPS, "model": MODEL_ID,
         "profile": PROFILE,
+        "model_upscale_enabled": MODEL_UPSCALE_ENABLED,
         # Hardware-aware time estimates for the Quality pills. The pill HTML
         # ships with the Comfortable-tier defaults; on boot we rewrite the
         # subtext using the active tier's quality_times. Compact users see
@@ -5732,8 +5738,9 @@ HTML = r"""<!doctype html>
                  = ffmpeg Lanczos resize, no detail recovery, near-instant.
                  Sharp = LTX 2.3 latent upscaler (~1 GB model), invents real
                  detail in latent space before VAE decode, ~30-60s slower.
-                 Sharp is auto-disabled on tiers without enough RAM, and
-                 falls back to Fast at runtime if the model file is missing. -->
+                 Sharp is lab-only behind LTX_ENABLE_MODEL_UPSCALE=1 after a
+                 release-test freeze showed the latent x2 peak can pressure
+                 64 GB Macs too hard. Public builds use Fast by default. -->
             <div class="cz-control" id="upscaleMethodRow" style="display:none;">
               <div class="cz-label">Method
                 <span class="cz-label-hint">how the upscale is done</span>
@@ -6090,6 +6097,7 @@ Third prompt."></textarea>
 const BOOT = __BOOTSTRAP__;
 const ASPECTS = BOOT.aspects;
 const FPS = BOOT.fps;
+const MODEL_UPSCALE_ENABLED = !!BOOT.model_upscale_enabled;
 
 // Apply tier-aware time estimates to the Quality pill subtitles. The HTML
 // ships with the Comfortable-tier (M4 Studio 64 GB) numbers as defaults;
@@ -6208,13 +6216,13 @@ function setUpscale(u) {
   // actually being applied. When toggled to "off", revert method to Fast
   // so a later toggle back to fit_720p starts from the safe default.
   const methodRow = document.getElementById('upscaleMethodRow');
-  if (methodRow) methodRow.style.display = (v === 'off') ? 'none' : '';
-  if (v === 'off') setUpscaleMethod('lanczos');
+  if (methodRow) methodRow.style.display = (v === 'off' || !MODEL_UPSCALE_ENABLED) ? 'none' : '';
+  if (v === 'off' || !MODEL_UPSCALE_ENABLED) setUpscaleMethod('lanczos');
   updateCustomizeSummary();
   updateDerived();
 }
 function setUpscaleMethod(m) {
-  const v = ['lanczos', 'model'].includes(m) ? m : 'lanczos';
+  const v = (MODEL_UPSCALE_ENABLED && m === 'model') ? 'model' : 'lanczos';
   document.getElementById('upscale_method').value = v;
   document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.method === v));
   updateCustomizeSummary();
@@ -7393,7 +7401,7 @@ function updateModelsCard(s) {
     card.style.display = '';
     card.classList.add('state-downloading');
     icon.textContent = '↓';
-    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model', ltx_upscaler: 'LTX spatial upscaler' };
+    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model' };
     title.textContent = `Downloading ${labelByKey[dl.key] || dl.repo_id}`;
     const elapsed = Math.max(0, Math.round((Date.now()/1000) - (dl.started_ts || 0)));
     sub.textContent = `${elapsed}s elapsed · resumable if interrupted`;

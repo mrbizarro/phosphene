@@ -113,10 +113,9 @@ Exported/upscaled files use the same **Output format** setting as native
 renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
 lossless (`yuv444p` / CRF 0).
 
-Install tries to fetch the official LTX 2.3 latent x2 upscaler (~1 GB) as an
-optional asset, and the Models dialog / Pinokio menu can resume it later. The
-current lightweight export path uses ffmpeg so it works even before that model
-is present.
+The public export path uses ffmpeg Lanczos. The experimental LTX latent x2
+upscaler can be enabled for lab testing with `LTX_ENABLE_MODEL_UPSCALE=1`, but
+it is hidden by default because its doubled-latent peak can pressure 64 GB Macs.
 
 Standard T2V/I2V also has an opt-in **Speed** control:
 
