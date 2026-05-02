@@ -2730,6 +2730,8 @@ def run_job_inner(job: dict) -> None:
         "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
         "helper_elapsed_sec": result.get("elapsed_sec"),
     }
+    if result.get("accel_metrics"):
+        sidecar["accel_metrics"] = result["accel_metrics"]
     write_sidecar(final_target.with_suffix(final_target.suffix + ".json"), sidecar)
     job["output_path"] = str(final_target)
     push(f"Done in {sidecar['elapsed_sec']}s → {final_target.name}")
@@ -6800,6 +6802,7 @@ function renderOutputInfoBody(path, data) {
   const seedVal = String(p.seed_used != null ? p.seed_used : p.seed || '');
   const seedAttr = JSON.stringify(seedVal).replace(/"/g, '&quot;');
   const pathAttr = JSON.stringify(path).replace(/"/g, '&quot;');
+  const accelMetrics = (data && data.accel_metrics) || null;
   const modeLabel = ({
     t2v: 'Text → Video',
     i2v: 'Image → Video',
@@ -6832,6 +6835,16 @@ function renderOutputInfoBody(path, data) {
   genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
   if (p.accel && p.accel !== 'off') {
     genRows.push(`<dt>Speed</dt><dd>${escapeHtml(p.accel.replace(/^./, c => c.toUpperCase()))}</dd>`);
+  }
+  if (accelMetrics && p.accel && p.accel !== 'off') {
+    const cachedCount = accelMetrics.cached_steps_count || 0;
+    const totalSteps = accelMetrics.total_steps || p.steps || 0;
+    const savings = accelMetrics.estimated_denoise_call_savings_pct;
+    const cachedList = Array.isArray(accelMetrics.cached_steps) && accelMetrics.cached_steps.length
+      ? ` · cached steps ${escapeHtml(accelMetrics.cached_steps.join(', '))}`
+      : '';
+    const savingsText = savings != null ? ` · ~${escapeHtml(String(savings))}% denoise calls saved` : '';
+    genRows.push(`<dt>Accel metrics</dt><dd>${cachedCount}/${totalSteps} cached${savingsText}${cachedList}</dd>`);
   }
   if (seedVal) {
     genRows.push(`<dt>Seed</dt><dd>

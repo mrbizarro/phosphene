@@ -108,7 +108,10 @@ Standard T2V/I2V also has an opt-in **Speed** control:
 Boost/Turbo are experimental acceleration modes. They keep the same
 prompt, seed, dimensions, and output format, but they are not bit-for-bit
 or visually identical to Exact. They are disabled for High, Extend, and
-FFLF.
+FFLF. The sampler keeps the first two steps and final third of the
+schedule exact, so the cached steps stay in the middle where speed wins
+are least likely to soften hands, faces, and typography. Per-render
+sidecars record the cached/full step counts for debugging and comparison.
 
 ---
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import random
 import sys
@@ -500,6 +501,7 @@ def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
 # per job; "off" restores the upstream sampler exactly.
 _ORIGINAL_DENOISE_LOOP = None
 _CURRENT_ACCEL_MODE = None
+_LAST_ACCEL_STATS = None
 
 
 def _scalar(x) -> float:
@@ -517,7 +519,7 @@ def _relative_mae(mx, current, previous) -> float:
     return _scalar(diff / base)
 
 
-def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: float):
+def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float, audio_thresh: float):
     import mlx.core as mx
     import ltx_pipelines_mlx.utils.samplers as samplers
 
@@ -550,6 +552,26 @@ def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: f
         audio_x = audio_state.latent
         steps = list(zip(sigmas[:-1], sigmas[1:]))
         iterator = samplers.tqdm(steps, desc="Denoising", disable=not show_progress)
+        protected_head = min(2, len(steps))
+        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 3))) if steps else 0
+
+        global _LAST_ACCEL_STATS
+        stats = {
+            "mode": mode_name,
+            "max_skips": max_skips,
+            "video_thresh": video_thresh,
+            "audio_thresh": audio_thresh,
+            "protected_head": protected_head,
+            "protected_tail": protected_tail,
+            "total_steps": len(steps),
+            "steps": [],
+            "cached_steps": [],
+            "full_steps": [],
+            "cached_steps_count": 0,
+            "full_steps_count": 0,
+            "estimated_denoise_call_savings_pct": 0.0,
+        }
+        _LAST_ACCEL_STATS = stats
 
         video_uniform = samplers._is_uniform_mask(video_state.denoise_mask)
         audio_uniform = samplers._is_uniform_mask(audio_state.denoise_mask)
@@ -560,9 +582,14 @@ def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: f
         skip_count = 0
 
         for idx, (sigma, sigma_next) in enumerate(iterator):
+            step_t0 = time.perf_counter()
             sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
             batch = video_x.shape[0]
-            protected = idx <= 1 or idx >= len(steps) - 2
+            # Keep early structure and late detail refinement exact. With the
+            # standard 8-step schedule this protects steps 0, 1 and 5, 6, 7;
+            # Turbo can only cache stable middle steps where artifacts are much
+            # less likely to show up as blurry hands/faces/type.
+            protected = idx < protected_head or idx >= len(steps) - protected_tail
             v_delta = _relative_mae(mx, video_x, last_video_latent)
             a_delta = _relative_mae(mx, audio_x, last_audio_latent)
             can_skip = (
@@ -577,14 +604,7 @@ def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: f
             if can_skip:
                 skip_count += 1
                 video_x0, audio_x0 = last_video_x0, last_audio_x0
-                emit({
-                    "event": "log",
-                    "line": (
-                        "accel:adaptive_x0 "
-                        f"step={idx} decision=cached "
-                        f"v_delta={v_delta:.5f} a_delta={a_delta:.5f} skips={skip_count}"
-                    ),
-                })
+                decision = "cached"
             else:
                 call_kwargs = dict(
                     video_latent=video_x,
@@ -609,21 +629,46 @@ def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: f
                     )
                 video_x0, audio_x0 = model(**call_kwargs)
                 last_video_x0, last_audio_x0 = video_x0, audio_x0
+                # Use only full-model steps as the comparison anchor. Updating
+                # this on cached steps would make back-to-back skips too easy.
                 last_video_latent, last_audio_latent = video_x, audio_x
-                emit({
-                    "event": "log",
-                    "line": (
-                        "accel:adaptive_x0 "
-                        f"step={idx} decision=full "
-                        f"v_delta={v_delta:.5f} a_delta={a_delta:.5f} skips={skip_count}"
-                    ),
-                })
+                decision = "full"
 
             video_x0 = samplers.apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
             audio_x0 = samplers.apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
             video_x = samplers.euler_step(video_x, video_x0, sigma, sigma_next)
             audio_x = samplers.euler_step(audio_x, audio_x0, sigma, sigma_next)
             mx.async_eval(video_x, audio_x)
+            step_sec = round(time.perf_counter() - step_t0, 3)
+            step_stats = {
+                "step": idx,
+                "decision": decision,
+                "protected": protected,
+                "v_delta": round(v_delta, 6),
+                "a_delta": round(a_delta, 6),
+                "wall_sec": step_sec,
+            }
+            stats["steps"].append(step_stats)
+            if decision == "cached":
+                stats["cached_steps"].append(idx)
+            else:
+                stats["full_steps"].append(idx)
+            stats["cached_steps_count"] = len(stats["cached_steps"])
+            stats["full_steps_count"] = len(stats["full_steps"])
+            stats["estimated_denoise_call_savings_pct"] = (
+                round(100.0 * stats["cached_steps_count"] / len(steps), 1)
+                if steps else 0.0
+            )
+            emit({
+                "event": "log",
+                "line": (
+                    "accel:adaptive_x0 "
+                    f"step={idx} decision={decision} "
+                    f"protected={int(protected)} "
+                    f"v_delta={v_delta:.5f} a_delta={a_delta:.5f} "
+                    f"skips={skip_count}/{max_skips} wall={step_sec:.2f}s"
+                ),
+            })
 
         samplers.aggressive_cleanup()
         return samplers.DenoiseOutput(video_latent=video_x, audio_latent=audio_x)
@@ -638,7 +683,7 @@ def configure_acceleration(mode: str) -> str:
     boost: skip at most 2 stable middle X0Model calls.
     turbo: skip at most 3 stable middle X0Model calls.
     """
-    global _ORIGINAL_DENOISE_LOOP, _CURRENT_ACCEL_MODE
+    global _ORIGINAL_DENOISE_LOOP, _CURRENT_ACCEL_MODE, _LAST_ACCEL_STATS
 
     requested = (mode or "off").strip().lower()
     if requested not in {"off", "boost", "turbo"}:
@@ -651,17 +696,20 @@ def configure_acceleration(mode: str) -> str:
         _ORIGINAL_DENOISE_LOOP = samplers.denoise_loop
 
     if requested == _CURRENT_ACCEL_MODE:
+        if requested != "off":
+            _LAST_ACCEL_STATS = None
         return requested
 
+    _LAST_ACCEL_STATS = None
     if requested == "off":
         samplers.denoise_loop = _ORIGINAL_DENOISE_LOOP
         ti2vid.denoise_loop = _ORIGINAL_DENOISE_LOOP
     elif requested == "boost":
-        loop = _build_adaptive_x0_loop(max_skips=2, video_thresh=0.02, audio_thresh=0.02)
+        loop = _build_adaptive_x0_loop("boost", max_skips=2, video_thresh=0.02, audio_thresh=0.02)
         samplers.denoise_loop = loop
         ti2vid.denoise_loop = loop
     else:
-        loop = _build_adaptive_x0_loop(max_skips=3, video_thresh=0.03, audio_thresh=0.03)
+        loop = _build_adaptive_x0_loop("turbo", max_skips=3, video_thresh=0.03, audio_thresh=0.03)
         samplers.denoise_loop = loop
         ti2vid.denoise_loop = loop
 
@@ -773,11 +821,14 @@ for line in sys.__stdin__:
             emit({"event": "log", "line": "step:generate_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
-            emit({
+            done_event = {
                 "event": "done", "id": job_id,
                 "output": str(out_path), "elapsed_sec": elapsed,
                 "seed_used": seed,
-            })
+            }
+            if accel_mode != "off" and _LAST_ACCEL_STATS:
+                done_event["accel_metrics"] = _LAST_ACCEL_STATS
+            emit(done_event)
         except Exception as exc:
             _last_activity = time.time()
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
