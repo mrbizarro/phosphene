@@ -85,8 +85,16 @@ QUEUE_FILE = STATE_DIR / "panel_queue.json"
 HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
-MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").strip().lower() in ("1", "true", "yes", "on")
 FPS = 24
+
+
+def _optional_bool_env(name: str) -> bool | None:
+    v = os.environ.get(name, "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
 
 # ---- Profile (production vs dev) ---------------------------------------------
 # Y1.015: support running a local "dev" Pinokio panel side-by-side with the
@@ -111,6 +119,11 @@ def _detect_profile() -> str:
 
 
 PROFILE = _detect_profile()
+# Sharp/LTX latent upscale is a dev-lab experiment. Production stays on the
+# safe ffmpeg Lanczos export path unless explicitly opted in; dev exposes it
+# by default so we can test the memory spike honestly before public release.
+_MODEL_UPSCALE_FLAG = _optional_bool_env("LTX_ENABLE_MODEL_UPSCALE")
+MODEL_UPSCALE_ENABLED = (PROFILE == "dev") if _MODEL_UPSCALE_FLAG is None else _MODEL_UPSCALE_FLAG
 # Default port: 8198 production, 8199 dev — so both panels can run side by
 # side. LTX_PORT env var still overrides if the user wants something else.
 DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198
@@ -2516,7 +2529,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "model"
                 if MODEL_UPSCALE_ENABLED and f("upscale_method", "lanczos") == "model"
                 else "lanczos"
-            ),   # lanczos / model (model is lab-only; see LTX_ENABLE_MODEL_UPSCALE)
+            ),   # lanczos / model (model is dev/lab-only; see LTX_ENABLE_MODEL_UPSCALE)
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2858,9 +2871,9 @@ def run_job_inner(job: dict) -> None:
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
                 "accel": p.get("accel", "off"),
-                # Public builds force this to Lanczos in make_job(); lab
-                # builds with LTX_ENABLE_MODEL_UPSCALE=1 pass "model" so the
-                # helper can run the experimental latent x2 upscaler.
+                # Public builds force this to Lanczos in make_job(); dev/lab
+                # builds pass "model" so the helper can run the experimental
+                # latent x2 upscaler.
                 "upscale": p.get("upscale", "off"),
                 "upscale_method": p.get("upscale_method", "lanczos"),
             },
@@ -5743,9 +5756,10 @@ HTML = r"""<!doctype html>
                  = ffmpeg Lanczos resize, no detail recovery, near-instant.
                  Sharp = LTX 2.3 latent upscaler (~1 GB model), invents real
                  detail in latent space before VAE decode, ~30-60s slower.
-                 Sharp is lab-only behind LTX_ENABLE_MODEL_UPSCALE=1 after a
-                 release-test freeze showed the latent x2 peak can pressure
-                 64 GB Macs too hard. Public builds use Fast by default. -->
+                 Sharp is enabled in dev/lab only after a release-test freeze
+                 showed the latent x2 peak can pressure 64 GB Macs too hard.
+                 Public builds use Fast by default unless opted in with
+                 LTX_ENABLE_MODEL_UPSCALE=1. -->
             <div class="cz-control" id="upscaleMethodRow" style="display:none;">
               <div class="cz-label">Method
                 <span class="cz-label-hint">how the upscale is done</span>
