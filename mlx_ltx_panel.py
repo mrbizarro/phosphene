@@ -1705,15 +1705,27 @@ CAPABILITIES: dict[str, dict] = {
             "an existing clip) need more memory than this Mac has, so "
             "they're turned off."
         ),
-        # Per-mode time estimates for a typical 5s render (121 frames @ 24fps).
-        # Times are wall-clock on the typical hardware at this tier.
+        # Per-mode time estimates for a typical 5 s render (121 frames @ 24 fps),
+        # measured at Exact (no Boost/Turbo). The Comfortable tier is the
+        # measured baseline (M4 Studio 64 GB); other tiers are scaled relative
+        # to it using crude but defensible multipliers calibrated against
+        # community reports (Compact ≈ 1.6× slower from swap pressure; Roomy ≈
+        # 0.8× from headroom; Studio M-Ultra ≈ 0.55× from extra GPU cores).
+        # The `quality_times` block is what the Quality pills show; the legacy
+        # `times` block is what the Tier modal already uses.
         "times": {
-            "t2v_draft":     "about 2 min",
-            "t2v_standard":  "about 5 min",
-            "i2v_standard":  "about 5 min",
+            "t2v_draft":     "about 3 min",
+            "t2v_standard":  "about 12 min",
+            "i2v_standard":  "about 12 min",
             "high":          None,  # disabled
             "keyframe":      None,  # disabled
             "extend":        None,  # disabled
+        },
+        "quality_times": {
+            "quick":    "~3 min",
+            "balanced": "~8 min",
+            "standard": "~12 min",
+            "high":     None,    # Q8 disabled at this tier
         },
     },
     "standard": {
@@ -1746,6 +1758,12 @@ CAPABILITIES: dict[str, dict] = {
             "keyframe":      "about 5 min (at 768 px)",
             "extend":        "about 11 min (at 768 px)",
         },
+        "quality_times": {
+            "quick":    "~2 min",
+            "balanced": "~5 min",
+            "standard": "~7 min",
+            "high":     "~12 min",
+        },
     },
     "high": {
         # 80–119 GB.
@@ -1774,6 +1792,12 @@ CAPABILITIES: dict[str, dict] = {
             "keyframe":      "about 6 min (at 1024 px)",
             "extend":        "about 9 min (at 1024 px)",
         },
+        "quality_times": {
+            "quick":    "~1 min",
+            "balanced": "~3 min",
+            "standard": "~4 min",
+            "high":     "~7 min",
+        },
     },
     "pro": {
         # 128+ GB. M-Ultra Mac Studio 192/256 GB.
@@ -1800,6 +1824,12 @@ CAPABILITIES: dict[str, dict] = {
             "high":          "about 4 min",
             "keyframe":      "about 3 min (full size)",
             "extend":        "about 5 min (full size)",
+        },
+        "quality_times": {
+            "quick":    "<1 min",
+            "balanced": "~2 min",
+            "standard": "~3 min",
+            "high":     "~4 min",
         },
     },
 }
@@ -3763,6 +3793,15 @@ def page() -> str:
         "default_audio": str(AUDIO_DEFAULT),
         "fps": FPS, "model": MODEL_ID,
         "profile": PROFILE,
+        # Hardware-aware time estimates for the Quality pills. The pill HTML
+        # ships with the Comfortable-tier defaults; on boot we rewrite the
+        # subtext using the active tier's quality_times. Compact users see
+        # honest "~12 min" instead of the M-Studio's "~7 min" optimism.
+        "tier": {
+            "key": SYSTEM_TIER,
+            "label": SYSTEM_CAPS["label"],
+        },
+        "quality_times": SYSTEM_CAPS.get("quality_times", {}),
     })
     # Profile badge — only visible in the dev panel. Lets Salo tell at a
     # glance which install he's looking at when both panels are open.
@@ -5918,6 +5957,28 @@ Third prompt."></textarea>
 const BOOT = __BOOTSTRAP__;
 const ASPECTS = BOOT.aspects;
 const FPS = BOOT.fps;
+
+// Apply tier-aware time estimates to the Quality pill subtitles. The HTML
+// ships with the Comfortable-tier (M4 Studio 64 GB) numbers as defaults;
+// users on Compact / Roomy / Studio tiers see realistic estimates instead
+// of the optimistic baseline. Runs once on boot, plus when the tier modal
+// reports new info (rare — tier is fixed for a given Mac).
+function applyTierTimes() {
+  const qt = (BOOT.quality_times || {});
+  document.querySelectorAll('#qualityGroup .pill-quality').forEach(btn => {
+    const key = btn.dataset.quality;
+    const time = qt[key];
+    const spec = btn.querySelector('.ql-spec');
+    if (!spec) return;
+    const dimsMatch = spec.textContent.match(/^([0-9]+×[0-9]+(\s+→\s+[0-9p]+)?)/);
+    const dims = dimsMatch ? dimsMatch[1] : '';
+    if (time && dims) {
+      spec.textContent = `${dims} · ${time}`;
+    } else if (time) {
+      spec.textContent = time;
+    }
+  });
+}
 
 let filterMode = 'visible';
 let activePath = null;
@@ -8561,6 +8622,7 @@ poll();
 setMode('t2v');
 setAspect('landscape');         // sets aspect first so the default preset orients correctly
 setQuality('balanced');         // bundles quality + dims; respects current aspect
+applyTierTimes();               // rewrite Quality pill subtitles to match this Mac
 updateCustomizeSummary();
 updateDerived();
 
