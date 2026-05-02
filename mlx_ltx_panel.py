@@ -2858,6 +2858,11 @@ def run_job_inner(job: dict) -> None:
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
                 "accel": p.get("accel", "off"),
+                # Public builds force this to Lanczos in make_job(); lab
+                # builds with LTX_ENABLE_MODEL_UPSCALE=1 pass "model" so the
+                # helper can run the experimental latent x2 upscaler.
+                "upscale": p.get("upscale", "off"),
+                "upscale_method": p.get("upscale_method", "lanczos"),
             },
         }
         if loras:
