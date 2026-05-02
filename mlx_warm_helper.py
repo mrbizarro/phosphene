@@ -493,6 +493,183 @@ def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
     return out_path
 
 
+# ---- one-stage acceleration --------------------------------------------------
+# Experimental but useful: standard Q4 T2V/I2V spends most wall time inside the
+# denoise loop's X0Model call. The "boost" and "turbo" modes below reuse the
+# previous x0 prediction for 2 or 3 locally-stable middle steps. This is opt-in
+# per job; "off" restores the upstream sampler exactly.
+_ORIGINAL_DENOISE_LOOP = None
+_CURRENT_ACCEL_MODE = None
+
+
+def _scalar(x) -> float:
+    import mlx.core as mx
+
+    mx.eval(x)
+    return float(x)
+
+
+def _relative_mae(mx, current, previous) -> float:
+    if current is None or previous is None:
+        return 999.0
+    diff = mx.mean(mx.abs(current - previous))
+    base = mx.maximum(mx.mean(mx.abs(previous)), 1e-6)
+    return _scalar(diff / base)
+
+
+def _build_adaptive_x0_loop(max_skips: int, video_thresh: float, audio_thresh: float):
+    import mlx.core as mx
+    import ltx_pipelines_mlx.utils.samplers as samplers
+
+    def denoise_loop_adaptive_x0(
+        model,
+        video_state,
+        audio_state,
+        video_text_embeds,
+        audio_text_embeds,
+        sigmas=None,
+        video_positions=None,
+        audio_positions=None,
+        video_attention_mask=None,
+        audio_attention_mask=None,
+        show_progress=True,
+    ):
+        if sigmas is None:
+            sigmas = samplers.DISTILLED_SIGMAS
+
+        if video_positions is None and video_state.positions is not None:
+            video_positions = video_state.positions
+        if audio_positions is None and audio_state.positions is not None:
+            audio_positions = audio_state.positions
+        if video_attention_mask is None and video_state.attention_mask is not None:
+            video_attention_mask = video_state.attention_mask
+        if audio_attention_mask is None and audio_state.attention_mask is not None:
+            audio_attention_mask = audio_state.attention_mask
+
+        video_x = video_state.latent
+        audio_x = audio_state.latent
+        steps = list(zip(sigmas[:-1], sigmas[1:]))
+        iterator = samplers.tqdm(steps, desc="Denoising", disable=not show_progress)
+
+        video_uniform = samplers._is_uniform_mask(video_state.denoise_mask)
+        audio_uniform = samplers._is_uniform_mask(audio_state.denoise_mask)
+        last_video_latent = None
+        last_audio_latent = None
+        last_video_x0 = None
+        last_audio_x0 = None
+        skip_count = 0
+
+        for idx, (sigma, sigma_next) in enumerate(iterator):
+            sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
+            batch = video_x.shape[0]
+            protected = idx <= 1 or idx >= len(steps) - 2
+            v_delta = _relative_mae(mx, video_x, last_video_latent)
+            a_delta = _relative_mae(mx, audio_x, last_audio_latent)
+            can_skip = (
+                not protected
+                and skip_count < max_skips
+                and last_video_x0 is not None
+                and last_audio_x0 is not None
+                and v_delta <= video_thresh
+                and a_delta <= audio_thresh
+            )
+
+            if can_skip:
+                skip_count += 1
+                video_x0, audio_x0 = last_video_x0, last_audio_x0
+                emit({
+                    "event": "log",
+                    "line": (
+                        "accel:adaptive_x0 "
+                        f"step={idx} decision=cached "
+                        f"v_delta={v_delta:.5f} a_delta={a_delta:.5f} skips={skip_count}"
+                    ),
+                })
+            else:
+                call_kwargs = dict(
+                    video_latent=video_x,
+                    audio_latent=audio_x,
+                    sigma=mx.broadcast_to(sigma_arr, (batch,)),
+                    video_text_embeds=video_text_embeds,
+                    audio_text_embeds=audio_text_embeds,
+                    video_positions=video_positions,
+                    audio_positions=audio_positions,
+                    video_attention_mask=video_attention_mask,
+                    audio_attention_mask=audio_attention_mask,
+                )
+                if not video_uniform:
+                    call_kwargs["video_timesteps"] = samplers._compute_per_token_timesteps(
+                        sigma,
+                        video_state.denoise_mask,
+                    )
+                if not audio_uniform:
+                    call_kwargs["audio_timesteps"] = samplers._compute_per_token_timesteps(
+                        sigma,
+                        audio_state.denoise_mask,
+                    )
+                video_x0, audio_x0 = model(**call_kwargs)
+                last_video_x0, last_audio_x0 = video_x0, audio_x0
+                last_video_latent, last_audio_latent = video_x, audio_x
+                emit({
+                    "event": "log",
+                    "line": (
+                        "accel:adaptive_x0 "
+                        f"step={idx} decision=full "
+                        f"v_delta={v_delta:.5f} a_delta={a_delta:.5f} skips={skip_count}"
+                    ),
+                })
+
+            video_x0 = samplers.apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
+            audio_x0 = samplers.apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
+            video_x = samplers.euler_step(video_x, video_x0, sigma, sigma_next)
+            audio_x = samplers.euler_step(audio_x, audio_x0, sigma, sigma_next)
+            mx.async_eval(video_x, audio_x)
+
+        samplers.aggressive_cleanup()
+        return samplers.DenoiseOutput(video_latent=video_x, audio_latent=audio_x)
+
+    return denoise_loop_adaptive_x0
+
+
+def configure_acceleration(mode: str) -> str:
+    """Configure the one-stage sampler acceleration mode for this helper.
+
+    mode: off | boost | turbo
+    boost: skip at most 2 stable middle X0Model calls.
+    turbo: skip at most 3 stable middle X0Model calls.
+    """
+    global _ORIGINAL_DENOISE_LOOP, _CURRENT_ACCEL_MODE
+
+    requested = (mode or "off").strip().lower()
+    if requested not in {"off", "boost", "turbo"}:
+        requested = "off"
+
+    import ltx_pipelines_mlx.ti2vid_one_stage as ti2vid
+    import ltx_pipelines_mlx.utils.samplers as samplers
+
+    if _ORIGINAL_DENOISE_LOOP is None:
+        _ORIGINAL_DENOISE_LOOP = samplers.denoise_loop
+
+    if requested == _CURRENT_ACCEL_MODE:
+        return requested
+
+    if requested == "off":
+        samplers.denoise_loop = _ORIGINAL_DENOISE_LOOP
+        ti2vid.denoise_loop = _ORIGINAL_DENOISE_LOOP
+    elif requested == "boost":
+        loop = _build_adaptive_x0_loop(max_skips=2, video_thresh=0.02, audio_thresh=0.02)
+        samplers.denoise_loop = loop
+        ti2vid.denoise_loop = loop
+    else:
+        loop = _build_adaptive_x0_loop(max_skips=3, video_thresh=0.03, audio_thresh=0.03)
+        samplers.denoise_loop = loop
+        ti2vid.denoise_loop = loop
+
+    _CURRENT_ACCEL_MODE = requested
+    emit({"event": "log", "line": f"accel:mode {requested}"})
+    return requested
+
+
 # ---- ready -------------------------------------------------------------------
 emit({
     "event": "ready",
@@ -561,6 +738,7 @@ for line in sys.__stdin__:
                       "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')}"})
             pipe = get_pipe("i2v" if needs_image else "t2v", loras=loras)
             emit({"event": "log", "line": "step:get_pipe done"})
+            accel_mode = configure_acceleration(p.get("accel", "off"))
 
             kwargs = dict(
                 prompt=p["prompt"],
@@ -590,7 +768,7 @@ for line in sys.__stdin__:
                 else:
                     kwargs["image"] = None
 
-            emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']}"})
+            emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
             out_path = pipe.generate_and_save(**kwargs)
             emit({"event": "log", "line": "step:generate_and_save done"})
             elapsed = round(time.time() - t0, 2)
@@ -604,6 +782,10 @@ for line in sys.__stdin__:
             _last_activity = time.time()
             emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
         finally:
+            try:
+                configure_acceleration("off")
+            except Exception:
+                pass
             _is_busy = False
         continue
 
@@ -616,6 +798,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            configure_acceleration("off")
             # Extend supports LoRAs via the same _pending_loras hook;
             # the dev transformer picks them up at load time just like T2V/I2V.
             loras = p.get("loras") or []
@@ -674,6 +857,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            configure_acceleration("off")
             pipe = get_hq_pipe(model_dir)
             kwargs = dict(
                 prompt=p["prompt"],
@@ -725,6 +909,7 @@ for line in sys.__stdin__:
         _is_busy = True
         try:
             t0 = time.time()
+            configure_acceleration("off")
             for k in ("start_image", "end_image"):
                 img = p.get(k)
                 if not img or not os.path.exists(img):

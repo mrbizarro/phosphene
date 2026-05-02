@@ -99,6 +99,17 @@ and step count change.
 | **Standard** | Q4 distilled | ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
 | **High** | Q8 two-stage + TeaCache | ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
 
+Standard T2V/I2V also has an opt-in **Speed** control:
+
+- **Exact** is the default full sampler.
+- **Boost** skips up to two stable middle denoise calls.
+- **Turbo** skips up to three stable middle denoise calls.
+
+Boost/Turbo are experimental acceleration modes. They keep the same
+prompt, seed, dimensions, and output format, but they are not bit-for-bit
+or visually identical to Exact. They are disabled for High, Extend, and
+FFLF.
+
 ---
 
 ## Hardware tiers
@@ -317,6 +328,15 @@ Wall-clock times on an **M4 Mac Studio, 64 GB**:
 | High (Q8 two-stage) | 1280×704 | 121 | s1=15 + s2=3 | ~12 min |
 | FFLF (Q8) | 768×416 | 121 | s1=15 + s2=3 | ~5 min |
 
+Experimental Speed smoke test on the same 64 GB machine, I2V Standard,
+768×512, 121 frames, 8 steps:
+
+| Speed | Time | Notes |
+|---|---:|---|
+| Exact | 186 s | Full sampler |
+| Boost | 145 s | 2 cached denoise calls |
+| Turbo | 126 s | 3 cached denoise calls |
+
 M-Max divides by ~3×. M-Ultra by ~6×. Compact tier (< 48 GB) takes
 roughly 2× longer at clamped resolutions because of swap pressure.
 
@@ -376,6 +396,9 @@ output gallery with sidecar params, and the Pinokio install scripts.
   render is the safest single thing a user can do. The panel surfaces
   the exit signal name (SIGKILL / SIGSEGV / SIGABRT) when the helper
   dies non-gracefully so issues are diagnosable.
+- **Boost/Turbo are quality trade-offs.** They are useful for fast
+  iteration, but Exact remains the default and safest choice for final
+  renders, faces, typography, and client work.
 - **Localhost only.** The panel binds to `127.0.0.1` with no auth.
   Not designed for LAN exposure or tunneling.
 - **A2V (audio → video) not yet wired.** Upstream supports it; the

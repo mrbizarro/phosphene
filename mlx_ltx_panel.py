@@ -3930,6 +3930,105 @@ HTML = r"""<!doctype html>
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
 
+    /* Quality pills (Y1.013) — richer than the standard pill-btn so each
+       button can carry: name, dimensions+time, model+tier requirement.
+       Same .pill-btn skeleton; just looser padding and explicit children
+       for the three lines of content. */
+    .quality-row .pill-quality {
+      padding: 12px 8px 10px;
+      gap: 4px;
+      min-height: 76px;
+      justify-content: flex-start;
+    }
+    .pill-quality .ql-name {
+      font-size: 13px; font-weight: 600;
+      color: inherit;            /* picks up muted/active colour from .pill-btn */
+    }
+    .pill-quality .ql-spec {
+      font-size: 10.5px;
+      color: var(--text);
+      opacity: 0.85;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0;
+    }
+    .pill-quality .ql-tier {
+      font-size: 9.5px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .pill-quality.active .ql-name { color: var(--accent-bright); }
+    .pill-quality.active .ql-spec { opacity: 1; }
+    .pill-quality.active .ql-tier { color: var(--accent-bright); opacity: 0.7; }
+
+    /* Customize disclosure inside the form — sub-tier UI, lighter than
+       a top-level <details>. Subtle border, indented body, distinct
+       chevron so it doesn't compete with the LoRAs section header. */
+    .customize-section {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.012);
+      overflow: hidden;
+    }
+    .customize-section > summary { list-style: none; cursor: pointer; }
+    .customize-section > summary::-webkit-details-marker { display: none; }
+    .cz-summary {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      user-select: none;
+      transition: background 100ms;
+    }
+    .cz-summary:hover { background: rgba(255,255,255,0.02); color: var(--text); }
+    .customize-section[open] .cz-summary { color: var(--text); }
+    .cz-summary .cz-chevron {
+      display: inline-block; width: 12px;
+      font-size: 10px;
+      transform: rotate(-90deg);
+      transition: transform 140ms ease;
+      color: var(--muted);
+    }
+    .customize-section[open] .cz-summary .cz-chevron {
+      transform: rotate(0deg);
+      color: var(--accent-bright, #58a6ff);
+    }
+    .cz-summary .cz-title {
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0;
+    }
+    .cz-summary .cz-meta {
+      margin-left: auto;
+      font-size: 11px; font-weight: 400;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .cz-body {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .cz-control { display: block; }
+    .cz-label {
+      font-size: 11px; font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .cz-label .cz-label-hint {
+      font-weight: 400;
+      letter-spacing: 0;
+      text-transform: none;
+      font-size: 10.5px;
+      color: var(--muted);
+      opacity: 0.85;
+    }
+    .cz-control .row { gap: 8px; }
+
     /* Mode-specific blocks (image/audio/extend sections) */
     .mode-only { display: none; }
     .mode-only.show { display: block; }
@@ -4969,20 +5068,32 @@ HTML = r"""<!doctype html>
       </div>
       <input type="hidden" name="mode" id="mode" value="t2v">
 
+      <!-- Quality picker (Y1.013): one decision instead of four. Each
+           button bundles dimensions + model + step count + tier
+           recommendation, with the actual specs visible on the pill so
+           power users can read what they're getting. Aspect, custom
+           W/H, and the experimental Speed setting moved into the
+           Customize disclosure below. Beginners pick a button; power
+           users open Customize. -->
       <h2>Quality</h2>
-      <div class="pill-group cols-3" id="qualityGroup">
-        <button type="button" class="pill-btn" data-quality="draft"><span>Draft</span><span class="sub">half size · ~2 min</span></button>
-        <button type="button" class="pill-btn active" data-quality="standard"><span>Standard</span><span class="sub">full size · ~7 min</span></button>
-        <button type="button" class="pill-btn disabled" data-quality="high" id="qualityHigh"><span>High</span><span class="sub" id="highSub">Q8 not installed</span></button>
+      <div class="pill-group cols-3 quality-row" id="qualityGroup">
+        <button type="button" class="pill-btn pill-quality" data-quality="quick">
+          <span class="ql-name">Quick</span>
+          <span class="sub ql-spec">640×480 · ~2 min</span>
+          <span class="ql-tier">Q4 · any Mac</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality active" data-quality="standard">
+          <span class="ql-name">Standard</span>
+          <span class="sub ql-spec">1280×704 · ~7 min</span>
+          <span class="ql-tier">Q4 · standard tier+</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
+          <span class="ql-name">High</span>
+          <span class="sub ql-spec" id="highSpec">1280×704 · ~12 min</span>
+          <span class="ql-tier" id="highSub">Q8 not installed</span>
+        </button>
       </div>
       <input type="hidden" name="quality" id="quality" value="standard">
-
-      <h2>Speed</h2>
-      <div class="pill-group cols-3" id="accelGroup">
-        <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
-        <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">faster · conservative</span></button>
-        <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">fastest · experimental</span></button>
-      </div>
       <input type="hidden" name="accel" id="accel" value="off">
 
       <div id="warnBanner" class="warn-banner"></div>
@@ -5216,22 +5327,56 @@ HTML = r"""<!doctype html>
         </label>
       </details>
 
-      <!-- Sizing for non-extend modes -->
+      <!-- Sizing for non-extend modes. The headline Quality picker above
+           sets sensible defaults; this disclosure lets power users override
+           aspect, exact dimensions, and the experimental sampler speed. -->
       <div class="mode-only" id="sizingSection">
-        <h2>Aspect</h2>
-        <div class="pill-group cols-2" id="aspectGroup">
-          <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">horizontal</span></button>
-          <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">vertical</span></button>
-        </div>
-        <input type="hidden" id="aspect" value="landscape">
+        <details id="customizeDetails" class="customize-section">
+          <summary class="cz-summary">
+            <span class="cz-chevron" aria-hidden="true">▾</span>
+            <span class="cz-title">Customize</span>
+            <span class="cz-meta" id="customizeSummary">16:9 · default speed</span>
+          </summary>
+          <div class="cz-body">
+            <!-- Aspect — only relevant when the active Quality preset has
+                 multiple aspects (Standard / High at 1280×704 vs 704×1280).
+                 Hidden when Quick is active (640×480 is 4:3 only). -->
+            <div id="aspectRow" class="cz-control">
+              <div class="cz-label">Aspect ratio</div>
+              <div class="pill-group cols-2" id="aspectGroup">
+                <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">horizontal</span></button>
+                <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">vertical</span></button>
+              </div>
+              <input type="hidden" id="aspect" value="landscape">
+            </div>
 
-        <!-- Manual W/H fields only shown in T2V (where they're the primary
-             control). In image flows they're auto-set from aspect + quality
-             so the input image drives the framing without surprise crops. -->
-        <div id="dimsRow" class="row" style="margin-top:10px">
-          <div><label class="lbl">Width</label><input name="width" id="width" value="1280" type="number" min="32" step="32"></div>
-          <div><label class="lbl">Height</label><input name="height" id="height" value="704" type="number" min="32" step="32"></div>
-        </div>
+            <!-- Width × height. Setting custom dimensions makes the form
+                 leave the active preset (the Quality pill stays highlighted
+                 but the Customize summary shows "custom" so the user knows
+                 they've deviated). -->
+            <div id="dimsRow" class="cz-control">
+              <div class="cz-label">Width × height</div>
+              <div class="row">
+                <div><input name="width" id="width" value="1280" type="number" min="32" step="32" aria-label="Width"></div>
+                <div><input name="height" id="height" value="704" type="number" min="32" step="32" aria-label="Height"></div>
+              </div>
+            </div>
+
+            <!-- Speed — experimental sampler acceleration. Boost/Turbo
+                 skip 2-3 stable middle denoise calls. Off at High quality
+                 (the two-stage HQ sampler doesn't support skipping). -->
+            <div class="cz-control">
+              <div class="cz-label">Speed
+                <span class="cz-label-hint">experimental — skip stable denoise steps</span>
+              </div>
+              <div class="pill-group cols-3" id="accelGroup">
+                <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
+                <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">~10-15% faster</span></button>
+                <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">~20-25% faster</span></button>
+              </div>
+            </div>
+          </div>
+        </details>
 
         <div class="row3" style="margin-top:10px">
           <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
@@ -5621,11 +5766,37 @@ function setMode(mode) {
   // the next 1.5s poll tick.
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
+// Quality presets (Y1.013) — each one bundles the backend quality value
+// (which selects the model + sampler) with the canonical dimensions.
+// Backend still routes only on `quality == 'high'` vs anything else, so
+// 'quick' and 'standard' both run Q4 distilled — they just differ in
+// pixel count. The richer label is preserved in the sidecar so the
+// info modal can show "Quick" / "Standard" / "High" verbatim.
+const QUALITY_PRESETS = {
+  quick:    { w: 640,  h: 480 },     // 4:3, ~3× fewer pixels than standard
+  standard: { w: 1280, h: 704 },     // 16:9 default, the canonical render
+  high:     { w: 1280, h: 704 },     // same dims, different model (Q8)
+};
+
 function setQuality(q) {
+  // Tolerate legacy values from old sidecars: 'draft' → 'standard'.
+  if (q === 'draft' || !QUALITY_PRESETS[q]) q = 'standard';
   document.getElementById('quality').value = q;
   document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.quality === q));
+  // Set canonical dimensions for the preset, respecting the current
+  // aspect choice. Quick is 4:3 only — landscape orientation only.
+  const preset = QUALITY_PRESETS[q];
+  const aspect = document.getElementById('aspect').value || 'landscape';
+  const vertical = (aspect === 'vertical' && q !== 'quick');
+  document.getElementById('width').value  = vertical ? preset.h : preset.w;
+  document.getElementById('height').value = vertical ? preset.w : preset.h;
+  // Hide the Aspect row when Quick is active (only 4:3 supported); show
+  // it for Standard/High where 16:9 vs 9:16 is a real choice.
+  const aspectRow = document.getElementById('aspectRow');
+  if (aspectRow) aspectRow.style.display = (q === 'quick') ? 'none' : '';
   applyQuality();
   updateAccelAvailability();
+  updateCustomizeSummary();
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 function setAccel(a) {
@@ -5633,6 +5804,7 @@ function setAccel(a) {
   const v = allowed ? a : 'off';
   document.getElementById('accel').value = v;
   document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.accel === v));
+  updateCustomizeSummary();
   updateDerived();
 }
 function updateAccelAvailability() {
@@ -5644,9 +5816,37 @@ function updateAccelAvailability() {
   if (!allowed && document.getElementById('accel').value !== 'off') setAccel('off');
 }
 function setAspect(a) {
+  if (!ASPECTS[a]) return;
   document.getElementById('aspect').value = a;
   document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === a));
   applyAspect(a);
+}
+
+// Compose the right-aligned line in the Customize summary. Reflects the
+// current effective state: aspect, custom-dims callout, speed setting.
+function updateCustomizeSummary() {
+  const el = document.getElementById('customizeSummary');
+  if (!el) return;
+  const q = document.getElementById('quality').value;
+  const w = parseInt(document.getElementById('width').value || 0);
+  const h = parseInt(document.getElementById('height').value || 0);
+  const aspect = document.getElementById('aspect').value || 'landscape';
+  const accel = document.getElementById('accel').value || 'off';
+  const parts = [];
+  // Aspect (Quick is fixed 4:3, no choice; Standard/High show landscape/vertical).
+  if (q === 'quick') parts.push('4:3 · 640×480');
+  else parts.push(aspect === 'vertical' ? '9:16' : '16:9');
+  // Flag custom dims if they don't match the preset.
+  const preset = QUALITY_PRESETS[q] || QUALITY_PRESETS['standard'];
+  const vertical = (aspect === 'vertical' && q !== 'quick');
+  const expectedW = vertical ? preset.h : preset.w;
+  const expectedH = vertical ? preset.w : preset.h;
+  if (q !== 'quick' && (w !== expectedW || h !== expectedH)) {
+    parts.push(`${w}×${h} custom`);
+  }
+  // Speed
+  parts.push(accel === 'off' ? 'exact speed' : (accel === 'boost' ? 'boost' : 'turbo'));
+  el.textContent = parts.join(' · ');
 }
 function setExtendMode(m) {
   // Fast = no-CFG path, fits in 64 GB at 1280×704. Quality = upstream
@@ -5727,31 +5927,31 @@ document.getElementById('i2vMode').addEventListener('change', () => {
 function applyAspect(key) {
   if (!ASPECTS[key]) return;
   document.getElementById('aspect').value = key;
-  // Defer the actual sizing to applyQuality — it reads aspect + quality and
-  // picks half-size (Draft) or full-size (Standard/High) of the chosen aspect.
-  applyQuality();
+  // Aspect controls dimensions only when the active preset has a choice
+  // (Standard / High at 1280×704 vs 704×1280). Quick is fixed 4:3 and
+  // ignores the aspect picker (the row is hidden in that state, so this
+  // path normally won't fire — defensive in case of programmatic calls).
+  const q = document.getElementById('quality').value;
+  if (q === 'quick') return;
+  const preset = QUALITY_PRESETS[q] || QUALITY_PRESETS['standard'];
+  const vertical = (key === 'vertical');
+  document.getElementById('width').value  = vertical ? preset.h : preset.w;
+  document.getElementById('height').value = vertical ? preset.w : preset.h;
+  updateCustomizeSummary();
+  updateDerived();
 }
 
+// applyQuality is kept as a tiny shim — old call sites (mode switching,
+// etc.) call it expecting "set steps for the active quality." The
+// dimensions are now owned by setQuality / applyAspect.
 function applyQuality() {
   const q = document.getElementById('quality').value;
-  if (q === 'draft' || q === 'standard') {
-    document.getElementById('steps').value = 8;
-  } else if (q === 'high') {
+  if (q === 'high') {
     document.getElementById('steps').value = 18;
+  } else {
+    document.getElementById('steps').value = 8;       // quick + standard
   }
-  // Draft and Standard both keep the same aspect ratio. Draft halves each
-  // dimension (1280×704 → 640×352 for 16:9; 704×1280 → 352×640 for 9:16).
-  // Same ratio, ~25% the pixel count, ~3× faster — a real preview of the
-  // final shot at draft cost. Standard restores full size.
-  const aspect = document.getElementById('aspect').value || 'landscape';
-  const a = ASPECTS[aspect] || ASPECTS.landscape;
-  if (q === 'draft') {
-    document.getElementById('width').value = Math.round(a.w / 2 / 32) * 32;
-    document.getElementById('height').value = Math.round(a.h / 2 / 32) * 32;
-  } else if (q === 'standard' || q === 'high') {
-    document.getElementById('width').value = a.w;
-    document.getElementById('height').value = a.h;
-  }
+  updateCustomizeSummary();
   updateDerived();
 }
 
@@ -5844,7 +6044,9 @@ function updateDerived() {
     el.addEventListener('input', e => { document.getElementById('duration').value = framesToDuration(parseInt(e.target.value) || 0); updateDerived(); });
     el.addEventListener('blur', () => { snapFramesTo8kPlus1(); updateDerived(); });
   } else {
-    el.addEventListener('input', updateDerived);
+    // width / height: also refresh the Customize summary so "custom" flags
+    // appear/disappear as the user types away from the preset values.
+    el.addEventListener('input', () => { updateCustomizeSummary(); updateDerived(); });
   }
 });
 // Picker hidden inputs no longer take user input — their value changes
@@ -6382,11 +6584,22 @@ async function loadParams() {
   else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
   else setMode('t2v');
+  // Apply quality + aspect FIRST (these stomp on width/height), then
+  // override with explicit sidecar values so any custom dims survive.
   if (p.quality) setQuality(p.quality);
-  if (p.accel) setAccel(p.accel);
-  document.getElementById('prompt').value = p.prompt || '';
+  // Snap aspect from the sidecar's recorded dims; only call when quality
+  // isn't 'quick' (Quick has no aspect choice and the row is hidden).
+  if (p.quality !== 'quick' && p.width && p.height) {
+    for (const [k, a] of Object.entries(ASPECTS)) {
+      if ((a.w === p.width && a.h === p.height) ||
+          (a.h === p.width && a.w === p.height)) { setAspect(k); break; }
+    }
+  }
+  // Now load explicit dims — overrides whatever the preset/aspect set.
   if (p.width) document.getElementById('width').value = p.width;
   if (p.height) document.getElementById('height').value = p.height;
+  if (p.accel) setAccel(p.accel);
+  document.getElementById('prompt').value = p.prompt || '';
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
   if (p.seed != null) document.getElementById('seed').value = p.seed;
@@ -6399,9 +6612,7 @@ async function loadParams() {
   // Extend-specific: restore source video path
   if (p.video_path) document.getElementById('video_path').value = p.video_path;
   if (p.label) document.getElementById('preset_label').value = p.label;
-  for (const [k, a] of Object.entries(ASPECTS)) {
-    if (a.w === p.width && a.h === p.height) { setAspect(k); break; }
-  }
+  updateCustomizeSummary();
   updateDerived();
 }
 
@@ -8079,8 +8290,9 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 setInterval(poll, 1500);
 poll();
 setMode('t2v');
-setQuality('standard');
-setAspect('landscape');
+setAspect('landscape');         // sets aspect first so Standard preset orients correctly
+setQuality('standard');         // bundles quality + dims; respects current aspect
+updateCustomizeSummary();
 updateDerived();
 
 // Wire the picker components (I2V image + FFLF start/end) and seed the
