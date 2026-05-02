@@ -9,6 +9,7 @@
 //   env_ready          — venv + ltx-2-mlx clone exist (install.js step 1-3)
 //   base_models_ready  — Q4 + Gemma fully on disk (install.js step 4-5)
 //   q8_ready           — optional Q8 bundle fully on disk (download_q8.js)
+//   upscaler_ready     — optional official LTX x2 latent upscaler (~1 GB)
 //
 // Anything less than `env_ready && base_models_ready` means the user can't
 // Start — we surface a Resume Install affordance instead of Start. This is
@@ -84,9 +85,11 @@ module.exports = {
     const repos = required.repos || []
     const baseRepos = repos.filter(r => r.kind === "base")
     const q8Repo    = repos.find(r => r.key === "q8")
+    const upscalerRepo = repos.find(r => r.key === "ltx_upscaler")
 
     const base_ready = baseRepos.length > 0 && baseRepos.every(r => repoComplete(installRoot, r, minBytes))
     const q8_ready   = q8Repo ? repoComplete(installRoot, q8Repo, minBytes) : false
+    const upscaler_ready = upscalerRepo ? repoComplete(installRoot, upscalerRepo, minBytes) : false
 
     // User-content folders persist across Reset (which only removes the venv).
     // Keep their shortcuts visible whenever they exist on disk so users can
@@ -101,6 +104,7 @@ module.exports = {
       update:     info.running("update.js"),
       reset:      info.running("reset.js"),
       q8download: info.running("download_q8.js"),
+      upscalerdownload: info.running("download_upscaler.js"),
     }
 
     // Running states first — show what's in progress, hide everything else.
@@ -108,6 +112,7 @@ module.exports = {
     if (running.update)     return [{ default: true, icon: "fa-solid fa-rotate",   text: "Updating",                     href: "update.js" }]
     if (running.reset)      return [{ default: true, icon: "fa-solid fa-eraser",   text: "Resetting",                    href: "reset.js" }]
     if (running.q8download) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading Q8 (~25 GB)",      href: "download_q8.js" }]
+    if (running.upscalerdownload) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading upscaler (~1 GB)", href: "download_upscaler.js" }]
 
     // No env at all → fresh install path. Recovery shortcuts to user content
     // folders if a previous install left files behind.
@@ -157,6 +162,9 @@ module.exports = {
     ]
     if (!q8_ready) {
       baseMenu.push({ icon: "fa-solid fa-download", text: "Download Q8 (~25 GB) — High quality + FFLF", href: "download_q8.js" })
+    }
+    if (!upscaler_ready) {
+      baseMenu.push({ icon: "fa-solid fa-download", text: "Download LTX upscaler (~1 GB) — optional", href: "download_upscaler.js" })
     }
     baseMenu.push(
       { icon: "fa-solid fa-rotate", text: "Update", href: "update.js" },

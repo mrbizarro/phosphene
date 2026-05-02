@@ -95,9 +95,24 @@ and step count change.
 
 | Tier | Model | Default size / time | Use case |
 |---|---|---|---|
-| **Quick** | Q4 distilled | 640×480 · ~2 min | Iterate on prompts and seeds before committing to a full-size render. |
+| **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
+| **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
 | **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
 | **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
+
+The **Export** control can also run a lightweight ffmpeg Lanczos pass after
+generation:
+
+- **Native** writes the generated dimensions unchanged.
+- **720p fit** scales into 1280×720 (or 720×1280 vertical) and pads any
+  remainder. It never crops or distorts; 1024×576 fills exactly.
+- **2×** doubles the generated width and height while preserving the exact
+  aspect ratio.
+
+Install tries to fetch the official LTX 2.3 latent x2 upscaler (~1 GB) as an
+optional asset, and the Models dialog / Pinokio menu can resume it later. The
+current lightweight export path uses ffmpeg so it works even before that model
+is present.
 
 Standard T2V/I2V also has an opt-in **Speed** control:
 

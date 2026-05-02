@@ -196,6 +196,23 @@ module.exports = {
       }
     },
 
+    // ---- Optional official LTX spatial upscaler (~1 GB) ------------------
+    // The dev panel's first lightweight upscale path uses ffmpeg Lanczos
+    // (already bundled, no model needed). Still grab the official LTX latent
+    // upscaler opportunistically so model-backed upscale experiments are one
+    // click away. If Hugging Face hiccups here, don't fail the base install:
+    // the Pinokio menu exposes "Download LTX upscaler" to resume later.
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "ltx-2-mlx",
+        message: [
+          "hf download dgrauet/ltx-2.3-mlx-q8 spatial_upscaler_x2_v1_1.safetensors --local-dir ../mlx_models/ltx-2.3-mlx-q8 || true"
+        ]
+      }
+    },
+
     // ---- Done -------------------------------------------------------------
     {
       method: "notify",

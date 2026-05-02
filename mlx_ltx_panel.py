@@ -2237,18 +2237,73 @@ def compute_pad(w: int, h: int) -> tuple[int, int, str | None]:
     return target_w, target_h, f"pad={target_w}:{target_h}:{pad_x}:{pad_y}:color=black"
 
 
+def compute_upscale_plan(w: int, h: int, mode: str | None) -> dict | None:
+    mode = (mode or "off").strip().lower()
+    if mode in ("", "off", "native"):
+        return None
+    if mode == "fit_720p":
+        # No crop, no distortion: fit inside standard 720p canvas and pad any
+        # remainder. 1024x576 fills 1280x720 exactly; 1280x704 becomes 1280x704
+        # with 8px bars top/bottom; 704x1280 becomes 704x1280 with side bars.
+        if w >= h:
+            target_w, target_h, tag = 1280, 720, "720p"
+        else:
+            target_w, target_h, tag = 720, 1280, "v720p"
+        vf = (
+            f"scale={target_w}:{target_h}:"
+            "force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+    elif mode == "x2":
+        target_w, target_h, tag = w * 2, h * 2, "up2x"
+        vf = f"scale={target_w}:{target_h}:flags=lanczos"
+    else:
+        raise RuntimeError(f"unknown upscale mode: {mode}")
+    return {
+        "mode": mode,
+        "method": "ffmpeg_lanczos",
+        "target_w": target_w,
+        "target_h": target_h,
+        "tag": tag,
+        "vf": vf,
+    }
+
+
+def run_ffmpeg_tracked(cmd: list[str], label: str) -> tuple[str, str]:
+    """Run an ffmpeg process in its own process group so /stop can kill it."""
+    push(f"{label}: " + " ".join(shlex.quote(c) for c in cmd))
+    env = os.environ.copy()
+    env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
+    proc = subprocess.Popen(
+        cmd, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    with LOCK:
+        STATE["mux_pgid"] = os.getpgid(proc.pid)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        with LOCK:
+            STATE["mux_pgid"] = None
+    if proc.returncode != 0:
+        push((stderr or stdout or "").strip())
+        raise RuntimeError(f"{label.lower()} exited with code {proc.returncode}")
+    return stdout or "", stderr or ""
+
+
 def video_duration(frames: int) -> float:
     return round(frames / FPS, 3)
 
 
 def stop_current_job(timeout: float = 5.0) -> None:
-    """Kill the warm helper (and any in-flight mux subprocess). Worker advances."""
+    """Kill the warm helper (and any in-flight ffmpeg mux/upscale). Worker advances."""
     with LOCK:
         cur = STATE["current"]
         mux_pgid = STATE.get("mux_pgid")
     if cur is not None:
         cur["cancel_requested"] = True
-    push("Stop requested — killing helper + mux to abort current job.")
+    push("Stop requested — killing helper + ffmpeg post-process to abort current job.")
     HELPER.kill()
     # Mux runs in its own process group outside the helper's. Kill it too,
     # otherwise ffmpeg keeps writing the (now-orphaned) output file.
@@ -2315,8 +2370,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
-            "quality": f("quality", "standard"),  # quick / standard / high
+            "quality": f("quality", "standard"),  # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
+            "upscale": f("upscale", "off"),        # off / fit_720p / x2
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2674,8 +2730,6 @@ def run_job_inner(job: dict) -> None:
         if not Path(audio).exists():
             raise RuntimeError(f"audio file not found: {audio}")
         duration = video_duration(frames)
-        env = os.environ.copy()
-        env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
         # Match the helper's lossless codec defaults (overridable via the
         # same env vars the upstream patch script reads). Previously this
         # mux step hardcoded yuv420p crf 18, undoing the codec patch for
@@ -2693,30 +2747,38 @@ def run_job_inner(job: dict) -> None:
             "-t", f"{duration}",
             str(final_out),
         ]
-        push("Mux: " + " ".join(shlex.quote(c) for c in mux_cmd))
-        # Run mux in its own process group so /stop can SIGTERM the whole
-        # ffmpeg pipeline (it lives outside the helper's pgid). Track pgid
-        # in STATE for stop_current_job() to find.
-        mux_proc = subprocess.Popen(
-            mux_cmd, env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        with LOCK:
-            STATE["mux_pgid"] = os.getpgid(mux_proc.pid)
-        try:
-            stdout, stderr = mux_proc.communicate()
-        finally:
-            with LOCK:
-                STATE["mux_pgid"] = None
-        if mux_proc.returncode != 0:
-            push((stderr or "").strip())
-            raise RuntimeError(f"mux exited with code {mux_proc.returncode}")
+        run_ffmpeg_tracked(mux_cmd, "Mux")
         final_target = final_out
+
+    native_target = final_target
+    upscale_plan = compute_upscale_plan(width, height, p.get("upscale", "off"))
+    if upscale_plan:
+        mux_pix_fmt = os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
+        mux_crf = os.environ.get("LTX_OUTPUT_CRF", "0")
+        upscaled_out = OUTPUT / (
+            f"{final_target.stem}_{upscale_plan['tag']}{final_target.suffix}"
+        )
+        upscale_cmd = [
+            str(FFMPEG), "-y", "-i", str(final_target),
+            "-vf", upscale_plan["vf"],
+            "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
+            "-preset", "veryfast",
+            "-c:a", "copy",
+            str(upscaled_out),
+        ]
+        run_ffmpeg_tracked(upscale_cmd, "Upscale")
+        final_target = upscaled_out
+        push(
+            f"Upscale done → {upscaled_out.name} "
+            f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop)"
+        )
+        set_hidden(str(native_target), True)
+        push(f"Native source kept but hidden from gallery → {native_target.name}")
 
     sidecar = {
         "output": str(final_target),
         "raw_output": str(raw_out),
+        "native_output": str(native_target),
         "params": {
             **p,
             "pad_w": pad_w, "pad_h": pad_h,
@@ -2732,6 +2794,11 @@ def run_job_inner(job: dict) -> None:
     }
     if result.get("accel_metrics"):
         sidecar["accel_metrics"] = result["accel_metrics"]
+    if upscale_plan:
+        sidecar["upscale"] = {
+            k: v for k, v in upscale_plan.items()
+            if k not in ("vf",)
+        } | {"source": str(native_target)}
     write_sidecar(final_target.with_suffix(final_target.suffix + ".json"), sidecar)
     job["output_path"] = str(final_target)
     push(f"Done in {sidecar['elapsed_sec']}s → {final_target.name}")
@@ -3408,6 +3475,7 @@ class Handler(BaseHTTPRequestHandler):
                     ) or ""
                     deps_signals = (
                         "install.js", "update.js", "pinokio.js", "download_q8.js",
+                        "download_upscaler.js",
                         "patch_ltx_codec.py", "required_files.json",
                         "requirements.txt", "pyproject.toml", "setup.py",
                     )
@@ -5149,11 +5217,16 @@ HTML = r"""<!doctype html>
            Customize disclosure below. Beginners pick a button; power
            users open Customize. -->
       <h2>Quality</h2>
-      <div class="pill-group cols-3 quality-row" id="qualityGroup">
+      <div class="pill-group cols-4 quality-row" id="qualityGroup">
         <button type="button" class="pill-btn pill-quality" data-quality="quick">
           <span class="ql-name">Quick</span>
           <span class="sub ql-spec">640×480 · ~2 min</span>
           <span class="ql-tier">Q4 · any Mac</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality" data-quality="balanced">
+          <span class="ql-name">Balanced</span>
+          <span class="sub ql-spec">1024×576 → 720p</span>
+          <span class="ql-tier">Q4 · no-crop upscale</span>
         </button>
         <button type="button" class="pill-btn pill-quality active" data-quality="standard">
           <span class="ql-name">Standard</span>
@@ -5168,6 +5241,7 @@ HTML = r"""<!doctype html>
       </div>
       <input type="hidden" name="quality" id="quality" value="standard">
       <input type="hidden" name="accel" id="accel" value="off">
+      <input type="hidden" name="upscale" id="upscale" value="off">
 
       <div id="warnBanner" class="warn-banner"></div>
 
@@ -5446,6 +5520,20 @@ HTML = r"""<!doctype html>
                 <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
                 <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">~10-15% faster</span></button>
                 <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">~20-25% faster</span></button>
+              </div>
+            </div>
+
+            <!-- Export upscale — lightweight ffmpeg Lanczos pass after render.
+                 "720p fit" preserves aspect ratio: exact 16:9 fills the canvas,
+                 LTX-wide 1280×704 gets tiny letterbox padding, never crop. -->
+            <div class="cz-control">
+              <div class="cz-label">Export
+                <span class="cz-label-hint">post-render, no crop</span>
+              </div>
+              <div class="pill-group cols-3" id="upscaleGroup">
+                <button type="button" class="pill-btn active" data-upscale="off"><span>Native</span><span class="sub">as generated</span></button>
+                <button type="button" class="pill-btn" data-upscale="fit_720p"><span>720p fit</span><span class="sub">scale + pad</span></button>
+                <button type="button" class="pill-btn" data-upscale="x2"><span>2×</span><span class="sub">same ratio</span></button>
               </div>
             </div>
           </div>
@@ -5842,13 +5930,14 @@ function setMode(mode) {
 // Quality presets (Y1.013) — each one bundles the backend quality value
 // (which selects the model + sampler) with the canonical dimensions.
 // Backend still routes only on `quality == 'high'` vs anything else, so
-// 'quick' and 'standard' both run Q4 distilled — they just differ in
+  // 'quick', 'balanced', and 'standard' all run Q4 distilled — they differ in
 // pixel count. The richer label is preserved in the sidecar so the
 // info modal can show "Quick" / "Standard" / "High" verbatim.
 const QUALITY_PRESETS = {
-  quick:    { w: 640,  h: 480 },     // 4:3, ~3× fewer pixels than standard
-  standard: { w: 1280, h: 704 },     // 16:9 default, the canonical render
-  high:     { w: 1280, h: 704 },     // same dims, different model (Q8)
+  quick:    { w: 640,  h: 480, upscale: 'off' },        // 4:3, fastest sanity check
+  balanced: { w: 1024, h: 576, upscale: 'fit_720p' },   // exact 16:9 → 1280×720
+  standard: { w: 1280, h: 704, upscale: 'off' },        // LTX-wide canonical render
+  high:     { w: 1280, h: 704, upscale: 'off' },        // same dims, different model (Q8)
 };
 
 function setQuality(q) {
@@ -5863,6 +5952,7 @@ function setQuality(q) {
   const vertical = (aspect === 'vertical' && q !== 'quick');
   document.getElementById('width').value  = vertical ? preset.h : preset.w;
   document.getElementById('height').value = vertical ? preset.w : preset.h;
+  setUpscale(preset.upscale || 'off');
   // Hide the Aspect row when Quick is active (only 4:3 supported); show
   // it for Standard/High where 16:9 vs 9:16 is a real choice.
   const aspectRow = document.getElementById('aspectRow');
@@ -5877,6 +5967,13 @@ function setAccel(a) {
   const v = allowed ? a : 'off';
   document.getElementById('accel').value = v;
   document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.accel === v));
+  updateCustomizeSummary();
+  updateDerived();
+}
+function setUpscale(u) {
+  const v = ['off', 'fit_720p', 'x2'].includes(u) ? u : 'off';
+  document.getElementById('upscale').value = v;
+  document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.upscale === v));
   updateCustomizeSummary();
   updateDerived();
 }
@@ -5905,6 +6002,7 @@ function updateCustomizeSummary() {
   const h = parseInt(document.getElementById('height').value || 0);
   const aspect = document.getElementById('aspect').value || 'landscape';
   const accel = document.getElementById('accel').value || 'off';
+  const upscale = document.getElementById('upscale').value || 'off';
   const parts = [];
   // Aspect (Quick is fixed 4:3, no choice; Standard/High show landscape/vertical).
   if (q === 'quick') parts.push('4:3 · 640×480');
@@ -5919,6 +6017,8 @@ function updateCustomizeSummary() {
   }
   // Speed
   parts.push(accel === 'off' ? 'exact speed' : (accel === 'boost' ? 'boost' : 'turbo'));
+  if (upscale === 'fit_720p') parts.push('720p export');
+  else if (upscale === 'x2') parts.push('2× export');
   el.textContent = parts.join(' · ');
 }
 function setExtendMode(m) {
@@ -5936,6 +6036,7 @@ function setExtendMode(m) {
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setAccel(b.dataset.accel); });
+document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 
@@ -6022,7 +6123,7 @@ function applyQuality() {
   if (q === 'high') {
     document.getElementById('steps').value = 18;
   } else {
-    document.getElementById('steps').value = 8;       // quick + standard
+    document.getElementById('steps').value = 8;       // quick + balanced + standard
   }
   updateCustomizeSummary();
   updateDerived();
@@ -6062,11 +6163,21 @@ function updateDerived() {
   const f = parseInt(document.getElementById('frames').value || 0);
   const dur = (f / FPS).toFixed(2);
 
-  let pw = w, ph = h;
-  if (w === 704 && h % 16 === 0) pw = 720;
-  if (h === 704 && w % 16 === 0) ph = 720;
-  const padded = (pw !== w || ph !== h) && mode === 'i2v_clean_audio';
-  const finalRes = padded ? `${w}×${h} → <strong>${pw}×${ph}</strong>` : `<strong>${w}×${h}</strong>`;
+  const upscale = document.getElementById('upscale')?.value || 'off';
+  let finalRes = `<strong>${w}×${h}</strong>`;
+  if (upscale === 'fit_720p') {
+    const tw = w >= h ? 1280 : 720;
+    const th = w >= h ? 720 : 1280;
+    finalRes = `${w}×${h} → <strong>${tw}×${th}</strong> fit`;
+  } else if (upscale === 'x2') {
+    finalRes = `${w}×${h} → <strong>${w * 2}×${h * 2}</strong>`;
+  } else {
+    let pw = w, ph = h;
+    if (w === 704 && h % 16 === 0) pw = 720;
+    if (h === 704 && w % 16 === 0) ph = 720;
+    const padded = (pw !== w || ph !== h) && mode === 'i2v_clean_audio';
+    finalRes = padded ? `${w}×${h} → <strong>${pw}×${ph}</strong>` : `<strong>${w}×${h}</strong>`;
+  }
   const accel = document.getElementById('accel')?.value || 'off';
   const accelText = accel === 'off' ? '' : ` · ${accel === 'turbo' ? 'Turbo' : 'Boost'}`;
 
@@ -6694,6 +6805,7 @@ async function loadParams() {
   if (p.width) document.getElementById('width').value = p.width;
   if (p.height) document.getElementById('height').value = p.height;
   if (p.accel) setAccel(p.accel);
+  if (p.upscale) setUpscale(p.upscale);
   document.getElementById('prompt').value = p.prompt || '';
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
@@ -6845,6 +6957,12 @@ function renderOutputInfoBody(path, data) {
       : '';
     const savingsText = savings != null ? ` · ~${escapeHtml(String(savings))}% denoise calls saved` : '';
     genRows.push(`<dt>Accel metrics</dt><dd>${cachedCount}/${totalSteps} cached${savingsText}${cachedList}</dd>`);
+  }
+  if (p.upscale && p.upscale !== 'off') {
+    const up = data.upscale || {};
+    const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
+    const label = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2× Lanczos' : p.upscale);
+    genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
   }
   if (seedVal) {
     genRows.push(`<dt>Seed</dt><dd>
@@ -7017,7 +7135,7 @@ function updateModelsCard(s) {
     card.style.display = '';
     card.classList.add('state-downloading');
     icon.textContent = '↓';
-    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model' };
+    const labelByKey = { q4: 'Q4 base model', gemma: 'Gemma text encoder', q8: 'Q8 high-quality model', ltx_upscaler: 'LTX spatial upscaler' };
     title.textContent = `Downloading ${labelByKey[dl.key] || dl.repo_id}`;
     const elapsed = Math.max(0, Math.round((Date.now()/1000) - (dl.started_ts || 0)));
     sub.textContent = `${elapsed}s elapsed · resumable if interrupted`;
