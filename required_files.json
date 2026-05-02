@@ -1,6 +1,8 @@
 {
   "_comment": "Single source of truth for what counts as a complete install. Read by pinokio.js (sidebar menu), mlx_ltx_panel.py (/status, /models, run-time job validation), and consumed indirectly by install.js + download_q8.js (whose `hf download` calls land files at the local_dir paths listed below). When the upstream model layout changes, edit ONE file.",
 
+  "_download_include_comment": "Y1.024 — `download_include` is the list of patterns passed as `--include` flags to `hf download`. Without it `hf download` grabs every file in the repo, which on dgrauet's LTX repos means duplicate transformer variants (transformer-distilled.safetensors AND transformer-distilled-1.1.safetensors AND transformer-dev.safetensors), duplicate distilled LoRAs (-384 and -384-1.1), the temporal upscaler we don't wire, and the x1.5 spatial upscaler we don't use — turning a declared 25 GB Q8 download into 82 GB on disk (and a 25 GB Q4 into 56 GB). With `download_include` we pull only what the panel actually loads. Pattern syntax: huggingface_hub fnmatch globs — bare filenames and wildcards both work. We pass `*.json` to keep all sidecar configs (split_model.json etc.) which are tiny and required at runtime.",
+
   "repos": [
     {
       "key": "q4",
@@ -9,8 +11,17 @@
       "blurb": "Required. Drives Standard / Draft renders.",
       "repo_id": "dgrauet/ltx-2.3-mlx-q4",
       "local_dir": "mlx_models/ltx-2.3-mlx-q4",
-      "size_gb": 25,
+      "size_gb": 20,
       "files": [
+        "transformer-distilled.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors"
+      ],
+      "download_include": [
+        "*.json",
         "transformer-distilled.safetensors",
         "connector.safetensors",
         "vae_decoder.safetensors",
@@ -41,10 +52,21 @@
       "blurb": "Optional. Unlocks High quality and keyframe (FFLF) interpolation.",
       "repo_id": "dgrauet/ltx-2.3-mlx-q8",
       "local_dir": "mlx_models/ltx-2.3-mlx-q8",
-      "size_gb": 25,
+      "size_gb": 37,
       "files": [
         "connector.safetensors",
         "transformer-dev.safetensors",
+        "ltx-2.3-22b-distilled-lora-384.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+        "audio_vae.safetensors",
+        "vocoder.safetensors",
+        "spatial_upscaler_x2_v1_1.safetensors"
+      ],
+      "download_include": [
+        "*.json",
+        "transformer-dev.safetensors",
+        "connector.safetensors",
         "ltx-2.3-22b-distilled-lora-384.safetensors",
         "vae_decoder.safetensors",
         "vae_encoder.safetensors",

@@ -111,7 +111,7 @@ module.exports = {
     if (running.install)    return [{ default: true, icon: "fa-solid fa-plug",     text: "Installing",                   href: "install.js" }]
     if (running.update)     return [{ default: true, icon: "fa-solid fa-rotate",   text: "Updating",                     href: "update.js" }]
     if (running.reset)      return [{ default: true, icon: "fa-solid fa-eraser",   text: "Resetting",                    href: "reset.js" }]
-    if (running.q8download) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading Q8 (~25 GB)",      href: "download_q8.js" }]
+    if (running.q8download) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading Q8 (~37 GB)",      href: "download_q8.js" }]
     if (running.upscalerdownload) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading upscaler (~1 GB)", href: "download_upscaler.js" }]
 
     // No env at all → fresh install path. Recovery shortcuts to user content
@@ -161,7 +161,7 @@ module.exports = {
       { icon: "fa-solid fa-image", text: "Uploads", href: "panel_uploads?fs=true" },
     ]
     if (!q8_ready) {
-      baseMenu.push({ icon: "fa-solid fa-download", text: "Download Q8 (~25 GB) — High quality + FFLF", href: "download_q8.js" })
+      baseMenu.push({ icon: "fa-solid fa-download", text: "Download Q8 (~37 GB) — High quality + FFLF", href: "download_q8.js" })
     }
     if (!upscaler_ready) {
       baseMenu.push({ icon: "fa-solid fa-download", text: "Download LTX upscaler (~1 GB) — optional", href: "download_upscaler.js" })

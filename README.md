@@ -97,8 +97,8 @@ and step count change.
 |---|---|---|---|
 | **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
 | **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Default. Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
-| **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
-| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
+| **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~20 GB on disk). |
+| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~37 GB extra). Required for FFLF. |
 
 The **Export** control can also run a lightweight ffmpeg Lanczos pass after
 generation:
@@ -169,19 +169,19 @@ jobs that fall out of the OOM killer.
      at the locked versions
    - Applies the codec + memory-overlap patches (idempotent, fails
      loud on upstream drift)
-   - Downloads Q4 model (~25 GB) + Gemma encoder (~7.5 GB) via `hf
-     download` — resumable
+   - Downloads Q4 model (~20 GB) + Gemma encoder (~7.5 GB) via `hf
+     download` — resumable, filtered to only the files the panel loads
 4. Click **Start** → **Open Panel** → http://127.0.0.1:8198
 
 For the High quality tier (Q8 two-stage + TeaCache), download the Q8
 model afterward via the **Download Q8** button in the panel sidebar
-(one-time, ~25 GB extra).
+(one-time, ~37 GB extra).
 
 ### Faster downloads (recommended for Q8)
 
 Hugging Face throttles unauthenticated downloads. With a token,
 downloads run **~10× faster** — particularly relevant for the optional
-25 GB Q8 model.
+37 GB Q8 model.
 
 Two options, no terminal required for either:
 

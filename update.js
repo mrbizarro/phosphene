@@ -94,6 +94,40 @@ module.exports = {
     {
       method: "shell.run",
       params: { message: "./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py" }
+    },
+    // Y1.024: reclaim disk on existing installs by deleting model files
+    // we never load. dgrauet's LTX repos host duplicate transformer
+    // variants and unused upscalers; pre-Y1.024 `hf download` grabbed
+    // everything (Q4 → 56 GB instead of 20, Q8 → 82 GB instead of 37).
+    // New installs use --include filters so the bloat never lands. This
+    // step trims existing bloated installs. `rm -f` is silently a no-op
+    // if the file is already absent.
+    //
+    //   Q4 trim: ~36 GB freed (transformer-distilled-1.1, transformer-dev,
+    //            distilled-lora-384-1.1, x1.5 upscaler, temporal upscaler)
+    //   Q8 trim: ~45 GB freed (transformer-distilled, transformer-distilled-1.1,
+    //            distilled-lora-384-1.1, x1.5 upscaler, temporal upscaler)
+    //
+    // Files chosen are those the panel never references at runtime —
+    // see required_files.json for the canonical list of what we DO load.
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "echo 'Y1.024: trimming unused model variants from mlx_models/ (saves up to ~80 GB on bloated pre-Y1.024 installs)…'",
+          "rm -f mlx_models/ltx-2.3-mlx-q4/transformer-distilled-1.1.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q4/transformer-dev.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q4/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q4/spatial_upscaler_x1_5_v1_0.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q4/temporal_upscaler_x2_v1_0.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q8/transformer-distilled.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q8/transformer-distilled-1.1.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q8/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q8/spatial_upscaler_x1_5_v1_0.safetensors",
+          "rm -f mlx_models/ltx-2.3-mlx-q8/temporal_upscaler_x2_v1_0.safetensors",
+          "echo 'Y1.024: trim done.'"
+        ]
+      }
     }
   ]
 }

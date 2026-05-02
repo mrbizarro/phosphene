@@ -1196,6 +1196,19 @@ def _download_thread(repo: dict) -> None:
     target = ROOT / repo["local_dir"]
     target.mkdir(parents=True, exist_ok=True)
     cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
+    # Y1.024 — apply --include filter when the repo entry declares one. Without
+    # it `hf download` grabs every file in the upstream repo. dgrauet's LTX
+    # repos host duplicate transformer variants (-distilled, -distilled-1.1,
+    # -dev), duplicate distilled LoRAs, and unused upscalers — turning a
+    # declared 25 GB Q8 into 82 GB on disk and a 25 GB Q4 into 56 GB.
+    # `download_include` is the explicit allowlist of patterns we ship to
+    # the user; everything else stays on the Hub. See required_files.json
+    # for the comment block on this.
+    include_patterns = repo.get("download_include") or []
+    for pat in include_patterns:
+        cmd.extend(["--include", pat])
+    if include_patterns:
+        push(f"[hf] filtering {repo_id} download to {len(include_patterns)} pattern(s) — only the files the panel actually loads.")
     push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
 
     # Build the env once. HF_HUB_ENABLE_HF_TRANSFER=1 turns on the Rust
@@ -6796,7 +6809,7 @@ async function poll() {
     const left = (s.q8_missing || []).length;
     genBtn.title = left > 0 && left < 6
       ? `Keyframe (FFLF) needs Q8 — ${left} file(s) still downloading.`
-      : 'Keyframe (FFLF) needs the Q8 model. Click "Download Q8 (~25 GB)" in Pinokio.';
+      : 'Keyframe (FFLF) needs the Q8 model. Click "Download Q8 (~37 GB)" in Pinokio.';
     genBtn.textContent = 'Generate · Q8 required';
   } else if (genBtn.disabled && genBtn.textContent.startsWith('Generate · Q8')) {
     // Restore — only do so if WE were the ones who disabled it, otherwise
@@ -7400,11 +7413,11 @@ function updateModelsCard(s) {
     icon.textContent = '⚠';
     title.textContent = 'Base models needed before you can render';
     const missing = (s.base_missing || []).length;
-    sub.innerHTML = `Q4 (~25 GB) and Gemma (~6 GB) are required. Click below — downloads resume if interrupted.${
+    sub.innerHTML = `Q4 (~20 GB) and Gemma (~6 GB) are required. Click below — downloads resume if interrupted.${
       missing ? ` <span style="color:var(--muted)">(${missing} files left)</span>` : ''
     }`;
     actions.innerHTML = (s.hf_available ?? true)
-      ? `<button onclick="startDownload('q4')">Download Q4 (25 GB)</button>`
+      ? `<button onclick="startDownload('q4')">Download Q4 (20 GB)</button>`
       : `<button disabled title="hf binary not found — reinstall via Pinokio">hf missing</button>`;
     return;
   }
@@ -7427,11 +7440,11 @@ function updateModelsCard(s) {
                                               : 'High quality needs the Q8 model';
     title.textContent = reason;
     const missing = (s.q8_missing || []).length;
-    sub.innerHTML = `Q8 (~25 GB) is a separate one-time download. Resumable.${
+    sub.innerHTML = `Q8 (~37 GB) is a separate one-time download. Resumable.${
       missing && missing < 8 ? ` <span style="color:var(--muted)">(${missing} files left — partial install detected)</span>` : ''
     }`;
     actions.innerHTML = (s.hf_available ?? true)
-      ? `<button onclick="startDownload('q8')">Download Q8 (25 GB)</button>`
+      ? `<button onclick="startDownload('q8')">Download Q8 (37 GB)</button>`
       : `<button disabled>hf missing</button>`;
     return;
   }

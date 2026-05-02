@@ -167,23 +167,30 @@ module.exports = {
       }
     },
 
-    // ---- Download Q4 LTX 2.3 (~25 GB, resumable) --------------------------
+    // ---- Download Q4 LTX 2.3 (~20 GB, resumable) --------------------------
     // `hf download` is the v1+ name (huggingface_hub deprecated `huggingface-cli`).
     // Resume + verify is built-in; --local-dir avoids the HF cache store so
     // the panel can point at the path directly with no symlink chase.
     // On Resume Install with base files already complete, this is a fast
     // verify pass (~seconds) — `hf` checks each file's hash and skips.
+    //
+    // Y1.024: explicit --include allowlist. dgrauet's Q4 repo hosts multiple
+    // transformer variants (transformer-distilled, -distilled-1.1, -dev),
+    // duplicate distilled LoRAs (-384, -384-1.1), and the x1.5/temporal
+    // upscalers we don't use. Without filters `hf download` grabs the full
+    // 56 GB tree; the panel only needs ~20 GB. Keep this list in sync with
+    // required_files.json → repos[q4].download_include.
     {
       method: "shell.run",
       params: {
         venv: "env",
         path: "ltx-2-mlx",
         // Y1.022: HF_HUB_ENABLE_HF_TRANSFER=1 enables the Rust accelerator,
-        // ~5-10× faster on 25 GB. Falls back gracefully if hf_transfer
+        // ~5-10× faster on 20 GB. Falls back gracefully if hf_transfer
         // isn't yet on disk (warning + plain Python downloader).
         env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
         message: [
-          "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4"
+          "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4 --include '*.json' --include 'transformer-distilled.safetensors' --include 'connector.safetensors' --include 'vae_decoder.safetensors' --include 'vae_encoder.safetensors' --include 'audio_vae.safetensors' --include 'vocoder.safetensors'"
         ]
       }
     },
