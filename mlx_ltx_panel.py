@@ -2278,31 +2278,52 @@ def compute_pad(w: int, h: int) -> tuple[int, int, str | None]:
     return target_w, target_h, f"pad={target_w}:{target_h}:{pad_x}:{pad_y}:color=black"
 
 
-def compute_upscale_plan(w: int, h: int, mode: str | None) -> dict | None:
+def compute_upscale_plan(w: int, h: int, mode: str | None,
+                          helper_did_model_upscale: bool = False) -> dict | None:
+    """Plan a panel-side ffmpeg upscale pass. Returns None when no further
+    work is needed (helper already produced the target dims, or target is off).
+
+    `helper_did_model_upscale=True` means the helper already ran the LTX latent
+    x2 upscaler; the file on disk is at 2× the requested W/H. We use this to
+    avoid double-upscaling and to plan a downscale-only pass for the
+    fit_720p target on a model-upscaled source."""
     mode = (mode or "off").strip().lower()
     if mode in ("", "off", "native"):
         return None
+    # Effective dims of the file the helper actually wrote. The model-based
+    # upscale (Sharper) doubles them inside the helper before VAE decode.
+    eff_w = w * 2 if helper_did_model_upscale else w
+    eff_h = h * 2 if helper_did_model_upscale else h
     if mode == "fit_720p":
         # No crop, no distortion: fit inside standard 720p canvas and pad any
-        # remainder. 1024x576 fills 1280x720 exactly; 1280x704 becomes 1280x704
-        # with 8px bars top/bottom; 704x1280 becomes 704x1280 with side bars.
-        if w >= h:
+        # remainder. 1024×576 fills 1280×720 exactly; 1280×704 becomes 1280×704
+        # with 8px bars top/bottom; 704×1280 becomes 704×1280 with side bars.
+        if eff_w >= eff_h:
             target_w, target_h, tag = 1280, 720, "720p"
         else:
             target_w, target_h, tag = 720, 1280, "v720p"
+        # If the helper already produced the exact target size, skip the pass.
+        if eff_w == target_w and eff_h == target_h:
+            return None
         vf = (
             f"scale={target_w}:{target_h}:"
             "force_original_aspect_ratio=decrease:flags=lanczos,"
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black"
         )
+        method = "ffmpeg_lanczos_downscale" if helper_did_model_upscale else "ffmpeg_lanczos"
     elif mode == "x2":
+        # If the helper already did model x2, the file is already at the
+        # x2 target — no further panel-side work needed.
+        if helper_did_model_upscale:
+            return None
         target_w, target_h, tag = w * 2, h * 2, "up2x"
         vf = f"scale={target_w}:{target_h}:flags=lanczos"
+        method = "ffmpeg_lanczos"
     else:
         raise RuntimeError(f"unknown upscale mode: {mode}")
     return {
         "mode": mode,
-        "method": "ffmpeg_lanczos",
+        "method": method,
         "target_w": target_w,
         "target_h": target_h,
         "tag": tag,
@@ -2423,6 +2444,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
             "upscale": upscale,                     # off / fit_720p / x2
+            "upscale_method": f("upscale_method", "lanczos"),   # lanczos / model
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2809,7 +2831,13 @@ def run_job_inner(job: dict) -> None:
         final_target = final_out
 
     native_target = final_target
-    upscale_plan = compute_upscale_plan(width, height, p.get("upscale", "off"))
+    helper_did_model_upscale = (result.get("upscale_applied") == "model_x2")
+    if helper_did_model_upscale:
+        push(f"Helper produced model-upscaled output ({width*2}×{height*2}, sharper).")
+    upscale_plan = compute_upscale_plan(
+        width, height, p.get("upscale", "off"),
+        helper_did_model_upscale=helper_did_model_upscale,
+    )
     if upscale_plan:
         codec = output_codec_settings()
         mux_pix_fmt = codec["pix_fmt"]
@@ -2862,6 +2890,19 @@ def run_job_inner(job: dict) -> None:
             k: v for k, v in upscale_plan.items()
             if k not in ("vf",)
         } | {"source": str(native_target), "codec": output_codec_settings()}
+        if helper_did_model_upscale:
+            sidecar["upscale"]["pre_pass"] = "ltx_latent_x2"
+    elif helper_did_model_upscale:
+        # Helper produced the final 2× output already; record that for the
+        # info modal so users see "Sharper (model x2)" on the card.
+        sidecar["upscale"] = {
+            "mode": p.get("upscale", "x2"),
+            "method": "ltx_latent_x2",
+            "target_w": width * 2,
+            "target_h": height * 2,
+            "source": str(native_target),
+            "codec": output_codec_settings(),
+        }
     write_sidecar(final_target.with_suffix(final_target.suffix + ".json"), sidecar)
     job["output_path"] = str(final_target)
     push(f"Done in {sidecar['elapsed_sec']}s → {final_target.name}")
@@ -5598,9 +5639,10 @@ HTML = r"""<!doctype html>
               </div>
             </div>
 
-            <!-- Export upscale — lightweight ffmpeg Lanczos pass after render.
-                 "720p fit" preserves aspect ratio: exact 16:9 fills the canvas,
-                 LTX-wide 1280×704 gets tiny letterbox padding, never crop. -->
+            <!-- Export upscale — target dims after render. "720p fit"
+                 preserves aspect ratio (no crop, no distortion). 2× doubles
+                 each side. Native skips the upscale entirely. The "Method"
+                 row below picks how the upscaling is done. -->
             <div class="cz-control">
               <div class="cz-label">Export
                 <span class="cz-label-hint">post-render, no crop</span>
@@ -5610,6 +5652,23 @@ HTML = r"""<!doctype html>
                 <button type="button" class="pill-btn" data-upscale="fit_720p"><span>720p fit</span><span class="sub">scale + pad</span></button>
                 <button type="button" class="pill-btn" data-upscale="x2"><span>2×</span><span class="sub">same ratio</span></button>
               </div>
+            </div>
+
+            <!-- Upscale method (Y1.021). Hidden when Export = Native. Fast
+                 = ffmpeg Lanczos resize, no detail recovery, near-instant.
+                 Sharp = LTX 2.3 latent upscaler (~1 GB model), invents real
+                 detail in latent space before VAE decode, ~30-60s slower.
+                 Sharp is auto-disabled on tiers without enough RAM, and
+                 falls back to Fast at runtime if the model file is missing. -->
+            <div class="cz-control" id="upscaleMethodRow" style="display:none;">
+              <div class="cz-label">Method
+                <span class="cz-label-hint">how the upscale is done</span>
+              </div>
+              <div class="pill-group cols-2" id="upscaleMethodGroup">
+                <button type="button" class="pill-btn active" data-method="lanczos"><span>Fast</span><span class="sub">ffmpeg Lanczos · instant</span></button>
+                <button type="button" class="pill-btn" data-method="model"><span>Sharp</span><span class="sub">LTX upscaler · +30-60 s · real detail</span></button>
+              </div>
+              <input type="hidden" name="upscale_method" id="upscale_method" value="lanczos">
             </div>
           </div>
         </details>
@@ -6071,6 +6130,19 @@ function setUpscale(u) {
   const v = ['off', 'fit_720p', 'x2'].includes(u) ? u : 'off';
   document.getElementById('upscale').value = v;
   document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.upscale === v));
+  // Show / hide the Method pill row — only relevant when an upscale is
+  // actually being applied. When toggled to "off", revert method to Fast
+  // so a later toggle back to fit_720p starts from the safe default.
+  const methodRow = document.getElementById('upscaleMethodRow');
+  if (methodRow) methodRow.style.display = (v === 'off') ? 'none' : '';
+  if (v === 'off') setUpscaleMethod('lanczos');
+  updateCustomizeSummary();
+  updateDerived();
+}
+function setUpscaleMethod(m) {
+  const v = ['lanczos', 'model'].includes(m) ? m : 'lanczos';
+  document.getElementById('upscale_method').value = v;
+  document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.method === v));
   updateCustomizeSummary();
   updateDerived();
 }
@@ -6114,8 +6186,10 @@ function updateCustomizeSummary() {
   }
   // Speed
   parts.push(accel === 'off' ? 'exact speed' : (accel === 'boost' ? 'boost' : 'turbo'));
-  if (upscale === 'fit_720p') parts.push('720p export');
-  else if (upscale === 'x2') parts.push('2× export');
+  const method = (document.getElementById('upscale_method')?.value || 'lanczos');
+  const methodTag = method === 'model' ? ' sharp' : '';
+  if (upscale === 'fit_720p') parts.push('720p export' + methodTag);
+  else if (upscale === 'x2') parts.push('2× export' + methodTag);
   el.textContent = parts.join(' · ');
 }
 function setExtendMode(m) {
@@ -6134,6 +6208,7 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () =>
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setAccel(b.dataset.accel); });
 document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
+document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 
@@ -6903,6 +6978,7 @@ async function loadParams() {
   if (p.height) document.getElementById('height').value = p.height;
   if (p.accel) setAccel(p.accel);
   if (p.upscale) setUpscale(p.upscale);
+  if (p.upscale_method) setUpscaleMethod(p.upscale_method);
   document.getElementById('prompt').value = p.prompt || '';
   document.getElementById('negative_prompt').value = p.negative_prompt || '';
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
@@ -7059,7 +7135,9 @@ function renderOutputInfoBody(path, data) {
   if (p.upscale && p.upscale !== 'off') {
     const up = data.upscale || {};
     const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
-    const label = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2× Lanczos' : p.upscale);
+    const isModel = p.upscale_method === 'model' || (data.upscale && (data.upscale.method === 'ltx_latent_x2' || (data.upscale.pre_pass === 'ltx_latent_x2')));
+    const baseLabel = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2×' : p.upscale);
+    const label = isModel ? `${baseLabel} · Sharp (LTX upscaler)` : `${baseLabel} · Fast (Lanczos)`;
     genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
   }
   const codec = data.output_codec || (data.upscale && data.upscale.codec);

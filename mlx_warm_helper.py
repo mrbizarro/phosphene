@@ -495,6 +495,99 @@ def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
     return out_path
 
 
+# ---- LTX 2.3 spatial latent upscaler (Y1.021+) ------------------------------
+# Optional model-based ×2 upscale that runs on the video latent BEFORE the VAE
+# decode, giving real detail recovery instead of the ffmpeg Lanczos resize that
+# the panel's lightweight export path uses. The model file is a 1 GB
+# safetensors that ships in mlx_models/ltx-2.3-mlx-q8/ (downloaded by
+# install.js, retryable via Pinokio's "Download LTX upscaler" menu item).
+# We hand-roll the loader rather than instantiating the HQ pipeline because
+# we only want the upsampler — not the Q8 dev transformer that costs ~25 GB.
+_UPSCALER_CACHE = None
+_UPSCALER_CACHE_DIR = None
+
+
+def _upscaler_dir() -> Path:
+    # The upscaler weights live in the Q8 weights folder (HF repo organization),
+    # but downloading them is independent of the full Q8 bundle — install.js
+    # pulls the single safetensors. LTX_Q8_LOCAL is set by the panel.
+    explicit = os.environ.get("LTX_Q8_LOCAL")
+    if explicit:
+        return Path(explicit)
+    # Fall back to MODEL_ID's sibling dir (LTX_MODEL points at the Q4 dir
+    # under mlx_models/ at install time, so swap the trailing folder).
+    q4 = Path(MODEL_ID)
+    if q4.is_dir():
+        return q4.parent / "ltx-2.3-mlx-q8"
+    return Path("mlx_models/ltx-2.3-mlx-q8")
+
+
+def upscaler_available() -> bool:
+    return (_upscaler_dir() / "spatial_upscaler_x2_v1_1.safetensors").exists()
+
+
+def _load_upscaler():
+    """Lazy-load + cache the spatial latent upscaler. Returns the model
+    instance, or None if the weights aren't on disk (caller falls back to
+    ffmpeg Lanczos)."""
+    global _UPSCALER_CACHE, _UPSCALER_CACHE_DIR
+    model_dir = _upscaler_dir()
+    if _UPSCALER_CACHE is not None and _UPSCALER_CACHE_DIR == str(model_dir):
+        return _UPSCALER_CACHE
+    weights_path = model_dir / "spatial_upscaler_x2_v1_1.safetensors"
+    if not weights_path.exists():
+        return None
+    from ltx_core_mlx.model.upsampler import LatentUpsampler
+    from ltx_core_mlx.utils.weights import load_split_safetensors
+    config_path = model_dir / "spatial_upscaler_x2_v1_1_config.json"
+    if config_path.exists():
+        cfg = json.loads(config_path.read_text()).get("config", {})
+        ups = LatentUpsampler.from_config(cfg)
+    else:
+        ups = LatentUpsampler()
+    sd = load_split_safetensors(weights_path, prefix="spatial_upscaler_x2_v1_1.")
+    ups.load_weights(list(sd.items()))
+    _UPSCALER_CACHE = ups
+    _UPSCALER_CACHE_DIR = str(model_dir)
+    return ups
+
+
+def _free_upscaler():
+    global _UPSCALER_CACHE, _UPSCALER_CACHE_DIR
+    _UPSCALER_CACHE = None
+    _UPSCALER_CACHE_DIR = None
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup
+        aggressive_cleanup()
+    except Exception:
+        pass
+
+
+def _model_upscale_video_latent(pipe, video_latent):
+    """Run the loaded latent x2 upscaler against the post-denoise video latent.
+    Mirrors the dance from upstream's TwoStageHQPipeline so the upsampler
+    gets the same denormalized input it was trained on. Returns the upscaled
+    latent in the same (B, C, F, H, W) layout."""
+    import mlx.core as mx
+    upsampler = _load_upscaler()
+    if upsampler is None:
+        raise RuntimeError("LTX spatial upscaler weights not on disk")
+    if pipe.vae_encoder is None:
+        pipe._load_vae_encoder()
+    # (B, C, F, H, W) -> (B, F, H, W, C) for denormalize_latent
+    video_mlx = video_latent.transpose(0, 2, 3, 4, 1)
+    video_denorm = pipe.vae_encoder.denormalize_latent(video_mlx)
+    # back to (B, C, F, H, W) for the upsampler
+    video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)
+    video_upscaled = upsampler(video_denorm)
+    # renormalize for the VAE decoder
+    video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)
+    video_upscaled = pipe.vae_encoder.normalize_latent(video_up_mlx)
+    video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)
+    mx.eval(video_upscaled)
+    return video_upscaled
+
+
 # ---- one-stage acceleration --------------------------------------------------
 # Experimental but useful: standard Q4 T2V/I2V spends most wall time inside the
 # denoise loop's X0Model call. The "boost" and "turbo" modes below reuse the
@@ -857,15 +950,78 @@ for line in sys.__stdin__:
                 else:
                     kwargs["image"] = None
 
-            emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
-            out_path = pipe.generate_and_save(**kwargs)
-            emit({"event": "log", "line": "step:generate_and_save done"})
+            # Y1.021: model-based latent upscale path. When the user picks
+            # the "Sharper" method on a non-Native target, we run the
+            # spatial latent upscaler between denoise and VAE decode so the
+            # decoder hallucinates real detail at 2× — vs. the cheaper
+            # ffmpeg Lanczos path (which the panel applies after the helper
+            # returns). Only fires when the upscaler weights are on disk;
+            # otherwise we fall back silently to the normal path.
+            upscale_method = (p.get("upscale_method") or "lanczos").strip().lower()
+            upscale_target = (p.get("upscale") or "off").strip().lower()
+            use_model_upscale = (
+                upscale_method == "model"
+                and upscale_target in ("fit_720p", "x2")
+                and upscaler_available()
+            )
+            if upscale_method == "model" and upscale_target in ("fit_720p", "x2") and not upscaler_available():
+                emit({"event": "log", "line": "Sharper upscale requested but model weights missing — falling back to Lanczos."})
+
+            if use_model_upscale:
+                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})
+                # Step 1: generate latents (no save)
+                if needs_image:
+                    src_image = kwargs.get("image")
+                    video_latent, audio_latent = pipe.generate_from_image(
+                        prompt=kwargs["prompt"],
+                        image=src_image,
+                        height=kwargs["height"],
+                        width=kwargs["width"],
+                        num_frames=kwargs["num_frames"],
+                        seed=kwargs["seed"],
+                        num_steps=kwargs["num_steps"],
+                    )
+                else:
+                    video_latent, audio_latent = pipe.generate(
+                        prompt=kwargs["prompt"],
+                        height=kwargs["height"],
+                        width=kwargs["width"],
+                        num_frames=kwargs["num_frames"],
+                        seed=kwargs["seed"],
+                        num_steps=kwargs["num_steps"],
+                    )
+                emit({"event": "log", "line": "step:generate done"})
+                # Free DiT + text encoder before the upscale + VAE decode peak.
+                if pipe.low_memory:
+                    pipe.dit = None
+                    pipe.text_encoder = None
+                    pipe.feature_extractor = None
+                    pipe._loaded = False
+                    try:
+                        from ltx_core_mlx.utils.memory import aggressive_cleanup
+                        aggressive_cleanup()
+                    except Exception:
+                        pass
+                # Step 2: latent x2 upscale
+                emit({"event": "log", "line": "step:latent_upscale_x2 start"})
+                video_latent = _model_upscale_video_latent(pipe, video_latent)
+                emit({"event": "log", "line": f"step:latent_upscale_x2 done — latent {video_latent.shape[-2]}×{video_latent.shape[-1]}"})
+                # Free the upscaler before VAE decode (can be ~2-3 GB peak).
+                _free_upscaler()
+                # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"])
+                emit({"event": "log", "line": "step:decode_and_save done"})
+            else:
+                emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
+                out_path = pipe.generate_and_save(**kwargs)
+                emit({"event": "log", "line": "step:generate_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             done_event = {
                 "event": "done", "id": job_id,
                 "output": str(out_path), "elapsed_sec": elapsed,
                 "seed_used": seed,
+                "upscale_applied": "model_x2" if use_model_upscale else None,
             }
             if accel_mode != "off" and _LAST_ACCEL_STATS:
                 done_event["accel_metrics"] = _LAST_ACCEL_STATS
@@ -876,6 +1032,10 @@ for line in sys.__stdin__:
         finally:
             try:
                 configure_acceleration("off")
+            except Exception:
+                pass
+            try:
+                _free_upscaler()
             except Exception:
                 pass
             _is_busy = False
