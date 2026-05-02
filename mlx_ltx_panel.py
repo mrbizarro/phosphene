@@ -1183,51 +1183,104 @@ def _download_thread(repo: dict) -> None:
     stdout/stderr line-by-line into STATE['log']. Sets DOWNLOAD["active"]
     back to False on exit (success or fail). Files land at repo['local_dir']
     relative to ROOT, which is exactly where the completeness checks look —
-    so the moment hf finishes, /status flips to complete + the UI updates."""
+    so the moment hf finishes, /status flips to complete + the UI updates.
+
+    Y1.022 — enables hf_transfer (Rust accelerator, ~5-10× faster on big
+    repos) via env var, threads the user's HF token through if set
+    (anonymous HF is throttled to ~50 KB/s and stalls Q8), and wraps the
+    download in a 3-attempt retry loop with exponential backoff. hf is
+    resumable, so retries pick up from where the previous attempt
+    stopped. User cancellations (DOWNLOAD["active"] flipping to False)
+    break the loop early."""
     repo_id = repo["repo_id"]
     target = ROOT / repo["local_dir"]
     target.mkdir(parents=True, exist_ok=True)
     cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
     push(f"[hf] {repo_id} → {target} (~{repo.get('size_gb','?')} GB) — resumable")
+
+    # Build the env once. HF_HUB_ENABLE_HF_TRANSFER=1 turns on the Rust
+    # downloader; if hf_transfer isn't installed the hf CLI logs a warning
+    # and falls back to the Python downloader (slower but still works).
+    # HF_TOKEN unlocks faster throughput for users who configured a token
+    # in Settings — anonymous HF is throttled hard.
+    env = os.environ.copy()
+    env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    hf_token = _active_hf_token()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        push(f"[hf] using authenticated download (HF token configured) — ~10× faster than anonymous.")
+    else:
+        push(f"[hf] no HF token configured — downloads run on the throttled anonymous tier. Set one in Settings → Hugging Face token for ~10× faster downloads.")
+
+    max_attempts = 3
+    backoff_sec = 5
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        with DOWNLOAD_LOCK:
-            DOWNLOAD["proc"] = proc
+        for attempt in range(1, max_attempts + 1):
+            with DOWNLOAD_LOCK:
+                if not DOWNLOAD["active"]:
+                    push(f"[hf] {repo_id} cancelled before attempt {attempt}.")
+                    break
+            if attempt > 1:
+                push(f"[hf] {repo_id} attempt {attempt}/{max_attempts} — resuming from where the previous attempt stopped.")
             try:
-                DOWNLOAD["pgid"] = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                DOWNLOAD["pgid"] = None
-        # Stream every line. hf emits a tqdm progress bar with carriage
-        # returns; we split on \r as well as \n so progress updates show
-        # up live in the panel log instead of being buffered until done.
-        buf = ""
-        while True:
-            ch = proc.stdout.read(1)
-            if not ch:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                    start_new_session=True,
+                )
+            except Exception as exc:
+                push(f"[hf] failed to spawn hf: {exc}")
                 break
-            if ch in ("\n", "\r"):
-                line = buf.strip()
-                buf = ""
-                if line:
+            with DOWNLOAD_LOCK:
+                DOWNLOAD["proc"] = proc
+                try:
+                    DOWNLOAD["pgid"] = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    DOWNLOAD["pgid"] = None
+            # Stream every line. hf emits a tqdm progress bar with carriage
+            # returns; we split on \r as well as \n so progress updates show
+            # up live in the panel log instead of being buffered until done.
+            buf = ""
+            while True:
+                ch = proc.stdout.read(1)
+                if not ch:
+                    break
+                if ch in ("\n", "\r"):
+                    line = buf.strip()
+                    buf = ""
+                    if line:
+                        with DOWNLOAD_LOCK:
+                            DOWNLOAD["last_line"] = line[:200]
+                        push(f"[hf:{repo['key']}] {line[:300]}")
+                else:
+                    buf += ch
+            if buf.strip():
+                push(f"[hf:{repo['key']}] {buf.strip()[:300]}")
+            rc = proc.wait()
+            if rc == 0:
+                push(f"[hf] {repo_id} downloaded successfully.")
+                break
+            with DOWNLOAD_LOCK:
+                still_active = DOWNLOAD["active"]
+            if not still_active:
+                push(f"[hf] {repo_id} cancelled (exit {rc}).")
+                break
+            if attempt < max_attempts:
+                push(f"[hf] {repo_id} attempt {attempt} failed (exit {rc}). Retrying in {backoff_sec}s — hf will resume from the last completed file.")
+                # Sleep in 1-second slices so a cancel during backoff is responsive.
+                for _ in range(backoff_sec):
+                    time.sleep(1)
                     with DOWNLOAD_LOCK:
-                        DOWNLOAD["last_line"] = line[:200]
-                    push(f"[hf:{repo['key']}] {line[:300]}")
+                        if not DOWNLOAD["active"]:
+                            break
+                backoff_sec = min(backoff_sec * 2, 60)   # 5 → 10 → 20s cap by attempt 3
             else:
-                buf += ch
-        if buf.strip():
-            push(f"[hf:{repo['key']}] {buf.strip()[:300]}")
-        rc = proc.wait()
-        if rc == 0:
-            push(f"[hf] {repo_id} downloaded successfully.")
-        else:
-            push(f"[hf] {repo_id} FAILED — exit {rc}. Click Download again to retry/resume.")
+                push(f"[hf] {repo_id} FAILED after {max_attempts} attempts (last exit {rc}). Click Download again to keep retrying — hf will resume.")
     except Exception as exc:
         push(f"[hf] {repo_id} crashed: {exc}")
     finally:

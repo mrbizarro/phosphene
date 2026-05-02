@@ -146,7 +146,11 @@ module.exports = {
           // resolve to the pinned version instead of pulling latest 0.31.x.
           "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'",
           "uv pip install --python env/bin/python ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx",
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0'"
+          // hf_transfer is HuggingFace's Rust-based downloader — 5-10× faster
+          // than the default Python downloader for big repos like Q8 (~25 GB).
+          // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
+          // package is missing the hf CLI falls back gracefully with a warning.
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6'"
         ]
       }
     },
@@ -174,6 +178,10 @@ module.exports = {
       params: {
         venv: "env",
         path: "ltx-2-mlx",
+        // Y1.022: HF_HUB_ENABLE_HF_TRANSFER=1 enables the Rust accelerator,
+        // ~5-10× faster on 25 GB. Falls back gracefully if hf_transfer
+        // isn't yet on disk (warning + plain Python downloader).
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
         message: [
           "hf download dgrauet/ltx-2.3-mlx-q4 --local-dir ../mlx_models/ltx-2.3-mlx-q4"
         ]
@@ -190,6 +198,7 @@ module.exports = {
       params: {
         venv: "env",
         path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
         message: [
           "hf download mlx-community/gemma-3-12b-it-4bit --local-dir ../mlx_models/gemma-3-12b-it-4bit"
         ]
@@ -207,6 +216,7 @@ module.exports = {
       params: {
         venv: "env",
         path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
         message: [
           "hf download dgrauet/ltx-2.3-mlx-q8 spatial_upscaler_x2_v1_1.safetensors --local-dir ../mlx_models/ltx-2.3-mlx-q8 || true"
         ]

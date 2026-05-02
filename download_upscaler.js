@@ -14,6 +14,7 @@ module.exports = {
       method: "shell.run",
       params: {
         venv: "ltx-2-mlx/env",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
         message: [
           "hf download dgrauet/ltx-2.3-mlx-q8 spatial_upscaler_x2_v1_1.safetensors --local-dir mlx_models/ltx-2.3-mlx-q8"
         ]

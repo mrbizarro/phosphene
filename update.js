@@ -74,6 +74,19 @@ module.exports = {
         message: "./env/bin/pip install --force-reinstall --no-deps ./packages/ltx-core-mlx ./packages/ltx-pipelines-mlx"
       }
     },
+    // Y1.022: hf_transfer is HuggingFace's Rust accelerator — 5-10× faster
+    // downloads on big repos (notably the ~25 GB Q8 bundle). Existing
+    // installs that pre-date Y1.022 don't have it, so a Q8 download was
+    // bottlenecked at ~50 KB/s on throttled HF anonymous tier. Update
+    // installs it idempotently. The panel sets HF_HUB_ENABLE_HF_TRANSFER=1
+    // when invoking hf download; if the package is missing for any reason
+    // the hf CLI just emits a warning and falls back to plain Python.
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'hf_transfer>=0.1.6'"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
     // Pin to the venv's python3.11 to match install.js — `python3` on
