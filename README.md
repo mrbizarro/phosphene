@@ -90,13 +90,13 @@ to rewrite your prompt in the structure LTX 2.3 was trained on.
 
 ## Quality tiers
 
-Three render levels picked per-job. All use the same prompt; the model
+Four render levels picked per-job. All use the same prompt; the model
 and step count change.
 
 | Tier | Model | Default size / time | Use case |
 |---|---|---|---|
 | **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
-| **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
+| **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Default. Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
 | **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
 | **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
 
@@ -296,6 +296,11 @@ structure automatically.
 If you don't want music in the output (because music is hard to
 remove cleanly in post), toggle the **🚫 No music** pill next to
 Enhance — it appends an audio constraint to the prompt at submit time.
+
+The optional **Avoid** field is stored separately in sidecars. On Q4
+Quick/Balanced/Standard it is folded into the prompt as avoid terms because
+that distilled path runs without CFG. On High / FFLF / Extend paths it extends
+the native CFG negative prompt used by the upstream pipeline.
 
 ---
 

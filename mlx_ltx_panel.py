@@ -2338,6 +2338,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     prompt = override_prompt if override_prompt is not None else f("prompt", "")
     if not prompt:
         prompt = "A cinematic atmospheric scene"
+    quality = f("quality", "balanced")
+    if quality == "quick":
+        default_w, default_h = 640, 480
+    elif quality in ("standard", "high"):
+        default_w, default_h = 1280, 704
+    else:
+        default_w, default_h = 1024, 576
+    upscale = f("upscale", "fit_720p" if quality == "balanced" else "off")
 
     return {
         "id": _new_job_id(),
@@ -2350,8 +2358,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         "params": {
             "mode": f("mode", "t2v"),
             "prompt": prompt,
-            "width": max(32, int(f("width", "1280") or 1280)),
-            "height": max(32, int(f("height", "704") or 704)),
+            "negative_prompt": f("negative_prompt", ""),
+            "width": max(32, int(f("width", str(default_w)) or default_w)),
+            "height": max(32, int(f("height", str(default_h)) or default_h)),
             "frames": max(1, int(f("frames", "121") or 121)),
             "steps": max(1, int(f("steps", "8") or 8)),
             "seed": f("seed", "-1") or "-1",
@@ -2370,9 +2379,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
-            "quality": f("quality", "standard"),  # quick / balanced / standard / high
+            "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
-            "upscale": f("upscale", "off"),        # off / fit_720p / x2
+            "upscale": upscale,                     # off / fit_720p / x2
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2470,6 +2479,7 @@ def run_job_inner(job: dict) -> None:
             "id": job["id"],
             "params": {
                 "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
                 "video_path": src,
                 "extend_frames": p["extend_frames"],
                 "direction": p["extend_direction"],
@@ -2560,6 +2570,7 @@ def run_job_inner(job: dict) -> None:
             "params": {
                 "model_dir": str(Q8_LOCAL_PATH),
                 "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(out_path),
                 "start_image": p["start_image"],
                 "end_image": p["end_image"],
@@ -2660,6 +2671,7 @@ def run_job_inner(job: dict) -> None:
             "params": {
                 "model_dir": str(Q8_LOCAL_PATH),
                 "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(raw_out),
                 "height": height,
                 "width": width,
@@ -2699,6 +2711,7 @@ def run_job_inner(job: dict) -> None:
             "params": {
                 "mode": mode,
                 "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(raw_out),
                 "height": height,
                 "width": width,
@@ -2755,6 +2768,14 @@ def run_job_inner(job: dict) -> None:
     if upscale_plan:
         mux_pix_fmt = os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
         mux_crf = os.environ.get("LTX_OUTPUT_CRF", "0")
+        try:
+            crf_value = float(str(mux_crf))
+        except Exception:
+            crf_value = 0.0
+        upscale_preset = os.environ.get(
+            "LTX_UPSCALE_PRESET",
+            "medium" if crf_value <= 5 else "veryfast",
+        )
         upscaled_out = OUTPUT / (
             f"{final_target.stem}_{upscale_plan['tag']}{final_target.suffix}"
         )
@@ -2762,7 +2783,7 @@ def run_job_inner(job: dict) -> None:
             str(FFMPEG), "-y", "-i", str(final_target),
             "-vf", upscale_plan["vf"],
             "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
-            "-preset", "veryfast",
+            "-preset", upscale_preset,
             "-c:a", "copy",
             str(upscaled_out),
         ]
@@ -2770,7 +2791,7 @@ def run_job_inner(job: dict) -> None:
         final_target = upscaled_out
         push(
             f"Upscale done → {upscaled_out.name} "
-            f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop)"
+            f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop, preset={upscale_preset})"
         )
         set_hidden(str(native_target), True)
         push(f"Native source kept but hidden from gallery → {native_target.name}")
@@ -4044,6 +4065,7 @@ HTML = r"""<!doctype html>
     }
     input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); background: var(--bg-2); }
     textarea { min-height: 84px; resize: vertical; font-family: inherit; }
+    textarea.avoid-textarea { min-height: 54px; }
 
     /* Pill button groups (mode/quality/aspect) */
     .pill-group {
@@ -5217,18 +5239,18 @@ HTML = r"""<!doctype html>
            Customize disclosure below. Beginners pick a button; power
            users open Customize. -->
       <h2>Quality</h2>
-      <div class="pill-group cols-4 quality-row" id="qualityGroup">
+      <div class="pill-group cols-2 quality-row" id="qualityGroup">
         <button type="button" class="pill-btn pill-quality" data-quality="quick">
           <span class="ql-name">Quick</span>
           <span class="sub ql-spec">640×480 · ~2 min</span>
           <span class="ql-tier">Q4 · any Mac</span>
         </button>
-        <button type="button" class="pill-btn pill-quality" data-quality="balanced">
+        <button type="button" class="pill-btn pill-quality active" data-quality="balanced">
           <span class="ql-name">Balanced</span>
           <span class="sub ql-spec">1024×576 → 720p</span>
-          <span class="ql-tier">Q4 · no-crop upscale</span>
+          <span class="ql-tier">Q4 · ~5 min · no crop</span>
         </button>
-        <button type="button" class="pill-btn pill-quality active" data-quality="standard">
+        <button type="button" class="pill-btn pill-quality" data-quality="standard">
           <span class="ql-name">Standard</span>
           <span class="sub ql-spec">1280×704 · ~7 min</span>
           <span class="ql-tier">Q4 · standard tier+</span>
@@ -5239,9 +5261,9 @@ HTML = r"""<!doctype html>
           <span class="ql-tier" id="highSub">Q8 not installed</span>
         </button>
       </div>
-      <input type="hidden" name="quality" id="quality" value="standard">
+      <input type="hidden" name="quality" id="quality" value="balanced">
       <input type="hidden" name="accel" id="accel" value="off">
-      <input type="hidden" name="upscale" id="upscale" value="off">
+      <input type="hidden" name="upscale" id="upscale" value="fit_720p">
 
       <div id="warnBanner" class="warn-banner"></div>
 
@@ -5366,6 +5388,8 @@ HTML = r"""<!doctype html>
            Most users assume "no sound" = bug. Hint nudges them to describe
            the soundscape too. Documented in the LTX 2.3 paper but unobvious. -->
       <textarea name="prompt" id="prompt" placeholder="Describe the scene AND the sound: e.g. 'wizard in a forest clearing, fireflies spiraling up — low whispered chant, ember crackle, distant owl'. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
+      <label class="lbl" for="negative_prompt">Avoid</label>
+      <textarea class="avoid-textarea" name="negative_prompt" id="negative_prompt" placeholder="Optional: blurry hands, distorted fingers, extra fingers, smeared face, warped text"></textarea>
       <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
            Rewrites your prompt with the structure/keywords LTX 2.3 trained
            on. ~12-15s on cold start (Gemma needs to load), ~5s warm.
@@ -5504,8 +5528,8 @@ HTML = r"""<!doctype html>
             <div id="dimsRow" class="cz-control">
               <div class="cz-label">Width × height</div>
               <div class="row">
-                <div><input name="width" id="width" value="1280" type="number" min="32" step="32" aria-label="Width"></div>
-                <div><input name="height" id="height" value="704" type="number" min="32" step="32" aria-label="Height"></div>
+                <div><input name="width" id="width" value="1024" type="number" min="32" step="32" aria-label="Width"></div>
+                <div><input name="height" id="height" value="576" type="number" min="32" step="32" aria-label="Height"></div>
               </div>
             </div>
 
@@ -6807,6 +6831,7 @@ async function loadParams() {
   if (p.accel) setAccel(p.accel);
   if (p.upscale) setUpscale(p.upscale);
   document.getElementById('prompt').value = p.prompt || '';
+  document.getElementById('negative_prompt').value = p.negative_prompt || '';
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
   if (p.seed != null) document.getElementById('seed').value = p.seed;
@@ -6963,6 +6988,9 @@ function renderOutputInfoBody(path, data) {
     const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
     const label = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2× Lanczos' : p.upscale);
     genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
+  }
+  if (p.negative_prompt) {
+    genRows.push(`<dt>Avoid</dt><dd>${escapeHtml(snippet(p.negative_prompt, 90))}</dd>`);
   }
   if (seedVal) {
     genRows.push(`<dt>Seed</dt><dd>
@@ -8514,8 +8542,8 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 setInterval(poll, 1500);
 poll();
 setMode('t2v');
-setAspect('landscape');         // sets aspect first so Standard preset orients correctly
-setQuality('standard');         // bundles quality + dims; respects current aspect
+setAspect('landscape');         // sets aspect first so the default preset orients correctly
+setQuality('balanced');         // bundles quality + dims; respects current aspect
 updateCustomizeSummary();
 updateDerived();
 

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 
 # ---- config ------------------------------------------------------------------
 # All paths come from env vars set by the panel. If LTX_GEMMA isn't set, the
@@ -504,6 +505,39 @@ _CURRENT_ACCEL_MODE = None
 _LAST_ACCEL_STATS = None
 
 
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _prompt_with_soft_negative(prompt: str, negative_prompt: str) -> str:
+    """Fold avoid terms into Q4 one-stage prompts where CFG is disabled."""
+    neg = _clean_text(negative_prompt)
+    if not neg:
+        return prompt
+    lower = prompt.lower()
+    if "avoid:" in lower or "negative prompt:" in lower:
+        return prompt
+    return f"{prompt}\nAvoid: {neg}"
+
+
+@contextmanager
+def _override_default_negative_prompt(negative_prompt: str):
+    """Temporarily extend upstream's CFG negative prompt for this one job."""
+    neg = _clean_text(negative_prompt)
+    if not neg:
+        yield False
+        return
+
+    import ltx_pipelines_mlx.ti2vid_one_stage as one_stage
+
+    previous = one_stage.DEFAULT_NEGATIVE_PROMPT
+    one_stage.DEFAULT_NEGATIVE_PROMPT = f"{previous}, {neg}"
+    try:
+        yield True
+    finally:
+        one_stage.DEFAULT_NEGATIVE_PROMPT = previous
+
+
 def _scalar(x) -> float:
     import mlx.core as mx
 
@@ -787,9 +821,16 @@ for line in sys.__stdin__:
             pipe = get_pipe("i2v" if needs_image else "t2v", loras=loras)
             emit({"event": "log", "line": "step:get_pipe done"})
             accel_mode = configure_acceleration(p.get("accel", "off"))
+            negative_prompt = _clean_text(p.get("negative_prompt"))
+            effective_prompt = _prompt_with_soft_negative(p["prompt"], negative_prompt)
+            if negative_prompt:
+                emit({
+                    "event": "log",
+                    "line": "Avoid terms active (Q4 path folds them into the positive prompt; CFG paths use native negative conditioning).",
+                })
 
             kwargs = dict(
-                prompt=p["prompt"],
+                prompt=effective_prompt,
                 output_path=p["output_path"],
                 height=int(p["height"]),
                 width=int(p["width"]),
@@ -863,15 +904,18 @@ for line in sys.__stdin__:
             # extends into swap (240s/step instead of ~25s/step). The panel
             # exposes a "Fast" / "Quality" toggle that flips this to 3.0.
             cfg_scale = float(p.get("cfg_scale", 1.0))
-            video_lat, audio_lat = pipe.extend_from_video(
-                prompt=p["prompt"],
-                video_path=video_path,
-                extend_frames=int(p.get("extend_frames", 5)),
-                direction=p.get("direction", "after"),
-                seed=seed,
-                num_steps=int(p.get("steps", 12)),
-                cfg_scale=cfg_scale,
-            )
+            with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
+                if neg_active:
+                    emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                video_lat, audio_lat = pipe.extend_from_video(
+                    prompt=p["prompt"],
+                    video_path=video_path,
+                    extend_frames=int(p.get("extend_frames", 5)),
+                    direction=p.get("direction", "after"),
+                    seed=seed,
+                    num_steps=int(p.get("steps", 12)),
+                    cfg_scale=cfg_scale,
+                )
             # Decode + save (mirrors the CLI _decode_and_save)
             from ltx_core_mlx.utils.memory import aggressive_cleanup
             if pipe.low_memory:
@@ -933,7 +977,10 @@ for line in sys.__stdin__:
                     raise RuntimeError(f"image not found: {img}")
                 kwargs["image"] = img
                 emit({"event": "log", "line": f"HQ I2V — pipeline will cover-crop image to {kwargs['width']}x{kwargs['height']}"})
-            out_path = pipe.generate_and_save(**kwargs)
+            with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
+                if neg_active:
+                    emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                out_path = pipe.generate_and_save(**kwargs)
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             emit({
@@ -982,7 +1029,10 @@ for line in sys.__stdin__:
                 cfg_scale=float(p.get("cfg_scale", 3.0)),
             )
             emit({"event": "log", "line": f"Keyframe FFLF — frames=[0, {num_frames-1}], pipeline cover-crops both to {kwargs['width']}x{kwargs['height']}"})
-            out_path = pipe.generate_and_save(**kwargs)
+            with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
+                if neg_active:
+                    emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                out_path = pipe.generate_and_save(**kwargs)
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             emit({
