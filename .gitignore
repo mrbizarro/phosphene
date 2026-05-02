@@ -6,6 +6,7 @@
 # below so existing installs don't leak files into commits during the
 # one-time migration window (state files get moved into state/ on first
 # Y1.004 boot — see _migrate_state_dir in mlx_ltx_panel.py).
+state
 state/
 panel_queue.json
 panel_hidden.json
@@ -16,13 +17,17 @@ panel_settings.json
 # =============================================================================
 # Generated / user content — too big or too personal for git
 # =============================================================================
+mlx_outputs
 mlx_outputs/
+panel_uploads
 panel_uploads/
+audio_inputs
 audio_inputs/
 
 # =============================================================================
 # Models — ~60 GB, must be downloaded separately (see README)
 # =============================================================================
+mlx_models
 mlx_models/
 
 # =============================================================================
