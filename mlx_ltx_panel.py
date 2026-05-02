@@ -452,6 +452,17 @@ def get_settings() -> dict:
         return dict(_SETTINGS)
 
 
+def output_codec_settings() -> dict[str, str]:
+    """Current render codec settings, normalized for panel-side ffmpeg passes."""
+    defaults = OUTPUT_PRESETS[DEFAULT_OUTPUT_PRESET]
+    s = get_settings()
+    return {
+        "preset": str(s.get("output_preset") or DEFAULT_OUTPUT_PRESET),
+        "pix_fmt": str(s.get("output_pix_fmt") or defaults["pix_fmt"]),
+        "crf": str(s.get("output_crf") or defaults["crf"]),
+    }
+
+
 def update_settings(patch: dict) -> tuple[dict, str | None]:
     """Apply a validated patch + persist + return (current, error_or_None).
     Caller is responsible for triggering a helper restart if codec settings
@@ -2503,6 +2514,7 @@ def run_job_inner(job: dict) -> None:
             "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
             "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
         }
         write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
         job["output_path"] = str(final_out)
@@ -2601,6 +2613,7 @@ def run_job_inner(job: dict) -> None:
             "video_duration_sec": video_duration(frames),
             "fps": FPS, "model": MODEL_ID_HQ, "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
         }
         write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
         job["output_path"] = str(out_path)
@@ -2743,12 +2756,13 @@ def run_job_inner(job: dict) -> None:
         if not Path(audio).exists():
             raise RuntimeError(f"audio file not found: {audio}")
         duration = video_duration(frames)
-        # Match the helper's lossless codec defaults (overridable via the
-        # same env vars the upstream patch script reads). Previously this
-        # mux step hardcoded yuv420p crf 18, undoing the codec patch for
-        # i2v_clean_audio mode and re-introducing chroma-block artifacts.
-        mux_pix_fmt = os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
-        mux_crf = os.environ.get("LTX_OUTPUT_CRF", "0")
+        # Match the selected panel output preset. The helper subprocess gets
+        # these values through env vars at spawn time; panel-side ffmpeg passes
+        # must read panel_settings.json directly or they fall back to lossless
+        # yuv444p/crf0 and produce huge files.
+        codec = output_codec_settings()
+        mux_pix_fmt = codec["pix_fmt"]
+        mux_crf = codec["crf"]
         mux_cmd = [str(FFMPEG), "-y", "-i", str(raw_out), "-i", audio,
                    "-map", "0:v:0", "-map", "1:a:0"]
         if pad_filter:
@@ -2756,6 +2770,7 @@ def run_job_inner(job: dict) -> None:
         mux_cmd += [
             "-af", f"apad,atrim=0:{duration},asetpts=PTS-STARTPTS",
             "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf, "-preset", "medium",
+            "-movflags", "+faststart",
             "-c:a", "aac", "-b:a", "192k",
             "-t", f"{duration}",
             str(final_out),
@@ -2766,16 +2781,10 @@ def run_job_inner(job: dict) -> None:
     native_target = final_target
     upscale_plan = compute_upscale_plan(width, height, p.get("upscale", "off"))
     if upscale_plan:
-        mux_pix_fmt = os.environ.get("LTX_OUTPUT_PIX_FMT", "yuv444p")
-        mux_crf = os.environ.get("LTX_OUTPUT_CRF", "0")
-        try:
-            crf_value = float(str(mux_crf))
-        except Exception:
-            crf_value = 0.0
-        upscale_preset = os.environ.get(
-            "LTX_UPSCALE_PRESET",
-            "medium" if crf_value <= 5 else "veryfast",
-        )
+        codec = output_codec_settings()
+        mux_pix_fmt = codec["pix_fmt"]
+        mux_crf = codec["crf"]
+        upscale_preset = os.environ.get("LTX_UPSCALE_PRESET", "medium")
         upscaled_out = OUTPUT / (
             f"{final_target.stem}_{upscale_plan['tag']}{final_target.suffix}"
         )
@@ -2784,6 +2793,7 @@ def run_job_inner(job: dict) -> None:
             "-vf", upscale_plan["vf"],
             "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
             "-preset", upscale_preset,
+            "-movflags", "+faststart",
             "-c:a", "copy",
             str(upscaled_out),
         ]
@@ -2791,7 +2801,8 @@ def run_job_inner(job: dict) -> None:
         final_target = upscaled_out
         push(
             f"Upscale done → {upscaled_out.name} "
-            f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop, preset={upscale_preset})"
+            f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop, "
+            f"{mux_pix_fmt} crf {mux_crf}, preset={upscale_preset})"
         )
         set_hidden(str(native_target), True)
         push(f"Native source kept but hidden from gallery → {native_target.name}")
@@ -2812,6 +2823,7 @@ def run_job_inner(job: dict) -> None:
         "video_duration_sec": video_duration(frames),
         "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
         "helper_elapsed_sec": result.get("elapsed_sec"),
+        "output_codec": output_codec_settings(),
     }
     if result.get("accel_metrics"):
         sidecar["accel_metrics"] = result["accel_metrics"]
@@ -2819,7 +2831,7 @@ def run_job_inner(job: dict) -> None:
         sidecar["upscale"] = {
             k: v for k, v in upscale_plan.items()
             if k not in ("vf",)
-        } | {"source": str(native_target)}
+        } | {"source": str(native_target), "codec": output_codec_settings()}
     write_sidecar(final_target.with_suffix(final_target.suffix + ".json"), sidecar)
     job["output_path"] = str(final_target)
     push(f"Done in {sidecar['elapsed_sec']}s → {final_target.name}")
@@ -6988,6 +7000,11 @@ function renderOutputInfoBody(path, data) {
     const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
     const label = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2× Lanczos' : p.upscale);
     genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
+  }
+  const codec = data.output_codec || (data.upscale && data.upscale.codec);
+  if (codec && codec.pix_fmt && codec.crf != null) {
+    const preset = codec.preset ? ` · ${codec.preset}` : '';
+    genRows.push(`<dt>Output codec</dt><dd>${escapeHtml(codec.pix_fmt)} · CRF ${escapeHtml(String(codec.crf))}${escapeHtml(preset)}</dd>`);
   }
   if (p.negative_prompt) {
     genRows.push(`<dt>Avoid</dt><dd>${escapeHtml(snippet(p.negative_prompt, 90))}</dd>`);

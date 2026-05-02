@@ -109,6 +109,10 @@ generation:
 - **2×** doubles the generated width and height while preserving the exact
   aspect ratio.
 
+Exported/upscaled files use the same **Output format** setting as native
+renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
+lossless (`yuv444p` / CRF 0).
+
 Install tries to fetch the official LTX 2.3 latent x2 upscaler (~1 GB) as an
 optional asset, and the Models dialog / Pinokio menu can resume it later. The
 current lightweight export path uses ffmpeg so it works even before that model
