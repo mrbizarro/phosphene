@@ -86,7 +86,34 @@ HIDDEN_FILE = STATE_DIR / "panel_hidden.json"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
 FPS = 24
-PORT = int(os.environ.get("LTX_PORT", "8198"))
+
+# ---- Profile (production vs dev) ---------------------------------------------
+# Y1.015: support running a local "dev" Pinokio panel side-by-side with the
+# production install. The dev panel checks out the `dev` branch of the same
+# repo and binds to a different port, so commits can be tested in Pinokio
+# before merging to main. Detection is automatic from the git branch — no
+# config to maintain. PHOSPHENE_PROFILE env var overrides for testing.
+def _detect_profile() -> str:
+    forced = os.environ.get("PHOSPHENE_PROFILE", "").strip().lower()
+    if forced in ("dev", "production"):
+        return forced
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).decode("utf-8", "replace").strip()
+        if out == "dev":
+            return "dev"
+    except Exception:
+        pass
+    return "production"
+
+
+PROFILE = _detect_profile()
+# Default port: 8198 production, 8199 dev — so both panels can run side by
+# side. LTX_PORT env var still overrides if the user wants something else.
+DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198
+PORT = int(os.environ.get("LTX_PORT", str(DEFAULT_PORT)))
 HISTORY_LIMIT = 200
 HISTORY_PERSIST_LIMIT = 100  # how many history entries to write to panel_queue.json
 HISTORY_API_LIMIT = 50       # how many to expose via /status
@@ -1954,13 +1981,31 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
         is_hidden = path_s in hidden_snap
         if is_hidden and not include_hidden:
             continue
+        # Pull elapsed_sec from the sidecar so the gallery card can show
+        # "how long this took to render" instead of a wall-clock timestamp
+        # (the timestamp tells you nothing useful when scanning a list of
+        # 60 outputs — duration is what users actually compare). Sidecar
+        # read is cheap, but tolerate a missing/corrupt sidecar by leaving
+        # elapsed_sec null and letting the UI fall back to the file mtime.
+        elapsed_sec = None
+        sidecar = p.with_suffix(p.suffix + ".json")
+        has_sidecar = sidecar.exists()
+        if has_sidecar:
+            try:
+                meta = json.loads(sidecar.read_text())
+                v = meta.get("elapsed_sec")
+                if isinstance(v, (int, float)):
+                    elapsed_sec = float(v)
+            except Exception:
+                pass
         out.append({
             "name": p.name,
             "path": path_s,
             "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)),
             "size_mb": p.stat().st_size / 1024 / 1024,
+            "elapsed_sec": elapsed_sec,
             "url": f"/file?path={quote(path_s)}",
-            "has_sidecar": p.with_suffix(p.suffix + ".json").exists(),
+            "has_sidecar": has_sidecar,
             "hidden": is_hidden,
         })
         if len(out) >= 60:
@@ -3614,8 +3659,18 @@ def page() -> str:
         "default_image": str(REFERENCE),
         "default_audio": str(AUDIO_DEFAULT),
         "fps": FPS, "model": MODEL_ID,
+        "profile": PROFILE,
     })
-    return HTML.replace("__BOOTSTRAP__", bootstrap)
+    # Profile badge — only visible in the dev panel. Lets Salo tell at a
+    # glance which install he's looking at when both panels are open.
+    profile_badge = (
+        '<span class="profile-badge" title="Dev panel · pulls from `dev` branch · port '
+        + str(PORT) + '">DEV</span>'
+        if PROFILE == "dev" else ""
+    )
+    return (HTML
+            .replace("__BOOTSTRAP__", bootstrap)
+            .replace("__PROFILE_BADGE__", profile_badge))
 
 
 HTML = r"""<!doctype html>
@@ -3661,6 +3716,21 @@ HTML = r"""<!doctype html>
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
     .brand img { height: 104px; width: auto; display: block; }
+    /* DEV badge — visible only on the dev panel (PROFILE == 'dev'). Sits
+       next to the Phosphene wordmark so it's the first thing you notice
+       when comparing dev vs production tabs. */
+    .profile-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 12px;
+      padding: 3px 9px;
+      border-radius: 5px;
+      background: rgba(240,185,64,0.18);
+      color: var(--warning, #f0b940);
+      border: 1px solid rgba(240,185,64,0.55);
+      font-size: 10px; font-weight: 700;
+      letter-spacing: 0.12em;
+      cursor: help;
+    }
     .tag { color: var(--muted); font-size: 11px; }
     .pill {
       padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
@@ -4981,6 +5051,7 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand"><img src="/assets/logo-header.png" alt="Phosphene"></a>
+  __PROFILE_BADGE__
   <span class="spacer"></span>
   <!-- Hardware tier badge — clickable, opens a dialog explaining what
        this Mac's RAM tier allows. Modes / qualities the tier doesn't
@@ -6524,6 +6595,21 @@ function setFilter(mode) {
   poll();
 }
 
+// Format render duration for the gallery card sub-line. Falls back to
+// the time-of-day when the sidecar is missing (older outputs that
+// pre-date the elapsed_sec field, or outputs whose sidecar got
+// deleted) so the slot is never empty.
+function _outputDurationLabel(o) {
+  const s = (o && typeof o.elapsed_sec === 'number') ? o.elapsed_sec : null;
+  if (s == null) {
+    // Fallback: show time-of-day from mtime so empty cards aren't worse.
+    return o.mtime ? o.mtime.slice(11, 16) : '—';
+  }
+  if (s < 60)    return `${Math.round(s)} s`;
+  if (s < 3600)  return `${Math.floor(s / 60)} m ${Math.round(s % 60)} s`;
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} m`;
+}
+
 function renderCarousel() {
   const el = document.getElementById('carousel');
   if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
@@ -6539,7 +6625,9 @@ function renderCarousel() {
         : ''}
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
-        <div class="sub">${o.mtime.slice(11,16)} · ${o.size_mb.toFixed(1)} MB</div>
+        <div class="sub" title="Render time · file size">
+          ${_outputDurationLabel(o)} · ${o.size_mb.toFixed(1)} MB
+        </div>
       </div>
       <div class="row-btns">
         <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})">${o.hidden ? 'Show' : 'Hide'}</button>

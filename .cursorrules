@@ -165,6 +165,31 @@ new patch versions without a venv rebuild — used when we added
   serious project shipped by `mrbizarro`. Co-author trailers showing
   "Claude" make it look like a vibe-coded toy.
 
+### Branch model — `main` is production, `dev` is staging (Y1.015+)
+
+- **`main`** is what real users get. Pinokio's Discover URL points here;
+  every commit pushed to `main` is shipped to every user the next time
+  they click Update. Treat it accordingly.
+- **`dev`** is the staging branch. Push WIP commits here freely. The
+  local "Phosphene Dev" Pinokio panel (set up via
+  `scripts/setup_dev_panel.sh`) tracks this branch on port 8199 and
+  shows a DEV badge in the header.
+- **Workflow**: develop on `dev` → push to `origin/dev` → click Update
+  in the Phosphene Dev panel → test what real users will experience →
+  once verified, merge `dev` → `main` and push. That's when users get
+  the change.
+- The panel auto-detects which profile it is from `git rev-parse
+  --abbrev-ref HEAD`: branch == `dev` → port 8199 + DEV badge; anything
+  else → port 8198 + normal header. No config files to edit per panel.
+- `update.js` is also branch-aware as of Y1.015 (`git pull --ff-only
+  origin <current branch>`) so the dev panel's Update pulls dev and
+  the production panel's Update pulls main, from the same shared code.
+- The dev panel symlinks `mlx_models/` from the production install
+  (saves ~36 GB of duplicate weights). State / outputs / uploads stay
+  separate per panel.
+- Don't push experimental commits directly to main. Always go via dev.
+  The whole point of the staging panel is to verify before users hit it.
+
 ### Git policy — NEVER FORCE-PUSH `origin/main`
 - A history-rewrite + force-push on 2026-05-01 (to scrub identity
   leaks from old commits) broke `git pull` for every existing user

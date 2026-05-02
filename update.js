@@ -9,33 +9,23 @@ module.exports = {
     // (durability of model assets vs. routine code updates) and adds a
     // 36 GB merge step to a flow that should be fast.
 
-    // Resilient pull for the panel repo (mrbizarro/phosphene). Plain
-    // `git pull` was breaking for existing users after a history-rewrite
-    // event on origin (commit identities were scrubbed; force-push
-    // landed; existing clones could no longer fast-forward because
-    // their local history didn't match origin's anymore).
+    // Resilient + branch-aware pull for the panel repo. Y1.015 made this
+    // branch-aware so the same update.js works for both the production
+    // panel (tracks `main`) and a local dev panel (tracks `dev`). The
+    // currently-checked-out branch is whatever the install was set up
+    // with; we pull origin/<that branch> rather than hardcoding `main`.
     //
-    // The new sequence:
-    //   1. git fetch origin
-    //   2. try a fast-forward pull. Works for everyone whose history
-    //      lines up with origin/main (i.e. fresh installs and most
-    //      users post-recovery).
-    //   3. if step 2 fails, fall back to `git reset --hard origin/main`.
-    //      A Pinokio-installed panel is not a place users keep local
-    //      commits, so wiping the working tree to match origin is the
-    //      Right Thing — it's what they meant by clicking Update.
-    //
-    // The compound shell command runs through Pinokio's shell.run with
-    // && / || so any path that resolves to "we're now on origin/main
-    // HEAD" finishes 0; any other state finishes non-zero and the user
-    // sees the error. We add a final `git rev-parse --short HEAD` so the
-    // log shows what we ended up on, even on the happy path.
+    // Recovery from divergence (Y1.002) is preserved: if --ff-only
+    // refuses, we fall back to reset --hard origin/<branch>. A Pinokio
+    // panel install is never expected to carry local commits.
     {
       method: "shell.run",
       params: {
         message: [
           "git fetch origin",
-          "git pull --ff-only origin main || (echo 'history diverged from origin (likely a force-push); falling back to reset --hard' && git reset --hard origin/main)",
+          "BRANCH=$(git rev-parse --abbrev-ref HEAD)",
+          "echo \"updating branch: $BRANCH\"",
+          "git pull --ff-only origin $BRANCH || (echo 'history diverged from origin (force-push?); falling back to reset --hard' && git reset --hard origin/$BRANCH)",
           "git rev-parse --short HEAD"
         ]
       }
