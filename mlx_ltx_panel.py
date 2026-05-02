@@ -6615,10 +6615,15 @@ function renderCarousel() {
   if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
   el.innerHTML = currentOutputs.map(o => {
     const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
+    // Thumbnail seek point: 2.5s is the midpoint of an LTX 5s clip (121
+    // frames at 24fps ≈ 5.04s). The first half-second of LTX renders is
+    // often dark/static (model fades into the scene), so #t=0.5 produced
+    // "black thumbnail" complaints — the video was fine, the seek point
+    // was the darkest moment. Mid-clip is reliably the visual peak.
     return `
     <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
-      <video src="/file?path=${encodeURIComponent(o.path)}#t=0.5" preload="metadata" muted></video>
+      <video src="/file?path=${encodeURIComponent(o.path)}#t=2.5" preload="metadata" muted></video>
       ${o.has_sidecar
         ? `<button class="car-info-btn" type="button" title="Show generation info"
                    onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
