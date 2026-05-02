@@ -2315,7 +2315,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
             "label": f("preset_label", "") or None,
-            "quality": f("quality", "standard"),  # draft / standard / high
+            "quality": f("quality", "standard"),  # quick / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
@@ -2357,7 +2357,7 @@ def run_job_inner(job: dict) -> None:
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
             "the output (this is what you saw last run). Use steps=8 for standard "
-            "renders, or pick Quality=Draft for a faster smaller-resolution render at "
+            "renders, or pick Quality=Quick for a faster smaller-resolution render at "
             "the same 8 steps."
         )
 
@@ -2585,7 +2585,7 @@ def run_job_inner(job: dict) -> None:
                 f"High quality (Q8 two-stage) isn't supported on the "
                 f"{SYSTEM_CAPS['label']} hardware tier — Q8 dev transformer "
                 f"(~19 GB) plus the upscaler stage doesn't fit. "
-                f"Use Standard or Draft instead, or upgrade to 64+ GB."
+                f"Use Standard or Quick instead, or upgrade to 64+ GB."
             )
         # Route to TwoStageHQPipeline (Q8 dev model + res_2s sampler + CFG anchor + TeaCache).
         # Defaults from ltx-2-mlx CLAUDE.md LTX_2_3_PARAMS.
@@ -2626,7 +2626,7 @@ def run_job_inner(job: dict) -> None:
         }
         push(f"Run HIGH via helper: id={job['id']} mode={mode} {width}x{height} {frames}f · Q8 two-stage HQ + TeaCache")
     else:
-        # Draft / Standard — Q4 one-stage with steps from form.
+        # Quick / Standard — Q4 one-stage with steps from form.
         # Resolve LoRAs: user-picked entries from p["loras"] plus the
         # HDR shortcut if enabled (the HDR LoRA is a curated Lightricks
         # repo we know about, kept hidden from the picker because the
@@ -6498,7 +6498,7 @@ async function poll() {
       if (rawLower.includes('sigkill')) {
         friendly = 'Helper killed by the OS — out of memory (jetsam).';
         hint = 'Close memory-heavy apps (Chrome, Slack, iOS Simulator) and try again, ' +
-               'or switch Quality to Draft (about half the RAM).';
+               'or switch Quality to Quick (about half the RAM).';
       } else if (rawLower.includes('sigsegv') || rawLower.includes('sigbus')) {
         friendly = 'Helper crashed at the native level (MLX/Metal fault).';
         hint = 'Share the crashlog at ~/Library/Logs/DiagnosticReports/python3.11_*.crash ' +
@@ -7033,7 +7033,7 @@ function updateModelsCard(s) {
   // the user is about to do one of those — no point nagging a T2V user
   // about Q8 if they'll never use it.
   // Dismissible: a user who deliberately doesn't want Q8 (storage budget,
-  // they only do T2V Draft/Standard) can × this away and we'll respect it
+  // they only do T2V Quick/Standard) can × this away and we'll respect it
   // until either model state changes or they re-summon the modal.
   const needsQ8 = (currentMode === 'keyframe')
                 || (document.getElementById('quality').value === 'high');
@@ -7204,8 +7204,8 @@ function openTierModal() {
         time: tt.i2v_standard,
       },
       {
-        title: 'Draft (faster, smaller)',
-        desc: 'Half-resolution preview to scout prompts and seeds before a full render.',
+        title: 'Quick (640×480)',
+        desc: 'Smaller preview to scout prompts and seeds before a full-size render.',
         on: true,
         size: 'Always smaller than Standard',
         time: tt.t2v_draft,

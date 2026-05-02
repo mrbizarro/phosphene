@@ -93,11 +93,11 @@ to rewrite your prompt in the structure LTX 2.3 was trained on.
 Three render levels picked per-job. All use the same prompt; the model
 and step count change.
 
-| Tier | Model | Time @ 1280×704 | Use case |
+| Tier | Model | Default size / time | Use case |
 |---|---|---|---|
-| **Draft** | Q4 distilled | ~2 min (half resolution) | Iterate on prompts and seeds before committing. |
-| **Standard** | Q4 distilled | ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
-| **High** | Q8 two-stage + TeaCache | ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
+| **Quick** | Q4 distilled | 640×480 · ~2 min | Iterate on prompts and seeds before committing to a full-size render. |
+| **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~25 GB on disk). |
+| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~25 GB extra). Required for FFLF. |
 
 Standard T2V/I2V also has an opt-in **Speed** control:
 
@@ -320,7 +320,7 @@ Wall-clock times on an **M4 Mac Studio, 64 GB**:
 
 | Mode | Resolution | Frames | Steps | ~Time |
 |---|---|---|---|---|
-| T2V Draft | 512×288 | 49 (2s) | 8 | ~35 s |
+| T2V Quick | 640×480 | 121 (5s) | 8 | ~2 min |
 | T2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
 | I2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
 | Extend (Q4 dev, cfg=1.0) | 768×416 | +6 latents (~2s) | 12 | ~12 min |
