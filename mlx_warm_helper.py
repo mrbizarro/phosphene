@@ -317,13 +317,26 @@ def _attach_loras(pipe, loras: list[dict] | None) -> None:
     pipe._pending_loras = pairs
 
 
-def get_pipe(kind: str, loras: list[dict] | None = None):
+_extend_model_dir: str | None = None
+
+
+def get_pipe(kind: str, loras: list[dict] | None = None,
+             model_dir: str | None = None):
     """kind in {'t2v','i2v','extend'}; loras is an optional list of
     {path, strength} dicts. When the requested LoRA set differs from
     the cached pipeline's, the pipeline is rebuilt — LoRA fusion is a
-    one-shot weight transformation, not a runtime toggle."""
+    one-shot weight transformation, not a runtime toggle.
+
+    Y1.036 — `model_dir` overrides the helper-default LTX_MODEL env var on a
+    per-call basis. Used for Extend, which needs the Q8 `transformer-dev`
+    weights even on a Standard-tier render. Pre-Y1.024 the Q4 dir incidentally
+    carried a copy of `transformer-dev.safetensors` (download bloat) so Extend
+    silently loaded from there; the Y1.024 download filter pruned the dupe and
+    exposed that Extend is structurally Q8-class. Cached alongside the LoRA
+    fingerprint so a model_dir flip rebuilds the pipe."""
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
+    global _extend_model_dir
     from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
 
     fp = _lora_fingerprint(loras)
@@ -348,19 +361,24 @@ def get_pipe(kind: str, loras: list[dict] | None = None):
                 _i2v_lora_key = fp
             return _i2v_pipe
         if kind == "extend":
-            if _extend_pipe is None or _extend_lora_key != fp:
-                if _extend_pipe is not None and _extend_lora_key != fp:
+            ext_dir = model_dir or MODEL_ID
+            if (_extend_pipe is None
+                    or _extend_lora_key != fp
+                    or _extend_model_dir != ext_dir):
+                if _extend_pipe is not None:
+                    why = "LoRA set changed" if _extend_lora_key != fp else "model_dir changed"
                     emit({"event": "log",
-                          "line": f"LoRA set changed; reloading Extend pipeline."})
+                          "line": f"{why}; reloading Extend pipeline."})
                     _extend_pipe = None
                 emit({"event": "log",
-                      "line": "Loading Extend pipeline (heavier — uses dev transformer)..."})
+                      "line": f"Loading Extend pipeline (heavier — uses dev transformer at {ext_dir})..."})
                 pipe = ExtendPipeline(
-                    model_dir=MODEL_ID, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                    model_dir=ext_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                 )
                 _attach_loras(pipe, loras)
                 _extend_pipe = pipe
                 _extend_lora_key = fp
+                _extend_model_dir = ext_dir
             return _extend_pipe
         # t2v
         if _t2v_pipe is None or _t2v_lora_key != fp:
@@ -1085,7 +1103,11 @@ for line in sys.__stdin__:
             # Extend supports LoRAs via the same _pending_loras hook;
             # the dev transformer picks them up at load time just like T2V/I2V.
             loras = p.get("loras") or []
-            pipe = get_pipe("extend", loras=loras)
+            # Y1.036 — Extend needs the Q8 `transformer-dev` weights. Panel
+            # passes the resolved Q8 path via params.model_dir; falling back
+            # to the helper's MODEL_ID is the legacy behavior.
+            ext_model_dir = p.get("model_dir")
+            pipe = get_pipe("extend", loras=loras, model_dir=ext_model_dir)
             video_path = p["video_path"]
             if not os.path.exists(video_path):
                 raise RuntimeError(f"source video not found: {video_path}")

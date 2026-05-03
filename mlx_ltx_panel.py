@@ -1845,18 +1845,31 @@ CAPABILITIES: dict[str, dict] = {
             "of memory above that. 768 is a sweet-spot working size; "
             "you can run a separate upscaler afterwards if you need 720p+."
         ),
+        # Times are measured wall clocks for a 5 s render (121 frames @ 24 fps)
+        # at Exact speed, on the canonical Comfortable hardware (M-Studio /
+        # M-Max 64 GB). Y1.034 + Y1.035 added a temporal-streaming VAE decode
+        # patch that adds ~30 s of decode work on a 5 s clip in exchange for
+        # not melting on long ones; that bump is reflected in `standard` going
+        # from ~7 to ~8 min vs. pre-Y1.034 baselines (median 459 s observed
+        # across 26 Y1.013-Y1.024 runs; Y1.035 observed 493 s).
+        # Boost/Turbo Speed pills shave ~23%/~34% off Standard respectively.
         "times": {
             "t2v_draft":     "about 2 min",
-            "t2v_standard":  "about 7 min",
-            "i2v_standard":  "about 7 min",
+            "t2v_standard":  "about 8 min",
+            "i2v_standard":  "about 8 min",
             "high":          "about 12 min",
-            "keyframe":      "about 5 min (at 768 px)",
-            "extend":        "about 11 min (at 768 px)",
+            "keyframe":      "about 6 min (at 768 px)",
+            # Extend on Comfortable measured 16 min for +3 s at 768 px on
+            # M-Max 64 GB (Q8 dev transformer, CFG=1.0, 12 steps). The
+            # earlier "about 11 min" estimate predates the Y1.036 Q8 routing
+            # — pre-Y1.024 Extend ran on Q4-distilled-by-accident (faster
+            # weights, but technically loading the wrong model).
+            "extend":        "about 16 min (at 768 px, +3 s)",
         },
         "quality_times": {
             "quick":    "~2 min",
             "balanced": "~5 min",
-            "standard": "~7 min",
+            "standard": "~8 min",
             "high":     "~12 min",
         },
     },
@@ -2629,6 +2642,21 @@ def run_job_inner(job: dict) -> None:
                 f"tier — the dev transformer needs more headroom than this Mac "
                 f"has. Bump to 64+ GB or render the longer clip in one shot."
             )
+        # Y1.036 — Extend always loads the Q8 `transformer-dev.safetensors`
+        # weights (CFG-guided dev transformer, not the 8-step distilled).
+        # Pre-Y1.024 the Q4 dir incidentally shipped a copy of that file as
+        # download bloat, so Extend silently worked on Q4-only installs. The
+        # Y1.024 download filter pruned the dupe and exposed that Extend is
+        # structurally Q8-class. Gate it the same way Keyframe does and route
+        # the helper to the Q8 dir.
+        ext_missing = q8_missing_files()
+        if ext_missing:
+            raise RuntimeError(
+                f"Extend requires the full Q8 model at {Q8_LOCAL_PATH}. "
+                f"Missing {len(ext_missing)} file(s): {', '.join(ext_missing[:3])}"
+                f"{' …' if len(ext_missing) > 3 else ''}. "
+                f"Click \"Download Q8\" in Pinokio to install it (~37 GB)."
+            )
         src = p["video_path"]
         if not src or not Path(src).exists():
             raise RuntimeError(f"source video for extend not found: {src}")
@@ -2667,6 +2695,10 @@ def run_job_inner(job: dict) -> None:
             "action": "extend",
             "id": job["id"],
             "params": {
+                # Y1.036: explicit model_dir → Q8. Helper's get_pipe("extend")
+                # caches per-model-dir so this rebuilds the pipe only when
+                # the dir actually flips.
+                "model_dir": str(Q8_LOCAL_PATH),
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "video_path": src,
@@ -2679,7 +2711,7 @@ def run_job_inner(job: dict) -> None:
             },
         }
         push(f"Extend via helper: id={job['id']} src={Path(src).name} +{p['extend_frames']}f · "
-             f"steps={steps} cfg={cfg_scale}")
+             f"steps={steps} cfg={cfg_scale} (Q8 dev transformer)")
         result = HELPER.run(job_spec)
         if "seed_used" in result:
             push(f"seed used: {result['seed_used']}")
@@ -2690,7 +2722,11 @@ def run_job_inner(job: dict) -> None:
             "params": {**p, "command": "extend"},
             "started": job.get("started_at"),
             "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
-            "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
+            # Y1.036 — Extend always loads Q8 `transformer-dev` regardless of
+            # the panel's nominal MODEL_ID (which tracks the Q4 distilled
+            # used by T2V/I2V/Standard). Record the actual path so the
+            # /info modal and historical analyzers don't misreport.
+            "fps": FPS, "model": str(Q8_LOCAL_PATH), "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
             "output_codec": output_codec_settings(),
         }
@@ -6878,17 +6914,21 @@ async function poll() {
     if (document.getElementById('quality').value === 'high') setQuality('standard');
   }
 
-  // Keyframe (FFLF) requires Q8 — server enforces it (see run_job_inner). The
-  // UI was previously silently downgrading the user to Standard when they
-  // picked keyframe with Q8 missing, then the server would 500 on submit.
-  // Disable Generate + show a clear reason while in that state.
+  // Keyframe (FFLF) and Extend both require Q8 — server enforces it (see
+  // run_job_inner). The UI was previously silently downgrading the user to
+  // Standard when they picked keyframe with Q8 missing, then the server
+  // would 500 on submit. Disable Generate + show a clear reason while in
+  // that state. Y1.036 added Extend to the same gate after the Y1.024
+  // download trim exposed that Extend is structurally Q8-class.
   const genBtn = document.getElementById('genBtn');
-  if (currentMode === 'keyframe' && !s.q8_available) {
+  const q8GatedMode = (currentMode === 'keyframe' || currentMode === 'extend');
+  if (q8GatedMode && !s.q8_available) {
     genBtn.disabled = true;
+    const modeName = currentMode === 'keyframe' ? 'Keyframe (FFLF)' : 'Extend';
     const left = (s.q8_missing || []).length;
     genBtn.title = left > 0 && left < 6
-      ? `Keyframe (FFLF) needs Q8 — ${left} file(s) still downloading.`
-      : 'Keyframe (FFLF) needs the Q8 model. Click "Download Q8 (~37 GB)" in Pinokio.';
+      ? `${modeName} needs Q8 — ${left} file(s) still downloading.`
+      : `${modeName} needs the Q8 model. Click "Download Q8 (~37 GB)" in Pinokio.`;
     genBtn.textContent = 'Generate · Q8 required';
   } else if (genBtn.disabled && genBtn.textContent.startsWith('Generate · Q8')) {
     // Restore — only do so if WE were the ones who disabled it, otherwise
@@ -7508,7 +7548,11 @@ function updateModelsCard(s) {
   // Dismissible: a user who deliberately doesn't want Q8 (storage budget,
   // they only do T2V Quick/Standard) can × this away and we'll respect it
   // until either model state changes or they re-summon the modal.
+  // Y1.036 — Extend joins FFLF and High in needing Q8. The Extend pipeline
+  // loads `transformer-dev.safetensors` for CFG-guided denoise; Q4 doesn't
+  // ship it after the Y1.024 download trim, so surface the same CTA here.
   const needsQ8 = (currentMode === 'keyframe')
+                || (currentMode === 'extend')
                 || (document.getElementById('quality').value === 'high');
   if (needsQ8 && !q8Ok && tier.allows_q8 !== false) {
     if (dismissed) { card.style.display = 'none'; return; }
@@ -7516,6 +7560,7 @@ function updateModelsCard(s) {
     card.classList.add('state-warn', 'dismissible');
     icon.textContent = '⬇';
     const reason = currentMode === 'keyframe' ? 'FFLF needs the Q8 model'
+                : currentMode === 'extend'    ? 'Extend needs the Q8 model'
                                               : 'High quality needs the Q8 model';
     title.textContent = reason;
     const missing = (s.q8_missing || []).length;

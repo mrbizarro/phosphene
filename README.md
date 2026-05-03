@@ -97,7 +97,7 @@ and step count change.
 |---|---|---|---|
 | **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
 | **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Default. Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
-| **Standard** | Q4 distilled | 1280×704 · ~7 min | The daily driver. Q4 weights (~20 GB on disk). |
+| **Standard** | Q4 distilled | 1280×704 · ~8 min | The daily driver. Q4 weights (~20 GB on disk). Boost/Turbo Speed shaves ~23 % / ~34 %. |
 | **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~37 GB extra). Required for FFLF. |
 
 The **Export** control can also run a lightweight ffmpeg Lanczos pass after
