@@ -2120,15 +2120,46 @@ def list_uploads(limit: int = 40) -> list[dict]:
 
 def list_outputs(include_hidden: bool = False) -> list[dict]:
     files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
-    # Snapshot HIDDEN_PATHS under LOCK so concurrent hide/unhide from other
-    # threads can't tear the read.
+    # Y1.039 — skip files that ffmpeg is still writing.
+    #
+    # Pre-Y1.039 a fresh render appeared in the gallery the moment its mp4
+    # file existed, even before ffmpeg had finished writing the moov atom.
+    # The <video> tag in the carousel fetched the truncated body, decoded a
+    # black frame, and the browser then cached that broken byte stream
+    # under the file URL — so the card stayed black for 2–3 minutes until
+    # the HTTP cache expired and a refresh re-pulled the now-complete file.
+    #
+    # Two layers of protection:
+    #   1. If a job is running, skip its known target paths (raw_path /
+    #      output_path / native_path / upscaled_path tracked on the job
+    #      dict). This catches the common case cleanly.
+    #   2. As a belt-and-braces, also skip any file whose mtime is within
+    #      the last 2 seconds — covers cancelled jobs that left a partial,
+    #      and any path the worker forgot to record on the job dict.
+    in_flight_paths: set[str] = set()
     with LOCK:
         hidden_snap = set(HIDDEN_PATHS)
+        cur = STATE.get("current")
+        if cur:
+            for k in ("raw_path", "output_path", "native_path", "upscaled_path"):
+                v = cur.get(k)
+                if v:
+                    in_flight_paths.add(str(v))
+    inflight_mtime_cutoff = time.time() - 2.0
     out = []
     for p in files:
         path_s = str(p)
         is_hidden = path_s in hidden_snap
         if is_hidden and not include_hidden:
+            continue
+        # In-flight protection — see the comment block above.
+        if path_s in in_flight_paths:
+            continue
+        try:
+            mt = p.stat().st_mtime
+        except OSError:
+            continue
+        if mt > inflight_mtime_cutoff:
             continue
         # Pull elapsed_sec from the sidecar so the gallery card can show
         # "how long this took to render" instead of a wall-clock timestamp
@@ -2147,13 +2178,18 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
                     elapsed_sec = float(v)
             except Exception:
                 pass
+        # Y1.039 cache-bust — append the file's mtime as a version param so
+        # the browser treats post-replace files as a new URL. Without this,
+        # if a file was overwritten in place (e.g. an upscale rewriting the
+        # native mp4), the browser would keep serving its cached old copy.
+        # `mt` was captured above for the in-flight skip; reuse it here.
         out.append({
             "name": p.name,
             "path": path_s,
-            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(p.stat().st_mtime)),
+            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mt)),
             "size_mb": p.stat().st_size / 1024 / 1024,
             "elapsed_sec": elapsed_sec,
-            "url": f"/file?path={quote(path_s)}",
+            "url": f"/file?path={quote(path_s)}&v={int(mt)}",
             "has_sidecar": has_sidecar,
             "hidden": is_hidden,
         })
@@ -3203,6 +3239,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Content-Length", str(length))
+            # Y1.039 — `no-cache` forces revalidation on every request even
+            # when the URL is reused. Combined with the v=<mtime> URL bust
+            # in list_outputs, this means a refreshed file gets re-fetched
+            # cleanly instead of the browser serving stale partial bytes.
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             with path.open("rb") as fh:
                 fh.seek(start)
@@ -3226,6 +3267,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Content-Length", str(size))
         self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-cache")  # Y1.039 — see above
         self.end_headers()
         with path.open("rb") as fh:
             while chunk := fh.read(1024 * 1024):
@@ -3263,6 +3305,13 @@ class Handler(BaseHTTPRequestHandler):
             payload["server_now"] = time.time()
             payload["avg_elapsed_sec"] = avg
             payload["eta_sec"] = (avg or 420) * len(payload["queue"])
+            # Y1.039 — per-job progress for the Now-card. Phase-aware,
+            # config-bucketed ETA, denoise-step extrapolation. Replaces the
+            # old elapsed/global-avg ratio that mis-paced Quick/High renders.
+            if payload.get("current"):
+                payload["current"]["progress"] = _compute_progress(
+                    payload["current"], payload.get("log") or [],
+                )
             payload["helper"] = {
                 "alive": HELPER.is_alive(), "pid": HELPER.pid(),
                 "low_memory": HELPER_LOW_MEMORY == "true",
@@ -4002,6 +4051,231 @@ def _avg_elapsed() -> float | None:
     if not recent:
         return None
     return round(sum(recent) / len(recent), 1)
+
+
+# ---- Per-job progress (Y1.039) ----------------------------------------------
+# The Now-card progress bar used to be `elapsed / global_avg_of_last_10`,
+# which mis-paced Quick renders (crawling because the avg includes Standard +
+# High) and High renders (blasting past 99% before decode). The bar also had
+# zero phase awareness — denoise-step events the helper emits as tqdm output
+# went unused.
+#
+# Y1.039 fixes both at once:
+#   1. ETA is computed per-config from history matching (mode, quality, accel,
+#      frames) instead of a global average. Quick uses Quick history.
+#   2. Phase weights split each render into setup / denoise / decode / post
+#      bands. Bar advances proportional to actual phase progress, not a
+#      monotone elapsed/eta ratio.
+#   3. Once the helper has reported one denoise step's per-it cost
+#      ("30.89s/it"), remaining time = steps_left * per_it + decode_budget.
+#      That becomes the dominant signal once denoise begins, so the bar
+#      jumps when Boost/Turbo skip a cached step (helper emits the next K/N
+#      near-instantly) and stays honest if a step is unusually slow.
+#
+# Returned `progress` dict is rendered by the Now-card JS — no client-side
+# math. Single source of truth for what the user sees.
+
+# Captures step counter in tqdm `Denoising: 12%|...| 1/8 [00:30<03:36, 30.89s/it]`.
+_DENOISE_RE = re.compile(r"Denoising[^|]*\|[^|]*\|\s*(\d+)\s*/\s*(\d+)")
+_PER_IT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s/it")
+
+
+def _parse_progress_signals(log_lines: list[str]) -> dict:
+    """Walk the helper log tail (newest-to-oldest) and surface the latest
+    phase-defining markers. The panel clears STATE['log'] when a new job
+    becomes current (worker_loop), so any log lines passed in are already
+    scoped to the running job — no cross-job filtering needed here."""
+    denoise_step = denoise_total = None
+    last_per_it = None
+    decode_started = decode_done = generate_done = upscale_done = pipe_loaded = False
+    for ln in reversed(log_lines or []):
+        if not isinstance(ln, str) or not ln:
+            continue
+        if denoise_step is None:
+            m = _DENOISE_RE.search(ln)
+            if m:
+                denoise_step = int(m.group(1))
+                denoise_total = int(m.group(2))
+                pit = _PER_IT_RE.search(ln)
+                if pit:
+                    last_per_it = float(pit.group(1))
+        if not decode_started and "step:decode_and_save start" in ln:
+            decode_started = True
+        if not decode_done and "step:decode_and_save done" in ln:
+            decode_done = True
+        if not generate_done and "step:generate done" in ln:
+            generate_done = True
+        if not upscale_done and ("Upscale done" in ln or "Sharp upscale" in ln and "done" in ln):
+            upscale_done = True
+        if not pipe_loaded and "step:get_pipe done" in ln:
+            pipe_loaded = True
+    return {
+        "denoise_step": denoise_step,
+        "denoise_total": denoise_total,
+        "last_per_it_sec": last_per_it,
+        "decode_started": decode_started,
+        "decode_done": decode_done,
+        "generate_done": generate_done,
+        "upscale_done": upscale_done,
+        "pipe_loaded": pipe_loaded,
+    }
+
+
+def _bucket_eta(params: dict, lookback: int = 8) -> float | None:
+    """Median elapsed_sec of the last `lookback` done jobs whose
+    (mode, quality, accel, frames) matches the current job. When upscale is
+    on, also requires the same upscale_method (Sharp adds ~26s).
+
+    Falls back to None if no matches — caller should drop to the tier-based
+    estimate from CAPABILITIES.times. Width/height intentionally NOT in the
+    bucket key — wall time scales near-linearly with pixel count and most
+    users render at the tier defaults anyway."""
+    mode = params.get("mode")
+    quality = params.get("quality")
+    accel = params.get("accel")
+    frames = params.get("frames")
+    upscale = params.get("upscale", "off")
+    upscale_method = params.get("upscale_method", "lanczos") if upscale != "off" else "off"
+    matches: list[float] = []
+    with LOCK:
+        for j in STATE["history"]:
+            if j.get("status") != "done" or not j.get("elapsed_sec"):
+                continue
+            p = j.get("params") or {}
+            if not (p.get("mode") == mode and p.get("quality") == quality
+                    and p.get("accel") == accel and p.get("frames") == frames):
+                continue
+            if upscale != "off":
+                if p.get("upscale", "off") == "off":
+                    continue
+                if p.get("upscale_method", "lanczos") != upscale_method:
+                    continue
+            matches.append(j["elapsed_sec"])
+            if len(matches) >= lookback:
+                break
+    if not matches:
+        return None
+    matches.sort()
+    return matches[len(matches) // 2]
+
+
+def _phase_weights(params: dict) -> dict[str, int]:
+    """Phase budget percentages. Sum to 100. Calibrated against today's
+    measured timings on Comfortable tier (M-Max 64 GB):
+      Standard 121f exact: ~458 s = ~5 s pipe + ~424 s denoise + ~30 s decode
+      High Q8 121f:        ~711 s = ~5 s pipe + ~620 s two-stage + ~85 s decode
+    Sharp/PiperSR adds ~26 s post-pass which we carve out as `post`."""
+    upscale = params.get("upscale", "off")
+    upscale_method = params.get("upscale_method", "lanczos")
+    quality = params.get("quality", "standard")
+    has_post = (upscale != "off" and upscale_method == "pipersr")
+    if quality == "high":
+        setup, denoise, decode = 2, 86, 12
+    elif quality == "quick":
+        setup, denoise, decode = 4, 75, 21
+    else:  # standard / balanced
+        setup, denoise, decode = 3, 82, 15
+    post = 0
+    if has_post:
+        # Steal from decode for the post-pass; keep total at 100.
+        post = 5
+        decode = max(8, decode - 5)
+        setup = max(1, 100 - denoise - decode - post)
+    return {"setup": setup, "denoise": denoise, "decode": decode, "post": post}
+
+
+def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None:
+    if not current:
+        return None
+    p = current.get("params") or {}
+    started = current.get("started_ts") or 0
+    if not started:
+        return None
+    elapsed = max(0.0, time.time() - started)
+    eta = _bucket_eta(p)
+    signals = _parse_progress_signals(log_lines[-200:] if log_lines else [])
+    weights = _phase_weights(p)
+
+    # Phase pick — newest-first markers win. Order: post > decode > denoise > setup.
+    if signals["upscale_done"]:
+        phase, phase_label = "post", "Finalizing"
+    elif signals["decode_done"]:
+        phase, phase_label = "post", "Encoding output"
+    elif signals["decode_started"]:
+        phase, phase_label = "decode", "VAE decode + audio mux"
+    elif signals["denoise_step"] is not None and signals["denoise_step"] > 0:
+        # tqdm emits a 0/N line at the very start before any step has
+        # completed — that's still "preparing" UX-wise. Switch to the
+        # "Denoising step K / N" label only once a step is actually done.
+        phase = "denoise"
+        ds = signals["denoise_step"]; dt = signals["denoise_total"] or 1
+        phase_label = f"Denoising · step {ds} / {dt}"
+    else:
+        phase = "setup"
+        phase_label = "Loading pipeline" if not signals["pipe_loaded"] else "Preparing"
+
+    setup_w = weights["setup"]; den_w = weights["denoise"]
+    dec_w = weights["decode"]; post_w = weights["post"]
+
+    if phase == "setup":
+        # Setup is short — usually <10 s on a warm helper, ~60 s cold.
+        # Creep to most of the setup band; don't pin at 0.
+        setup_budget = 60.0 if not signals["pipe_loaded"] else 10.0
+        within = min(0.92, elapsed / setup_budget) if setup_budget else 0
+        pct = within * setup_w
+    elif phase == "denoise":
+        ds = signals["denoise_step"] or 0
+        dt = signals["denoise_total"] or 1
+        within = ds / dt if dt else 0
+        pct = setup_w + within * den_w
+    elif phase == "decode":
+        # Within decode: linear creep from 0 → 95% of the band. We don't get
+        # progress events from the decoder, so just creep with elapsed.
+        # If eta exists, anchor decode budget; else assume ~30 s.
+        decode_budget = max(15.0, (eta or 60) * dec_w / 100)
+        # Time spent inside decode: rough — use elapsed past the denoise band.
+        denoise_done_at = (eta or 60) * (setup_w + den_w) / 100 if eta else None
+        if denoise_done_at:
+            in_decode = max(0.0, elapsed - denoise_done_at)
+            within = min(0.95, in_decode / decode_budget) if decode_budget else 0
+        else:
+            within = 0.5
+        pct = setup_w + den_w + within * dec_w
+    else:  # post
+        pct = setup_w + den_w + dec_w + 0.6 * post_w
+        if signals["upscale_done"]:
+            pct = setup_w + den_w + dec_w + post_w
+
+    pct_int = int(round(min(99, max(0, pct))))
+
+    # Remaining time. Per-step extrapolation is the most accurate during
+    # denoise; otherwise fall back to bucket eta minus elapsed.
+    remaining = None
+    if (signals["denoise_step"] is not None and signals["last_per_it_sec"]
+            and signals["denoise_total"]):
+        ds = signals["denoise_step"]; dt = signals["denoise_total"]
+        per_it = signals["last_per_it_sec"]
+        steps_left = max(0, dt - ds)
+        denoise_left = steps_left * per_it
+        # Tail = decode + post. Use eta share if we have eta; else 30 s.
+        if eta:
+            tail = eta * (dec_w + post_w) / 100
+        else:
+            tail = 30.0
+        remaining = denoise_left + tail
+    elif eta:
+        remaining = max(0.0, eta - elapsed)
+
+    return {
+        "phase": phase,
+        "phase_label": phase_label,
+        "pct": pct_int,
+        "elapsed_sec": round(elapsed, 1),
+        "eta_sec": round(eta, 1) if eta else None,
+        "remaining_sec": round(remaining, 1) if remaining is not None else None,
+        "denoise_step": signals["denoise_step"],
+        "denoise_total": signals["denoise_total"],
+    }
 
 
 # ---- HTML --------------------------------------------------------------------
@@ -6940,19 +7214,42 @@ async function poll() {
   }
 
   // Now card
+  // Y1.039 — bar + meta line driven by server-computed progress (phase-aware,
+  // config-bucketed ETA, denoise per-step extrapolation). Falls back to the
+  // old elapsed/global-avg behavior if the server didn't ship a progress
+  // block (e.g. mid-deploy where the server is older than the JS).
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
   if (s.running && s.current) {
     nowCard.classList.remove('idle', 'failed');
-    const elapsed = Math.max(0, s.server_now - s.current.started_ts);
-    const avg = s.avg_elapsed_sec || 420;
-    const pct = Math.min(99, Math.round(elapsed / avg * 100));
+    const prog = s.current.progress || null;
+    const elapsedFallback = Math.max(0, s.server_now - s.current.started_ts);
+    let pct, elapsed, phaseLabel, timing;
+    if (prog) {
+      pct = Math.min(99, Math.max(0, prog.pct ?? 0));
+      elapsed = prog.elapsed_sec ?? elapsedFallback;
+      phaseLabel = prog.phase_label || 'Working';
+      if (prog.remaining_sec != null && prog.remaining_sec > 0) {
+        timing = `<strong>${fmtMin(elapsed)}</strong> in · ~${fmtMin(prog.remaining_sec)} left`;
+      } else if (prog.eta_sec) {
+        timing = `<strong>${fmtMin(elapsed)}</strong> / ~${fmtMin(prog.eta_sec)}`;
+      } else {
+        timing = `<strong>${fmtMin(elapsed)}</strong> elapsed`;
+      }
+    } else {
+      // Legacy fallback path
+      const avg = s.avg_elapsed_sec || 420;
+      pct = Math.min(99, Math.round(elapsedFallback / avg * 100));
+      elapsed = elapsedFallback;
+      phaseLabel = '';
+      timing = `<strong>${fmtMin(elapsed)}</strong> elapsed${avg ? ' / ~'+fmtMin(avg)+' avg' : ''}`;
+    }
     fill.style.width = pct + '%';
-    const lastLog = s.log.slice(-1)[0] || '';
     nowCard.querySelector('.ttl').textContent = snippet(s.current.params.label || s.current.params.prompt, 80);
-    nowCard.querySelector('.meta').innerHTML =
-      `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · <strong>${fmtMin(elapsed)}</strong> elapsed${avg ? ' / ~'+fmtMin(avg)+' avg' : ''}` +
-      (lastLog ? `<br><span style="color:var(--muted)">${escapeHtml(lastLog.split(']').slice(1).join(']').trim().slice(0,100))}</span>` : '');
+    const baseMeta = `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · ${timing}`;
+    nowCard.querySelector('.meta').innerHTML = phaseLabel
+      ? `${baseMeta}<br><span style="color:var(--muted)">${escapeHtml(phaseLabel)}</span>`
+      : baseMeta;
   } else {
     // Idle state. If the LAST history entry was a failure (helper crash,
     // OOM, etc.) surface it loud-and-clear here — otherwise users like
@@ -7101,7 +7398,7 @@ function renderCarousel() {
     return `
     <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
-      <video src="/file?path=${encodeURIComponent(o.path)}#t=2.5" preload="metadata" muted></video>
+      <video src="${o.url}#t=2.5" preload="metadata" muted></video>
       ${o.has_sidecar
         ? `<button class="car-info-btn" type="button" title="Show generation info"
                    onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
@@ -7125,8 +7422,13 @@ function selectOutput(path) {
   document.querySelectorAll('.car-card').forEach(el => el.classList.toggle('active', el.dataset.path === path));
   const wrap = document.getElementById('playerWrap');
   wrap.classList.remove('empty');
-  wrap.innerHTML = `<video controls autoplay src="/file?path=${encodeURIComponent(path)}"></video>`;
+  // Y1.039 — use the server-provided URL (which includes the mtime
+  // cache-bust v=N param) instead of reconstructing from path. Otherwise
+  // the player ends up on the cached stale-bytes URL and re-shows black
+  // until the browser cache expires.
   const o = currentOutputs.find(x => x.path === path);
+  const playerSrc = o ? o.url : `/file?path=${encodeURIComponent(path)}`;
+  wrap.innerHTML = `<video controls autoplay src="${playerSrc}"></video>`;
   document.getElementById('playerMeta').style.display = '';
   document.getElementById('playerName').innerHTML = o ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB` : '';
   document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar);
