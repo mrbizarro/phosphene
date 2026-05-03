@@ -118,6 +118,19 @@ upscaler can be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by
 default: the official LTX upscaler is meant to be followed by a second-stage
 denoise/refinement pass, and direct decode distorted faces in release tests.
 
+Dev builds include an opt-in PiperSR comparison tool for testing a lightweight
+Apple Neural Engine 2× post-upscaler against Lanczos:
+
+```bash
+ltx-2-mlx/env/bin/pip install pipersr
+ltx-2-mlx/env/bin/python scripts/upscale_compare_pipersr.py path/to/input.mp4
+```
+
+PiperSR is not bundled or enabled in the public app yet. Its code is AGPL-3.0,
+and its model license requires visible attribution for public-facing apps plus
+separate licensing for commercial use. Keep it as a lab experiment until that
+licensing decision is settled.
+
 Standard T2V/I2V also has an opt-in **Speed** control:
 
 - **Exact** is the default full sampler.
