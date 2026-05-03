@@ -81,7 +81,7 @@ Four generation modes. All produce video + synced audio.
 | **T2V** — text → video | prompt | The default. Type a scene, get 5 seconds with sound. |
 | **I2V** — image → video | prompt + reference image | Animate a still. Auto cover-crop to model dimensions. |
 | **FFLF** — first / last frame | prompt + start image + end image | Two images bookend the clip; the model fills the motion between. Requires Q8. |
-| **Extend** — continue a clip | existing mp4 + prompt | Append seconds onto a previous render. Audio continuous across the join. |
+| **Extend** — continue a clip | existing mp4 + prompt | Append seconds onto a previous render. Audio continuous across the join. Requires Q8. |
 
 Plus a **Prompt Enhance** button that uses Gemma 3 12B (4-bit, locally)
 to rewrite your prompt in the structure LTX 2.3 was trained on.
