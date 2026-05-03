@@ -113,10 +113,10 @@ Exported/upscaled files use the same **Output format** setting as native
 renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
 lossless (`yuv444p` / CRF 0).
 
-The public export path uses ffmpeg Lanczos. Dev builds also expose the
-experimental LTX latent x2 upscaler for testing. Production can opt into it with
-`LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by default because its
-doubled-latent peak can pressure 64 GB Macs.
+The public export path uses ffmpeg Lanczos. The experimental LTX latent x2
+upscaler can be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by
+default: the official LTX upscaler is meant to be followed by a second-stage
+denoise/refinement pass, and direct decode distorted faces in release tests.
 
 Standard T2V/I2V also has an opt-in **Speed** control:
 

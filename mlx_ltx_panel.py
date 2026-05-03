@@ -119,11 +119,12 @@ def _detect_profile() -> str:
 
 
 PROFILE = _detect_profile()
-# Sharp/LTX latent upscale is a dev-lab experiment. Production stays on the
-# safe ffmpeg Lanczos export path unless explicitly opted in; dev exposes it
-# by default so we can test the memory spike honestly before public release.
-_MODEL_UPSCALE_FLAG = _optional_bool_env("LTX_ENABLE_MODEL_UPSCALE")
-MODEL_UPSCALE_ENABLED = (PROFILE == "dev") if _MODEL_UPSCALE_FLAG is None else _MODEL_UPSCALE_FLAG
+# Sharp/LTX latent upscale is an unsafe lab experiment, not a release feature.
+# The official LTX pipelines use the latent upsampler only as the middle of a
+# two-stage flow: upscale latent -> denoise/refine at full resolution -> decode.
+# Running upsampler -> decode directly distorted faces and produced bad tail
+# frames in release tests, so keep it hidden unless explicitly opted in.
+MODEL_UPSCALE_ENABLED = _optional_bool_env("LTX_ENABLE_MODEL_UPSCALE") is True
 # Default port: 8198 production, 8199 dev — so both panels can run side by
 # side. LTX_PORT env var still overrides if the user wants something else.
 DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198
@@ -2529,7 +2530,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "model"
                 if MODEL_UPSCALE_ENABLED and f("upscale_method", "lanczos") == "model"
                 else "lanczos"
-            ),   # lanczos / model (model is dev/lab-only; see LTX_ENABLE_MODEL_UPSCALE)
+            ),   # lanczos / model (model is lab-only; see LTX_ENABLE_MODEL_UPSCALE)
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2871,9 +2872,9 @@ def run_job_inner(job: dict) -> None:
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
                 "accel": p.get("accel", "off"),
-                # Public builds force this to Lanczos in make_job(); dev/lab
-                # builds pass "model" so the helper can run the experimental
-                # latent x2 upscaler.
+                # Normal builds force this to Lanczos in make_job(); only
+                # explicit lab opt-in passes "model" so the helper can run
+                # the experimental latent x2 upscaler.
                 "upscale": p.get("upscale", "off"),
                 "upscale_method": p.get("upscale_method", "lanczos"),
             },
@@ -5756,10 +5757,11 @@ HTML = r"""<!doctype html>
                  = ffmpeg Lanczos resize, no detail recovery, near-instant.
                  Sharp = LTX 2.3 latent upscaler (~1 GB model), invents real
                  detail in latent space before VAE decode, ~30-60s slower.
-                 Sharp is enabled in dev/lab only after a release-test freeze
-                 showed the latent x2 peak can pressure 64 GB Macs too hard.
-                 Public builds use Fast by default unless opted in with
-                 LTX_ENABLE_MODEL_UPSCALE=1. -->
+                 Sharp is hidden unless LTX_ENABLE_MODEL_UPSCALE=1 because
+                 release tests showed the standalone latent x2 path can
+                 distort faces and corrupt tail frames. The official LTX
+                 contract is upsample + second-stage refinement, not direct
+                 decode. -->
             <div class="cz-control" id="upscaleMethodRow" style="display:none;">
               <div class="cz-label">Method
                 <span class="cz-label-hint">how the upscale is done</span>
