@@ -113,23 +113,19 @@ Exported/upscaled files use the same **Output format** setting as native
 renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
 lossless (`yuv444p` / CRF 0).
 
-The public export path uses ffmpeg Lanczos. The experimental LTX latent x2
-upscaler can be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by
-default: the official LTX upscaler is meant to be followed by a second-stage
+The **Fast** export method uses ffmpeg Lanczos. The **Sharp** export method uses
+PiperSR, a lightweight Apple Neural Engine 2× post-upscaler, then ffmpeg handles
+the final fit/pad/encode step. The old experimental LTX latent x2 upscaler can
+still be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by default:
+the official LTX upscaler is meant to be followed by a second-stage
 denoise/refinement pass, and direct decode distorted faces in release tests.
 
-Dev builds include an opt-in PiperSR comparison tool for testing a lightweight
-Apple Neural Engine 2× post-upscaler against Lanczos:
+Dev builds also include a PiperSR comparison tool for testing Sharp against
+Lanczos on any existing clip:
 
 ```bash
-ltx-2-mlx/env/bin/pip install pipersr
 ltx-2-mlx/env/bin/python scripts/upscale_compare_pipersr.py path/to/input.mp4
 ```
-
-PiperSR is not bundled or enabled in the public app yet. Its code is AGPL-3.0,
-and its model license requires visible attribution for public-facing apps plus
-separate licensing for commercial use. Keep it as a lab experiment until that
-licensing decision is settled.
 
 Standard T2V/I2V also has an opt-in **Speed** control:
 
@@ -419,6 +415,8 @@ This is a wrapper, not a fork. All the hard model work belongs to:
 - **[@cocktailpeanut](https://twitter.com/cocktailpeanut)** —
   Pinokio itself, which makes one-click installers like this
   possible
+- **[ModelPiper PiperSR](https://github.com/ModelPiper/PiperSR)** —
+  optional Sharp export upscaling on Apple Neural Engine
 
 The panel adds: persistent batch queue, warm helper subprocess,
 hardware-tier feature gating, lossless H.264 + faststart output,
@@ -468,3 +466,7 @@ commercial use.
 **MLX framework:** Apache 2.0.
 
 **Gemma 3 12B weights:** Google's terms.
+
+**PiperSR:** code is AGPL-3.0; model usage requires ModelPiper attribution
+and may require separate commercial licensing. Review its model license before
+commercial redistribution.

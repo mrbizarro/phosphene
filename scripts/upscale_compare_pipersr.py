@@ -63,7 +63,12 @@ def probe_video(path: Path) -> dict:
     return data["streams"][0]
 
 
-def target_for_fit_720p(width: int, height: int) -> tuple[int, int, str]:
+def target_for_mode(width: int, height: int, mode: str) -> tuple[int, int, str]:
+    mode = (mode or "fit_720p").strip().lower()
+    if mode == "x2":
+        return width * 2, height * 2, "up2x"
+    if mode not in ("fit_720p", "720p"):
+        raise SystemExit(f"Unsupported upscale mode for PiperSR compare: {mode}")
     if width >= height:
         return 1280, 720, "720p"
     return 720, 1280, "v720p"
@@ -77,9 +82,9 @@ def fit_filter(target_w: int, target_h: int) -> str:
     )
 
 
-def make_lanczos(input_mp4: Path, output_mp4: Path, crf: str, pix_fmt: str, preset: str) -> float:
+def make_lanczos(input_mp4: Path, output_mp4: Path, crf: str, pix_fmt: str, preset: str, mode: str) -> float:
     info = probe_video(input_mp4)
-    target_w, target_h, _ = target_for_fit_720p(int(info["width"]), int(info["height"]))
+    target_w, target_h, _ = target_for_mode(int(info["width"]), int(info["height"]), mode)
     t0 = time.perf_counter()
     run([
         str(ffmpeg_path()), "-hide_banner", "-y",
@@ -163,10 +168,10 @@ def piper_upscale_frames(frames_in: Path, frames_out: Path) -> float:
     return time.perf_counter() - t0
 
 
-def make_pipersr(input_mp4: Path, output_mp4: Path, crf: str, pix_fmt: str, preset: str, keep_work: bool) -> float:
+def make_pipersr(input_mp4: Path, output_mp4: Path, crf: str, pix_fmt: str, preset: str, keep_work: bool, mode: str) -> float:
     info = probe_video(input_mp4)
     fps = info.get("avg_frame_rate") or "24/1"
-    target_w, target_h, _ = target_for_fit_720p(int(info["width"]), int(info["height"]))
+    target_w, target_h, _ = target_for_mode(int(info["width"]), int(info["height"]), mode)
     t0 = time.perf_counter()
 
     work_parent = output_mp4.parent if keep_work else None
@@ -231,6 +236,9 @@ def main() -> int:
     ap.add_argument("--pix-fmt", default="yuv420p")
     ap.add_argument("--preset", default="medium")
     ap.add_argument("--keep-work", action="store_true")
+    ap.add_argument("--mode", default="fit_720p", choices=("fit_720p", "x2"))
+    ap.add_argument("--pipersr-only", action="store_true")
+    ap.add_argument("--output", type=Path, default=None)
     args = ap.parse_args()
 
     input_mp4 = args.input.expanduser().resolve()
@@ -239,13 +247,22 @@ def main() -> int:
     out_dir = (args.output_dir or input_mp4.parent).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    lanczos = out_dir / f"{input_mp4.stem}_compare_lanczos_720p.mp4"
-    piper = out_dir / f"{input_mp4.stem}_compare_pipersr_720p.mp4"
+    _, _, tag = target_for_mode(int(probe_video(input_mp4)["width"]), int(probe_video(input_mp4)["height"]), args.mode)
+    lanczos = out_dir / f"{input_mp4.stem}_compare_lanczos_{tag}.mp4"
+    piper = args.output.expanduser().resolve() if args.output else out_dir / f"{input_mp4.stem}_compare_pipersr_{tag}.mp4"
     sheet = out_dir / f"{input_mp4.stem}_compare_sheet.jpg"
 
     print("PiperSR attribution: Powered by PiperSR from ModelPiper — https://modelpiper.com", flush=True)
-    lanczos_sec = make_lanczos(input_mp4, lanczos, args.crf, args.pix_fmt, args.preset)
-    piper_sec = make_pipersr(input_mp4, piper, args.crf, args.pix_fmt, args.preset, args.keep_work)
+    if args.pipersr_only:
+        piper.parent.mkdir(parents=True, exist_ok=True)
+        piper_sec = make_pipersr(input_mp4, piper, args.crf, args.pix_fmt, args.preset, args.keep_work, args.mode)
+        print("\nDone:")
+        print(f"  Source:  {input_mp4}")
+        print(f"  PiperSR: {piper} ({piper.stat().st_size / 1024 / 1024:.2f} MB, {piper_sec:.2f}s)")
+        return 0
+
+    lanczos_sec = make_lanczos(input_mp4, lanczos, args.crf, args.pix_fmt, args.preset, args.mode)
+    piper_sec = make_pipersr(input_mp4, piper, args.crf, args.pix_fmt, args.preset, args.keep_work, args.mode)
     make_contact_sheet([input_mp4, lanczos, piper], sheet)
 
     print("\nDone:")

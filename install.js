@@ -150,7 +150,7 @@ module.exports = {
           // than the default Python downloader for big repos like Q8 (~25 GB).
           // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
           // package is missing the hf CLI falls back gracefully with a warning.
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6'"
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6' 'pipersr==1.0.0'"
         ]
       }
     },

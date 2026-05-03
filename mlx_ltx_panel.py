@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import atexit
 import cgi
+import importlib.util
 import json
 import os
 import re
@@ -125,6 +126,7 @@ PROFILE = _detect_profile()
 # Running upsampler -> decode directly distorted faces and produced bad tail
 # frames in release tests, so keep it hidden unless explicitly opted in.
 MODEL_UPSCALE_ENABLED = _optional_bool_env("LTX_ENABLE_MODEL_UPSCALE") is True
+PIPERSR_UPSCALE_ENABLED = _optional_bool_env("LTX_ENABLE_PIPERSR") is not False and importlib.util.find_spec("pipersr") is not None
 # Default port: 8198 production, 8199 dev — so both panels can run side by
 # side. LTX_PORT env var still overrides if the user wants something else.
 DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198
@@ -2413,8 +2415,8 @@ def compute_upscale_plan(w: int, h: int, mode: str | None,
     }
 
 
-def run_ffmpeg_tracked(cmd: list[str], label: str) -> tuple[str, str]:
-    """Run an ffmpeg process in its own process group so /stop can kill it."""
+def run_postprocess_tracked(cmd: list[str], label: str) -> tuple[str, str]:
+    """Run a post-process in its own process group so /stop can kill it."""
     push(f"{label}: " + " ".join(shlex.quote(c) for c in cmd))
     env = os.environ.copy()
     env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
@@ -2434,6 +2436,29 @@ def run_ffmpeg_tracked(cmd: list[str], label: str) -> tuple[str, str]:
         push((stderr or stdout or "").strip())
         raise RuntimeError(f"{label.lower()} exited with code {proc.returncode}")
     return stdout or "", stderr or ""
+
+
+def run_ffmpeg_tracked(cmd: list[str], label: str) -> tuple[str, str]:
+    """Run an ffmpeg process in its own process group so /stop can kill it."""
+    return run_postprocess_tracked(cmd, label)
+
+
+def run_pipersr_tracked(source: Path, output: Path, mode: str, crf: str,
+                        pix_fmt: str, preset: str) -> tuple[str, str]:
+    script = ROOT / "scripts" / "upscale_compare_pipersr.py"
+    if not script.exists():
+        raise RuntimeError("PiperSR upscale script is missing")
+    if not PIPERSR_UPSCALE_ENABLED:
+        raise RuntimeError("PiperSR is not installed in this environment")
+    return run_postprocess_tracked([
+        sys.executable, str(script), str(source),
+        "--pipersr-only",
+        "--mode", mode,
+        "--output", str(output),
+        "--crf", crf,
+        "--pix-fmt", pix_fmt,
+        "--preset", preset,
+    ], "Sharp upscale")
 
 
 def video_duration(frames: int) -> float:
@@ -2490,6 +2515,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     else:
         default_w, default_h = 1024, 576
     upscale = f("upscale", "fit_720p" if quality == "balanced" else "off")
+    requested_upscale_method = (f("upscale_method", "lanczos") or "lanczos").strip().lower()
+    if requested_upscale_method == "model":
+        requested_upscale_method = "pipersr"
+    if requested_upscale_method == "pipersr" and not PIPERSR_UPSCALE_ENABLED:
+        requested_upscale_method = "lanczos"
+    if requested_upscale_method not in ("lanczos", "pipersr"):
+        requested_upscale_method = "lanczos"
 
     return {
         "id": _new_job_id(),
@@ -2526,11 +2558,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
             "upscale": upscale,                     # off / fit_720p / x2
-            "upscale_method": (
-                "model"
-                if MODEL_UPSCALE_ENABLED and f("upscale_method", "lanczos") == "model"
-                else "lanczos"
-            ),   # lanczos / model (model is lab-only; see LTX_ENABLE_MODEL_UPSCALE)
+            "upscale_method": requested_upscale_method,   # lanczos / pipersr
             # LoRAs the user has enabled for this job. The UI submits a
             # JSON-encoded array via the `loras` form field; we parse +
             # validate here so the worker / helper layers receive a clean
@@ -2872,11 +2900,11 @@ def run_job_inner(job: dict) -> None:
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
                 "accel": p.get("accel", "off"),
-                # Normal builds force this to Lanczos in make_job(); only
-                # explicit lab opt-in passes "model" so the helper can run
-                # the experimental latent x2 upscaler.
+                # Sharp/PiperSR is a panel-side post-render pass. Do not pass it
+                # through to the helper; the helper's old "model" path is the
+                # hidden LTX latent upscaler experiment that distorted faces.
                 "upscale": p.get("upscale", "off"),
-                "upscale_method": p.get("upscale_method", "lanczos"),
+                "upscale_method": "lanczos",
             },
         }
         if loras:
@@ -2934,24 +2962,37 @@ def run_job_inner(job: dict) -> None:
         mux_pix_fmt = codec["pix_fmt"]
         mux_crf = codec["crf"]
         upscale_preset = os.environ.get("LTX_UPSCALE_PRESET", "medium")
+        upscale_method = (p.get("upscale_method", "lanczos") or "lanczos").strip().lower()
+        if upscale_method == "model":
+            upscale_method = "pipersr"
         upscaled_out = OUTPUT / (
             f"{final_target.stem}_{upscale_plan['tag']}{final_target.suffix}"
         )
-        upscale_cmd = [
-            str(FFMPEG), "-y", "-i", str(final_target),
-            "-vf", upscale_plan["vf"],
-            "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
-            "-preset", upscale_preset,
-            "-movflags", "+faststart",
-            "-c:a", "copy",
-            str(upscaled_out),
-        ]
-        run_ffmpeg_tracked(upscale_cmd, "Upscale")
+        if upscale_method == "pipersr":
+            push("Sharp upscale: PiperSR/CoreML 2× pass, then ffmpeg fit/export.")
+            run_pipersr_tracked(
+                final_target, upscaled_out, p.get("upscale", "fit_720p"),
+                mux_crf, mux_pix_fmt, upscale_preset,
+            )
+            upscale_plan["method"] = "pipersr_coreml"
+            upscale_plan["pre_pass"] = "pipersr_x2"
+        else:
+            upscale_cmd = [
+                str(FFMPEG), "-y", "-i", str(final_target),
+                "-vf", upscale_plan["vf"],
+                "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
+                "-preset", upscale_preset,
+                "-movflags", "+faststart",
+                "-c:a", "copy",
+                str(upscaled_out),
+            ]
+            run_ffmpeg_tracked(upscale_cmd, "Upscale")
+            upscale_plan["method"] = "ffmpeg_lanczos"
         final_target = upscaled_out
         push(
             f"Upscale done → {upscaled_out.name} "
             f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop, "
-            f"{mux_pix_fmt} crf {mux_crf}, preset={upscale_preset})"
+            f"{upscale_plan['method']}, {mux_pix_fmt} crf {mux_crf}, preset={upscale_preset})"
         )
         set_hidden(str(native_target), True)
         push(f"Native source kept but hidden from gallery → {native_target.name}")
@@ -3925,6 +3966,7 @@ def page() -> str:
         "fps": FPS, "model": MODEL_ID,
         "profile": PROFILE,
         "model_upscale_enabled": MODEL_UPSCALE_ENABLED,
+        "pipersr_upscale_enabled": PIPERSR_UPSCALE_ENABLED,
         # Hardware-aware time estimates for the Quality pills. The pill HTML
         # ships with the Comfortable-tier defaults; on boot we rewrite the
         # subtext using the active tier's quality_times. Compact users see
@@ -5753,22 +5795,18 @@ HTML = r"""<!doctype html>
               </div>
             </div>
 
-            <!-- Upscale method (Y1.021). Hidden when Export = Native. Fast
-                 = ffmpeg Lanczos resize, no detail recovery, near-instant.
-                 Sharp = LTX 2.3 latent upscaler (~1 GB model), invents real
-                 detail in latent space before VAE decode, ~30-60s slower.
-                 Sharp is hidden unless LTX_ENABLE_MODEL_UPSCALE=1 because
-                 release tests showed the standalone latent x2 path can
-                 distort faces and corrupt tail frames. The official LTX
-                 contract is upsample + second-stage refinement, not direct
-                 decode. -->
+            <!-- Upscale method. Hidden when Export = Native. Fast = ffmpeg
+                 Lanczos resize, no detail recovery, near-instant. Sharp =
+                 PiperSR/CoreML 2× post-upscale on Apple Neural Engine, then
+                 ffmpeg fit/export. The old LTX latent upscaler path remains
+                 hidden behind LTX_ENABLE_MODEL_UPSCALE for lab archaeology. -->
             <div class="cz-control" id="upscaleMethodRow" style="display:none;">
               <div class="cz-label">Method
                 <span class="cz-label-hint">how the upscale is done</span>
               </div>
               <div class="pill-group cols-2" id="upscaleMethodGroup">
                 <button type="button" class="pill-btn active" data-method="lanczos"><span>Fast</span><span class="sub">ffmpeg Lanczos · instant</span></button>
-                <button type="button" class="pill-btn" data-method="model"><span>Sharp</span><span class="sub">LTX upscaler · +30-60 s · real detail</span></button>
+                <button type="button" class="pill-btn" data-method="pipersr"><span>Sharp</span><span class="sub">PiperSR ANE · +10-40 s</span></button>
               </div>
               <input type="hidden" name="upscale_method" id="upscale_method" value="lanczos">
             </div>
@@ -6119,6 +6157,7 @@ const BOOT = __BOOTSTRAP__;
 const ASPECTS = BOOT.aspects;
 const FPS = BOOT.fps;
 const MODEL_UPSCALE_ENABLED = !!BOOT.model_upscale_enabled;
+const PIPERSR_UPSCALE_ENABLED = !!BOOT.pipersr_upscale_enabled;
 
 // Apply tier-aware time estimates to the Quality pill subtitles. The HTML
 // ships with the Comfortable-tier (M4 Studio 64 GB) numbers as defaults;
@@ -6237,13 +6276,14 @@ function setUpscale(u) {
   // actually being applied. When toggled to "off", revert method to Fast
   // so a later toggle back to fit_720p starts from the safe default.
   const methodRow = document.getElementById('upscaleMethodRow');
-  if (methodRow) methodRow.style.display = (v === 'off' || !MODEL_UPSCALE_ENABLED) ? 'none' : '';
-  if (v === 'off' || !MODEL_UPSCALE_ENABLED) setUpscaleMethod('lanczos');
+  if (methodRow) methodRow.style.display = (v === 'off' || !PIPERSR_UPSCALE_ENABLED) ? 'none' : '';
+  if (v === 'off' || !PIPERSR_UPSCALE_ENABLED) setUpscaleMethod('lanczos');
   updateCustomizeSummary();
   updateDerived();
 }
 function setUpscaleMethod(m) {
-  const v = (MODEL_UPSCALE_ENABLED && m === 'model') ? 'model' : 'lanczos';
+  if (m === 'model') m = 'pipersr'; // legacy sidecars from the retired LTX Sharp path
+  const v = (PIPERSR_UPSCALE_ENABLED && m === 'pipersr') ? 'pipersr' : 'lanczos';
   document.getElementById('upscale_method').value = v;
   document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.method === v));
   updateCustomizeSummary();
@@ -6290,7 +6330,7 @@ function updateCustomizeSummary() {
   // Speed
   parts.push(accel === 'off' ? 'exact speed' : (accel === 'boost' ? 'boost' : 'turbo'));
   const method = (document.getElementById('upscale_method')?.value || 'lanczos');
-  const methodTag = method === 'model' ? ' sharp' : '';
+  const methodTag = method === 'pipersr' || method === 'model' ? ' sharp' : '';
   if (upscale === 'fit_720p') parts.push('720p export' + methodTag);
   else if (upscale === 'x2') parts.push('2× export' + methodTag);
   el.textContent = parts.join(' · ');
@@ -7238,9 +7278,9 @@ function renderOutputInfoBody(path, data) {
   if (p.upscale && p.upscale !== 'off') {
     const up = data.upscale || {};
     const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
-    const isModel = p.upscale_method === 'model' || (data.upscale && (data.upscale.method === 'ltx_latent_x2' || (data.upscale.pre_pass === 'ltx_latent_x2')));
+    const isSharp = p.upscale_method === 'pipersr' || p.upscale_method === 'model' || (data.upscale && (data.upscale.method === 'pipersr_coreml' || data.upscale.pre_pass === 'pipersr_x2' || data.upscale.method === 'ltx_latent_x2' || data.upscale.pre_pass === 'ltx_latent_x2'));
     const baseLabel = p.upscale === 'fit_720p' ? '720p fit (no crop)' : (p.upscale === 'x2' ? '2×' : p.upscale);
-    const label = isModel ? `${baseLabel} · Sharp (LTX upscaler)` : `${baseLabel} · Fast (Lanczos)`;
+    const label = isSharp ? `${baseLabel} · Sharp (PiperSR)` : `${baseLabel} · Fast (Lanczos)`;
     genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
   }
   const codec = data.output_codec || (data.upscale && data.upscale.codec);
