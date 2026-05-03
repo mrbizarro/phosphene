@@ -1670,12 +1670,22 @@ def atomic_write_text(path: Path, text: str) -> None:
     sidecar files would lose the user's work-in-progress. Atomic replace
     guarantees the file is either pre-write or fully post-write, never torn.
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with tmp.open("w") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # Multiple request/worker threads can persist state close together. A
+    # process-wide temp name lets one writer replace/unlink another writer's
+    # temp file, producing ENOENT in the logs and risking a missed persist.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    try:
+        with tmp.open("w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
 
 
 # ---- caffeinate --------------------------------------------------------------
