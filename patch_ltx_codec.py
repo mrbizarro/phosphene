@@ -15,7 +15,8 @@ Upstream issues we patch around:
 
 3. VideoDecoder.decode_and_stream advertises temporal streaming but still
    full-decodes the video tensor before writing frames. Patched to use
-   temporal tiled_decode() by default, with LTX_VAE_STREAMING=0 fallback.
+   temporal tiled_decode() automatically for longer clips, with
+   LTX_VAE_STREAMING=0/1 override.
 
 Known unfixed: KeyframeInterpolationPipeline OOMs at the stage-1 → stage-2
 transition on 64 GB Macs at full resolution. We tried freeing/reloading
@@ -171,8 +172,8 @@ PATCH_BASE_LOAD_NEW = '''        # Stage 2: DiT (largest component — load afte
 # a time, but the implementation still calls self.decode(latent) for the full
 # video volume before writing frames to ffmpeg. On long 720p-ish clips this is
 # exactly the "denoise is done, now it freezes at the end" memory-pressure tail.
-# The decoder already has tiled_decode(); use temporal tiling by default while
-# keeping LTX_VAE_STREAMING=0 as an emergency full-decode fallback.
+# The decoder already has tiled_decode(); use temporal tiling automatically for
+# longer clips while keeping LTX_VAE_STREAMING=0/1 as explicit fallback/force.
 PATCH_VAE_STREAM_OLD = '''        try:
             # Decode full volume and stream frames
             pixels = self.decode(latent)
@@ -196,8 +197,17 @@ PATCH_VAE_STREAM_NEW = '''        try:
             # decoded the full video tensor before writing frames, causing
             # multi-minute end-of-render stalls or jetsam on long/high-res jobs.
             import os as _os
-            _streaming = _os.environ.get("LTX_VAE_STREAMING", "1").strip().lower()
-            _streaming_enabled = _streaming not in ("0", "false", "no", "off", "full")
+            _streaming = _os.environ.get("LTX_VAE_STREAMING", "auto").strip().lower()
+            _frames_est = 1 + (int(latent.shape[2]) - 1) * 8
+            _auto_max = int(_os.environ.get("LTX_VAE_STREAMING_AUTO_MAX_FRAMES", "121"))
+            if _streaming in ("1", "true", "yes", "on", "stream", "streaming", "chunked"):
+                _streaming_enabled = True
+            elif _streaming in ("0", "false", "no", "off", "full"):
+                _streaming_enabled = False
+            else:
+                # Auto: short 5 s clips are faster as a single decode; long clips
+                # keep temporal chunks to avoid memory-pressure stalls.
+                _streaming_enabled = _frames_est > _auto_max
 
             if _streaming_enabled:
                 from ltx_core_mlx.model.video_vae.tiling import TilingConfig, TemporalTilingConfig

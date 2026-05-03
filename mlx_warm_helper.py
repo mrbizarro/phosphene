@@ -34,6 +34,37 @@ IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
+# Y1.037 — VAE temporal-streaming decision.
+#
+# Y1.035 patched the upstream `decode_and_stream` to actually stream temporal
+# tiles (it had been pretending to). That fixed the "frozen final step" bug
+# on long / 720p clips, but adds ~30 s of overlap-tile compute on a 5-second
+# Standard render where the old full-volume decode fit in memory just fine
+# (M-Max 64 GB measured: 459 s pre-Y1.035 → 493 s on Y1.035, +7.4%).
+#
+# This module captures whatever LTX_VAE_STREAMING was at process start. If the
+# user explicitly set it (any value), we respect it. Otherwise the per-job
+# helper code flips the env var per-render based on num_frames vs the
+# threshold (default 200 frames ≈ 8 s @ 24 fps), letting the patched decoder's
+# auto-pick the streaming or full-decode path. Power users can set
+# LTX_VAE_STREAMING_THRESHOLD=N to override the cutoff.
+_USER_VAE_STREAMING_OVERRIDE = os.environ.get("LTX_VAE_STREAMING")
+
+
+def _apply_vae_streaming_decision(num_frames: int) -> None:
+    """Set/unset os.environ['LTX_VAE_STREAMING'] for the upcoming decode.
+    No-op if the user pinned a value at helper start time. Threshold reads
+    LTX_VAE_STREAMING_AUTO_MAX_FRAMES (default 121, matching the patched
+    decoder's auto-mode cutoff in patch_ltx_codec.py)."""
+    if _USER_VAE_STREAMING_OVERRIDE is not None:
+        return  # respect explicit override
+    threshold = int(os.environ.get("LTX_VAE_STREAMING_AUTO_MAX_FRAMES", "121"))
+    if num_frames <= threshold:
+        os.environ["LTX_VAE_STREAMING"] = "0"
+    else:
+        # Long clip: let the patched decoder default ("auto") pick streaming.
+        os.environ.pop("LTX_VAE_STREAMING", None)
+
 _real_stdout = sys.stdout
 _emit_lock = threading.Lock()
 
@@ -996,6 +1027,10 @@ for line in sys.__stdin__:
                 seed=seed,
                 num_steps=int(p.get("steps", 8)),
             )
+            # Y1.037: short-clip VAE-streaming opt-out. Set the env var BEFORE
+            # generate() so it propagates through the whole chain (the patched
+            # decode_and_stream reads os.environ at decode call time).
+            _apply_vae_streaming_decision(kwargs["num_frames"])
             if needs_image:
                 src_image = p.get("image")
                 if src_image:
@@ -1167,6 +1202,8 @@ for line in sys.__stdin__:
             t0 = time.time()
             configure_acceleration("off")
             pipe = get_hq_pipe(model_dir)
+            # Y1.037: short-clip VAE-streaming opt-out (HQ T2V/I2V path).
+            _apply_vae_streaming_decision(int(p["frames"]))
             kwargs = dict(
                 prompt=p["prompt"],
                 output_path=p["output_path"],
@@ -1227,6 +1264,8 @@ for line in sys.__stdin__:
                     raise RuntimeError(f"{k} not found: {img}")
             pipe = get_kf_pipe(model_dir)
             num_frames = int(p["frames"])
+            # Y1.037: short-clip VAE-streaming opt-out (Keyframe path).
+            _apply_vae_streaming_decision(num_frames)
             kwargs = dict(
                 prompt=p["prompt"],
                 output_path=p["output_path"],
