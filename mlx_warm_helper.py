@@ -497,6 +497,49 @@ def cover_crop_to_size(src_path: str, w: int, h: int) -> str:
     return out_path
 
 
+def _free_pipe_for_decode(pipe):
+    """Release generation-only modules before VAE/audio decode.
+
+    Upstream TextToVideoPipeline.generate_and_save() already does this, but
+    ImageToVideoPipeline.generate_and_save() currently skips the cleanup before
+    _decode_and_save_video(). On 10s 1280x704 I2V that leaves the 10.5GB DiT
+    resident during VAE decode and can turn the apparent "last step" into a
+    multi-minute memory-pressure stall. Keep the policy here so T2V/I2V behave
+    identically from the panel.
+    """
+    if getattr(pipe, "low_memory", False):
+        pipe.dit = None
+        pipe.text_encoder = None
+        pipe.feature_extractor = None
+        pipe._loaded = False
+        try:
+            from ltx_core_mlx.utils.memory import aggressive_cleanup
+            aggressive_cleanup()
+        except Exception:
+            pass
+
+
+def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
+    if needs_image:
+        return pipe.generate_from_image(
+            prompt=kwargs["prompt"],
+            image=kwargs.get("image"),
+            height=kwargs["height"],
+            width=kwargs["width"],
+            num_frames=kwargs["num_frames"],
+            seed=kwargs["seed"],
+            num_steps=kwargs["num_steps"],
+        )
+    return pipe.generate(
+        prompt=kwargs["prompt"],
+        height=kwargs["height"],
+        width=kwargs["width"],
+        num_frames=kwargs["num_frames"],
+        seed=kwargs["seed"],
+        num_steps=kwargs["num_steps"],
+    )
+
+
 # ---- LTX 2.3 spatial latent upscaler (Y1.021+) ------------------------------
 # Optional model-based ×2 upscale that runs on the video latent BEFORE the VAE
 # decode, giving real detail recovery instead of the ffmpeg Lanczos resize that
@@ -898,8 +941,9 @@ for line in sys.__stdin__:
             # Granular breadcrumbs so a silent helper death is traceable:
             # if the panel's last log line is "step:get_pipe" then we died
             # during pipeline init (likely OOM or weight-load issue). If
-            # the last line is "step:generate_and_save" we died during
-            # the actual gen (denoising / VAE decode). Without this the
+            # it reaches "step:generate" / "step:decode_and_save", the
+            # failure is inside denoising or VAE/audio decode respectively.
+            # Without this the
             # last visible line was the original "Loading I2V pipeline..."
             # message and users had no idea where to look.
             # LoRAs (optional). Each is {"path": str, "strength": float}.
@@ -977,38 +1021,12 @@ for line in sys.__stdin__:
             if use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})
                 # Step 1: generate latents (no save)
-                if needs_image:
-                    src_image = kwargs.get("image")
-                    video_latent, audio_latent = pipe.generate_from_image(
-                        prompt=kwargs["prompt"],
-                        image=src_image,
-                        height=kwargs["height"],
-                        width=kwargs["width"],
-                        num_frames=kwargs["num_frames"],
-                        seed=kwargs["seed"],
-                        num_steps=kwargs["num_steps"],
-                    )
-                else:
-                    video_latent, audio_latent = pipe.generate(
-                        prompt=kwargs["prompt"],
-                        height=kwargs["height"],
-                        width=kwargs["width"],
-                        num_frames=kwargs["num_frames"],
-                        seed=kwargs["seed"],
-                        num_steps=kwargs["num_steps"],
-                    )
+                video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
                 # Free DiT + text encoder before the upscale + VAE decode peak.
-                if pipe.low_memory:
-                    pipe.dit = None
-                    pipe.text_encoder = None
-                    pipe.feature_extractor = None
-                    pipe._loaded = False
-                    try:
-                        from ltx_core_mlx.utils.memory import aggressive_cleanup
-                        aggressive_cleanup()
-                    except Exception:
-                        pass
+                emit({"event": "log", "line": "step:free_generation_modules start"})
+                _free_pipe_for_decode(pipe)
+                emit({"event": "log", "line": "step:free_generation_modules done"})
                 # Step 2: latent x2 upscale
                 emit({"event": "log", "line": "step:latent_upscale_x2 start"})
                 video_latent = _model_upscale_video_latent(pipe, video_latent)
@@ -1019,9 +1037,15 @@ for line in sys.__stdin__:
                 out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
             else:
-                emit({"event": "log", "line": f"step:generate_and_save mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
-                out_path = pipe.generate_and_save(**kwargs)
-                emit({"event": "log", "line": "step:generate_and_save done"})
+                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
+                video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
+                emit({"event": "log", "line": "step:generate done"})
+                emit({"event": "log", "line": "step:free_generation_modules start"})
+                _free_pipe_for_decode(pipe)
+                emit({"event": "log", "line": "step:free_generation_modules done"})
+                emit({"event": "log", "line": "step:decode_and_save start"})
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"])
+                emit({"event": "log", "line": "step:decode_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             done_event = {
