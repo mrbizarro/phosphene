@@ -84,7 +84,7 @@ module.exports = {
     {
       method: "shell.run",
       params: {
-        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'hf_transfer>=0.1.6' 'pipersr==1.0.0'"
+        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'hf_transfer>=0.1.6'"
       }
     },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op

@@ -113,12 +113,15 @@ Exported/upscaled files use the same **Output format** setting as native
 renders. Standard stays compact (`yuv420p` / CRF 18); Video production stays
 lossless (`yuv444p` / CRF 0).
 
-The **Fast** export method uses ffmpeg Lanczos. The **Sharp** export method uses
-PiperSR, a lightweight Apple Neural Engine 2× post-upscaler, then ffmpeg handles
-the final fit/pad/encode step. The old experimental LTX latent x2 upscaler can
-still be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it is hidden by default:
-the official LTX upscaler is meant to be followed by a second-stage
-denoise/refinement pass, and direct decode distorted faces in release tests.
+The **Fast** export method uses ffmpeg Lanczos. The optional **Sharp** export
+method uses PiperSR, a lightweight Apple Neural Engine 2× post-upscaler, then
+ffmpeg handles the final fit/pad/encode step. It is not bundled in the default
+install because PiperSR has separate AGPL/model-license terms; install it from
+the Pinokio menu only if those terms work for you. The old experimental LTX
+latent x2 upscaler can still be forced with `LTX_ENABLE_MODEL_UPSCALE=1`, but it
+is hidden by default: the official LTX upscaler is meant to be followed by a
+second-stage denoise/refinement pass, and direct decode distorted faces in
+release tests.
 
 Dev builds also include a PiperSR comparison tool for testing Sharp against
 Lanczos on any existing clip:
@@ -470,3 +473,8 @@ commercial use.
 **PiperSR:** code is AGPL-3.0; model usage requires ModelPiper attribution
 and may require separate commercial licensing. Review its model license before
 commercial redistribution.
+
+**Network note:** Phosphene runs locally and has no telemetry. On clean
+production installs it checks GitHub every 30 minutes for an update badge, and
+it reaches Hugging Face/CivitAI only when you download models or LoRAs. Disable
+the update badge with `PHOSPHENE_DISABLE_VERSION_CHECK=1`.

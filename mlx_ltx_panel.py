@@ -127,6 +127,7 @@ PROFILE = _detect_profile()
 # frames in release tests, so keep it hidden unless explicitly opted in.
 MODEL_UPSCALE_ENABLED = _optional_bool_env("LTX_ENABLE_MODEL_UPSCALE") is True
 PIPERSR_UPSCALE_ENABLED = _optional_bool_env("LTX_ENABLE_PIPERSR") is not False and importlib.util.find_spec("pipersr") is not None
+VERSION_CHECK_ENABLED = _optional_bool_env("PHOSPHENE_DISABLE_VERSION_CHECK") is not True
 # Default port: 8198 production, 8199 dev — so both panels can run side by
 # side. LTX_PORT env var still overrides if the user wants something else.
 DEFAULT_PORT = 8199 if PROFILE == "dev" else 8198
@@ -298,7 +299,7 @@ def _load_settings() -> dict:
     if not SETTINGS_FILE.exists():
         defaults = _settings_defaults()
         try:
-            SETTINGS_FILE.write_text(json.dumps(defaults, indent=2))
+            _save_settings(defaults)
         except Exception as exc:
             sys.stderr.write(f"WARN: could not write {SETTINGS_FILE} ({exc})\n")
         return defaults
@@ -790,7 +791,9 @@ def _detect_local_install_state() -> None:
         _VERSION_STATE["local_dirty"] = dirty
         # Suppress remote checks when the user is clearly running their own
         # variant — we'd be wrong to nag them about being "behind."
-        if not sha:
+        if not VERSION_CHECK_ENABLED:
+            _VERSION_STATE["suppress_reason"] = "disabled by PHOSPHENE_DISABLE_VERSION_CHECK"
+        elif not sha:
             _VERSION_STATE["suppress_reason"] = "not a git checkout"
         elif branch != "main":
             _VERSION_STATE["suppress_reason"] = f"on branch '{branch}', not main"
@@ -1600,8 +1603,7 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
         "downloaded_size_bytes": bytes_written,
     }
     try:
-        with sidecar.open("w") as fh:
-            json.dump(sidecar_data, fh, indent=2)
+        atomic_write_text(sidecar, json.dumps(sidecar_data, indent=2))
     except Exception as exc:
         push(f"[civitai] WARN: could not write sidecar ({exc})")
     return {
@@ -3778,7 +3780,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 p = Path(target).resolve()
                 base = _safe_loras_dir().resolve()
-                if not str(p).startswith(str(base)) or not p.is_file():
+                if not p.is_relative_to(base) or not p.is_file():
                     raise RuntimeError("path not inside loras dir")
                 if p.suffix.lower() != ".safetensors":
                     raise RuntimeError("not a safetensors file")
@@ -5816,7 +5818,7 @@ HTML = r"""<!doctype html>
               </div>
               <div class="pill-group cols-2" id="upscaleMethodGroup">
                 <button type="button" class="pill-btn active" data-method="lanczos"><span>Fast</span><span class="sub">ffmpeg Lanczos · instant</span></button>
-                <button type="button" class="pill-btn" data-method="pipersr"><span>Sharp</span><span class="sub">PiperSR ANE · +10-40 s</span></button>
+                <button type="button" class="pill-btn" data-method="pipersr"><span>Sharp</span><span class="sub">PiperSR ANE · +30-90 s</span></button>
               </div>
               <input type="hidden" name="upscale_method" id="upscale_method" value="lanczos">
             </div>
@@ -5836,15 +5838,13 @@ HTML = r"""<!doctype html>
 
       <!-- Comfy-kill toggle. Hidden in DOM by default; shown only when the
            panel detects ComfyUI actually running on this Mac (see updateUI
-           in the poll handler). Default-on when surfaced because Comfy idle
-           costs ~27 GB and on a 64 GB Mac that pushes 720p+ renders into
-           swap. The reviewer flagged the always-on hidden field as too
-           surprising for a public install — this version is opt-in only
-           when there's something to opt into. -->
+           in the poll handler). Default-off for public installs: killing a
+           neighboring Pinokio app should be an explicit choice, even when it
+           can free a lot of memory on 64 GB machines. -->
       <div id="comfyKillRow" class="comfy-row" style="display:none">
         <label class="lbl" style="display:flex; align-items:center; gap:8px; cursor:pointer">
-          <input type="checkbox" name="stop_comfy" id="stop_comfy" value="on" checked>
-          <span>Stop ComfyUI before render <span style="color:var(--muted)">(detected · frees ~27 GB)</span></span>
+          <input type="checkbox" name="stop_comfy" id="stop_comfy" value="on">
+          <span>Stop ComfyUI before render <span style="color:var(--muted)">(optional · can free ~27 GB)</span></span>
         </label>
       </div>
 
@@ -8972,7 +8972,10 @@ if __name__ == "__main__":
     load_hidden()
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
-    threading.Thread(target=version_check_loop, daemon=True).start()
+    if VERSION_CHECK_ENABLED:
+        threading.Thread(target=version_check_loop, daemon=True).start()
+    else:
+        _detect_local_install_state()
     # Pre-flight: bind in a try/except so a busy port surfaces an actionable
     # one-liner instead of a 6-frame Python traceback. The bare OSError
     # ("[Errno 48] Address already in use") was confusing users who'd closed

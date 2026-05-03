@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Idempotent patches against the ltx-core-mlx + ltx-pipelines-mlx packages.
 
-Two upstream issues we patch around:
+Upstream issues we patch around:
 
 1. Output codec is `yuv420p crf 18` — 4:2:0 chroma subsampling produces
    visible JPEG-style block artifacts on faces / skin. Patched to
@@ -12,6 +12,10 @@ Two upstream issues we patch around:
    encoder before VAE decode (the parent T2V version does). On Q8 / 64 GB
    Macs this OOMs the helper subprocess on the I2V code path. Patched to
    add the same low_memory cleanup the parent has.
+
+3. VideoDecoder.decode_and_stream advertises temporal streaming but still
+   full-decodes the video tensor before writing frames. Patched to use
+   temporal tiled_decode() by default, with LTX_VAE_STREAMING=0 fallback.
 
 Known unfixed: KeyframeInterpolationPipeline OOMs at the stage-1 → stage-2
 transition on 64 GB Macs at full resolution. We tried freeing/reloading
@@ -161,6 +165,91 @@ PATCH_BASE_LOAD_NEW = '''        # Stage 2: DiT (largest component — load afte
                 self.text_encoder = None
                 self.feature_extractor = None
                 aggressive_cleanup()'''
+
+# ---- Patch 5: stream VAE decode in temporal chunks -----------------------------
+# Upstream VideoDecoder.decode_and_stream() says it decodes one temporal chunk at
+# a time, but the implementation still calls self.decode(latent) for the full
+# video volume before writing frames to ffmpeg. On long 720p-ish clips this is
+# exactly the "denoise is done, now it freezes at the end" memory-pressure tail.
+# The decoder already has tiled_decode(); use temporal tiling by default while
+# keeping LTX_VAE_STREAMING=0 as an emergency full-decode fallback.
+PATCH_VAE_STREAM_OLD = '''        try:
+            # Decode full volume and stream frames
+            pixels = self.decode(latent)
+            mx.async_eval(pixels)
+
+            num_frames = pixels.shape[2]
+            for i in range(num_frames):
+                frame = pixels[:, :, i, :, :]  # (B, 3, H, W)
+                frame = mx.clip(frame, -1.0, 1.0)
+                frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
+                # (1, 3, H, W) -> (H, W, 3)
+                frame_hwc = frame[0].transpose(1, 2, 0)
+                mx.eval(frame_hwc)  # must be sync — async_eval can write before data is ready
+                proc.stdin.write(bytes(memoryview(frame_hwc)))
+                del frame, frame_hwc
+                if i % 8 == 0:
+                    aggressive_cleanup()'''
+
+PATCH_VAE_STREAM_NEW = '''        try:
+            # PATCHED (LTX23MLX): temporal streaming decode. The old code
+            # decoded the full video tensor before writing frames, causing
+            # multi-minute end-of-render stalls or jetsam on long/high-res jobs.
+            import os as _os
+            _streaming = _os.environ.get("LTX_VAE_STREAMING", "1").strip().lower()
+            _streaming_enabled = _streaming not in ("0", "false", "no", "off", "full")
+
+            if _streaming_enabled:
+                from ltx_core_mlx.model.video_vae.tiling import TilingConfig, TemporalTilingConfig
+
+                _tile_frames = int(_os.environ.get("LTX_VAE_TILE_FRAMES", "64"))
+                _overlap_frames = int(_os.environ.get("LTX_VAE_TILE_OVERLAP_FRAMES", "24"))
+                _tile_frames = max(16, (_tile_frames // 8) * 8)
+                _overlap_frames = max(0, (_overlap_frames // 8) * 8)
+                if _overlap_frames >= _tile_frames:
+                    _overlap_frames = max(0, _tile_frames - 8)
+                _tiling = TilingConfig(
+                    spatial_config=None,
+                    temporal_config=TemporalTilingConfig(
+                        tile_size_in_frames=_tile_frames,
+                        tile_overlap_in_frames=_overlap_frames,
+                    ),
+                )
+                _frame_index = 0
+                for pixels in self.tiled_decode(latent, _tiling):
+                    mx.async_eval(pixels)
+                    num_frames = pixels.shape[2]
+                    for i in range(num_frames):
+                        frame = pixels[:, :, i, :, :]  # (B, 3, H, W)
+                        frame = mx.clip(frame, -1.0, 1.0)
+                        frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
+                        # (1, 3, H, W) -> (H, W, 3)
+                        frame_hwc = frame[0].transpose(1, 2, 0)
+                        mx.eval(frame_hwc)  # must be sync — async_eval can write before data is ready
+                        proc.stdin.write(bytes(memoryview(frame_hwc)))
+                        del frame, frame_hwc
+                        _frame_index += 1
+                        if _frame_index % 8 == 0:
+                            aggressive_cleanup()
+                    del pixels
+                    aggressive_cleanup()
+            else:
+                # Emergency fallback: original full-volume decode.
+                pixels = self.decode(latent)
+                mx.async_eval(pixels)
+
+                num_frames = pixels.shape[2]
+                for i in range(num_frames):
+                    frame = pixels[:, :, i, :, :]  # (B, 3, H, W)
+                    frame = mx.clip(frame, -1.0, 1.0)
+                    frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
+                    # (1, 3, H, W) -> (H, W, 3)
+                    frame_hwc = frame[0].transpose(1, 2, 0)
+                    mx.eval(frame_hwc)  # must be sync — async_eval can write before data is ready
+                    proc.stdin.write(bytes(memoryview(frame_hwc)))
+                    del frame, frame_hwc
+                    if i % 8 == 0:
+                        aggressive_cleanup()'''
 
 
 # NOTE: Keyframe interpolation OOMs at the stage-1 → stage-2 transition on
@@ -358,6 +447,16 @@ def main() -> int:
         )
         base_outcome = OUTCOME_ALREADY
     outcomes.append(("base load() free feature_extractor (peanut)", base_outcome))
+
+    # Patch 5: temporal streaming VAE decode. Required for long/high-res renders:
+    # without it, decode_and_stream still materializes the whole video tensor and
+    # can look like a frozen final step under memory pressure.
+    vae_stream_outcome = apply_patch(
+        codec_target, PATCH_VAE_STREAM_OLD, PATCH_VAE_STREAM_NEW,
+        marker="PATCHED (LTX23MLX): temporal streaming decode",
+        label="VAE temporal streaming decode",
+    )
+    outcomes.append(("VAE temporal streaming decode", vae_stream_outcome))
 
     # (Keyframe OOM patch was removed — see NOTE in the patches block above.
     #  The fix is currently a panel-side resolution clamp, not a pipeline edit.)
