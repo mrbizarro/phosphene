@@ -4369,6 +4369,21 @@ HTML = r"""<!doctype html>
       letter-spacing: 0.12em;
       cursor: help;
     }
+    /* Phosphene 2.0 release badge — sits next to the wordmark logo so
+       users immediately know they're on the major version bump. Brand
+       violet vs the DEV badge's amber so they don't visually clash when
+       both are shown on the dev panel. */
+    .version-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 10px;
+      padding: 3px 10px;
+      border-radius: 5px;
+      background: rgba(140,120,255,0.16);
+      color: #b6a4ff;
+      border: 1px solid rgba(140,120,255,0.45);
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.06em;
+    }
     .tag { color: var(--muted); font-size: 11px; }
     .pill {
       padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
@@ -5698,6 +5713,7 @@ HTML = r"""<!doctype html>
 
 <header>
   <a href="/" class="brand"><img src="/assets/logo-header.png" alt="Phosphene"></a>
+  <span class="version-badge" title="Phosphene 2.0">2.0</span>
   __PROFILE_BADGE__
   <span class="spacer"></span>
   <!-- Hardware tier badge — clickable, opens a dialog explaining what
