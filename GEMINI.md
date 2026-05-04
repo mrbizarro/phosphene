@@ -8,6 +8,105 @@ section overrides it where they conflict.
 
 ---
 
+## 0. Current state — Phosphene 2.0 (released 2026-05-04)
+
+VERSION file is now `2.0.0`. Git tag `v2.0.0` points at commit `fca78bb`
+on `main`. Going forward: `2.0.x` for patches, `2.1.0` for features,
+`3.0.0` only for another major story like this one. Pre-2.0 commit
+messages and inline comments still reference the `Y1.NNN` sequential
+counter (Y1.001 → Y1.039). Treat those as historical; do not introduce
+new `Y` labels.
+
+### What ships in 2.0 (capabilities checklist)
+
+- **Four modes**: T2V, I2V, FFLF (keyframe interpolation), Extend.
+- **Joint audio + video** in a single LTX 2.3 forward pass — sound is
+  generated WITH the video. Lip-sync, footsteps, ambient noise all
+  align at the frame level. mlx 0.31.1 pin is what keeps the vocoder
+  output at healthy levels (-9 to -15 dB peak on dialogue prompts).
+- **Quality tiers**: `quick` / `balanced` / `standard` / `high`. The
+  earlier `draft` key was renamed; do not reintroduce it. `high` =
+  Q8 two-stage HQ pipeline + TeaCache, requires Q8 download.
+- **Speed modes** for Standard renders: `exact` (full sampler) /
+  `boost` (skip up to 2 stable middle steps via adaptive caching) /
+  `turbo` (skip up to 3). 23–34 % wall-time savings on stable scenes.
+  Disabled for High, Extend, and FFLF where step-skipping breaks
+  quality contracts.
+- **Sharp upscale** = PiperSR (CoreML) on the Apple Neural Engine.
+  Real x2 detail recovery before the ffmpeg fit/encode tail; ~26 s
+  overhead on a 5 s × 1024×576 native. The earlier "model" upscale
+  path (LTX latent x2) was retired in Y1.026; it remains hidden
+  behind `LTX_ENABLE_MODEL_UPSCALE=1` for lab archaeology only.
+- **VAE temporal streaming** — long clips no longer freeze at the
+  final decode. Patch in `patch_ltx_codec.py` defaults to
+  `LTX_VAE_STREAMING=auto`: streams when latent frames > 121 (≈ 5 s),
+  full-decodes shorter clips. Helper-side env-var override keeps
+  installs that haven't re-applied the patch on the right path too.
+- **Filtered hf downloads** (Y1.024+): Q4 ≈ 20 GB, Q8 ≈ 37 GB,
+  Gemma ≈ 7.5 GB, optional spatial upscaler ≈ 1 GB. Older builds
+  pulled the full upstream repos and bloated to Q4=56 GB / Q8=82 GB
+  by including duplicate transformer variants and unused upscalers.
+  `update.js` deletes the dupes on existing installs.
+- **Hardware-tier auto-config** (`base` / `standard` / `high` / `pro`)
+  with realistic per-tier time estimates surfaced on the Quality
+  pills. Compact-tier users see honest "~12 min" instead of M-Studio
+  numbers.
+- **Now-card progress bar** (Y1.039) — phase-aware, denoise-step-aware.
+  Computed server-side from history bucket + helper log signals.
+  Replaces the old `elapsed / global_avg` ratio that mis-paced both
+  Quick and High renders.
+- **Gallery race-free** (Y1.039) — `list_outputs()` skips files that
+  ffmpeg is still writing (in-flight skip + 2 s mtime cutoff), and
+  the `/file` URL carries an `&v=<mtime>` cache-bust so the browser
+  fetches the freshest bytes when a file is replaced.
+- **CivitAI LoRA browser** built into the panel. `mlx_models/loras/`
+  is scanned at boot; sidecar JSON metadata travels with each safetensors.
+- **Phosphene 2.0 release badge** — violet `2.0` chip next to the
+  wordmark in the panel header. Distinct from the amber `DEV` profile
+  badge so dev/prod tabs are distinguishable at a glance.
+
+### Empirical benchmarks (M4 Max 64 GB, "Comfortable" tier)
+
+All numbers are real wall-clock from sidecar `elapsed_sec` on Y1.039 /
+v2.0.0 runs today. Output mp4 carries audio in every case.
+
+| Config | Frames | Wall |
+|---|---|---|
+| T2V Quick · exact · 640×480 | 121 (5 s) | ~ 2 m 14 s |
+| T2V Standard · exact · 1280×704 | 121 (5 s) | ~ 7 m 40 s |
+| T2V Standard · boost · 1280×704 | 121 (5 s) | ~ 6 m 20 s |
+| T2V Standard · turbo · 1280×704 | 121 (5 s) | ~ 5 m 26 s |
+| T2V High Q8 · 1280×704 | 121 (5 s) | ~ 11 m 51 s |
+| T2V Balanced · turbo · 720p Sharp | 121 (5 s) | **~ 3 m 30 s** |
+| T2V Balanced · turbo · 720p Sharp | 241 (10 s) | **~ 8 m 07 s** |
+| I2V Standard · exact · 1280×704 | 121 (5 s) | ~ 7 m 51 s |
+| I2V Balanced · turbo · 720p Sharp | 121 (5 s) | ~ 3 m 37 s |
+| I2V Balanced · turbo · 720p Sharp | 241 (10 s) | ~ 8 m 26 s |
+| FFLF · clamped to 768 px (Comfortable cap) | 121 (5 s) | ~ 5 m 29 s |
+| Extend · 768 px (Comfortable cap), +3 s | source 121 → output 184 | ~ 15 m 50 s |
+
+The marquee number for the launch thread is the
+**Balanced + Turbo + 720p Sharp** recipe: 5-sec clip in 3 m 30 s, 10-sec
+in 8 m 07 s. That's the recommended default for "fast HD with audio".
+
+### Repository layout (now — both clones documented)
+
+`/Users/salo/pinokio/api/phosphene.git/` is the **production** clone.
+Tracks `main`. Pinokio's daily-driver Phosphene panel runs from here on
+port 8198.
+
+`/Users/salo/pinokio/api/phosphene-dev.git/` is the **dev** clone.
+Tracks `dev`. Set up via `scripts/setup_dev_panel.sh`. Runs on port 8199
+with the amber `DEV` profile badge in the header. Symlinks
+`mlx_models/`, `mlx_outputs/`, `panel_uploads/`, and `state/` from a
+shared Pinokio fs.link drive so weights aren't duplicated and outputs
+land in one gallery regardless of which panel rendered them.
+
+When a session starts: `git checkout dev` in the dev clone, work, push.
+Promote to main only when Salo gives the explicit green light. See §7.
+
+---
+
 ## 1. What Phosphene is
 
 A free desktop panel that wraps Lightricks' **LTX 2.3** model running
@@ -34,8 +133,8 @@ separate dev folder. Old "local dev" copy was deleted to consolidate.
 │   ├── env/                                    ← Python 3.11 venv
 │   └── packages/{ltx-core-mlx,ltx-pipelines-mlx}
 ├── mlx_models/                                 ← downloaded weights
-│   ├── ltx-2.3-mlx-q4/                         ← Q4 base (~25 GB)
-│   ├── ltx-2.3-mlx-q8/                         ← optional Q8 (~25 GB)
+│   ├── ltx-2.3-mlx-q4/                         ← Q4 base (~20 GB, filtered Y1.024+)
+│   ├── ltx-2.3-mlx-q8/                         ← optional Q8 (~37 GB, filtered Y1.024+)
 │   └── gemma-3-12b-it-4bit/                    ← text encoder (~7.5 GB)
 ├── mlx_outputs/                                ← generated mp4s
 ├── panel_uploads/                              ← user-uploaded reference images
@@ -118,6 +217,23 @@ Currently shipped patches:
 4. **Base `load()` also clears feature_extractor** — optional.
    Patches `TextToVideoPipeline.load`. Drops one extra ~5.91 GiB blob
    from the peak when the DiT loads.
+
+5. **VAE temporal streaming with auto-skip on short clips** (Y1.035 +
+   Y1.037). Patches `VideoDecoder.decode_and_stream` in
+   `ltx_core_mlx/model/video_vae/video_vae.py`. Upstream's method
+   *advertised* streaming but actually called `self.decode(latent)` on
+   the full video volume before iterating frames — caused multi-minute
+   end-of-render stalls / jetsam on long 720p clips. The patch routes
+   through `tiled_decode()` with a `TemporalTilingConfig` (default
+   tile = 64 latent frames, overlap = 24). Default mode is `auto`:
+   tiling is applied only when latent length > `LTX_VAE_STREAMING_AUTO_MAX_FRAMES`
+   (default 121 video frames ≈ 5 s). Short clips skip tiling and gain
+   ~30 s on 5-sec Standard renders. `LTX_VAE_STREAMING=0` forces
+   full-decode fallback; `=1` forces always-stream. Helper-side
+   `_apply_vae_streaming_decision()` in `mlx_warm_helper.py` sets the
+   env var per-job based on `num_frames`, so even pre-2.0 patched
+   installs that haven't re-run `patch_ltx_codec.py` get the right
+   behavior.
 
 The "upgrade" path in `apply_patch()` lets old patched installs receive
 new patch versions without a venv rebuild — used when we added
@@ -452,7 +568,10 @@ Every form field below maps to `params.<field>` on the resulting job.
 | `enhance` | "on"/"off" | `"off"` | Reserved (panel uses the explicit `/prompt/enhance` button instead). |
 | `stop_comfy` | "on"/"off" | `"off"` | Kill ComfyUI before this render to free MPS memory. |
 | `open_when_done` | "on"/"off" | `"off"` | macOS `open` the output when finished. |
-| `quality` | str | `"standard"` | `"draft"`, `"standard"`, or `"high"`. Drives dimensions, step counts, and pipeline. |
+| `quality` | str | `"balanced"` | `"quick"`, `"balanced"`, `"standard"`, or `"high"`. Drives dimensions, step counts, and pipeline. |
+| `accel` | str | `"off"` | `"off"` (alias for exact) / `"boost"` / `"turbo"`. Adaptive-cache denoise; boost skips up to 2 cached steps, turbo up to 3. T2V/I2V Standard only — disabled for High, Extend, FFLF. |
+| `upscale` | str | `"off"` | `"off"` / `"fit_720p"` / `"x2"`. Post-render export. Balanced defaults to `fit_720p`. |
+| `upscale_method` | str | `"lanczos"` | `"lanczos"` (ffmpeg) or `"pipersr"` (Sharp, ANE-accelerated). PiperSR adds ~26 s on 5-sec 1024×576. |
 | `no_music` | "on"/"off" | `"off"` | When on, the panel appends a no-music audio constraint to the prompt at submit time. |
 | `preset_label` | str | `""` | Optional human-readable label for the queue/history rows. |
 
@@ -460,11 +579,11 @@ Every form field below maps to `params.<field>` on the resulting job.
 
 | Mode | Pipeline class | Transformer | Quality flag | Notes |
 |---|---|---|---|---|
-| `t2v` | `TextToVideoPipeline` | distilled Q4 | draft → smaller dims; standard → full; high → `TwoStageHQPipeline` w/ Q8 dev | Most common path. |
-| `i2v` | `ImageToVideoPipeline` | distilled Q4 | same as T2V | Adds VAE-encoder pass on the input image. |
+| `t2v` | `TextToVideoPipeline` | distilled Q4 | quick → smaller dims; balanced → 1024×576 + 720p export; standard → 1280×704; high → `TwoStageHQPipeline` w/ Q8 dev | Most common path. |
+| `i2v` | `ImageToVideoPipeline` | distilled Q4 | same tier ladder as T2V | Adds VAE-encoder pass on the input image. |
 | `i2v_clean_audio` | `ImageToVideoPipeline` | distilled Q4 | same | Generates LTX video, then panel-side ffmpeg mux replaces the LTX audio with `audio` param. |
-| `extend` | `ExtendPipeline` | **dev** Q4 | always uses Q4 dev; cfg_scale dial via `extend_cfg` | Heavier (~75 s/step on 1280×704 cfg=1.0). |
-| `keyframe` (FFLF) | `KeyframePipeline` | **Q8 dev + distilled LoRA** | requires Q8 download | Disabled on `base` tier. |
+| `extend` | `ExtendPipeline` | **Q8 dev** (Y1.036+) | always uses Q8 `transformer-dev.safetensors`; cfg_scale dial via `extend_cfg` | Heavier (~75–80 s/step on 768×416 cfg=1.0). Pre-Y1.024 a duplicate `transformer-dev.safetensors` shipped in the Q4 dir as download bloat — Extend silently loaded from there. Y1.024 download filter pruned the dupe and exposed that Extend is structurally Q8-class. Panel auto-routes to Q8 dir; UI gates on Q8 download (same shape as FFLF). |
+| `keyframe` (FFLF) | `KeyframePipeline` | **Q8 dev + distilled LoRA** | requires Q8 download | Disabled on `base` tier. Comfortable tier clamps to 768 max-side (the stage-1 → stage-2 transition OOMs at 1280×704 on 64 GB). |
 
 The helper `get_pipe(kind)` lazily loads the pipeline class corresponding
 to the mode. Switching modes between jobs frees the previous pipeline
@@ -477,14 +596,23 @@ policy keeps memory bounded.
 the maximum dimensions per mode; `quality` picks the pipeline + step
 count *within* that clamp.
 
-| `quality` | Pipeline used | Dimensions | Steps | Approx wall on M4 64 GB |
+| `quality` | Pipeline used | Dimensions | Steps | Approx wall on M4 Max 64 GB |
 |---|---|---|---|---|
-| `draft` | distilled Q4 | half of standard (rounded to multiples of 32) | 8 | ~2 min @ 512×288 |
-| `standard` | distilled Q4 | full target (clamped by tier) | 8 | ~7 min @ 1280×704 |
-| `high` | TwoStageHQPipeline (Q8 dev + res_2s sampler + TeaCache) | full | 30 + extra | ~12 min @ 1280×704 |
+| `quick` | distilled Q4 | 640×480 (4:3 fast sanity) | 8 | ~ 2 m 14 s @ 121 frames |
+| `balanced` | distilled Q4 + ffmpeg or PiperSR fit_720p export | 1024×576 → 1280×720 export | 8 | ~ 4 m 36 s (Lanczos) / ~ 5 m 02 s (Sharp) @ 121 frames |
+| `standard` | distilled Q4 | 1280×704 (full target, clamped by tier) | 8 | ~ 7 m 40 s @ 121 frames; ~ 5 m 26 s with `accel=turbo` |
+| `high` | `TwoStageHQPipeline` (Q8 dev + res_2s sampler + TeaCache) | 1280×704 | 15 stage-1 + 3 stage-2 | ~ 11 m 51 s @ 121 frames |
 
-`high` requires the Q8 model on disk (~25 GB extra). Disabled when the
-panel detects Q8 incomplete.
+`high` and `keyframe` require the Q8 model on disk (~37 GB filtered).
+`extend` also requires Q8 since Y1.036 (transformer-dev). Panel surfaces
+a "Download Q8" CTA + disables the Generate button when the user picks
+a Q8-required mode without Q8 installed.
+
+Independent of `quality`, T2V/I2V Standard takes an `accel` flag
+(`exact` / `boost` / `turbo`) that drives an adaptive-cache denoise
+loop. Boost can skip up to 2 stable middle steps, Turbo up to 3.
+Cached steps near-zero wall; full steps stay ~53 s/it on 1280×704.
+Per-step decisions are recorded in the sidecar's `accel_metrics` block.
 
 ## 15. Hardware tier system
 

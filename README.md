@@ -27,15 +27,64 @@
 > 1. In Pinokio: **Reset** the Phosphene panel.
 > 2. **Install** it again.
 >
-> Yes, this re-downloads the LTX weights (~36 GB). Annoying but quick on
-> a decent connection, and from this point on Pinokio's Reset preserves
-> your models because `install.js` declares an `fs.link` persistent drive
-> (Y1.004+). So this is a one-time inconvenience for clones that pre-date
-> 2026-05-01; future Reset → Install is fast and lossless.
+> Yes, this re-downloads the LTX weights (~28 GB total — Q4 + Gemma).
+> Annoying but quick on a decent connection, and from this point on
+> Pinokio's Reset preserves your models because `install.js` declares an
+> `fs.link` persistent drive (Y1.004+). So this is a one-time
+> inconvenience for clones that pre-date 2026-05-01; future Reset →
+> Install is fast and lossless.
 >
 > If you'd rather not re-download, the repo includes a `recover.sh` that
 > resets the git repo to current main without touching your `mlx_models/`.
 > See its header comment for usage. (Most users: just reinstall.)
+
+---
+
+## What's new in 2.0
+
+Phosphene 2.0 is the first major release after a sustained inference
+rewrite. **The fastest local way to make AI video on a Mac**, with
+synced audio, four modes, and HD upscaling on the Apple Neural Engine.
+
+**Headline benchmarks** (Apple M4 Max 64 GB, real wall-clock today):
+
+| Recipe | 5-sec clip | 10-sec clip |
+|---|---|---|
+| T2V · Balanced · Turbo · 720p Sharp | **3 m 30 s** | **8 m 07 s** |
+| I2V · Balanced · Turbo · 720p Sharp | 3 m 37 s | 8 m 26 s |
+| T2V · Standard · Exact (1280×704) | 7 m 40 s | — |
+| T2V · High Q8 two-stage (max quality) | 11 m 51 s | — |
+
+**What you actually get**:
+
+- **Sharp upscale on the Apple Neural Engine** via [PiperSR](https://github.com/ModelPiper/PiperSR) —
+  real x2 detail recovery, not Lanczos blur. Optional install (AGPL terms).
+- **Boost & Turbo speed modes** for Standard renders — adaptive denoise
+  caching cuts 23–34 % off wall time on stable scenes without breaking
+  faces / hands / typography.
+- **Q8 two-stage HQ tier** with TeaCache for cinematic-quality renders.
+- **Four modes**: T2V (text→video), I2V (image→video), **FFLF** (first/last
+  frame keyframing), **Extend** (append seconds with continuous audio).
+- **Joint audio + video** in one diffusion pass — lip-sync, footsteps,
+  ambient noise all align at the frame level.
+- **Hardware-aware tier system** — the panel detects your Mac's RAM
+  and shows realistic per-tier time estimates on the Quality pills.
+- **Streaming VAE decode** for long clips (10-sec at 720p actually
+  finishes; auto-skipped on short clips so you don't pay the overhead).
+- **Filtered downloads** — Q4 ≈ 20 GB, Q8 ≈ 37 GB, Gemma ≈ 7.5 GB.
+  Pre-2.0 builds bloated to Q4 = 56 GB / Q8 = 82 GB by including
+  duplicate transformer variants. New installs skip the dupes; existing
+  installs free ~80 GB on first Update.
+- **Phase-aware progress bar** in the Now-card — knows what step it's
+  on, gives an honest remaining-time estimate.
+- **Seamless gallery** — new clips appear instantly, no more 2-minute
+  black-frame waiting for the browser cache to expire.
+
+**Already a user?** In Pinokio → Phosphene: **Stop · Update · Start**.
+The Update step also reclaims ~80 GB on existing bloated installs.
+
+**New here?** Install [Pinokio](https://pinokio.computer), then in
+Discover paste `https://github.com/mrbizarro/phosphene` and click Install.
 
 ---
 
