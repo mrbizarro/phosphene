@@ -167,6 +167,29 @@ module.exports = {
       }
     },
 
+    // ---- Sanity-import the pipeline packages (v2.0.2+) --------------------
+    // SHIP-BLOCKER guard: at least one user (KTDS, May 4) reported a
+    // "ModuleNotFoundError: No module named 'ltx_pipelines_mlx'" after a
+    // green Pinokio install — the upstream pip step had silently failed
+    // mid-install but the patch script's i2v target check tolerates a
+    // missing ltx_pipelines_mlx file (demotes MISSING → ALREADY for that
+    // specific patch), so the install reported success and the user only
+    // learned about the breakage when they clicked Generate.
+    //
+    // This step imports both packages explicitly. If either is missing
+    // the Python call exits non-zero, Pinokio marks the install step as
+    // failed, and the user sees an actionable error instead of a 30 GB
+    // download into a broken venv. Idempotent — costs ~300ms on a working
+    // install.
+    {
+      method: "shell.run",
+      params: {
+        message: [
+          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx; print('venv OK — ltx_core_mlx, ltx_pipelines_mlx, mlx all importable')\""
+        ]
+      }
+    },
+
     // ---- Download Q4 LTX 2.3 (~20 GB, resumable) --------------------------
     // `hf download` is the v1+ name (huggingface_hub deprecated `huggingface-cli`).
     // Resume + verify is built-in; --local-dir avoids the HF cache store so
