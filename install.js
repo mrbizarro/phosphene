@@ -113,8 +113,23 @@ module.exports = {
       params: {
         path: "ltx-2-mlx",
         message: [
+          // v2.0.3: log the toolchain BEFORE creating the venv so the
+          // install log self-documents which Python uv landed on. A user
+          // (KTDS) hit a silent "ModuleNotFoundError: ltx_pipelines_mlx"
+          // after a green install — the most likely cause was uv falling
+          // back to a Python that couldn't install mlx wheels, and we
+          // had no log evidence to confirm. These echoes change nothing
+          // operationally; they just leave a trail.
+          "echo '=== install diagnostics: venv create ==='",
+          "which uv && uv --version || echo 'uv NOT FOUND'",
+          "which python3.11 && python3.11 --version || echo 'system python3.11 NOT FOUND (uv will try to fetch)'",
+          "uname -a",
+          "echo '=== /diagnostics ==='",
           "rm -rf env",
-          "uv venv --python 3.11 --seed env"
+          "uv venv --python 3.11 --seed env",
+          "echo '=== venv created ==='",
+          "ls -la env/bin/python* 2>&1 || echo 'venv create FAILED'",
+          "env/bin/python --version || echo 'venv python NOT executable'"
         ]
       }
     },
@@ -142,6 +157,14 @@ module.exports = {
       params: {
         path: "ltx-2-mlx",
         message: [
+          // v2.0.3: log Python identity before each pip step. KTDS hit a
+          // silent missing-package install and we had nothing in the log
+          // to diagnose it. These echoes leave a paper trail of which
+          // interpreter is being targeted by --python env/bin/python.
+          "echo '=== install diagnostics: pip install ==='",
+          "env/bin/python --version || echo 'venv python NOT executable'",
+          "env/bin/python -c 'import sys; print(\"sys.executable:\", sys.executable); print(\"sys.path[0]:\", sys.path[0] if sys.path else None)'",
+          "echo '=== /diagnostics ==='",
           // Force the mlx pin BEFORE installing ltx-* packages so their deps
           // resolve to the pinned version instead of pulling latest 0.31.x.
           "uv pip install --python env/bin/python 'mlx==0.31.1' 'mlx-lm==0.31.1' 'mlx-metal==0.31.1'",
@@ -150,7 +173,14 @@ module.exports = {
           // than the default Python downloader for big repos like Q8 (~25 GB).
           // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
           // package is missing the hf CLI falls back gracefully with a warning.
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6'"
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6'",
+          // v2.0.3: post-install confirmation that the local packages
+          // actually landed in site-packages. The Y1.034+ patch script's
+          // i2v target tolerates a missing ltx_pipelines_mlx — without
+          // this echo we'd discover the gap only at panel start time.
+          "echo '=== post-pip site-packages check ==='",
+          "ls env/lib/python3.11/site-packages/ | grep -E '^(ltx|mlx)' || echo 'WARN: no ltx_*/mlx packages in site-packages'",
+          "echo '=== /site-packages check ==='"
         ]
       }
     },
