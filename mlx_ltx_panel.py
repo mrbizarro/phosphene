@@ -246,6 +246,15 @@ def _settings_defaults() -> dict:
         # when the model state regresses (e.g. a download disappears) so
         # a real new problem still surfaces. UI-only; no security impact.
         "models_card_dismissed": False,
+        # Spicy mode — gates NSFW LoRA visibility. Default OFF (kid-safe).
+        # When OFF: the CivitAI browser hides its "Show NSFW" toggle, the
+        # server forces nsfw=false on CivitAI requests, and any incoming
+        # NSFW-flagged items are filtered out as a defense-in-depth pass.
+        # When ON: existing per-session "Show NSFW" toggle is exposed and
+        # works as before. The Settings UI requires explicit confirmation
+        # to flip OFF→ON so kids / casual visitors can't enable it by a
+        # stray click.
+        "spicy_mode": False,
     }
 
 
@@ -418,6 +427,14 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         else:
             out["models_card_dismissed"] = str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    if "spicy_mode" in patch:
+        # Same urlencoded-bool coercion as models_card_dismissed.
+        v = patch["spicy_mode"]
+        if isinstance(v, bool):
+            out["spicy_mode"] = v
+        else:
+            out["spicy_mode"] = str(v).strip().lower() in ("1", "true", "yes", "on")
+
     return out, None
 
 
@@ -459,6 +476,7 @@ def get_settings_public() -> dict:
         "has_civitai_key": bool(s.get("civitai_api_key", "").strip()),
         "has_hf_token": bool(s.get("hf_token", "").strip()),
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
+        "spicy_mode": bool(s.get("spicy_mode", False)),
     }
 
 
@@ -1402,6 +1420,13 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     Each item carries everything the front end needs to render a card
     AND everything the download endpoint needs to write a sidecar — no
     second round-trip required to install."""
+    # Spicy mode gate (v2.0 — server-side authoritative). When the user
+    # hasn't enabled Spicy mode in Settings, force nsfw=False regardless
+    # of what the client sent. This keeps NSFW results out of casual /
+    # kid-accessible installs even if someone fiddles the client param.
+    spicy_on = bool(get_settings().get("spicy_mode", False))
+    if not spicy_on:
+        nsfw = False
     # CivitAI's /models endpoint uses cursor-style pagination
     # (`nextCursor` in the response → pass back as `cursor` on the next
     # request). Page numbers are deprecated for this endpoint. We expose
@@ -1476,6 +1501,12 @@ def _civitai_search(query: str = "", nsfw: bool = False,
             "base_model": v.get("baseModel"),
             "civitai_url": f"https://civitai.com/models/{m.get('id')}",
         })
+    # Defense-in-depth: when Spicy mode is off, also drop any items the
+    # API returned with nsfw=true. CivitAI's `nsfw=false` request param
+    # filters by image-tier (Soft/Mature/X) but model cards have a
+    # separate boolean we re-check here so nothing slips through.
+    if not spicy_on:
+        items = [it for it in items if not it.get("nsfw")]
     metadata = raw.get("metadata") or {}
     return {
         "items": items,
@@ -5597,6 +5628,42 @@ HTML = r"""<!doctype html>
     .settings-row label {
       font-size: 11px; color: var(--muted); min-width: 70px;
     }
+    /* Spicy mode toggle row — explicit state badge + button.
+       OFF: muted neutral chip, button reads "Enable Spicy mode"
+       ARMED (mid-confirm): amber chip, button reads "Click again to confirm"
+       ON: amber chip, button reads "Disable" (single click off — easy to
+       turn off, harder to turn on, intentional per user spec). */
+    .spicy-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .spicy-state {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.08em;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: rgba(255,255,255,0.03);
+    }
+    .spicy-state.on {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.55);
+      background: rgba(240,185,64,0.16);
+    }
+    .spicy-state.armed {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.85);
+      background: rgba(240,185,64,0.26);
+      animation: spicyArm 1.2s ease-in-out infinite;
+    }
+    @keyframes spicyArm {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
     /* Token rows in the Settings modal. The status pill on the right
        of the label tells the user at a glance whether a key is
        configured (green ✓) or missing (muted —). The input is masked
@@ -6341,6 +6408,30 @@ HTML = r"""<!doctype html>
           — read access is enough.
         </div>
       </div>
+    </div>
+
+    <!-- Spicy mode — gates NSFW LoRA visibility in the CivitAI browser.
+         Default OFF. Turning ON requires an explicit confirm-click pattern
+         so a casual visitor / kid can't toggle it by a stray click. The
+         server enforces the gate independently in _civitai_search, so a
+         tampered client can't bypass this. -->
+    <div class="settings-section">
+      <h3>Spicy mode <span class="hint" style="font-weight:400">(adult content)</span></h3>
+      <div class="hint" style="margin-bottom:10px">
+        When OFF, the CivitAI LoRA browser hides NSFW models entirely —
+        the "Show NSFW" toggle disappears and any NSFW result the API
+        returns is filtered out. When ON, you can choose per-search whether
+        to include NSFW results. The server enforces this gate even if the
+        client is tampered with.
+      </div>
+      <div class="spicy-row">
+        <span class="spicy-state" id="spicyStateBadge">OFF</span>
+        <button type="button" class="ghost-btn" id="spicyToggleBtn"
+                onclick="toggleSpicyMode()" style="margin-left:auto">
+          Enable Spicy mode
+        </button>
+      </div>
+      <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
     </div>
 
     <div class="settings-section" id="settingsCustomSection" style="display:none">
@@ -8181,6 +8272,102 @@ async function openSettingsModal() {
     : 'hf_…';
   document.getElementById('civitaiKeyClear').style.display = cur.has_civitai_key ? '' : 'none';
   document.getElementById('hfTokenClear').style.display = cur.has_hf_token ? '' : 'none';
+
+  // Spicy mode — render current state. _spicyArmed is the mid-confirm
+  // state (clicked once, waiting for the second click). It lives only
+  // on the JS side; only ON/OFF gets persisted.
+  _spicyArmed = false;
+  renderSpicyState(!!cur.spicy_mode);
+}
+
+let _spicyArmed = false;
+
+function renderSpicyState(isOn) {
+  const badge = document.getElementById('spicyStateBadge');
+  const btn = document.getElementById('spicyToggleBtn');
+  const hint = document.getElementById('spicyHint');
+  if (!badge || !btn) return;
+  badge.classList.remove('on', 'armed');
+  if (_spicyArmed) {
+    badge.textContent = 'ARMED';
+    badge.classList.add('armed');
+    btn.textContent = 'Click again to confirm';
+    btn.classList.remove('ghost-btn');
+    btn.classList.add('primary-btn');
+    hint.style.display = '';
+    hint.textContent = 'Confirms turning Spicy mode ON. NSFW LoRAs will be available in the CivitAI browser. Cancel by closing the modal.';
+  } else if (isOn) {
+    badge.textContent = 'ON';
+    badge.classList.add('on');
+    btn.textContent = 'Disable';
+    btn.classList.remove('primary-btn');
+    btn.classList.add('ghost-btn');
+    hint.style.display = '';
+    hint.textContent = 'Spicy mode is ON. NSFW LoRAs are visible in the CivitAI browser when you tick "Show NSFW".';
+  } else {
+    badge.textContent = 'OFF';
+    btn.textContent = 'Enable Spicy mode';
+    btn.classList.remove('primary-btn');
+    btn.classList.add('ghost-btn');
+    hint.style.display = 'none';
+    hint.textContent = '';
+  }
+}
+
+async function toggleSpicyMode() {
+  // Two-click confirm to turn ON, single-click to turn OFF.
+  // Easy to disable, deliberate to enable — matches the user spec
+  // ("don't want people to turn it on by mistake, or kids").
+  const cur = (_settingsCache && _settingsCache.settings) || {};
+  const isOn = !!cur.spicy_mode;
+  if (isOn) {
+    // Single-click off, no confirm.
+    await _persistSpicyMode(false);
+    return;
+  }
+  if (!_spicyArmed) {
+    _spicyArmed = true;
+    renderSpicyState(false);
+    // Auto-disarm after 6 s if the user doesn't confirm — prevents
+    // the "click again" state lingering across an unrelated tab return.
+    setTimeout(() => {
+      if (_spicyArmed) {
+        _spicyArmed = false;
+        renderSpicyState(!!(_settingsCache?.settings?.spicy_mode));
+      }
+    }, 6000);
+    return;
+  }
+  // Second click — actually persist.
+  _spicyArmed = false;
+  await _persistSpicyMode(true);
+}
+
+async function _persistSpicyMode(target) {
+  const status = document.getElementById('settingsStatus');
+  try {
+    const fd = new URLSearchParams();
+    fd.set('spicy_mode', target ? 'true' : 'false');
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (_settingsCache && _settingsCache.settings) {
+      _settingsCache.settings.spicy_mode = !!target;
+    }
+    renderSpicyState(!!target);
+    if (status) {
+      status.textContent = target ? 'Spicy mode ON · NSFW LoRAs unlocked' : 'Spicy mode OFF · NSFW LoRAs hidden';
+      status.className = 'settings-status ok';
+    }
+    // Refresh the CivitAI panel so the "Show NSFW" toggle appears /
+    // disappears immediately without a full page reload.
+    if (typeof refreshCivitaiAccessUI === 'function') refreshCivitaiAccessUI();
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Could not change Spicy mode: ' + (e.message || e);
+      status.className = 'settings-status err';
+    }
+  }
 }
 
 function setTokenStatus(prefix, isSet, dirty) {
@@ -8697,7 +8884,25 @@ function openCivitaiModal() {
   }).catch(() => { renderCivitaiAuthBanner(false); });
   document.getElementById('civitaiQuery').value = '';
   _civitaiCursor = '';
+  // Pull current Spicy mode state so the "Show NSFW" toggle hides when off.
+  refreshCivitaiAccessUI();
   civitaiSearch();
+}
+
+// Hide / show the "Show NSFW" toggle in the CivitAI browser based on the
+// Spicy mode setting. Called on modal open and after toggleSpicyMode flips
+// the value, so the UI tracks the gate without a page reload.
+async function refreshCivitaiAccessUI() {
+  let spicy = false;
+  try {
+    const r = await fetch('/settings');
+    const j = await r.json();
+    spicy = !!(j && j.settings && j.settings.spicy_mode);
+  } catch (_) { /* default off */ }
+  const pill = document.getElementById('civitaiNsfwPill');
+  const cb = document.getElementById('civitaiNsfw');
+  if (pill) pill.style.display = spicy ? '' : 'none';
+  if (!spicy && cb) cb.checked = false;  // force off when spicy mode is off
 }
 
 // Render the inline API-key banner at the top of the CivitAI browser.
