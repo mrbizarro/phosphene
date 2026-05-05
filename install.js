@@ -215,7 +215,7 @@ module.exports = {
       method: "shell.run",
       params: {
         message: [
-          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx; print('venv OK — ltx_core_mlx, ltx_pipelines_mlx, mlx all importable')\""
+          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx; print('venv OK: ltx_core_mlx, ltx_pipelines_mlx, mlx all importable')\""
         ]
       }
     },
