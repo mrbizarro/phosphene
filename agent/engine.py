@@ -102,8 +102,23 @@ def chat(messages: list[dict], config: EngineConfig,
     / model name typos in the Settings drawer).
     """
     url = config.base_url.rstrip("/") + "/chat/completions"
+    # mlx-lm.server identifies models by their LOAD PATH, not by short
+    # name. Its /v1/models endpoint returns the absolute path (e.g.
+    # "/Users/.../mlx_models/gemma-3-12b-it-4bit") as the model id, and
+    # /v1/chat/completions 404s with a HuggingFace lookup error
+    # ("Repository Not Found for url: https://huggingface.co/api/models/
+    # gemma-3-12b-it-4bit/revision/main") if it receives anything else
+    # — it interprets unknown short names as HF repo ids and tries to
+    # download them. So for the local engine we always pass the absolute
+    # path as the request "model" field. For custom OpenAI-compat
+    # endpoints we pass `config.model` as-is (those expect short names
+    # like "gpt-5", "claude-sonnet-4-6", etc.).
+    if config.kind == "phosphene_local" and config.local_model_path:
+        wire_model = config.local_model_path
+    else:
+        wire_model = config.model
     body = {
-        "model": config.model,
+        "model": wire_model,
         "messages": _normalize_for_wire(messages),
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,

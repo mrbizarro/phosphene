@@ -6938,8 +6938,12 @@ HTML = r"""<!doctype html>
        fades under it.
        Esc exits — bound in JS. */
 
-    /* Wipe all the regular panel chrome */
-    body.agent-fullscreen header,
+    /* Wipe all the regular panel chrome.
+       NOTE: `body.agent-fullscreen > header` (direct child only) — without
+       the > combinator the rule also matches the agent's own
+       <header class="agent-header"> inside the chat, which is exactly
+       what we DON'T want to hide. */
+    body.agent-fullscreen > header,
     body.agent-fullscreen .bottom-pane,
     body.agent-fullscreen .form-pane > :not(.agent-pane),
     body.agent-fullscreen .workflow-tabs {
@@ -7326,7 +7330,50 @@ HTML = r"""<!doctype html>
     .agent-settings-card h2 {
       margin: 0 0 6px;
       font-size: 17px; font-weight: 600;
+      /* Override the panel-wide h2 rule (line ~5322) which sets uppercase
+         + 0.1em letter-spacing. The settings-card titles are sentence-
+         case, like a real settings sheet, not eyebrow labels. */
+      text-transform: none;
+      letter-spacing: -0.1px;
+      color: var(--text);
       display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+    }
+    .agent-settings-card h2 button,
+    .agent-settings-card h2 .close-btn {
+      flex-shrink: 0;          /* don't let the close button grow huge */
+    }
+    /* Inline 'Close' button next to the title. The button has no class,
+       just sits inside h2 — keep it small and ghosty. */
+    .agent-settings-card h2 > button {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      text-transform: none;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .agent-settings-card h2 > button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    /* The panel has a global `input, textarea, select, button { width: 100% }`
+       rule (see ~line 5331). It makes EVERY button full-width by default,
+       which destroys the inline button layout in the modal: the Close
+       button stretches across the whole card, the Start button next to
+       the engine status pill takes 350px, etc. Override for the agent
+       modal — buttons here are inline elements managed by their flex
+       containers. */
+    .agent-settings-card h2 > button,
+    .agent-engine-row > button,
+    .agent-settings-card .actions > button {
+      width: auto;
     }
     .agent-settings-card .subtitle {
       font-size: 12px; color: var(--muted);
@@ -7531,15 +7578,16 @@ HTML = r"""<!doctype html>
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
         </button>
-        <button type="button" class="icon-btn" id="agentPopOutBtn"
-                onclick="agentPopOut()"
-                title="Open in your default browser (true OS fullscreen — escapes Pinokio's sidebar)">
+        <a class="icon-btn" id="agentPopOutBtn"
+           href="/" target="_blank" rel="noopener"
+           onclick="agentPopOutFlagsBeforeNavigate()"
+           title="Open in your default browser (true OS fullscreen — escapes Pinokio's sidebar)">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
             <polyline points="15 3 21 3 21 9"/>
             <line x1="10" y1="14" x2="21" y2="3"/>
           </svg>
-        </button>
+        </a>
         <button type="button" class="icon-btn" id="agentFullscreenBtn"
                 onclick="agentToggleFullscreen()" title="Expand to fullscreen (Esc to exit)">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" id="agentFullscreenIconExpand">
@@ -12171,6 +12219,11 @@ async function agentSend() {
     clearInterval(poller);
     window.AGENT.busy = false;
     btn.disabled = false;
+    // The auto-start backend logic may have just spawned the local
+    // engine — the engine pill in the header was 'click to start'
+    // when the user hit Send. Now it should read 'live'. Refresh
+    // the config view so the pill catches up.
+    agentRefreshConfig();
     requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   }
 }
@@ -12463,31 +12516,29 @@ async function agentSaveSettings() {
 }
 
 // ---- Pop out to system browser -------------------------------------------
-// Pinokio shows the panel inside a webview with its own sidebar + top bar.
-// Clicking pop-out opens the same panel URL in the user's default browser
-// (no Pinokio chrome → real OS-level fullscreen via Cmd+Ctrl+F or browser
-// fullscreen). The new tab boots straight into Agentic Flows fullscreen
-// because we set the localStorage flags before opening.
-function agentPopOut() {
+// The pop-out is a real <a target="_blank"> link (set up during boot via
+// agentInitPopOut). The browser handles the actual navigation as a user
+// gesture so popup-blockers don't kick in. This handler just sets the
+// localStorage flags so the new tab boots straight into Agentic Flows +
+// fullscreen.
+function agentPopOutFlagsBeforeNavigate() {
   try {
     localStorage.setItem('phos_workflow', 'agent');
     localStorage.setItem('phos_agent_fullscreen', '1');
   } catch(e) {}
-  const url = window.location.origin || ('http://127.0.0.1:' + window.location.port);
-  // window.open with _blank usually triggers the OS default browser when
-  // running inside Electron-style webviews (Pinokio honors target=_blank).
-  // If the host doesn't, fall back to copying the URL to clipboard with a
-  // toast — the user can paste it into any browser.
-  const w = window.open(url, '_blank', 'noopener,noreferrer');
-  if (!w) {
-    // Popup blocked or webview didn't honor _blank — fall back to clipboard.
-    try {
-      navigator.clipboard.writeText(url);
-      alert('URL copied to clipboard:\\n' + url + '\\n\\nPaste it into any browser for a clean fullscreen experience.');
-    } catch(e) {
-      alert('Open this URL in your browser for a clean fullscreen:\\n' + url);
-    }
-  }
+  // The <a href> handles navigation. Don't preventDefault.
+}
+
+function agentInitPopOut() {
+  const a = document.getElementById('agentPopOutBtn');
+  if (!a) return;
+  a.href = window.location.origin || ('http://127.0.0.1:' + window.location.port);
+}
+// Run on every page load; cheap and idempotent.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', agentInitPopOut);
+} else {
+  agentInitPopOut();
 }
 
 // ---- Fullscreen / focus mode ---------------------------------------------
@@ -12511,9 +12562,17 @@ function agentToggleFullscreen(force) {
   });
 }
 
-// Esc to exit fullscreen.
+// Esc handler: priority is modal-close > fullscreen-exit. So Esc to
+// dismiss the settings drawer doesn't drop the user out of fullscreen
+// at the same time.
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.body.classList.contains('agent-fullscreen')) {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('agentSettingsModal');
+  if (modal && modal.classList.contains('open')) {
+    closeAgentSettings();
+    return;
+  }
+  if (document.body.classList.contains('agent-fullscreen')) {
     agentToggleFullscreen(false);
   }
 });
