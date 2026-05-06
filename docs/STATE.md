@@ -253,6 +253,12 @@ phosphene-dev.git/
 
 ### Open / partially understood
 - **KTDS install case** (Linear HAI-156): user reported `ModuleNotFoundError: No module named 'ltx_pipelines_mlx'` after a "green" install. Symptom is now possibly explained by the v2.0.2/v2.0.3 em-dash bug (the sanity check itself was broken, install completed green for the wrong reason). Asked for log tail + VERSION; pending response. Suggested fix: Reset → Install on v2.0.4.
+- **Qwen 3.6 Abliterated reasoning loops** (May 7 overnight session): Qwen 3.6 routinely emits 40k+ char chain-of-thought when planning multi-shot batches in long-context sessions. Even with `max_tokens=12000` and `DEFAULT_TIMEOUT_S=900`, a single turn can exhaust both. The new reasoning-aware engine.chat() raises an actionable error pointing the user to bump max_tokens, but for a recursive thought spiral no token budget is enough. Workarounds for the next session:
+  - **Recommend Gemma 12B for the agent** when the task is "queue 20+ shots". Already on disk at `mlx_models/gemma-3-12b-it-4bit`, no reasoning blocks, responds directly. 7.5 GB resident vs Qwen's 22 GB.
+  - **Or Anthropic API (claude-sonnet-4-5)** — paid, fast, no local reasoning block.
+  - **Smaller batches**: trigger 5 shots at a time in plain text (avoids long planning turns). Confirmed working tonight: agent submitted S1-S5 (News Intro, Wife LLM Monitor, Inpatient Toaster, Wife Coffee Variables, Psychiatrist Uptime) in one focused trigger before hitting the next reasoning-loop.
+  - **System-prompt injection** to discourage over-thinking: "Do not deliberate; emit the action block immediately." Untested as of 2026-05-07; worth a try.
+  - Future: detect reasoning-token consumption mid-stream + tool-loop checkpoint after each submit_shot so a long-running planner doesn't lose its place.
 
 ## 8. Open work / future direction
 
