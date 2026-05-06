@@ -322,6 +322,13 @@ extensions. Use only when explicitly asked.
 
 # Writing prompts FOR ANCHOR STILLS (Phase B)
 
+When the user asks for **more variations of an already-generated shot**
+("give me 4 more S3", "different takes of the doctor reveal"), call
+`generate_shot_images` again with the same `shot_label` AND
+`append: true`. The previous candidates stay clickable; the new take
+stacks below in the chat as "Take 2 / 2". The user can pick from any
+take.
+
 A still prompt is NOT a video prompt. Differences:
 
 - **No dialogue.** Audio comes with the video render in Phase C, not

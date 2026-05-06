@@ -8031,6 +8031,14 @@ HTML = r"""<!doctype html>
       font-weight: 600; font-size: 10px;
       letter-spacing: 0.4px; text-transform: uppercase;
     }
+    .anchor-grid-meta .take-pill {
+      padding: 2px 8px; border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      font-weight: 500; font-size: 10px;
+      border: 1px solid var(--border);
+      letter-spacing: 0.2px;
+    }
     /* Pick-state badge — right-aligned, neutral when nothing picked,
        success-tinted when there's a pick. Updated in-place by
        agentPickAnchor without re-rendering the grid. */
@@ -14794,10 +14802,28 @@ function renderToolResultCard(result) {
   // Phase B of the director workflow: when the result carries
   // `candidates`, render an interactive thumbnail grid below the head.
   // The card stays expanded by default so the user can immediately pick.
-  if (ok && inner && Array.isArray(inner.candidates) && inner.candidates.length > 0) {
-    card.classList.add('open');                    // open by default
-    const grid = renderAnchorGrid(inner);
-    card.appendChild(grid);
+  // Multi-take support: if `takes` is present, render every take stacked
+  // (take 1 / take 2 / take N) so the user can choose from any prior batch.
+  if (ok && inner) {
+    const takes = Array.isArray(inner.takes) && inner.takes.length > 1
+      ? inner.takes
+      : (Array.isArray(inner.candidates) && inner.candidates.length > 0
+          ? [{candidates: inner.candidates, prompt: inner.prompt, take_index: 0}]
+          : []);
+    if (takes.length > 0) {
+      card.classList.add('open');                  // open by default
+      for (const take of takes) {
+        const grid = renderAnchorGrid({
+          shot_label: inner.shot_label,
+          prompt: take.prompt || inner.prompt,
+          engine: inner.engine,
+          candidates: take.candidates || [],
+          take_index: take.take_index,
+          take_count: takes.length,
+        });
+        card.appendChild(grid);
+      }
+    }
   }
   return card;
 }
@@ -14811,11 +14837,19 @@ function renderAnchorGrid(payload) {
 
   const selected = window.AGENT.selectedAnchors || {};
   const isPicked = !!((selected[label] || {}).png_path);
+  // Multi-take label: when the same shot has multiple takes generated,
+  // tag each grid as "Take 1 of 3" so the user knows where the candidates
+  // came from and can compare across takes.
+  const takeChip = (typeof payload.take_index === 'number'
+                    && (payload.take_count || 1) > 1)
+    ? `<span class="take-pill">Take ${payload.take_index + 1} / ${payload.take_count}</span>`
+    : '';
   const meta = document.createElement('div');
   meta.className = 'anchor-grid-meta';
   meta.dataset.shot = label;
   meta.innerHTML = `
     <span class="label-pill">${escapeHtml(label)}</span>
+    ${takeChip}
     <span>${payload.candidates.length} candidates · ${escapeHtml(engine)}</span>
     <span style="flex:1"></span>
     <span class="pick-state${isPicked ? ' is-picked' : ''}">${isPicked ? '✓ picked' : 'click to pick'}</span>

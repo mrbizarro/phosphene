@@ -683,14 +683,23 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
       aspect: "16:9" | "9:16" | "1:1" | "4:3" | "21:9" | "3:4" = "16:9"
       seed_base: int = -1 — when >= 0, candidates use seed_base + i so the
                             run is reproducible. Use -1 for random seeds.
+      append: bool = false — when true AND the same shot_label has
+                            existing candidates, ADD a new "take" instead
+                            of overwriting. New PNGs land under
+                            `take_NN/cand_*.png`. Use this when the user
+                            says "give me 4 more variations of S3" — the
+                            previous candidates stay clickable and the new
+                            take stacks below.
 
     Returns: {shot_label, prompt, candidates: [{png_path, seed, ...}, ...],
-              elapsed_seconds, engine}.
+              takes: [{candidates, generated_at, prompt}, ...],
+              elapsed_seconds, engine, take_index}.
 
     The UI renders the candidates as a clickable thumbnail grid in the
     tool-result card. When the user clicks one, that selection is recorded
     in `session.tool_state["selected_anchors"][shot_label]`. The agent
-    can read the selections later via `get_selected_anchors`.
+    can read the selections later via `get_selected_anchors`. With multiple
+    takes, the user can pick from ANY take.
     """
     from agent import image_engine as _image_engine
 
@@ -701,6 +710,7 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     n = max(1, min(8, int(args.get("n", 4))))
     aspect = args.get("aspect", "16:9")
     seed_base = int(args.get("seed_base", -1))
+    append = bool(args.get("append", False))
 
     # Image engine config travels in PanelOps.capabilities so tools.py
     # stays free of panel imports.
@@ -709,7 +719,30 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
 
     safe_label = re.sub(r"[^a-z0-9_-]", "_", label.lower())[:40] or "untitled"
     sid = session.get("session_id") or "session"
-    out_dir = ops.uploads_dir / "agentflow" / sid / safe_label
+    base_dir = ops.uploads_dir / "agentflow" / sid / safe_label
+
+    # Resolve existing takes so we can compute the next subdir.
+    session.setdefault("anchor_candidates", {})
+    existing = session["anchor_candidates"].get(label) or {}
+    prior_takes = list(existing.get("takes") or [])
+    # Migration path: an older session may have a flat "candidates" list
+    # under the label without a "takes" array. Preserve as take_00.
+    if not prior_takes and existing.get("candidates"):
+        prior_takes = [{
+            "candidates": existing["candidates"],
+            "prompt": existing.get("prompt", prompt),
+            "generated_at": existing.get("generated_at", time.time()),
+        }]
+
+    if append and prior_takes:
+        take_index = len(prior_takes)
+        out_dir = base_dir / f"take_{take_index:02d}"
+    else:
+        # Fresh run (or no append flag) — overwrite. Keep the old behavior
+        # for the no-append branch so the agent's existing prompts work.
+        prior_takes = []
+        take_index = 0
+        out_dir = base_dir
 
     t0 = time.time()
     candidates = _image_engine.generate(
@@ -720,11 +753,17 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     )
     elapsed = round(time.time() - t0, 2)
 
-    # Track in session state.
-    session.setdefault("anchor_candidates", {})
+    new_take = {
+        "candidates": candidates,
+        "prompt": prompt,
+        "generated_at": time.time(),
+        "take_index": take_index,
+    }
+    all_takes = prior_takes + [new_take]
     session["anchor_candidates"][label] = {
         "prompt": prompt,
-        "candidates": candidates,
+        "candidates": candidates,        # latest take, surfaced to legacy UI
+        "takes": all_takes,
         "generated_at": time.time(),
     }
 
@@ -732,6 +771,8 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
         "shot_label": label,
         "prompt": prompt,
         "candidates": candidates,
+        "takes": all_takes,
+        "take_index": take_index,
         "engine": cfg.kind,
         "elapsed_seconds": elapsed,
     }
