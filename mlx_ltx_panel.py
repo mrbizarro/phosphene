@@ -6466,9 +6466,9 @@ HTML = r"""<!doctype html>
 
     /* ---- Header ---- */
     .agent-header {
-      display: flex; align-items: center; gap: 12px;
+      display: flex; align-items: center; gap: 10px;
       padding: 12px 16px;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
       background: linear-gradient(180deg, var(--panel-2), var(--panel));
     }
     .agent-header .engine-pill {
@@ -6894,50 +6894,270 @@ HTML = r"""<!doctype html>
       max-height: 80px; overflow-y: auto;
     }
 
-    /* ---- Fullscreen / Focus mode ---- */
-    /* Toggle via .agent-fullscreen on <body>. Hides every chrome
-       element except the agent pane itself and pins the pane to the
-       full viewport. ESC also exits. */
+    /* =========================================================
+       FULLSCREEN / FOCUS MODE — pro-app polish
+       =========================================================
+       Toggle via .agent-fullscreen on <body>. Hides every chrome
+       element, paints a soft radial-gradient backdrop, centers
+       the conversation in a comfortable reading column, and
+       floats the composer with a glass-blur effect so the chat
+       fades under it.
+       Esc exits — bound in JS. */
+
+    /* Wipe all the regular panel chrome */
     body.agent-fullscreen header,
     body.agent-fullscreen .bottom-pane,
     body.agent-fullscreen .form-pane > :not(.agent-pane),
     body.agent-fullscreen .workflow-tabs {
       display: none !important;
     }
+    body.agent-fullscreen { overflow: hidden; }
     body.agent-fullscreen .layout {
       max-width: none; padding: 0; margin: 0;
-      height: 100vh;
-      display: block;
+      height: 100vh; display: block;
     }
     body.agent-fullscreen .form-pane {
       max-width: none; padding: 0;
       width: 100vw; height: 100vh;
     }
-    body.agent-fullscreen .agent-pane {
-      width: min(960px, 100vw);
-      margin: 0 auto;
-      height: 100vh; max-height: 100vh;
-      border-radius: 0; border-left: 1px solid var(--border); border-right: 1px solid var(--border);
-      border-top: none; border-bottom: none;
+
+    /* Soft body backdrop — subtle radial wash gives depth without
+       fighting the conversation. */
+    body.agent-fullscreen {
+      background:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(47,129,247,0.06), transparent 70%),
+        radial-gradient(ellipse 70% 50% at 50% 110%, rgba(204,122,58,0.04), transparent 70%),
+        var(--bg);
+      background-attachment: fixed;
     }
+
+    /* The pane fills the screen, no borders, no card */
+    body.agent-fullscreen .agent-pane {
+      width: 100vw; height: 100vh; max-height: 100vh;
+      border: none; border-radius: 0;
+      background: transparent;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+
+    /* Header: minimal, transparent, generous padding, no bottom rule */
+    body.agent-fullscreen .agent-header {
+      background: transparent;
+      border-bottom: none;
+      padding: 16px 28px;
+      max-width: 1080px; width: 100%;
+      margin: 0 auto;
+      box-sizing: border-box;
+    }
+    body.agent-fullscreen .agent-header .engine-pill {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(255,255,255,0.06);
+    }
+    body.agent-fullscreen .agent-header .engine-pill:hover {
+      background: rgba(47,129,247,0.08);
+      border-color: var(--accent);
+    }
+    body.agent-fullscreen .agent-header .icon-btn {
+      background: transparent;
+      border: 1px solid transparent;
+    }
+    body.agent-fullscreen .agent-header .icon-btn:hover {
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.08);
+      color: var(--accent-bright);
+    }
+    body.agent-fullscreen .agent-header .session-title {
+      font-size: 14px;
+      letter-spacing: -0.1px;
+    }
+    body.agent-fullscreen .agent-header .session-title .meta {
+      font-size: 11px;
+      opacity: 0.55;
+    }
+
+    /* Chat: takes the rest, content column centered at reading width */
     body.agent-fullscreen .agent-chat {
       max-height: none;
       flex: 1;
+      padding: 8px 28px 0;
+      scroll-padding-bottom: 140px;
     }
-    /* Show a thin "Exit fullscreen" badge top-left when in fullscreen
-       so the user always knows how to get out, even if they forget
-       Esc. */
-    body.agent-fullscreen::before {
-      content: "Esc to exit fullscreen";
-      position: fixed; top: 12px; left: 14px;
-      z-index: 1000;
-      font-size: 10px; letter-spacing: 0.5px;
-      padding: 4px 9px;
-      background: var(--panel); color: var(--muted);
-      border: 1px solid var(--border);
-      border-radius: 999px;
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar { width: 10px; }
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.06);
+      border-radius: 4px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.14);
+      background-clip: padding-box;
+    }
+
+    /* Center every direct child of the chat at reading width */
+    body.agent-fullscreen .agent-chat > * {
+      max-width: 720px;
+      margin-left: auto; margin-right: auto;
+      width: 100%;
+    }
+    body.agent-fullscreen .agent-empty {
+      max-width: 580px; margin: 80px auto 24px;
+    }
+    body.agent-fullscreen .agent-msg-row {
+      margin-bottom: 26px;
+    }
+    body.agent-fullscreen .agent-avatar {
+      width: 30px; height: 30px;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.04);
+    }
+    body.agent-fullscreen .agent-avatar.claude {
+      box-shadow: 0 0 0 1px rgba(204,122,58,0.4),
+                  0 4px 16px rgba(204,122,58,0.18);
+    }
+
+    /* Composer: floating glass card with soft shadow + fading
+       gradient above so chat appears to dissolve under it. */
+    body.agent-fullscreen .agent-composer {
+      background: transparent;
+      border-top: none;
+      padding: 0 28px 24px;
+      position: relative;
+      z-index: 5;
+    }
+    body.agent-fullscreen .agent-composer::before {
+      content: '';
+      position: absolute; inset: -56px 0 0 0;
       pointer-events: none;
-      opacity: 0.7;
+      background: linear-gradient(
+        180deg,
+        transparent 0%,
+        rgba(0,6,26,0.5) 30%,
+        rgba(0,6,26,0.85) 65%,
+        var(--bg) 100%
+      );
+    }
+    body.agent-fullscreen .agent-composer-wrap {
+      max-width: 720px; width: 100%;
+      margin: 0 auto;
+      position: relative; z-index: 1;
+    }
+    body.agent-fullscreen .agent-composer textarea {
+      background: rgba(20, 26, 58, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 18px;
+      padding: 14px 60px 14px 18px;          /* room for the inline send button */
+      box-shadow:
+        0 12px 36px rgba(0,0,0,0.45),
+        0 0 0 1px rgba(47,129,247,0.0);
+      font-size: 14.5px;
+      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    }
+    body.agent-fullscreen .agent-composer textarea:focus {
+      background: rgba(28, 36, 72, 0.92);
+      border-color: rgba(47,129,247,0.5);
+      box-shadow:
+        0 12px 36px rgba(0,0,0,0.5),
+        0 0 0 4px rgba(47,129,247,0.12);
+    }
+    body.agent-fullscreen .agent-composer .hint {
+      bottom: -22px; left: 0;
+      width: 100%; text-align: center;
+      opacity: 0.5;
+    }
+
+    /* Send button polish for fullscreen — slightly larger, deeper shadow */
+    body.agent-fullscreen .agent-composer .send-btn {
+      width: 38px; height: 38px;
+      right: 8px; bottom: 8px;
+      border-radius: 11px;
+      z-index: 2;
+      box-shadow: 0 6px 20px rgba(47,129,247,0.45);
+    }
+    body.agent-fullscreen .agent-composer .send-btn:hover:not(:disabled) {
+      box-shadow: 0 8px 28px rgba(47,129,247,0.55);
+    }
+    body.agent-fullscreen .agent-composer .send-btn:disabled {
+      background: rgba(255,255,255,0.05);
+      box-shadow: none;
+    }
+    body.agent-fullscreen .agent-composer .send-btn svg {
+      width: 17px; height: 17px;
+    }
+
+    /* Tool cards: tighten + soften in fullscreen */
+    body.agent-fullscreen .agent-tool-card {
+      background: rgba(255,255,255,0.025);
+      border-color: rgba(255,255,255,0.06);
+    }
+    body.agent-fullscreen .agent-tool-card:hover {
+      border-color: rgba(47,129,247,0.4);
+    }
+    body.agent-fullscreen .agent-tool-card .head {
+      padding: 9px 14px;
+      font-size: 12px;
+    }
+    body.agent-fullscreen .agent-tool-card .body {
+      padding: 0 14px 12px;
+    }
+
+    /* Anchor grid in fullscreen: roomier cells, no card border around them */
+    body.agent-fullscreen .anchor-grid {
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+    }
+    body.agent-fullscreen .anchor-cell {
+      border-width: 1px;
+      border-color: rgba(255,255,255,0.06);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+    }
+    body.agent-fullscreen .anchor-cell:hover {
+      transform: translateY(-2px) scale(1.01);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+
+    /* Empty state in fullscreen — magazine-feel layout */
+    body.agent-fullscreen .agent-empty {
+      padding: 40px 0 60px;
+    }
+    body.agent-fullscreen .agent-empty h3 {
+      font-size: 26px; font-weight: 600;
+      letter-spacing: -0.4px;
+      margin: 14px 0 12px;
+    }
+    body.agent-fullscreen .agent-empty p {
+      font-size: 14px; line-height: 1.65;
+      max-width: 460px; margin: 8px auto;
+    }
+    body.agent-fullscreen .agent-empty .examples {
+      gap: 10px; margin-top: 32px;
+    }
+    body.agent-fullscreen .agent-empty .example {
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.025);
+      border-color: rgba(255,255,255,0.06);
+      border-radius: 12px;
+    }
+    body.agent-fullscreen .agent-empty .example:hover {
+      background: rgba(47,129,247,0.06);
+      border-color: rgba(47,129,247,0.4);
+    }
+
+    /* Sessions popover anchored to the header — keep it usable in fullscreen */
+    body.agent-fullscreen .agent-sessions-pop {
+      top: 60px;
+      right: 28px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+    }
+
+    /* Fullscreen entrance */
+    body.agent-fullscreen .agent-pane {
+      animation: agent-fullscreen-in 0.28s cubic-bezier(0.2, 0.7, 0.2, 1);
+    }
+    @keyframes agent-fullscreen-in {
+      from { opacity: 0.6; transform: scale(0.99); }
+      to   { opacity: 1; transform: scale(1); }
     }
 
     /* ---- Typing indicator ---- */
@@ -6973,30 +7193,30 @@ HTML = r"""<!doctype html>
     }
 
     /* ---- Composer ---- */
+    /* Button sits INSIDE the textarea (absolute) so it feels like one
+       integrated input — the modern chat-app convention. Textarea has
+       padding-right to keep typed text clear of the button. */
     .agent-composer {
       border-top: 1px solid var(--border);
-      padding: 14px 16px;
+      padding: 14px 16px 18px;
       background: var(--bg-2);
-      display: flex; gap: 10px;
-      align-items: flex-end;
     }
     .agent-composer-wrap {
-      flex: 1; min-width: 0;
       position: relative;
     }
     .agent-composer textarea {
       width: 100%;
       min-height: 48px; max-height: 220px;
-      padding: 12px 14px;
+      padding: 13px 56px 13px 16px;
       background: var(--panel);
       color: var(--text);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       font-family: inherit;
       font-size: var(--agent-text);
       line-height: 1.55;
       resize: none;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
       box-sizing: border-box;
     }
     .agent-composer textarea:focus {
@@ -7004,39 +7224,49 @@ HTML = r"""<!doctype html>
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--accent-dim);
     }
+    .agent-composer textarea::placeholder {
+      color: var(--muted);
+      opacity: 0.7;
+    }
     .agent-composer .hint {
       position: absolute;
-      bottom: -18px; left: 4px;
+      bottom: -16px; right: 4px;
       font-size: 10px;
       color: var(--muted);
       letter-spacing: 0.2px;
       pointer-events: none;
+      opacity: 0.55;
     }
     .agent-composer .send-btn {
-      width: 44px; height: 44px;
-      border-radius: 50%;
+      position: absolute;
+      right: 7px; bottom: 7px;
+      width: 34px; height: 34px;
+      border-radius: 10px;
       background: var(--accent);
       color: white;
       border: none;
       cursor: pointer;
       display: inline-flex;
       align-items: center; justify-content: center;
-      font-size: 16px;
-      transition: background 0.15s, transform 0.15s;
-      flex-shrink: 0;
+      transition: background 0.18s, transform 0.18s, box-shadow 0.18s;
+      box-shadow: 0 2px 8px rgba(47,129,247,0.3);
     }
     .agent-composer .send-btn:hover:not(:disabled) {
       background: var(--accent-bright);
-      transform: scale(1.05);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(47,129,247,0.45);
     }
-    .agent-composer .send-btn:active { transform: scale(0.95); }
+    .agent-composer .send-btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
     .agent-composer .send-btn:disabled {
-      background: var(--border-strong);
+      background: rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.3);
       cursor: not-allowed;
-      transform: none;
+      box-shadow: none;
     }
     .agent-composer .send-btn svg {
-      width: 18px; height: 18px;
+      width: 16px; height: 16px;
     }
 
     /* ---- Settings drawer ---- */
@@ -7299,14 +7529,14 @@ HTML = r"""<!doctype html>
                     placeholder="Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight."
                     rows="1"
                     autocomplete="off"></textarea>
+          <button type="button" id="agentSendBtn" class="send-btn" onclick="agentSend()" title="Send (Cmd/Ctrl+Enter)" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5"/>
+              <polyline points="5 12 12 5 19 12"/>
+            </svg>
+          </button>
           <span class="hint">Cmd/Ctrl + Enter to send</span>
         </div>
-        <button type="button" id="agentSendBtn" class="send-btn" onclick="agentSend()" title="Send (Cmd/Ctrl+Enter)" disabled>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="19" x2="12" y2="5"/>
-            <polyline points="5 12 12 5 19 12"/>
-          </svg>
-        </button>
       </div>
     </section>
 
