@@ -32,7 +32,7 @@ class EngineConfig:
     promises a panel-spawned mlx-lm.server on `base_url`.
     """
 
-    kind: str = "phosphene_local"          # "phosphene_local" | "custom"
+    kind: str = "phosphene_local"          # "phosphene_local" | "ollama" | "custom"
     base_url: str = "http://127.0.0.1:8200/v1"
     model: str = "mlx-community/gemma-3-12b-it-4bit"
     api_key: str = ""
@@ -110,9 +110,11 @@ def chat(messages: list[dict], config: EngineConfig,
     # gemma-3-12b-it-4bit/revision/main") if it receives anything else
     # — it interprets unknown short names as HF repo ids and tries to
     # download them. So for the local engine we always pass the absolute
-    # path as the request "model" field. For custom OpenAI-compat
-    # endpoints we pass `config.model` as-is (those expect short names
-    # like "gpt-5", "claude-sonnet-4-6", etc.).
+    # path as the request "model" field.
+    #
+    # Ollama and Custom OpenAI-compat endpoints get `config.model` as-is
+    # — Ollama wants tags like "qwen2.5-coder:32b", remote APIs want
+    # short ids like "claude-sonnet-4-6" or "gpt-5".
     if config.kind == "phosphene_local" and config.local_model_path:
         wire_model = config.local_model_path
     else:

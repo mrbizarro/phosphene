@@ -27,6 +27,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import urllib.error
+import urllib.parse
+import urllib.request
 from urllib.parse import parse_qs, quote, urlparse
 
 # Agentic Flows runtime — chat-driven shot planner + queue submitter.
@@ -3655,6 +3658,252 @@ def _render_session_messages(sess: agent_runtime.Session) -> list[dict]:
     return out
 
 
+def _agent_ollama_status(timeout: float = 2.0) -> dict:
+    """Probe a local Ollama server. Returns base_url + installed-model list.
+
+    Ollama's native API:
+      GET http://127.0.0.1:11434/api/tags  -> {"models":[{"name", "size", ...}]}
+    Its OpenAI-compat surface lives at /v1/* (chat/completions, models, ...)
+    so the agent pointing at base_url + /v1 just works once Ollama is
+    running.
+    """
+    base_url = os.environ.get("LTX_OLLAMA_URL", "http://127.0.0.1:11434")
+    tags_url = base_url.rstrip("/") + "/api/tags"
+    try:
+        with urllib.request.urlopen(tags_url, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except urllib.error.URLError as e:
+        return {"running": False, "base_url": base_url,
+                "openai_url": base_url.rstrip("/") + "/v1",
+                "models": [], "error": f"unreachable: {getattr(e, 'reason', e)}"}
+    except Exception as e:                  # noqa: BLE001
+        return {"running": False, "base_url": base_url,
+                "openai_url": base_url.rstrip("/") + "/v1",
+                "models": [], "error": str(e)}
+    models = []
+    for m in (data.get("models") or []):
+        size = int(m.get("size") or 0)
+        details = m.get("details") or {}
+        models.append({
+            "name": m.get("name") or m.get("model"),
+            "size_bytes": size,
+            "size_gb": round(size / (1024 ** 3), 2) if size else None,
+            "modified_at": m.get("modified_at"),
+            "family": details.get("family"),
+            "parameter_size": details.get("parameter_size"),
+            "quantization": details.get("quantization_level"),
+        })
+    return {
+        "running": True,
+        "base_url": base_url,
+        "openai_url": base_url.rstrip("/") + "/v1",
+        "models": models,
+    }
+
+
+# ---- Hugging Face model browser ------------------------------------------
+# `hf` CLI is already installed (used for LoRA + LTX downloads). We piggy-
+# back on the same binary for chat-model installs. Search talks directly
+# to https://huggingface.co/api which doesn't require auth for public
+# models. Install streams `hf download` to the panel log; cancellation
+# uses SIGTERM on the spawned process group.
+HF_MODEL_DOWNLOAD_LOCK = threading.Lock()
+HF_MODEL_DOWNLOAD: dict = {
+    "active": False,
+    "repo_id": None,
+    "started_ts": None,
+    "lines": [],            # ring of recent lines for the UI to display
+    "proc": None,
+    "pgid": None,
+    "error": None,
+    "done": False,
+    "target_dir": None,
+}
+_HF_MODEL_LINES_LIMIT = 200
+
+
+def _hf_model_search(query: str = "", *, abliterated: bool = False,
+                     limit: int = 30, library: str = "mlx",
+                     pipeline_tag: str = "text-generation") -> list[dict]:
+    """Hit the public HF model search endpoint and return chat-capable
+    MLX models matching `query`. When `abliterated` is True, swap the
+    search term to 'abliterated' so the user gets uncensored variants
+    (which are a substring convention in repo ids — `huihui-ai/...`,
+    `mlx-community/...-abliterated-...`).
+    """
+    params = [
+        ("library", library),
+        ("pipeline_tag", pipeline_tag),
+        ("sort", "downloads"),
+        ("direction", "-1"),
+        ("limit", str(limit)),
+    ]
+    if abliterated:
+        # Combine the user's query with 'abliterated' so they can still
+        # narrow ('qwen abliterated' -> qwen variants only).
+        q = (query or "").strip()
+        params.append(("search", (q + " abliterated").strip()))
+    elif query:
+        params.append(("search", query.strip()))
+
+    url = "https://huggingface.co/api/models?" + urllib.parse.urlencode(params)
+    headers = {"Accept": "application/json"}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            items = json.loads(r.read())
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"HF search failed: {getattr(e, 'reason', e)}") from e
+    out = []
+    for it in (items or []):
+        out.append({
+            "repo_id": it.get("id") or it.get("modelId"),
+            "author": it.get("author"),
+            "downloads": it.get("downloads", 0),
+            "likes": it.get("likes", 0),
+            "last_modified": it.get("lastModified"),
+            "tags": it.get("tags") or [],
+            "library_name": it.get("library_name") or library,
+            "pipeline_tag": it.get("pipeline_tag") or pipeline_tag,
+            "gated": bool(it.get("gated")),
+            "private": bool(it.get("private")),
+        })
+    return out
+
+
+def _hf_model_files(repo_id: str) -> dict:
+    """Get the file list + total size for a repo. Used for 'this is a
+    NN GB download' before clicking Install."""
+    url = f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            items = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 401 or e.code == 403:
+            return {"repo_id": repo_id, "gated": True,
+                    "error": f"HTTP {e.code} — model is gated. Open the model card on HF and accept terms first."}
+        raise RuntimeError(f"HF tree failed (HTTP {e.code})") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"HF tree failed: {getattr(e, 'reason', e)}") from e
+    files = []
+    total = 0
+    for f in items:
+        if f.get("type") != "file":
+            continue
+        size = int((f.get("lfs") or {}).get("size") or f.get("size") or 0)
+        files.append({"path": f.get("path"), "size_bytes": size})
+        total += size
+    return {
+        "repo_id": repo_id,
+        "files": files,
+        "total_size_bytes": total,
+        "total_size_gb": round(total / (1024 ** 3), 2) if total else 0,
+        "file_count": len(files),
+    }
+
+
+def _hf_model_install_async(repo_id: str) -> dict:
+    """Spawn `hf download {repo_id} --local-dir mlx_models/{name}` in a
+    background thread. Status streams via /agent/models/install/status."""
+    with HF_MODEL_DOWNLOAD_LOCK:
+        if HF_MODEL_DOWNLOAD["active"]:
+            return {"ok": False,
+                    "error": f"download already active for {HF_MODEL_DOWNLOAD['repo_id']}"}
+        if not HF_BIN or not Path(HF_BIN).is_file():
+            return {"ok": False, "error": "hf CLI not found in this venv"}
+
+        # Pick a sensible local dir name — last segment of the repo id.
+        # Avoid clobbering existing models by appending _N if needed.
+        leaf = repo_id.split("/")[-1]
+        target = MODELS_DIR / leaf
+        if target.exists():
+            i = 2
+            while (MODELS_DIR / f"{leaf}_{i}").exists():
+                i += 1
+            target = MODELS_DIR / f"{leaf}_{i}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        HF_MODEL_DOWNLOAD["active"] = True
+        HF_MODEL_DOWNLOAD["repo_id"] = repo_id
+        HF_MODEL_DOWNLOAD["started_ts"] = time.time()
+        HF_MODEL_DOWNLOAD["lines"] = []
+        HF_MODEL_DOWNLOAD["error"] = None
+        HF_MODEL_DOWNLOAD["done"] = False
+        HF_MODEL_DOWNLOAD["target_dir"] = str(target)
+
+    def _run():
+        try:
+            cmd = [str(HF_BIN), "download", repo_id, "--local-dir", str(target)]
+            env = os.environ.copy()
+            env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+            tok = _active_hf_token() if "_active_hf_token" in globals() else None
+            if tok:
+                env["HF_TOKEN"] = tok
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env, start_new_session=True,
+            )
+            with HF_MODEL_DOWNLOAD_LOCK:
+                HF_MODEL_DOWNLOAD["proc"] = proc
+                HF_MODEL_DOWNLOAD["pgid"] = os.getpgid(proc.pid)
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                with HF_MODEL_DOWNLOAD_LOCK:
+                    HF_MODEL_DOWNLOAD["lines"].append(line)
+                    HF_MODEL_DOWNLOAD["lines"] = HF_MODEL_DOWNLOAD["lines"][-_HF_MODEL_LINES_LIMIT:]
+                push(f"hf download[{repo_id}]: {line}")
+            rc = proc.wait()
+            with HF_MODEL_DOWNLOAD_LOCK:
+                HF_MODEL_DOWNLOAD["proc"] = None
+                HF_MODEL_DOWNLOAD["pgid"] = None
+                if rc != 0:
+                    HF_MODEL_DOWNLOAD["error"] = f"hf download exited {rc}"
+                else:
+                    HF_MODEL_DOWNLOAD["done"] = True
+                HF_MODEL_DOWNLOAD["active"] = False
+        except Exception as e:                          # noqa: BLE001
+            with HF_MODEL_DOWNLOAD_LOCK:
+                HF_MODEL_DOWNLOAD["error"] = f"{type(e).__name__}: {e}"
+                HF_MODEL_DOWNLOAD["active"] = False
+                HF_MODEL_DOWNLOAD["proc"] = None
+                HF_MODEL_DOWNLOAD["pgid"] = None
+            push(f"hf download[{repo_id}] crashed: {e}")
+
+    threading.Thread(target=_run, daemon=True, name=f"hf-dl-{leaf}").start()
+    return {"ok": True, "repo_id": repo_id, "target_dir": str(target)}
+
+
+def _hf_model_install_status() -> dict:
+    with HF_MODEL_DOWNLOAD_LOCK:
+        return {
+            "active": HF_MODEL_DOWNLOAD["active"],
+            "repo_id": HF_MODEL_DOWNLOAD["repo_id"],
+            "started_ts": HF_MODEL_DOWNLOAD["started_ts"],
+            "elapsed_s": (time.time() - HF_MODEL_DOWNLOAD["started_ts"]) if HF_MODEL_DOWNLOAD["started_ts"] else None,
+            "lines": list(HF_MODEL_DOWNLOAD["lines"][-30:]),  # tail for display
+            "last_line": HF_MODEL_DOWNLOAD["lines"][-1] if HF_MODEL_DOWNLOAD["lines"] else "",
+            "error": HF_MODEL_DOWNLOAD["error"],
+            "done": HF_MODEL_DOWNLOAD["done"],
+            "target_dir": HF_MODEL_DOWNLOAD["target_dir"],
+        }
+
+
+def _hf_model_install_cancel() -> dict:
+    with HF_MODEL_DOWNLOAD_LOCK:
+        proc = HF_MODEL_DOWNLOAD.get("proc")
+        pgid = HF_MODEL_DOWNLOAD.get("pgid")
+    if not proc:
+        return {"ok": False, "error": "no active download"}
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    return {"ok": True}
+
+
 def _agent_local_start(model_path: str | None = None) -> dict:
     """Spawn the bundled mlx-lm.server against the current config's model.
 
@@ -4138,6 +4387,38 @@ class Handler(BaseHTTPRequestHandler):
                 "local_server": agent_local_server.status(),
                 "available_models": agent_local_server.discover_local_models(ROOT),
             })
+            return
+
+        if parsed.path == "/agent/ollama/status":
+            self._json(_agent_ollama_status())
+            return
+
+        if parsed.path == "/agent/models/search":
+            qs = parse_qs(parsed.query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            abliterated = qs.get("abliterated", ["0"])[0] in ("1", "true", "yes", "on")
+            limit = int(qs.get("limit", ["30"])[0] or "30")
+            try:
+                results = _hf_model_search(q, abliterated=abliterated, limit=limit)
+            except RuntimeError as e:
+                self._json({"error": str(e)}, 502); return
+            self._json({"results": results, "abliterated": abliterated, "query": q})
+            return
+
+        if parsed.path == "/agent/models/info":
+            qs = parse_qs(parsed.query)
+            repo_id = (qs.get("repo_id", [""])[0] or "").strip()
+            if not repo_id:
+                self._json({"error": "repo_id is required"}, 400); return
+            try:
+                info = _hf_model_files(repo_id)
+            except RuntimeError as e:
+                self._json({"error": str(e)}, 502); return
+            self._json(info)
+            return
+
+        if parsed.path == "/agent/models/install/status":
+            self._json(_hf_model_install_status())
             return
 
         if parsed.path == "/agent/image/config":
@@ -4747,6 +5028,27 @@ class Handler(BaseHTTPRequestHandler):
 
         # Anchor selection — user clicked a thumbnail in the chat.
         # Records {shot_label: candidate_dict} in the session's tool_state.
+        if path == "/agent/models/install":
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            repo_id = (payload.get("repo_id") or "").strip()
+            if not repo_id:
+                self._json({"error": "repo_id is required"}, 400); return
+            res = _hf_model_install_async(repo_id)
+            if not res.get("ok"):
+                self._json(res, 409 if "already" in (res.get("error") or "") else 500)
+                return
+            self._json(res)
+            return
+
+        if path == "/agent/models/install/cancel":
+            self._json(_hf_model_install_cancel())
+            return
+
         if path.startswith("/agent/sessions/") and path.endswith("/anchors/select"):
             sid = path[len("/agent/sessions/"):-len("/anchors/select")]
             sess = agent_runtime.load_session(sid, STATE_DIR)
@@ -7196,6 +7498,174 @@ HTML = r"""<!doctype html>
       flex-shrink: 0;
     }
 
+    /* ============== HF MODEL BROWSER MODAL ============== */
+    .model-browser-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.7); backdrop-filter: blur(6px);
+      z-index: 220;
+      display: none;
+      align-items: center; justify-content: center;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .model-browser-modal.open { display: flex; }
+    .model-browser-card {
+      width: min(820px, 96vw); max-height: 88vh;
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+      overflow: hidden;
+    }
+    .model-browser-head {
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .model-browser-head h2 {
+      margin: 0; font-size: 17px; font-weight: 600;
+      text-transform: none; letter-spacing: -0.1px;
+      color: var(--text);
+      flex: 1;
+    }
+    .model-browser-head .subtitle {
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.3px; text-transform: uppercase;
+      flex: 0 0 auto;
+    }
+    .model-browser-head .close-btn {
+      width: auto; padding: 5px 12px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px; font-size: 11px; font-weight: 600;
+      cursor: pointer;
+    }
+    .model-browser-head .close-btn:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .model-browser-controls {
+      padding: 14px 22px;
+      display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      background: var(--bg-2);
+    }
+    .model-browser-controls input[type="text"] {
+      flex: 1; padding: 9px 12px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px; font-size: 13px;
+      width: auto;
+    }
+    .model-browser-controls input[type="text"]:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .model-browser-controls .checkbox-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--muted);
+      cursor: pointer; user-select: none;
+      flex: 0 0 auto;
+    }
+    .model-browser-controls .checkbox-label input {
+      width: auto; margin: 0;
+    }
+    .model-browser-controls button {
+      padding: 9px 16px; border-radius: 8px;
+      border: none; background: var(--accent); color: white;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      width: auto;
+    }
+    .model-browser-controls button:hover { background: var(--accent-bright); }
+    .model-browser-controls button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .model-browser-results {
+      flex: 1; overflow-y: auto;
+      padding: 8px 14px 18px;
+    }
+    .model-result {
+      padding: 12px 14px; margin: 6px 0;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: 10px;
+      display: grid; grid-template-columns: 1fr auto;
+      gap: 14px;
+      transition: border-color 0.15s;
+    }
+    .model-result:hover { border-color: var(--accent); }
+    .model-result .info { min-width: 0; }
+    .model-result .name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px; color: var(--text);
+      font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .model-result .meta {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      margin-top: 4px;
+      font-size: 11px; color: var(--muted);
+    }
+    .model-result .meta .tag {
+      padding: 1px 7px; border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+    }
+    .model-result .meta .tag.gated {
+      background: rgba(207,34,46,0.12); color: #f49a9e;
+      border: 1px solid rgba(207,34,46,0.3);
+    }
+    .model-result .meta .tag.abliterated {
+      background: rgba(204,122,58,0.12); color: #ffb37a;
+      border: 1px solid rgba(204,122,58,0.3);
+    }
+    .model-result .actions {
+      display: flex; align-items: center; gap: 8px;
+      flex-shrink: 0;
+    }
+    .model-result .install-btn {
+      padding: 7px 14px; border-radius: 7px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      border: 1px solid var(--accent);
+      font-size: 11px; font-weight: 600; cursor: pointer;
+      width: auto;
+      transition: background 0.15s, color 0.15s;
+    }
+    .model-result .install-btn:hover {
+      background: var(--accent); color: white;
+    }
+    .model-result .install-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .model-result .info-btn {
+      padding: 7px 10px; border-radius: 7px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+      font-size: 11px; cursor: pointer; width: auto;
+    }
+    .model-result .info-btn:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .model-browser-status {
+      padding: 12px 22px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--muted);
+      display: none;
+    }
+    .model-browser-status.visible { display: block; }
+    .model-browser-status .label {
+      color: var(--accent-bright); font-weight: 700;
+      margin-right: 8px;
+    }
+    .model-browser-status .last-line {
+      max-height: 60px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+      margin-top: 6px;
+      color: var(--text);
+    }
+    .model-browser-empty {
+      text-align: center; padding: 60px 20px;
+      color: var(--muted); font-size: 13px;
+    }
+
     /* Lightbox: clicking a stage-output-cell plays the video full-size */
     .stage-lightbox {
       position: fixed; inset: 0;
@@ -8734,6 +9204,37 @@ HTML = r"""<!doctype html>
   </div>
 </aside>
 
+<!-- ============== HF MODEL BROWSER MODAL ============== -->
+<!-- Search + install MLX-format chat models from Hugging Face. Hits
+     huggingface.co/api/models with library=mlx + pipeline_tag=text-generation
+     filters. Click Install → backend spawns `hf download`, status streams
+     in the bottom strip until done. Newly-installed models appear in the
+     local-engine model picker on next refresh. -->
+<div class="model-browser-modal" id="modelBrowserModal" onclick="if(event.target===this)closeModelBrowser()">
+  <div class="model-browser-card">
+    <div class="model-browser-head">
+      <h2>Browse + install models</h2>
+      <span class="subtitle">Hugging Face · MLX</span>
+      <button type="button" class="close-btn" onclick="closeModelBrowser()">Close</button>
+    </div>
+    <div class="model-browser-controls">
+      <input type="text" id="modelBrowserQuery" placeholder="Search HF (e.g. qwen coder, devstral, llama 3.3, granite)" autocomplete="off" />
+      <label class="checkbox-label" title="Filter to abliterated / uncensored variants — the huihui-ai conventions on HF.">
+        <input type="checkbox" id="modelBrowserAbliterated">
+        Abliterated only
+      </label>
+      <button type="button" id="modelBrowserSearchBtn" onclick="modelBrowserSearch()">Search</button>
+    </div>
+    <div class="model-browser-results" id="modelBrowserResults">
+      <div class="model-browser-empty">Type a query and hit Search. Try "qwen3 coder", "devstral", "abliterated", "32b".</div>
+    </div>
+    <div class="model-browser-status" id="modelBrowserStatus">
+      <div><span class="label" id="modelBrowserStatusLabel">…</span><span id="modelBrowserStatusSummary"></span></div>
+      <div class="last-line" id="modelBrowserStatusLine"></div>
+    </div>
+  </div>
+</div>
+
 <!-- ============== AGENT SETTINGS MODAL ============== -->
 <div class="agent-settings-modal" id="agentSettingsModal" onclick="if(event.target===this)closeAgentSettings()">
   <div class="agent-settings-card">
@@ -8761,14 +9262,32 @@ HTML = r"""<!doctype html>
     <div class="field">
       <label>Engine kind</label>
       <select id="agentKind" onchange="agentKindChanged()">
-        <option value="phosphene_local">Phosphene Local (bundled mlx-lm.server)</option>
-        <option value="custom">Custom (any OpenAI-compatible URL)</option>
+        <option value="phosphene_local">Phosphene Local — bundled mlx-lm.server</option>
+        <option value="ollama">Ollama bridge — talks to your `ollama serve` on port 11434</option>
+        <option value="custom">Custom — any OpenAI-compatible URL (Anthropic compat, OpenAI, OpenRouter, LM Studio…)</option>
       </select>
     </div>
 
     <div class="field" id="agentLocalModelField">
-      <label>Local model (chat-capable, MLX 4-bit recommended)</label>
+      <label>
+        Local model (chat-capable, MLX 4-bit recommended)
+        <button type="button" onclick="openModelBrowser()" style="margin-left:8px;font-size:10px;padding:3px 9px;background:transparent;color:var(--accent-bright);border:1px solid var(--accent);border-radius:6px;cursor:pointer;width:auto">Browse + install…</button>
+      </label>
       <select id="agentLocalModel"></select>
+    </div>
+
+    <!-- Ollama: shown only when engine kind == 'ollama'. Status is fetched
+         live from /agent/ollama/status; if Ollama isn't running we surface
+         a clear hint instead of a useless empty dropdown. -->
+    <div class="field" id="agentOllamaField" style="display:none">
+      <label>
+        Ollama installed model
+        <button type="button" onclick="agentOllamaRefresh()" style="margin-left:8px;font-size:10px;padding:3px 9px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;width:auto">Refresh</button>
+      </label>
+      <select id="agentOllamaModel"></select>
+      <div id="agentOllamaHint" style="margin-top:6px;font-size:11px;color:var(--muted)">
+        Manage Ollama models from the terminal: <code>ollama pull qwen2.5-coder:32b</code>, <code>ollama pull huihui_ai/llama3.3-abliterated:70b</code>, etc. Phosphene only talks to Ollama's <code>/v1/chat/completions</code> endpoint — the model has to already be installed in Ollama.
+      </div>
     </div>
 
     <div class="field" id="agentBaseUrlField" style="display:none">
@@ -12667,6 +13186,7 @@ function openAgentSettings() {
     document.getElementById('agentKind').value = cfg.kind || 'phosphene_local';
     document.getElementById('agentBaseUrl').value = cfg.base_url || '';
     document.getElementById('agentRemoteModel').value = cfg.kind === 'custom' ? (cfg.model || '') : '';
+    if ((cfg.kind || 'phosphene_local') === 'ollama') agentOllamaRefresh();
     document.getElementById('agentApiKey').value = '';
     document.getElementById('agentApiKey').placeholder =
       cfg.has_api_key ? '(saved key — leave blank to keep)' : 'Paste API key';
@@ -12734,9 +13254,48 @@ function agentKindChanged() {
   const kind = document.getElementById('agentKind').value;
   document.getElementById('agentLocalModelField').style.display = kind === 'phosphene_local' ? '' : 'none';
   document.getElementById('agentLocalRow').style.display = kind === 'phosphene_local' ? '' : 'none';
+  document.getElementById('agentOllamaField').style.display = kind === 'ollama' ? '' : 'none';
   document.getElementById('agentBaseUrlField').style.display = kind === 'custom' ? '' : 'none';
   document.getElementById('agentApiKeyField').style.display = kind === 'custom' ? '' : 'none';
   document.getElementById('agentRemoteModelField').style.display = kind === 'custom' ? '' : 'none';
+  if (kind === 'ollama') agentOllamaRefresh();
+}
+
+async function agentOllamaRefresh() {
+  const sel = document.getElementById('agentOllamaModel');
+  const hint = document.getElementById('agentOllamaHint');
+  if (!sel) return;
+  sel.innerHTML = '<option>Probing Ollama at 127.0.0.1:11434…</option>';
+  try {
+    const r = await fetch('/agent/ollama/status');
+    const j = await r.json();
+    sel.innerHTML = '';
+    if (!j.running) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'Ollama not running on 127.0.0.1:11434';
+      sel.appendChild(opt);
+      if (hint) hint.innerHTML = `<strong>Ollama is not running.</strong> Start it with <code>ollama serve</code>, then click Refresh. Install models with <code>ollama pull qwen2.5-coder:32b</code>.`;
+      return;
+    }
+    const cfg = (window.AGENT.config && window.AGENT.config.engine) || {};
+    if ((j.models || []).length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No Ollama models installed';
+      sel.appendChild(opt);
+    }
+    for (const m of (j.models || [])) {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = `${m.name}${m.size_gb ? ' · ' + m.size_gb + ' GB' : ''}${m.parameter_size ? ' · ' + m.parameter_size : ''}${m.quantization ? ' · ' + m.quantization : ''}`;
+      if (cfg.kind === 'ollama' && cfg.model === m.name) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (hint) hint.innerHTML = `Talks to <code>${escapeHtml(j.openai_url || j.base_url + '/v1')}/chat/completions</code>. Tool calling works on models whose Modelfile declares it (Qwen3 Coder, Llama 3.x, Devstral, Mistral, Granite). Run <code>ollama show &lt;model&gt;</code> to verify.`;
+  } catch(e) {
+    sel.innerHTML = '<option>Failed to probe — see console</option>';
+  }
 }
 
 function agentImageKindChanged() {
@@ -12821,6 +13380,13 @@ async function agentSaveSettings() {
       const parts = sel.value.split('/');
       payload.model = parts[parts.length - 1] || sel.value;
     }
+  } else if (kind === 'ollama') {
+    // Ollama bridge: same OpenAI-compat shape, just talks to 127.0.0.1:11434/v1.
+    // No api_key. The model field is the Ollama tag (e.g. "qwen2.5-coder:32b").
+    const sel = document.getElementById('agentOllamaModel');
+    payload.base_url = 'http://127.0.0.1:11434/v1';
+    payload.model = sel ? sel.value : '';
+    payload.local_model_path = '';
   } else {
     payload.base_url = (document.getElementById('agentBaseUrl').value || '').trim();
     payload.model = (document.getElementById('agentRemoteModel').value || '').trim();
@@ -12880,6 +13446,220 @@ async function agentSaveSettings() {
   await agentRefreshConfig();
   await agentRefreshImageConfig();
 }
+
+// ============================================================================
+// HF MODEL BROWSER — search + install MLX chat models
+// ============================================================================
+window.MODEL_BROWSER = {
+  pollerId: null,
+  lastResults: [],
+};
+
+function openModelBrowser() {
+  const m = document.getElementById('modelBrowserModal');
+  if (!m) return;
+  m.classList.add('open');
+  // Auto-focus the query input on open.
+  setTimeout(() => {
+    const q = document.getElementById('modelBrowserQuery');
+    if (q) q.focus();
+  }, 50);
+  // If we already have results from a previous search, leave them; else
+  // run a default search ("qwen") so the user sees something useful.
+  if (!window.MODEL_BROWSER.lastResults.length) {
+    document.getElementById('modelBrowserQuery').value = 'qwen';
+    modelBrowserSearch();
+  }
+  // Start polling install status in case a download is already in flight.
+  modelBrowserStartPolling();
+}
+
+function closeModelBrowser() {
+  document.getElementById('modelBrowserModal').classList.remove('open');
+  modelBrowserStopPolling();
+}
+
+async function modelBrowserSearch() {
+  const q = (document.getElementById('modelBrowserQuery').value || '').trim();
+  const abliterated = document.getElementById('modelBrowserAbliterated').checked;
+  const results = document.getElementById('modelBrowserResults');
+  const btn = document.getElementById('modelBrowserSearchBtn');
+  results.innerHTML = '<div class="model-browser-empty">Searching…</div>';
+  btn.disabled = true;
+  try {
+    const url = '/agent/models/search?q=' + encodeURIComponent(q)
+              + '&abliterated=' + (abliterated ? '1' : '0')
+              + '&limit=40';
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      results.innerHTML = '<div class="model-browser-empty" style="color:#f49a9e">Error: ' + escapeHtml(j.error || ('HTTP ' + r.status)) + '</div>';
+      return;
+    }
+    window.MODEL_BROWSER.lastResults = j.results || [];
+    modelBrowserRender(j.results || []);
+  } catch(e) {
+    results.innerHTML = '<div class="model-browser-empty" style="color:#f49a9e">Error: ' + escapeHtml(String(e)) + '</div>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function modelBrowserRender(results) {
+  const wrap = document.getElementById('modelBrowserResults');
+  if (!results.length) {
+    wrap.innerHTML = '<div class="model-browser-empty">No matches. Try a different query.</div>';
+    return;
+  }
+  wrap.innerHTML = '';
+  for (const m of results) {
+    const row = document.createElement('div');
+    row.className = 'model-result';
+    const isAbliterated = (m.repo_id || '').toLowerCase().includes('abliterated')
+                       || (m.repo_id || '').toLowerCase().startsWith('huihui-ai/');
+    const dl = (m.downloads || 0).toLocaleString();
+    const lk = (m.likes || 0).toLocaleString();
+    const tags = [];
+    if (m.gated) tags.push('<span class="tag gated">gated</span>');
+    if (isAbliterated) tags.push('<span class="tag abliterated">abliterated</span>');
+    if (m.library_name) tags.push(`<span class="tag">${escapeHtml(m.library_name)}</span>`);
+    if (m.pipeline_tag) tags.push(`<span class="tag">${escapeHtml(m.pipeline_tag)}</span>`);
+    row.innerHTML = `
+      <div class="info">
+        <div class="name">${escapeHtml(m.repo_id)}</div>
+        <div class="meta">
+          <span>↓ ${dl}</span>
+          <span>♥ ${lk}</span>
+          ${tags.join('')}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="info-btn" onclick="modelBrowserInfo('${escapeHtml(m.repo_id)}')">Info</button>
+        <button class="install-btn" onclick="modelBrowserInstall('${escapeHtml(m.repo_id)}', this)">Install</button>
+      </div>
+    `;
+    wrap.appendChild(row);
+  }
+}
+
+async function modelBrowserInfo(repoId) {
+  // Lightweight inline info — pop a confirm with size + file count + gated state.
+  try {
+    const r = await fetch('/agent/models/info?repo_id=' + encodeURIComponent(repoId));
+    const j = await r.json();
+    if (j.gated || j.error) {
+      alert('Repo info:\n' + (j.error || ('Gated. Open https://huggingface.co/' + repoId + ' and accept the terms first.')));
+      return;
+    }
+    alert(`${repoId}\n\nFiles: ${j.file_count}\nTotal: ${j.total_size_gb} GB\n\nClick Install to download into mlx_models/.`);
+  } catch(e) {
+    alert('Could not fetch info: ' + e);
+  }
+}
+
+async function modelBrowserInstall(repoId, btn) {
+  if (!confirm(`Install ${repoId}?\n\nDownloads to mlx_models/. Files are large — first run can take 5-30 min depending on size and network.`)) {
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Queuing…';
+  try {
+    const r = await fetch('/agent/models/install', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repoId}),
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      alert('Install failed to start: ' + (j.error || ('HTTP ' + r.status)));
+      btn.disabled = false;
+      btn.textContent = 'Install';
+      return;
+    }
+    btn.textContent = 'Downloading…';
+    modelBrowserStartPolling();
+  } catch(e) {
+    alert('Install error: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Install';
+  }
+}
+
+function modelBrowserStartPolling() {
+  modelBrowserStopPolling();
+  modelBrowserPollOnce();
+  window.MODEL_BROWSER.pollerId = setInterval(modelBrowserPollOnce, 1500);
+}
+
+function modelBrowserStopPolling() {
+  if (window.MODEL_BROWSER.pollerId) {
+    clearInterval(window.MODEL_BROWSER.pollerId);
+    window.MODEL_BROWSER.pollerId = null;
+  }
+}
+
+async function modelBrowserPollOnce() {
+  try {
+    const r = await fetch('/agent/models/install/status');
+    const j = await r.json();
+    const status = document.getElementById('modelBrowserStatus');
+    const lbl = document.getElementById('modelBrowserStatusLabel');
+    const summ = document.getElementById('modelBrowserStatusSummary');
+    const line = document.getElementById('modelBrowserStatusLine');
+    if (!status || !lbl) return;
+    if (j.active) {
+      status.classList.add('visible');
+      lbl.textContent = 'Downloading';
+      lbl.style.color = '';
+      const elapsed = j.elapsed_s ? ` · ${Math.round(j.elapsed_s)}s` : '';
+      summ.textContent = `${j.repo_id || ''}${elapsed}`;
+      line.textContent = j.last_line || '';
+    } else if (j.done) {
+      status.classList.add('visible');
+      lbl.textContent = 'Installed';
+      lbl.style.color = '#9be7a4';
+      summ.textContent = `${j.repo_id || ''} → ${j.target_dir || ''}`;
+      line.textContent = '';
+      modelBrowserStopPolling();
+      // Refresh the local-model picker in the background so the user
+      // sees the new model on next settings-modal open.
+      try { agentRefreshConfig(); } catch(e) {}
+    } else if (j.error) {
+      status.classList.add('visible');
+      lbl.textContent = 'Failed';
+      lbl.style.color = '#f49a9e';
+      summ.textContent = j.repo_id || '';
+      line.textContent = j.error;
+      modelBrowserStopPolling();
+    } else {
+      status.classList.remove('visible');
+      modelBrowserStopPolling();
+    }
+  } catch(e) {
+    /* swallow */
+  }
+}
+
+// Esc closes the model browser, before falling through to settings/fullscreen.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const m = document.getElementById('modelBrowserModal');
+    if (m && m.classList.contains('open')) {
+      closeModelBrowser();
+      e.stopPropagation();
+    }
+  }
+}, true);
+
+// Cmd/Ctrl+Enter in the search box runs the search.
+document.addEventListener('DOMContentLoaded', () => {
+  const q = document.getElementById('modelBrowserQuery');
+  if (q) {
+    q.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); modelBrowserSearch(); }
+    });
+  }
+});
 
 // ============================================================================
 // AGENT STAGE PANE — live canvas on the right side
