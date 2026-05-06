@@ -10466,6 +10466,13 @@ function workflowSwitch(name) {
       const stored = localStorage.getItem('phos_agent_session');
       if (stored) {
         agentLoadSession(stored);
+      } else {
+        // No session in this browser yet — but the panel may already
+        // have persisted sessions on disk (e.g. an overnight agentic
+        // run that completed before the user reopened the panel).
+        // Pick the most-recently-updated one so the user lands in
+        // the conversation they care about, not an empty pane.
+        agentLoadMostRecent();
       }
     } else {
       agentLoadSession(window.AGENT.sessionId);
@@ -10530,6 +10537,20 @@ async function agentNewSession(initialMessage) {
     `${j.session.title} · ${j.session.session_id}`;
   document.getElementById('agentChat').innerHTML = '';
   return j.session;
+}
+
+async function agentLoadMostRecent() {
+  try {
+    const r = await fetch('/agent/sessions');
+    const j = await r.json();
+    const sessions = j.sessions || [];
+    if (sessions.length === 0) return;        // empty pane is correct here
+    const mostRecent = sessions[0];           // server-side sorted by updated_at desc
+    await agentLoadSession(mostRecent.session_id);
+    try { localStorage.setItem('phos_agent_session', mostRecent.session_id); } catch(e) {}
+  } catch (e) {
+    console.warn('agentLoadMostRecent', e);
+  }
 }
 
 async function agentLoadSession(sid) {
