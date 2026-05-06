@@ -1249,8 +1249,23 @@ for line in sys.__stdin__:
         continue
 
     if action == "generate_keyframe":
-        # FFLF — two images anchored at frame 0 and frame N-1, model interpolates.
-        # Like HQ this uses the Q8 dev transformer + two-stage refine.
+        # Keyframe interpolation — anchor images at chosen frame indices,
+        # model fills the motion between them. Uses the Q8 dev transformer
+        # + two-stage refine (same as HQ).
+        #
+        # Two input shapes are accepted:
+        #
+        # (A) Multi-keyframe (preferred — used by agents):
+        #         "keyframe_images":  list[str]   absolute paths, length N >= 2
+        #         "keyframe_indices": list[int]   pixel-frame indices, length N,
+        #                                          strictly ascending, all in [0, frames-1]
+        #
+        # (B) FFLF backward-compat (used by the panel today):
+        #         "start_image": str
+        #         "end_image":   str
+        #     Equivalent to multi-keyframe with indices [0, frames-1].
+        #
+        # If (A) fields are present they win; (B) is only checked when (A) is absent.
         job_id = msg.get("id", "?")
         p = msg.get("params", {}) or {}
         model_dir = p.get("model_dir") or MODEL_ID
@@ -1261,19 +1276,66 @@ for line in sys.__stdin__:
         try:
             t0 = time.time()
             configure_acceleration("off")
-            for k in ("start_image", "end_image"):
-                img = p.get(k)
-                if not img or not os.path.exists(img):
-                    raise RuntimeError(f"{k} not found: {img}")
-            pipe = get_kf_pipe(model_dir)
             num_frames = int(p["frames"])
+
+            # ---- Resolve keyframes (multi-keyframe path or FFLF fallback) ----
+            kf_images_in = p.get("keyframe_images")
+            kf_indices_in = p.get("keyframe_indices")
+            if kf_images_in is not None or kf_indices_in is not None:
+                # Multi-keyframe — validate strictly so agent bugs surface early.
+                if kf_images_in is None or kf_indices_in is None:
+                    raise RuntimeError(
+                        "keyframe_images and keyframe_indices must both be provided as lists"
+                    )
+                if not isinstance(kf_images_in, list) or not isinstance(kf_indices_in, list):
+                    raise RuntimeError("keyframe_images and keyframe_indices must be lists")
+                if len(kf_images_in) != len(kf_indices_in):
+                    raise RuntimeError(
+                        f"keyframe_images ({len(kf_images_in)}) and "
+                        f"keyframe_indices ({len(kf_indices_in)}) must have the same length"
+                    )
+                if len(kf_images_in) < 2:
+                    raise RuntimeError("at least 2 keyframes required")
+                for path in kf_images_in:
+                    if not isinstance(path, str) or not os.path.exists(path):
+                        raise RuntimeError(f"keyframe image not found: {path}")
+                idxs: list[int] = []
+                for i in kf_indices_in:
+                    try:
+                        idx = int(i)
+                    except (TypeError, ValueError):
+                        raise RuntimeError(f"keyframe_indices must be integers, got: {i!r}")
+                    if idx < 0 or idx >= num_frames:
+                        raise RuntimeError(
+                            f"keyframe_index {idx} out of range [0, {num_frames - 1}]"
+                        )
+                    idxs.append(idx)
+                for a, b in zip(idxs, idxs[1:]):
+                    if b <= a:
+                        raise RuntimeError(
+                            f"keyframe_indices must be strictly ascending, got {idxs}"
+                        )
+                kf_images = list(kf_images_in)
+                kf_indices = idxs
+                kf_mode_label = f"multi-{len(kf_images)}kf"
+            else:
+                # FFLF backward-compat — start + end at the boundaries.
+                for k in ("start_image", "end_image"):
+                    img = p.get(k)
+                    if not img or not os.path.exists(img):
+                        raise RuntimeError(f"{k} not found: {img}")
+                kf_images = [p["start_image"], p["end_image"]]
+                kf_indices = [0, num_frames - 1]
+                kf_mode_label = "FFLF"
+
+            pipe = get_kf_pipe(model_dir)
             # Y1.037: short-clip VAE-streaming opt-out (Keyframe path).
             _apply_vae_streaming_decision(num_frames)
             kwargs = dict(
                 prompt=p["prompt"],
                 output_path=p["output_path"],
-                keyframe_images=[p["start_image"], p["end_image"]],
-                keyframe_indices=[0, num_frames - 1],
+                keyframe_images=kf_images,
+                keyframe_indices=kf_indices,
                 height=int(p["height"]),
                 width=int(p["width"]),
                 num_frames=num_frames,
@@ -1283,7 +1345,13 @@ for line in sys.__stdin__:
                 stage2_steps=int(p.get("stage2_steps", 3)),
                 cfg_scale=float(p.get("cfg_scale", 3.0)),
             )
-            emit({"event": "log", "line": f"Keyframe FFLF — frames=[0, {num_frames-1}], pipeline cover-crops both to {kwargs['width']}x{kwargs['height']}"})
+            emit({
+                "event": "log",
+                "line": (
+                    f"Keyframe {kf_mode_label} — indices={kf_indices}, "
+                    f"pipeline cover-crops all to {kwargs['width']}x{kwargs['height']}"
+                ),
+            })
             with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
                 if neg_active:
                     emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})

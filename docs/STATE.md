@@ -204,7 +204,12 @@ Everything below is also tracked in Linear (HAI-150 → HAI-158 under the Phosph
 
 **TL;DR**: ComfyGuy9000 demoed first-frame-last-frame method via `Deno2026/comfyui-deno-custom-nodes`. Phosphene's `ltx_pipelines_mlx.KeyframeInterpolationPipeline` already accepts arbitrary `list[Image]` keyframes + `list[int]` indices — but our panel/helper artificially restrict it to 2 keyframes (start + end). Exposing the full multi-keyframe API gives us the agentic-flow compositional primitive: agent picks N stills, model fills the motion, character is anchored at every shot start.
 
-**Implementation order**: helper (3 lines) → panel worker (form parsing) → UI (multi-keyframe drop-zone list).
+**Status (2026-05-06)**:
+- **Layer 1 — DONE.** Helper `generate_keyframe` action accepts arbitrary `keyframe_images` + `keyframe_indices` lists, with strict validation. Backward-compatible with the old `start_image`/`end_image` shape so the panel keeps working. Full agent contract in `docs/SDK_KEYFRAME_INTERPOLATION.md` § Agent API contract.
+- **Layer 2 (panel HTTP form-parsing) — NOT YET.** Needed if agents want to POST through the panel queue instead of talking to the helper directly via stdin.
+- **Layer 3 (panel UI multi-row keyframe list) — NOT YET.**
+
+**Today's agent path**: spawn a helper subprocess and write JSON jobs to its stdin. See the doc for a working Python example.
 
 ### Long-video research (Strategy A / B / C)
 
@@ -227,7 +232,7 @@ Future feature for 1-minute movies from one user idea:
 3. Stitcher concatenates the K resulting mp4s with ffmpeg
 4. Director UI in the panel — paste idea, see planned shot-list, edit any prompt, hit "Render Movie"
 
-Blocked on multi-keyframe interpolation shipping (the compositional primitive) + long-video research deliverable (per-shot length sweet spot).
+Compositional primitive **partially unblocked (2026-05-06)**: Layer 1 of multi-keyframe is live, so an agent can already submit jobs via helper stdin. Layer 2 (panel HTTP route) is the remaining piece for queue-based submission. Long-video research (per-shot length sweet spot) still pending Codex deep-research return.
 
 ### Speed optimization candidates (from May 4 research session)
 
