@@ -723,6 +723,95 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     }
 
 
+@tool("inspect_clip")
+def _inspect_clip(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Look up an existing rendered clip's full parameters from its sidecar.
+
+    Used when the user references an earlier clip and asks for a
+    variation — "remake S5 with more pause", "redo the doctor reveal at
+    higher quality", "give me another take of this". Reads the .mp4.json
+    sidecar that the panel writes next to every render and returns the
+    original prompt, mode, quality, dimensions, frame count, seed, and
+    any LoRAs / loras_json. Use the returned values as the BASELINE for
+    your variation, then submit_shot with the user's modifications layered
+    on top — same shot label suffixed (e.g. "S5 Wife Legacy v2") so the
+    new render reads as a take, not a duplicate.
+
+    Args (one of):
+      job_id: str — agent's submitted shot id (e.g. "j-19dfe67c6e6-001"),
+              OR a clip path like "/path/to/...mp4". The implementation
+              accepts either.
+      clip_path: str — alternative to job_id. Absolute mp4 path; the
+              sidecar at <path>.json is read.
+
+    Returns: {
+      job_id, output_path, sidecar_path, status, elapsed_sec,
+      prompt, negative_prompt, mode, quality, accel,
+      width, height, frames, duration_seconds, seed_used,
+      label, loras, hdr, upscale_method, upscale,
+    }
+
+    On miss: {"error": "no clip found for ..."}.
+    """
+    import json as _json
+
+    job_id = (args.get("job_id") or "").strip()
+    clip_path = (args.get("clip_path") or "").strip()
+    if not job_id and not clip_path:
+        raise _ToolValidationError("provide job_id or clip_path")
+
+    # Resolve to a clip mp4 path.
+    if job_id and not clip_path:
+        j = ops.find_job(job_id)
+        if not j:
+            return {"error": f"no clip found for job_id {job_id}"}
+        clip_path = (j.get("output_path") or "").strip()
+        if not clip_path:
+            return {"error": f"job {job_id} has no output_path yet (status={j.get('status')})"}
+
+    p = Path(clip_path)
+    if not p.is_absolute():
+        p = (ops.outputs_dir / p).resolve()
+    if not p.is_file():
+        return {"error": f"clip not found on disk: {p}"}
+
+    # Sidecar lives at <path>.json next to the mp4.
+    sidecar = p.with_suffix(p.suffix + ".json")
+    if not sidecar.is_file():
+        return {"error": f"no sidecar at {sidecar} — clip was rendered before sidecars existed?"}
+    try:
+        data = _json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as e:
+        return {"error": f"sidecar unreadable: {e}"}
+
+    params = data.get("params") or {}
+    frames = int(params.get("frames", 0)) or None
+    duration = round((frames - 1) / 24.0, 2) if frames and frames > 1 else None
+
+    return {
+        "job_id": data.get("queue_id") or job_id or "",
+        "output_path": str(p),
+        "sidecar_path": str(sidecar),
+        "status": "done",
+        "elapsed_sec": data.get("elapsed_sec"),
+        "prompt": params.get("prompt"),
+        "negative_prompt": params.get("negative_prompt") or "",
+        "mode": params.get("mode") or "t2v",
+        "quality": params.get("quality") or "balanced",
+        "accel": params.get("accel") or "off",
+        "width": params.get("width"),
+        "height": params.get("height"),
+        "frames": frames,
+        "duration_seconds": duration,
+        "seed_used": params.get("seed_used") or params.get("seed"),
+        "label": params.get("label") or params.get("preset_label") or "",
+        "loras": params.get("loras") or [],
+        "hdr": bool(params.get("hdr")),
+        "upscale_method": params.get("upscale_method") or "",
+        "upscale": params.get("upscale") or "",
+    }
+
+
 @tool("get_selected_anchors")
 def _get_selected_anchors(args: dict, ops: PanelOps, session: dict) -> dict:
     """Return the user's anchor selections so far.

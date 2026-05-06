@@ -7463,6 +7463,30 @@ HTML = r"""<!doctype html>
     .stage-output-cell.failed .badge {
       background: rgba(207,34,46,0.85);
     }
+    /* Refine button — small circular icon top-right of every output cell.
+       Distinct from the main click area (which opens the lightbox to
+       play the clip). Click → drops a reference into the chat composer
+       so the user can ask the agent for a variation. */
+    .stage-output-cell .refine-btn {
+      position: absolute; top: 4px; right: 4px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.6);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.15);
+      font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s;
+      z-index: 1;
+      width: 22px;
+    }
+    .stage-output-cell:hover .refine-btn { opacity: 1; }
+    .stage-output-cell .refine-btn:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
     .stage-empty {
       text-align: center; color: var(--muted);
       font-size: 12px; padding: 16px;
@@ -7696,6 +7720,64 @@ HTML = r"""<!doctype html>
     }
     .stage-lightbox .close-btn:hover {
       background: rgba(255,255,255,0.14);
+    }
+    .stage-lightbox .refine-btn-large {
+      position: absolute;
+      top: 16px; right: 110px;
+      background: var(--accent);
+      color: white;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 12px; font-weight: 600;
+      cursor: pointer; width: auto;
+      box-shadow: 0 4px 14px rgba(47,129,247,0.4);
+    }
+    .stage-lightbox .refine-btn-large:hover {
+      background: var(--accent-bright);
+    }
+
+    /* ---- Composer reference chip ----
+       When the user clicks Refine on a clip, a chip appears just above
+       the textarea with the clip's label + a × to clear it. The chip's
+       data is sent verbatim as a prefix to the user's next message so
+       the agent picks up the reference and calls inspect_clip first. */
+    .agent-ref-chip {
+      display: none;
+      align-items: center; gap: 8px;
+      padding: 6px 10px 6px 12px;
+      margin: 0 0 6px 0;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--accent-bright);
+      max-width: fit-content;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .agent-ref-chip.visible { display: inline-flex; }
+    .agent-ref-chip .ref-icon {
+      font-size: 11px;
+    }
+    .agent-ref-chip .ref-label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      max-width: 320px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-ref-chip .clear {
+      background: transparent;
+      color: var(--accent-bright);
+      border: none;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .agent-ref-chip .clear:hover {
+      background: rgba(255,255,255,0.1);
     }
 
     /* =========================================================
@@ -8402,6 +8484,17 @@ HTML = r"""<!doctype html>
       <div class="agent-chat" id="agentChat"></div>
 
       <div class="agent-composer">
+        <!-- Reference chip: appears when the user clicks Refine on an
+             existing clip. Carries the clip's job_id; on Send, we
+             prepend "Refine <job_id>: " to the user's message so the
+             agent calls inspect_clip and treats the request as a
+             variation. Clear with the × button. -->
+        <div class="agent-ref-chip" id="agentRefChip" style="margin-left:auto;margin-right:auto;max-width:720px">
+          <span class="ref-icon">↻</span>
+          <span style="color:var(--muted);font-size:11px">refine</span>
+          <span class="ref-label" id="agentRefChipLabel">…</span>
+          <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine">×</button>
+        </div>
         <div class="agent-composer-wrap">
           <textarea id="agentInput"
                     placeholder="Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight."
@@ -8919,9 +9012,12 @@ HTML = r"""<!doctype html>
     </div>
   </aside>
 
-  <!-- Lightbox for stage outputs — plays a finished mp4 full-size on click. -->
+  <!-- Lightbox for stage outputs — plays a finished mp4 full-size on click.
+       Refine button references the playing clip in the composer so the
+       user can ask the agent for a variation while watching. -->
   <div class="stage-lightbox" id="agentStageLightbox" onclick="if(event.target===this)agentStageLightboxClose()">
     <button class="close-btn" onclick="agentStageLightboxClose()">Close · Esc</button>
+    <button class="refine-btn-large" id="agentStageLightboxRefine" onclick="agentStageLightboxRefine()">↻ Refine this clip</button>
     <video id="agentStageLightboxVideo" controls preload="metadata"></video>
   </div>
 </main>
@@ -13032,11 +13128,23 @@ async function agentSend() {
     if (!sess) return;
   }
 
+  // If a Refine reference is set, prepend "Refine <jobid> (<label>): " to
+  // the user's message so the agent picks it up as a variation request.
+  // Clear the chip after so the next message is a normal one.
+  let outgoing = text;
+  if (window.AGENT_REFINE) {
+    const r = window.AGENT_REFINE;
+    const ref = r.jobId || r.clipPath;
+    const lbl = r.label ? ` (${r.label})` : '';
+    outgoing = `Refine ${ref}${lbl}: ${text}`;
+    agentClearRefine();
+  }
+
   const chat = document.getElementById('agentChat');
   // Clear empty-state if present, then append user bubble + typing
   const empty = chat.querySelector('.agent-empty');
   if (empty) empty.remove();
-  chat.appendChild(renderMessage({kind: 'user', content: text}));
+  chat.appendChild(renderMessage({kind: 'user', content: outgoing}));
   chat.appendChild(renderTypingRow('Drafting plan'));
   chat.scrollTop = chat.scrollHeight;
 
@@ -13081,7 +13189,7 @@ async function agentSend() {
       {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: text}),
+        body: JSON.stringify({message: outgoing}),
       }
     );
     const j = await r.json();
@@ -13793,7 +13901,18 @@ function agentStageRender(status, sess) {
         v.preload = 'metadata';
         v.muted = true;
         cell.appendChild(v);
-        cell.addEventListener('click', () => agentStageLightboxOpen(o.output_path, o.label));
+        cell.addEventListener('click', () => agentStageLightboxOpen(o.output_path, o.label, o.id));
+        // Refine button (overlay top-right): "give me a variation of this clip"
+        const refine = document.createElement('button');
+        refine.type = 'button';
+        refine.className = 'refine-btn';
+        refine.title = 'Refine this clip — start a variation in the chat';
+        refine.textContent = '↻';
+        refine.addEventListener('click', (e) => {
+          e.stopPropagation();
+          agentSetRefine({jobId: o.id, label: o.label, clipPath: o.output_path});
+        });
+        cell.appendChild(refine);
       } else {
         cell.style.display = 'flex';
         cell.style.alignItems = 'center';
@@ -13871,12 +13990,17 @@ function agentFmtDur(seconds) {
   return h + 'h ' + (mr < 10 ? '0' : '') + mr + 'm';
 }
 
-function agentStageLightboxOpen(path, label) {
+// Track which clip is currently in the lightbox so the Refine button
+// has something to reference when clicked.
+window.AGENT_STAGE.lightboxCurrent = null;
+
+function agentStageLightboxOpen(path, label, jobId) {
   const lb = document.getElementById('agentStageLightbox');
   const v = document.getElementById('agentStageLightboxVideo');
   if (!lb || !v) return;
   v.src = '/file?path=' + encodeURIComponent(path);
   v.title = label || '';
+  window.AGENT_STAGE.lightboxCurrent = {jobId: jobId || null, label: label || '', clipPath: path};
   lb.classList.add('open');
   v.play().catch(() => {});
 }
@@ -13887,7 +14011,47 @@ function agentStageLightboxClose() {
   if (!lb || !v) return;
   v.pause();
   v.src = '';
+  window.AGENT_STAGE.lightboxCurrent = null;
   lb.classList.remove('open');
+}
+
+function agentStageLightboxRefine() {
+  const cur = window.AGENT_STAGE.lightboxCurrent;
+  if (!cur) return;
+  agentStageLightboxClose();
+  agentSetRefine(cur);
+}
+
+// ---- Composer reference chip — "Refine this clip" -----------------------
+// When the user clicks ↻ on a stage output (or the Refine button in the
+// lightbox), we set a refine reference. The chip shows above the textarea;
+// on next Send, the user's message is prepended with "Refine <job_id>: "
+// so the agent calls inspect_clip and treats the rest as the requested
+// modification. Clear with × on the chip.
+window.AGENT_REFINE = null;          // {jobId, label, clipPath}
+
+function agentSetRefine(ref) {
+  window.AGENT_REFINE = ref;
+  const chip = document.getElementById('agentRefChip');
+  const lbl = document.getElementById('agentRefChipLabel');
+  if (!chip || !lbl) return;
+  lbl.textContent = ref.label || ref.jobId || ref.clipPath || 'clip';
+  lbl.title = ref.jobId ? `${ref.label || ''} · ${ref.jobId}` : ref.clipPath;
+  chip.classList.add('visible');
+  // Bring focus to the composer so the user can type their refinement.
+  const ta = document.getElementById('agentInput');
+  if (ta) {
+    ta.placeholder = 'How should this clip be different? (e.g. "more pause", "warmer light", "longer take")';
+    setTimeout(() => ta.focus(), 50);
+  }
+}
+
+function agentClearRefine() {
+  window.AGENT_REFINE = null;
+  const chip = document.getElementById('agentRefChip');
+  if (chip) chip.classList.remove('visible');
+  const ta = document.getElementById('agentInput');
+  if (ta) ta.placeholder = 'Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight.';
 }
 
 // Esc closes the stage lightbox first (before falling through to the
