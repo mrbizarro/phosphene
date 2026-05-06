@@ -15467,15 +15467,40 @@ function agentStageRender(status, sess) {
     }
   }
 
-  // Now rendering
+  // Now rendering. /status returns `current.progress` as an object now:
+  //   { phase, phase_label, pct (0-100), elapsed_sec, eta_sec, denoise_step, ... }
+  // The legacy code path here was calling Number(progressObject) which yields
+  // NaN, so the bar always read 0% with phase "rendering" — making the user
+  // think nothing was happening even mid-batch. Read the structured fields
+  // and fall back gracefully if a future status format ships flat numbers.
   const cur = status && status.current;
   if (running && cur) {
     const p = cur.params || {};
     const label = p.label || (p.preset_label || cur.id || 'render');
-    const progress = (cur.progress != null ? cur.progress : (status.progress || 0));
-    const pct = Math.max(0, Math.min(1, Number(progress) || 0)) * 100;
-    const eta = cur.eta_seconds || cur.eta || null;
-    const phase = cur.phase || (cur.status === 'running' ? 'rendering' : '');
+    const prog = cur.progress;
+    let pct = 0;
+    let phase = (cur.status === 'running' ? 'rendering' : '');
+    let eta = cur.eta_seconds || cur.eta || null;
+    let elapsed = null;
+    let denoiseStep = null, denoiseTotal = null;
+    if (prog && typeof prog === 'object') {
+      pct = Math.max(0, Math.min(100, Number(prog.pct) || 0));
+      phase = prog.phase_label || prog.phase || phase;
+      eta = prog.eta_sec || prog.remaining_sec || eta;
+      elapsed = prog.elapsed_sec || null;
+      denoiseStep = prog.denoise_step;
+      denoiseTotal = prog.denoise_total;
+    } else {
+      pct = Math.max(0, Math.min(1, Number(prog) || 0)) * 100;
+    }
+    // Append step counter when in the denoise phase so progress feels
+    // alive even when pct ticks slowly.
+    let phaseDetail = phase || 'rendering';
+    if (denoiseStep && denoiseTotal) {
+      phaseDetail += ` · step ${denoiseStep}/${denoiseTotal}`;
+    } else if (elapsed && elapsed >= 5) {
+      phaseDetail += ` · ${agentFmtDur(elapsed)} in`;
+    }
     nowEl.classList.remove('idle');
     nowEl.innerHTML = `
       <div class="stage-now-label">${escapeHtml(label)}</div>
@@ -15484,7 +15509,7 @@ function agentStageRender(status, sess) {
         <div class="stage-progress-fill" style="width:${pct.toFixed(1)}%"></div>
       </div>
       <div class="stage-progress-text">
-        <span>${escapeHtml(phase || 'rendering')}</span>
+        <span>${escapeHtml(phaseDetail)}</span>
         <span>${pct.toFixed(0)}%${eta ? ' · ETA ' + agentFmtDur(eta) : ''}</span>
       </div>
     `;
