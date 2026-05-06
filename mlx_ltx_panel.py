@@ -2657,9 +2657,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "extend_direction": f("extend_direction", "after"),
             "extend_steps": max(1, int(f("extend_steps", "12") or 12)),
             "extend_cfg": float(f("extend_cfg", "1.0") or 1.0),
-            # keyframe (FFLF) mode params
+            # keyframe (FFLF) mode params.
+            # Two-keyframe path (start_image + end_image) is the legacy panel
+            # contract still used by the manual UI. The agent SDK can pass
+            # `keyframes_json` — a JSON-encoded list of {image_path, frame_index}
+            # — to use the engine's full multi-keyframe support (Layer 2 of
+            # the keyframe SDK; see docs/SDK_KEYFRAME_INTERPOLATION.md).
             "start_image": f("start_image", ""),
             "end_image": f("end_image", ""),
+            "keyframes_json": f("keyframes_json", ""),
+            "keyframes_total_frames": f("keyframes_total_frames", ""),
+            # Optional session tag — agent runs stamp this so the manifest
+            # writer can later filter all jobs that came from one session.
+            "session_tag": f("session_tag", ""),
             "enhance": f("enhance", "off") == "on",
             "stop_comfy": f("stop_comfy", "off") == "on",
             "open_when_done": f("open_when_done", "off") == "on",
@@ -2846,10 +2856,42 @@ def run_job_inner(job: dict) -> None:
                 f"{' …' if len(kf_missing) > 3 else ''}. "
                 f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
             )
-        if not p.get("start_image") or not Path(p["start_image"]).exists():
-            raise RuntimeError(f"start_image not found: {p.get('start_image')}")
-        if not p.get("end_image") or not Path(p["end_image"]).exists():
-            raise RuntimeError(f"end_image not found: {p.get('end_image')}")
+        # Multi-keyframe path: agent submits a JSON-encoded list of
+        # {image_path, frame_index} pairs. Layer 1 of the SDK shipped the
+        # helper-side acceptance; this branch is Layer 2 (panel form).
+        # Backward compat: when keyframes_json is empty, fall back to the
+        # legacy start_image + end_image two-keyframe shape.
+        kf_list_raw = (p.get("keyframes_json") or "").strip()
+        kf_list: list[dict] = []
+        if kf_list_raw:
+            try:
+                parsed = json.loads(kf_list_raw)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"keyframes_json must be valid JSON: {e}") from e
+            if not isinstance(parsed, list) or len(parsed) < 2:
+                raise RuntimeError("keyframes_json must be a list with >=2 items")
+            last_idx = -1
+            for kf in parsed:
+                img = (kf.get("image_path") or "").strip()
+                idx = int(kf.get("frame_index", 0))
+                if not img or not Path(img).exists():
+                    raise RuntimeError(f"keyframe image not found: {img}")
+                if idx <= last_idx:
+                    raise RuntimeError("keyframe frame_index values must strictly increase")
+                last_idx = idx
+                kf_list.append({"image_path": img, "frame_index": idx})
+
+        if kf_list:
+            # Sync start_image / end_image with the first/last entries so the
+            # rest of the pipeline (sidecar, gallery preview) shows something
+            # sensible even though the helper is using the full list.
+            p["start_image"] = kf_list[0]["image_path"]
+            p["end_image"] = kf_list[-1]["image_path"]
+        else:
+            if not p.get("start_image") or not Path(p["start_image"]).exists():
+                raise RuntimeError(f"start_image not found: {p.get('start_image')}")
+            if not p.get("end_image") or not Path(p["end_image"]).exists():
+                raise RuntimeError(f"end_image not found: {p.get('end_image')}")
         # Clamp keyframe-mode resolution to the tier's max-dim. The Q8
         # KeyframeInterpolationPipeline OOMs on 64 GB Macs at the stage-1 →
         # stage-2 transition for 1280×704 (peak memory hits the ceiling
@@ -2875,6 +2917,27 @@ def run_job_inner(job: dict) -> None:
         frames = p["frames"]
         out_path = OUTPUT / f"mlx_keyframe_{width}x{height}_{frames}f_{stamp}.mp4"
         job["raw_path"] = str(out_path)
+        # When the agent submitted a multi-keyframe list, hand the helper
+        # the full keyframe_images + keyframe_indices arrays (its Layer 1
+        # contract from 2026-05-06). Otherwise stick with the legacy two-
+        # keyframe call shape.
+        if kf_list:
+            kf_imgs = [k["image_path"] for k in kf_list]
+            kf_idxs = [int(k["frame_index"]) for k in kf_list]
+            # Validate every index is reachable in the requested clip length.
+            if any(i < 0 or i >= frames for i in kf_idxs):
+                raise RuntimeError(
+                    f"keyframe frame_index out of range [0, {frames-1}]: {kf_idxs}"
+                )
+            kf_helper_params = {
+                "keyframe_images": kf_imgs,
+                "keyframe_indices": kf_idxs,
+            }
+        else:
+            kf_helper_params = {
+                "start_image": p["start_image"],
+                "end_image": p["end_image"],
+            }
         job_spec = {
             "action": "generate_keyframe",
             "id": job["id"],
@@ -2883,8 +2946,7 @@ def run_job_inner(job: dict) -> None:
                 "prompt": p["prompt"],
                 "negative_prompt": p.get("negative_prompt", ""),
                 "output_path": str(out_path),
-                "start_image": p["start_image"],
-                "end_image": p["end_image"],
+                **kf_helper_params,
                 "height": height,
                 "width": width,
                 "frames": frames,
