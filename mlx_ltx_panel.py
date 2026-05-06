@@ -10438,8 +10438,9 @@ HTML = r"""<!doctype html>
       <label>Engine kind</label>
       <select id="agentKind" onchange="agentKindChanged()">
         <option value="phosphene_local">Phosphene Local — bundled mlx-lm.server</option>
+        <option value="anthropic">Claude (Anthropic) — claude.ai API key, billed per token</option>
         <option value="ollama">Ollama bridge — talks to your `ollama serve` on port 11434</option>
-        <option value="custom">Custom — any OpenAI-compatible URL (Anthropic compat, OpenAI, OpenRouter, LM Studio…)</option>
+        <option value="custom">Custom — any OpenAI-compatible URL (OpenRouter, LM Studio…)</option>
       </select>
     </div>
 
@@ -10465,19 +10466,42 @@ HTML = r"""<!doctype html>
       </div>
     </div>
 
+    <!-- Anthropic: shown only when engine kind == 'anthropic'. Curated
+         model dropdown (covers the common picks) plus a free-form
+         override field for whatever Anthropic ships next. The base URL
+         is implicit (https://api.anthropic.com/v1) so we don't expose
+         it in the UI. The api_key field below this is shared with the
+         custom-OpenAI branch — same input, different transport. -->
+    <div class="field" id="agentAnthropicModelField" style="display:none">
+      <label>Claude model</label>
+      <select id="agentAnthropicModel" onchange="agentAnthropicModelChanged()">
+        <option value="claude-sonnet-4-5">Sonnet 4.5 — balanced reasoning, recommended</option>
+        <option value="claude-opus-4-5">Opus 4.5 — strongest reasoning, slower + pricier</option>
+        <option value="claude-haiku-4-5">Haiku 4.5 — fastest, cheapest, lighter reasoning</option>
+        <option value="__custom__">Custom model id…</option>
+      </select>
+      <input type="text" id="agentAnthropicCustomModel"
+             placeholder="claude-…-YYYYMMDD"
+             style="margin-top:8px; display:none">
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+        API charges per token. Get a key at <code>console.anthropic.com</code>. Phosphene
+        sends your key directly to <code>api.anthropic.com</code> — never to a third party.
+      </div>
+    </div>
+
     <div class="field" id="agentBaseUrlField" style="display:none">
       <label>Base URL</label>
       <input type="text" id="agentBaseUrl" placeholder="https://api.openai.com/v1">
     </div>
 
     <div class="field" id="agentApiKeyField" style="display:none">
-      <label>API key (saved locally; only sent as Authorization header)</label>
+      <label>API key (saved locally; sent only to the configured endpoint)</label>
       <input type="password" id="agentApiKey" placeholder="(leave blank to keep saved key)">
     </div>
 
     <div class="field" id="agentRemoteModelField" style="display:none">
       <label>Model identifier</label>
-      <input type="text" id="agentRemoteModel" placeholder="e.g. claude-sonnet-4-6 or gpt-5">
+      <input type="text" id="agentRemoteModel" placeholder="e.g. gpt-5 or qwen2.5-coder:32b">
     </div>
 
     <div class="row">
@@ -15158,6 +15182,25 @@ function openAgentSettings() {
     document.getElementById('agentApiKey').value = '';
     document.getElementById('agentApiKey').placeholder =
       cfg.has_api_key ? '(saved key — leave blank to keep)' : 'Paste API key';
+    // Anthropic: pick the curated dropdown if cfg.model matches, else fall
+    // through to the custom-id input so power users can pick e.g. a
+    // dated alias Anthropic shipped after this UI was last edited.
+    const anthropicModels = ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5'];
+    if (cfg.kind === 'anthropic') {
+      if (anthropicModels.includes(cfg.model || '')) {
+        document.getElementById('agentAnthropicModel').value = cfg.model;
+        document.getElementById('agentAnthropicCustomModel').value = '';
+        document.getElementById('agentAnthropicCustomModel').style.display = 'none';
+      } else {
+        document.getElementById('agentAnthropicModel').value = '__custom__';
+        document.getElementById('agentAnthropicCustomModel').value = cfg.model || '';
+        document.getElementById('agentAnthropicCustomModel').style.display = '';
+      }
+    } else {
+      document.getElementById('agentAnthropicModel').value = 'claude-sonnet-4-5';
+      document.getElementById('agentAnthropicCustomModel').value = '';
+      document.getElementById('agentAnthropicCustomModel').style.display = 'none';
+    }
     document.getElementById('agentTemp').value = cfg.temperature ?? 0.4;
     document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 3072;
 
@@ -15269,10 +15312,28 @@ function agentKindChanged() {
   document.getElementById('agentLocalModelField').style.display = kind === 'phosphene_local' ? '' : 'none';
   document.getElementById('agentLocalRow').style.display = kind === 'phosphene_local' ? '' : 'none';
   document.getElementById('agentOllamaField').style.display = kind === 'ollama' ? '' : 'none';
+  document.getElementById('agentAnthropicModelField').style.display = kind === 'anthropic' ? '' : 'none';
+  // Base URL is implicit for Anthropic — hide the field.
   document.getElementById('agentBaseUrlField').style.display = kind === 'custom' ? '' : 'none';
-  document.getElementById('agentApiKeyField').style.display = kind === 'custom' ? '' : 'none';
+  // API key field is shared between Anthropic + custom (transport differs:
+  // Anthropic uses x-api-key, custom uses Authorization Bearer — that's
+  // engine.chat()'s problem, not the UI's).
+  document.getElementById('agentApiKeyField').style.display =
+    (kind === 'custom' || kind === 'anthropic') ? '' : 'none';
   document.getElementById('agentRemoteModelField').style.display = kind === 'custom' ? '' : 'none';
   if (kind === 'ollama') agentOllamaRefresh();
+}
+
+function agentAnthropicModelChanged() {
+  const sel = document.getElementById('agentAnthropicModel');
+  const custom = document.getElementById('agentAnthropicCustomModel');
+  if (!sel || !custom) return;
+  if (sel.value === '__custom__') {
+    custom.style.display = '';
+    custom.focus();
+  } else {
+    custom.style.display = 'none';
+  }
 }
 
 async function agentOllamaRefresh() {
@@ -15401,6 +15462,19 @@ async function agentSaveSettings() {
     payload.base_url = 'http://127.0.0.1:11434/v1';
     payload.model = sel ? sel.value : '';
     payload.local_model_path = '';
+  } else if (kind === 'anthropic') {
+    // Anthropic Messages API: implicit base URL + x-api-key auth (handled
+    // inside engine.chat). Model is either the curated select or a custom
+    // dated id.
+    payload.base_url = 'https://api.anthropic.com/v1';
+    const sel = document.getElementById('agentAnthropicModel');
+    const custom = (document.getElementById('agentAnthropicCustomModel').value || '').trim();
+    payload.model = (sel && sel.value === '__custom__')
+      ? (custom || 'claude-sonnet-4-5')
+      : (sel ? sel.value : 'claude-sonnet-4-5');
+    payload.local_model_path = '';
+    const ak = (document.getElementById('agentApiKey').value || '').trim();
+    if (ak) payload.api_key = ak;
   } else {
     payload.base_url = (document.getElementById('agentBaseUrl').value || '').trim();
     payload.model = (document.getElementById('agentRemoteModel').value || '').trim();

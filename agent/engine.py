@@ -32,7 +32,7 @@ class EngineConfig:
     promises a panel-spawned mlx-lm.server on `base_url`.
     """
 
-    kind: str = "phosphene_local"          # "phosphene_local" | "ollama" | "custom"
+    kind: str = "phosphene_local"          # "phosphene_local" | "ollama" | "custom" | "anthropic"
     base_url: str = "http://127.0.0.1:8200/v1"
     model: str = "mlx-community/gemma-3-12b-it-4bit"
     api_key: str = ""
@@ -42,6 +42,9 @@ class EngineConfig:
     # `local_model_path` may be a Hugging Face id ("Qwen/Qwen3-30B-A3B-Instruct-4bit")
     # OR an absolute path to a local model dir (the bundled Gemma path).
     local_model_path: str = ""
+    # Anthropic-only: API version pinned in the `anthropic-version` header.
+    # Anthropic adds breaking changes per dated version; pin to a known-good.
+    anthropic_version: str = "2023-06-01"
     # Operating mode for the agent.
     #   "plan_sleep"  — agent plans, queues all shots, calls finish; the panel
     #                   auto-stops the local engine the moment finish lands so
@@ -111,6 +114,9 @@ def chat(messages: list[dict], config: EngineConfig,
     sees what the engine actually said (helpful for debugging API key
     / model name typos in the Settings drawer).
     """
+    if config.kind == "anthropic":
+        return _chat_anthropic(messages, config, timeout=timeout)
+
     url = config.base_url.rstrip("/") + "/chat/completions"
     # mlx-lm.server identifies models by their LOAD PATH, not by short
     # name. Its /v1/models endpoint returns the absolute path (e.g.
@@ -183,6 +189,94 @@ def chat(messages: list[dict], config: EngineConfig,
                       model=data.get("model", config.model))
 
 
+def _chat_anthropic(messages: list[dict], config: EngineConfig,
+                    *, timeout: int) -> ChatResult:
+    """Anthropic Messages API — `/v1/messages` shape.
+
+    Differences from the OpenAI shape we already handle:
+      - System prompt is a top-level `system` STRING, not a {role:"system"}
+        item in `messages`. We pop it out (assumes only one — see
+        _normalize_for_wire which never adds a second).
+      - `messages` must strictly alternate user/assistant (same as Gemma).
+        _normalize_for_wire already collapses adjacent roles so this works.
+      - Auth is via `x-api-key` header, NOT `Authorization: Bearer`.
+      - Response is `{content: [{type:"text", text:"..."}], stop_reason}`
+        — no `choices` array. Concatenate text blocks for the result.
+      - `max_tokens` is REQUIRED.
+    """
+    base = config.base_url.rstrip("/") or "https://api.anthropic.com/v1"
+    url = base + "/messages"
+    # Normalize first (collapse adjacent same-role messages so the
+    # Anthropic "strict alternation" rule passes), THEN extract the
+    # leading system message.
+    norm = _normalize_for_wire(messages)
+    system_text = ""
+    if norm and norm[0].get("role") == "system":
+        system_text = (norm[0].get("content") or "").strip()
+        norm = norm[1:]
+    body: dict = {
+        "model": config.model or "claude-sonnet-4-5",
+        "messages": norm,
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+    }
+    if system_text:
+        body["system"] = system_text
+
+    headers = {
+        "Content-Type": "application/json",
+        "anthropic-version": config.anthropic_version or "2023-06-01",
+    }
+    if config.api_key:
+        headers["x-api-key"] = config.api_key
+
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        # Anthropic ships errors as {"type":"error","error":{"type","message"}}.
+        nice = detail
+        try:
+            j = json.loads(detail)
+            if isinstance(j, dict) and isinstance(j.get("error"), dict):
+                err = j["error"]
+                nice = f"{err.get('type','?')}: {err.get('message','?')}"
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Anthropic API returned HTTP {e.code} ({e.reason}). "
+            f"Detail: {nice[:600]}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Anthropic API unreachable at {url}: {e.reason}."
+        ) from e
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Anthropic returned non-JSON ({len(raw)} bytes). "
+            f"First 200 chars: {raw[:200]!r}"
+        ) from e
+
+    blocks = data.get("content") or []
+    text_parts = [b.get("text") or "" for b in blocks if b.get("type") == "text"]
+    content = "".join(text_parts)
+    finish = data.get("stop_reason") or "end_turn"
+    usage = data.get("usage") or {}
+    return ChatResult(content=content, finish_reason=finish, usage=usage,
+                      model=data.get("model", config.model))
+
+
 def health_check(config: EngineConfig, *, timeout: int = 5) -> tuple[bool, str]:
     """Light probe of the engine. Returns (ok, message).
 
@@ -190,9 +284,17 @@ def health_check(config: EngineConfig, *, timeout: int = 5) -> tuple[bool, str]:
     all expose the same. We don't insist on a specific shape — any 200
     response means the endpoint is alive and accepts auth (if provided).
     """
-    url = config.base_url.rstrip("/") + "/models"
+    base = config.base_url.rstrip("/") or (
+        "https://api.anthropic.com/v1" if config.kind == "anthropic" else ""
+    )
+    url = base + "/models"
     headers = {}
-    if config.api_key:
+    if config.kind == "anthropic":
+        # Anthropic auth is x-api-key + anthropic-version, not Bearer.
+        headers["anthropic-version"] = config.anthropic_version or "2023-06-01"
+        if config.api_key:
+            headers["x-api-key"] = config.api_key
+    elif config.api_key:
         headers["Authorization"] = f"Bearer {config.api_key}"
     req = urllib.request.Request(url, headers=headers)
     try:
