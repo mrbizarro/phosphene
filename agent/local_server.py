@@ -78,12 +78,22 @@ def start(model_path: str, *, venv_python: str, log_sink=None) -> dict:
             _LAST_ERROR = f"venv python not found: {venv_python}"
             return _status_locked()
 
+        # Conservative concurrency. mlx-lm 0.31.1 has a known KV-cache merge
+        # bug in `_merge_caches` (BatchRotatingKVCache.merge) that fires
+        # under multi-prompt batching, manifesting as
+        # `ValueError: [broadcast_shapes] Shapes (1,8,N+1,256) and
+        # (1,8,N,256) cannot be broadcast.` mid-generation, hanging the
+        # request until the client times out. Setting prompt/decode
+        # concurrency to 1 takes that code path out of play. The agent
+        # is a single-user feature anyway — there's nothing to batch.
         cmd = [
             venv_python, "-m", "mlx_lm.server",
             "--model", model_path,
             "--host", "127.0.0.1",
             "--port", str(_PORT),
             "--log-level", "WARNING",
+            "--prompt-concurrency", "1",
+            "--decode-concurrency", "1",
         ]
         env = os.environ.copy()
         # mlx-lm honors HF_HOME for model cache lookup. The bundled

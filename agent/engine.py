@@ -62,6 +62,36 @@ class ChatResult:
     model: str = ""
 
 
+def _normalize_for_wire(messages: list[dict]) -> list[dict]:
+    """Collapse consecutive same-role messages into one for transport.
+
+    Gemma (and several other open chat models) ship with chat templates
+    that require strict user/assistant alternation. Our runtime stores
+    the raw conversation — tool results land as a user-role wrapper
+    after an assistant tool-call, and a new user turn after a tool-
+    result-tool-result-finish chain produces user→user adjacency. We
+    keep the raw shape on disk (the UI renders each tool result as its
+    own chip), and merge here so the wire form is always valid.
+
+    The system message is preserved as-is; only user/assistant runs are
+    coalesced. Joins are by double newline so the model can see the
+    boundary.
+    """
+    if not messages:
+        return messages
+    out: list[dict] = []
+    for m in messages:
+        if not out:
+            out.append(dict(m))
+            continue
+        prev = out[-1]
+        if prev.get("role") == m.get("role") and m.get("role") in ("user", "assistant"):
+            prev["content"] = (prev.get("content") or "") + "\n\n" + (m.get("content") or "")
+        else:
+            out.append(dict(m))
+    return out
+
+
 def chat(messages: list[dict], config: EngineConfig,
          *, timeout: int = DEFAULT_TIMEOUT_S) -> ChatResult:
     """Send a chat completion request. Returns the assistant text.
@@ -74,7 +104,7 @@ def chat(messages: list[dict], config: EngineConfig,
     url = config.base_url.rstrip("/") + "/chat/completions"
     body = {
         "model": config.model,
-        "messages": messages,
+        "messages": _normalize_for_wire(messages),
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
         "stream": False,
