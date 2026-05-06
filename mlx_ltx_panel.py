@@ -5433,8 +5433,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"bad JSON: {e}"}, 400); return
             label = (payload.get("shot_label") or "").strip()
             png_path = (payload.get("png_path") or "").strip()
-            if not label or not png_path:
-                self._json({"error": "shot_label and png_path are required"}, 400); return
+            if not label:
+                self._json({"error": "shot_label is required"}, 400); return
+            # Empty png_path → un-pick this label. Lets the chat UI implement
+            # "click same anchor twice to deselect" without a separate endpoint.
+            if not png_path:
+                picks = sess.tool_state.setdefault("selected_anchors", {})
+                if label in picks:
+                    picks.pop(label, None)
+                    agent_runtime.save_session(sess, STATE_DIR)
+                    push(f"agent: anchor un-picked for {label}")
+                self._json({
+                    "ok": True,
+                    "shot_label": label,
+                    "selected": None,
+                    "all_selected": sess.tool_state.get("selected_anchors", {}),
+                })
+                return
             # Validate path is real and inside our uploads dir (no traversal).
             try:
                 p = Path(png_path).resolve()
@@ -8015,6 +8030,24 @@ HTML = r"""<!doctype html>
       background: var(--accent-dim); color: var(--accent-bright);
       font-weight: 600; font-size: 10px;
       letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    /* Pick-state badge — right-aligned, neutral when nothing picked,
+       success-tinted when there's a pick. Updated in-place by
+       agentPickAnchor without re-rendering the grid. */
+    .anchor-grid-meta .pick-state {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      letter-spacing: 0.3px;
+    }
+    .anchor-grid-meta .pick-state.is-picked {
+      background: rgba(63,185,80,0.12);
+      border-color: rgba(63,185,80,0.5);
+      color: var(--success, #3fb950);
+      font-weight: 600;
     }
     .anchor-grid {
       display: grid;
@@ -14776,13 +14809,16 @@ function renderAnchorGrid(payload) {
   const prompt = payload.prompt || '';
   const engine = payload.engine || '';
 
+  const selected = window.AGENT.selectedAnchors || {};
+  const isPicked = !!((selected[label] || {}).png_path);
   const meta = document.createElement('div');
   meta.className = 'anchor-grid-meta';
+  meta.dataset.shot = label;
   meta.innerHTML = `
     <span class="label-pill">${escapeHtml(label)}</span>
     <span>${payload.candidates.length} candidates · ${escapeHtml(engine)}</span>
     <span style="flex:1"></span>
-    <span style="font-size:10px">click to pick</span>
+    <span class="pick-state${isPicked ? ' is-picked' : ''}">${isPicked ? '✓ picked' : 'click to pick'}</span>
   `;
   wrap.appendChild(meta);
 
@@ -14796,7 +14832,6 @@ function renderAnchorGrid(payload) {
   const grid = document.createElement('div');
   grid.className = 'anchor-grid';
 
-  const selected = window.AGENT.selectedAnchors || {};
   const currentPick = (selected[label] || {}).png_path;
 
   for (const cand of payload.candidates) {
@@ -14840,13 +14875,23 @@ function renderAnchorGrid(payload) {
 
 async function agentPickAnchor(label, cand, gridEl) {
   if (!window.AGENT.sessionId) return;
-  // Optimistic UI: mark this cell selected, deselect siblings
+  // Toggle behavior: clicking the already-selected anchor un-picks it.
+  // The backend treats empty png_path as "remove this label's pick".
+  const cur = (window.AGENT.selectedAnchors || {})[label];
+  const isUnpick = cur && cur.png_path === cand.png_path;
+  // Optimistic UI: mark this cell selected, deselect siblings (or clear).
   if (gridEl) {
     gridEl.querySelectorAll('.anchor-cell').forEach(c => c.classList.remove('selected'));
-    const me = gridEl.querySelector(`[data-png-path="${CSS.escape(cand.png_path)}"]`);
-    if (me) me.classList.add('selected');
+    if (!isUnpick) {
+      const me = gridEl.querySelector(`[data-png-path="${CSS.escape(cand.png_path)}"]`);
+      if (me) me.classList.add('selected');
+    }
   }
-  window.AGENT.selectedAnchors[label] = cand;
+  if (isUnpick) {
+    delete window.AGENT.selectedAnchors[label];
+  } else {
+    window.AGENT.selectedAnchors[label] = cand;
+  }
 
   try {
     const r = await fetch(
@@ -14854,7 +14899,10 @@ async function agentPickAnchor(label, cand, gridEl) {
       {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({shot_label: label, png_path: cand.png_path}),
+        body: JSON.stringify({
+          shot_label: label,
+          png_path: isUnpick ? '' : cand.png_path,
+        }),
       }
     );
     const j = await r.json();
@@ -14866,6 +14914,16 @@ async function agentPickAnchor(label, cand, gridEl) {
   } catch (e) {
     console.error('agentPickAnchor', e);
   }
+  // Also refresh per-grid summary lines on screen.
+  document.querySelectorAll('.anchor-grid-meta[data-shot]').forEach(m => {
+    const lbl = m.dataset.shot;
+    const has = !!((window.AGENT.selectedAnchors || {})[lbl] || {}).png_path;
+    const pickEl = m.querySelector('.pick-state');
+    if (pickEl) {
+      pickEl.textContent = has ? '✓ picked' : 'click to pick';
+      pickEl.className = 'pick-state' + (has ? ' is-picked' : '');
+    }
+  });
   agentRenderBatchBar();
 }
 
