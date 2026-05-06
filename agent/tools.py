@@ -537,8 +537,12 @@ def _extract_frame(args: dict, ops: PanelOps, session: dict) -> dict:
         clip = j.get("output_path") or ""
     if not clip:
         raise _ToolValidationError("provide either job_id (finished) or clip_path")
-    if not Path(clip).is_file():
+    clip_p = _ensure_under(
+        Path(clip), [ops.outputs_dir, ops.uploads_dir]
+    )
+    if not clip_p.is_file():
         raise _ToolValidationError(f"clip not found: {clip}")
+    clip = str(clip_p)
 
     which = args.get("which", "last")
     nb = _probe_frame_count(clip)
@@ -553,7 +557,12 @@ def _extract_frame(args: dict, ops: PanelOps, session: dict) -> dict:
 
     out_name = (args.get("output_name") or
                 f"frame_{Path(clip).stem}_{idx:04d}.png")
-    out_path = ops.uploads_dir / out_name
+    # Strip any directory traversal — output_name is a filename, not a path.
+    # Without this, an LLM nudged by a poisoned doc could write outside uploads_dir.
+    out_name = Path(out_name).name or f"frame_{idx:04d}.png"
+    out_path = (ops.uploads_dir / out_name).resolve()
+    if not out_path.is_relative_to(ops.uploads_dir.resolve()):
+        raise _ToolValidationError(f"output path escapes uploads dir: {out_name}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ffmpeg seek-by-index. -frames:v 1 + select+filter is precise but slow
@@ -772,6 +781,10 @@ def _inspect_clip(args: dict, ops: PanelOps, session: dict) -> dict:
     p = Path(clip_path)
     if not p.is_absolute():
         p = (ops.outputs_dir / p).resolve()
+    try:
+        p = _ensure_under(p, [ops.outputs_dir, ops.uploads_dir])
+    except _ToolValidationError as e:
+        return {"error": str(e)}
     if not p.is_file():
         return {"error": f"clip not found on disk: {p}"}
 
@@ -913,6 +926,32 @@ def _resolve_path(p: str, base: Path) -> str:
     if pp.is_absolute():
         return str(pp)
     return str(base / pp)
+
+
+def _ensure_under(path: Path, allowed_roots: list[Path]) -> Path:
+    """Resolve `path` and require it lives under one of `allowed_roots`.
+
+    Defense against prompt-injected file paths reaching `inspect_clip` /
+    `extract_frame`. Without this an LLM coaxed by a malicious doc could
+    point ffmpeg at /etc/* or read sidecars outside the project tree.
+    Symlink/.. tricks are neutralized because we resolve both ends.
+    """
+    resolved = path.resolve()
+    rroots = []
+    for r in allowed_roots:
+        try:
+            rroots.append(r.resolve())
+        except OSError:
+            pass
+    for r in rroots:
+        try:
+            if resolved.is_relative_to(r):
+                return resolved
+        except ValueError:
+            continue
+    raise _ToolValidationError(
+        f"path {resolved} is outside the allowed project directories"
+    )
 
 
 def _probe_frame_count(clip_path: str) -> int:

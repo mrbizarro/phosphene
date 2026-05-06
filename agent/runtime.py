@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -37,6 +38,17 @@ from agent import engine, tools, prompts
 
 MAX_STEPS_PER_TURN = 30           # safety cap on tool-loop iterations per user turn
 SESSION_VERSION = 1
+
+
+# Sessions are identified by uuid4().hex[:12] — a 12-char lowercase hex string.
+# Reject anything else BEFORE touching the filesystem so a path like
+# "../../etc/passwd" can't masquerade as a session id and cause a stat() / read
+# of files outside state/agent_sessions/.
+_VALID_SESSION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def is_valid_session_id(sid: str) -> bool:
+    return bool(sid and _VALID_SESSION_ID_RE.fullmatch(sid))
 
 
 @dataclass
@@ -51,6 +63,23 @@ class Session:
     finished: bool = False
 
     def to_dict(self) -> dict:
+        # NEVER include api_key on the wire — to_public_dict() masks it. The
+        # session is the response shape for /agent/sessions/<id>; without this,
+        # opening DevTools or any browser cache shows the raw key.
+        return {
+            "version": SESSION_VERSION,
+            "session_id": self.session_id,
+            "title": self.title,
+            "messages": self.messages,
+            "engine_config": self.engine_config.to_public_dict(),
+            "tool_state": self.tool_state,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "finished": self.finished,
+        }
+
+    def to_persisted_dict(self) -> dict:
+        """Disk shape — INCLUDES api_key so a panel restart doesn't lose it."""
         return {
             "version": SESSION_VERSION,
             "session_id": self.session_id,
@@ -88,11 +117,21 @@ def save_session(session: Session, state_dir: Path) -> None:
     session.updated_at = time.time()
     p = sessions_dir(state_dir) / f"{session.session_id}.json"
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(session.to_dict(), indent=2), encoding="utf-8")
+    # Persisted shape keeps api_key so the conversation can resume after a
+    # panel restart without the user re-entering their key.
+    tmp.write_text(json.dumps(session.to_persisted_dict(), indent=2), encoding="utf-8")
     os.replace(tmp, p)                              # atomic — never see half-write on read
+    # umask alone leaves these world-readable on most systems; the file holds
+    # the user's full conversation history (often with API keys baked in).
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
 
 
 def load_session(session_id: str, state_dir: Path) -> Session | None:
+    if not is_valid_session_id(session_id):
+        return None
     p = sessions_dir(state_dir) / f"{session_id}.json"
     if not p.is_file():
         return None
@@ -127,6 +166,8 @@ def list_sessions(state_dir: Path) -> list[dict]:
 
 
 def delete_session(session_id: str, state_dir: Path) -> bool:
+    if not is_valid_session_id(session_id):
+        return False
     p = sessions_dir(state_dir) / f"{session_id}.json"
     if p.is_file():
         p.unlink()

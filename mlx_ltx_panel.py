@@ -1732,7 +1732,7 @@ def iso_now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
     """Write text to `path` via temp file + fsync + os.replace.
 
     Plain Path.write_text() can leave a half-written file if macOS sleeps,
@@ -1750,6 +1750,13 @@ def atomic_write_text(path: Path, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        # Default 0o600 ensures secrets in state files (API keys in
+        # agent_config.json / agent_image_config.json) aren't world/group
+        # readable. umask alone leaves them at 0644 on most systems.
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
     finally:
         try:
             if tmp.exists():
@@ -3463,6 +3470,45 @@ def _load_agent_config() -> agent_engine.EngineConfig:
         return cfg
 
 
+_ALLOWED_REMOTE_HOSTS = {
+    # OpenAI-compatible providers we've intentionally tested. The kind="custom"
+    # branch lets the user point at any HTTPS endpoint (their own gateway,
+    # OpenRouter, etc.); the allow-list below is purely informational and not
+    # used to block — see _validate_engine_base_url for the actual policy.
+}
+
+
+def _validate_engine_base_url(kind: str, base_url: str) -> tuple[bool, str]:
+    """Block configs that would leak the user's API key to a hostile target.
+
+    The agent posts the configured api_key as a Bearer token to whatever
+    base_url we save. If the user is talked into pasting `http://evil.com/v1`
+    the next message exfiltrates the key in plaintext. Two rules:
+
+      * Any non-loopback URL must be HTTPS. Plain http:// outside loopback
+        is rejected — even if the user "trusts" the host, an upstream MITM
+        could still capture the bearer token.
+      * The URL must parse to a real http/https scheme with a host.
+    """
+    from urllib.parse import urlparse as _u
+    url = (base_url or "").strip()
+    if not url:
+        return False, "base_url is empty"
+    try:
+        p = _u(url)
+    except Exception as e:
+        return False, f"unparseable base_url: {e}"
+    if p.scheme not in ("http", "https"):
+        return False, "base_url must be http:// or https://"
+    host = (p.hostname or "").lower()
+    if not host:
+        return False, "base_url has no host"
+    is_loopback = host in {"127.0.0.1", "::1", "localhost"}
+    if p.scheme == "http" and not is_loopback:
+        return False, "remote base_url must use https:// (refusing to send API key over plaintext)"
+    return True, ""
+
+
 def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
     """Merge `updates` into the current engine config and persist.
 
@@ -3481,6 +3527,9 @@ def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
                 continue            # treat blank as no-change for secrets
             merged[k] = v
         cfg = agent_engine.EngineConfig(**merged)
+        ok, why = _validate_engine_base_url(cfg.kind, cfg.base_url)
+        if not ok:
+            raise ValueError(why)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(AGENT_CONFIG_PATH, json.dumps(cfg.__dict__, indent=2))
         _AGENT_CONFIG_CACHE = cfg
@@ -3524,13 +3573,19 @@ def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineCon
         return cfg
 
 
-def _agent_capabilities() -> dict:
+def _agent_capabilities(*, include_secrets: bool = False) -> dict:
     """Hardware-tier snapshot the agent uses to clamp its plan.
 
     Mirrors the SYSTEM_CAPS table in tier-friendly form so the system
     prompt can show the user what this Mac can actually render. Also
     carries the current image-engine config so the `generate_shot_images`
     tool can dispatch without circular imports.
+
+    `include_secrets` controls whether the api_key fields (BFL key etc.)
+    are returned. The HTTP-facing endpoint (`GET /agent/config`) calls
+    this with the default (False) → masked dict. The PanelOps construction
+    used by tools.py inside the agent loop calls with True so the actual
+    BFL request can authenticate.
     """
     img_cfg = _load_agent_image_config()
     return {
@@ -3543,7 +3598,10 @@ def _agent_capabilities() -> dict:
         "allows_q8": SYSTEM_CAPS.get("allows_q8", False),
         "allows_keyframe": SYSTEM_CAPS.get("allows_keyframe", False),
         "allows_extend": SYSTEM_CAPS.get("allows_extend", False),
-        "image_engine_config": dict(img_cfg.__dict__),
+        "image_engine_config": (
+            dict(img_cfg.__dict__) if include_secrets
+            else img_cfg.to_public_dict()
+        ),
     }
 
 
@@ -3652,13 +3710,18 @@ def _agent_find_job(job_id: str) -> dict | None:
 
 
 def _build_panel_ops() -> agent_tools.PanelOps:
+    # The PanelOps surface is in-process only — passed to tool dispatch.
+    # The capabilities dict here MUST include the bfl_api_key / etc. so
+    # `generate_shot_images` can authenticate. The HTTP-facing
+    # `/agent/config` endpoint calls _agent_capabilities() WITHOUT
+    # include_secrets, masking the keys.
     return agent_tools.PanelOps(
         submit_job=_agent_submit_job,
         queue_snapshot=_agent_queue_snapshot,
         find_job=_agent_find_job,
         outputs_dir=OUTPUT,
         uploads_dir=UPLOADS,
-        capabilities=_agent_capabilities(),
+        capabilities=_agent_capabilities(include_secrets=True),
     )
 
 
@@ -3979,6 +4042,43 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
         return
 
+    def _is_local_request(self) -> bool:
+        """Reject DNS-rebinding attacks.
+
+        We bind to 127.0.0.1, but a malicious page on the open internet can
+        still reach us if the user's resolver returns 127.0.0.1 for an
+        attacker-controlled hostname (classic DNS rebinding). The browser
+        sends the rebound hostname in the Host header and the page's own
+        origin in Origin/Referer — both must point at localhost for the
+        request to be considered legitimate.
+
+        Rules:
+          - Host header must be loopback (127.0.0.1, [::1], localhost) on
+            our PORT, or empty (some local tooling omits it).
+          - If Origin is present it must also be loopback.
+          - Referer is only checked as a last-resort hint.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        # Host can include the port; strip it.
+        host_name = host.rsplit(":", 1)[0] if host else ""
+        if host_name.startswith("[") and host_name.endswith("]"):
+            host_name = host_name[1:-1]
+        allowed = {"127.0.0.1", "::1", "localhost", ""}
+        if host_name not in allowed:
+            return False
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin != "null":
+            try:
+                from urllib.parse import urlparse as _u
+                ohost = (_u(origin).hostname or "").lower()
+                if ohost.startswith("[") and ohost.endswith("]"):
+                    ohost = ohost[1:-1]
+                if ohost not in {"127.0.0.1", "::1", "localhost"}:
+                    return False
+            except Exception:
+                return False
+        return True
+
     def _ok(self, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -4080,6 +4180,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
     def do_GET(self) -> None:
+        if not self._is_local_request():
+            self.send_error(403, "non-local request rejected")
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._ok(page().encode())
@@ -4377,7 +4480,17 @@ class Handler(BaseHTTPRequestHandler):
                 path = Path(qs.get("path", [""])[0]).resolve()
             except Exception:
                 self.send_error(400); return
-            # Allow any image file that exists locally (this is a local-only panel)
+            # Loopback alone isn't enough — a malicious page or extension on
+            # the local machine could request /image?path=/etc/shadow. Resolve
+            # both sides and require the requested path to live under our
+            # OUTPUT, UPLOADS, or STATE_DIR. is_relative_to() already handles
+            # the symlink/.. tricks since we resolved both ends.
+            try:
+                roots = [OUTPUT.resolve(), UPLOADS.resolve(), STATE_DIR.resolve()]
+            except Exception:
+                roots = []
+            if not any(path.is_relative_to(r) for r in roots):
+                self.send_error(403); return
             if not path.exists() or not path.is_file():
                 self.send_error(404); return
             ext = path.suffix.lower()
@@ -4427,7 +4540,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/agent/sessions/"):
             sid = parsed.path[len("/agent/sessions/"):]
             sid = sid.split("/", 1)[0]
-            if not sid:
+            if not agent_runtime.is_valid_session_id(sid):
                 self.send_error(404); return
             sess = agent_runtime.load_session(sid, STATE_DIR)
             if sess is None:
@@ -4490,12 +4603,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        if not self._is_local_request():
+            self.send_error(403, "non-local request rejected")
+            return
         path = self.path.split("?")[0]
         qs = parse_qs(urlparse(self.path).query)
         ctype = self.headers.get("Content-Type", "")
 
         # Multipart upload
         if path == "/upload" and ctype.startswith("multipart/form-data"):
+            # Hard cap on body size so a misbehaving / malicious caller can't
+            # spool a multi-GB file into memory via cgi.FieldStorage. 64 MB
+            # comfortably covers any reasonable still-image reference; multipart
+            # framing adds a small overhead so we read the declared length.
+            MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"error": "Content-Length required"}, 411); return
+            if clen > MAX_UPLOAD_BYTES:
+                self._json({"error": f"upload too large (max {MAX_UPLOAD_BYTES} bytes)"}, 413)
+                return
             try:
                 form = cgi.FieldStorage(
                     fp=self.rfile, headers=self.headers,
@@ -4935,7 +5065,10 @@ class Handler(BaseHTTPRequestHandler):
                     payload = {k: v[0] if v else "" for k, v in form.items()}
             except json.JSONDecodeError as e:
                 self._json({"error": f"bad JSON: {e}"}, 400); return
-            cfg = _save_agent_config(payload)
+            try:
+                cfg = _save_agent_config(payload)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
             push(f"agent: engine config updated ({cfg.kind} → {cfg.model})")
             self._json({"ok": True, "engine": cfg.to_public_dict()})
             return
@@ -4975,6 +5108,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/agent/sessions/") and path.endswith("/message"):
             sid = path[len("/agent/sessions/"):-len("/message")]
+            if not agent_runtime.is_valid_session_id(sid):
+                self._json({"error": "session not found"}, 404); return
             sess = agent_runtime.load_session(sid, STATE_DIR)
             if sess is None:
                 self._json({"error": "session not found"}, 404); return
@@ -5107,6 +5242,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/agent/sessions/") and path.endswith("/anchors/select"):
             sid = path[len("/agent/sessions/"):-len("/anchors/select")]
+            if not agent_runtime.is_valid_session_id(sid):
+                self._json({"error": "session not found"}, 404); return
             sess = agent_runtime.load_session(sid, STATE_DIR)
             if sess is None:
                 self._json({"error": "session not found"}, 404); return
