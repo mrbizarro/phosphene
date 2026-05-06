@@ -285,3 +285,47 @@ mlx_outputs/
   bypass of the audio-bearing pipeline.
 - **Branch policy** — every Agentic Flows commit lands on `dev` first.
   Promotion to `main` waits for explicit OK.
+
+## ✦ The agent-tool connection rule (binding)
+
+**Every new feature added to the manual UI must also be exposed to
+the agent as a tool.** No exceptions.
+
+The agent's value is "you can drive the panel by chatting." When a
+new manual control ships without a matching agent tool, the user has
+to drop out of chat to use it — defeats the point.
+
+How to honor this rule when adding a feature:
+
+1. **Implement the manual UI** in `mlx_ltx_panel.py` (HTML/JS) or
+   `agent/*.py` first. Get it working through the existing endpoints.
+2. **Decide the tool surface.** The tool name should match how the
+   user would describe the action ("install_lora", "extract_frame",
+   "set_quality"). Args mirror the most useful manual fields, defaults
+   are the panel's defaults.
+3. **Add the tool to `agent/tools.py`** with the `@tool("name")`
+   decorator. Wire it through `PanelOps` callbacks (no panel imports
+   inside the tools module — see existing pattern at the top of
+   `agent/tools.py`).
+4. **Document it in the system prompt** (`agent/prompts.py`,
+   `# Tools you can call` section + `# Director's craft` if it
+   changes the recommended workflow). The agent doesn't read this
+   doc — only its prompt.
+5. **Render the tool's results sanely.** If the result has visual
+   content (PNGs, clips), extend `renderToolResultCard()` in
+   `mlx_ltx_panel.py` so it surfaces the content inline.
+6. **Add a row to the Tool reference table above** in this file.
+7. **Update `docs/STATE.md`** with the new capability so future
+   Phosphene sessions discover it.
+
+Reference example: when LoRA management was added to the manual UI,
+the agent gained `install_lora`, `list_loras`, `select_lora` tools.
+When the keyframe-interpolation mode was added, `submit_shot` gained
+the `keyframes_json` arg. When project-notes shipped, the agent got
+`read_project_notes` + `append_project_notes`. The pattern is
+consistent — preserve it.
+
+Anti-pattern (don't do this): "I'll add this to the UI now and wire
+the agent later." Later never happens; the manual feature drifts
+ahead of the agent and the user develops a habit of using it manually
+even when chat would be faster.

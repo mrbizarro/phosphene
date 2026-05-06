@@ -59,6 +59,50 @@ A Pinokio Reset wipes the install dir but preserves all four — Salo can Reset 
 - Gallery with cache-bust URLs, no more black-clip race
 - 80+ GB less disk than pre-Y1.024 installs (filtered hf downloads)
 
+**Agentic Flows (v2.0.5+, May 6–7 2026)**
+- Engine kinds: `phosphene_local` (mlx-lm), `ollama`, `custom` (any
+  OpenAI-compat), `anthropic` (Messages API, native preset)
+- Two operating modes: `plan_sleep` (default — engine auto-stops after
+  agent's `finish` call so RAM goes back to LTX renderer) /
+  `interactive` (engine stays resident)
+- Sessions sidebar (Cmd+K) with pinned/preview/rename/delete + auto
+  search across titles
+- "Queue them" batch bar above composer for explicit user-driven batch
+- Multi-take per shot (`generate_shot_images append:true` adds Take
+  N+1 below previous)
+- Anchor pick / un-pick (re-click toggles), per-grid pick-state badge
+- Project notes file (`state/agent_project_notes.md`) +
+  `read_project_notes` / `append_project_notes` tools
+- read_document tool (txt/md inline; PDF if pypdf installed)
+- Image-engine plumbing: mock / mflux / bfl backends
+- RAM headroom chip in agent header — green/amber/red based on free
+  GB vs configured chat model size
+- Memory-pressure guard: refuses to auto-spawn local engine when system
+  is in swap or > 92% pressure
+- Reasoning-model handling — `engine.chat()` reads `message.reasoning`
+  separately from `message.content`; falls back when content is empty,
+  raises informative error on length truncation
+- Default `max_tokens` 8192 (was 3072 — too small for Qwen 3.6 / R1
+  thinking budgets)
+- Scroll-pinning + "↓ New messages" pill (no more auto-scroll yank)
+- Stop button on long turns; abort via AbortController
+- Offline banner (Phosphene-branded, pulsing) when /status fails
+  twice in a row
+- Phosphene-branded assistant avatar (favicon glyph, not "C")
+- Live phasing on typing indicator: "Calling submit_shot · 12s",
+  "Queued ce5c, planning next", etc.
+- One-click "Stop engine" button (frees ~22 GB without going to
+  Settings)
+- Plan/Interactive mode pill toggle in agent header
+
+**Frontend extraction (parked on `frontend-extraction` branch)**
+- `webapp/` directory: index.html, style/all.css, js/main.js,
+  vendor/marked.min.js + dompurify.min.js (MIT/Apache licenses)
+- Panel slimmed from 16,223 → 5,866 lines (-10,357)
+- New `/webapp/*` static route, `/api/page-config` endpoint
+- Markdown rendering swapped to `marked.parse + DOMPurify.sanitize`
+- Validated end-to-end on port 8210; merge to dev when reviewed
+
 ## 3. Marquee benchmarks (M4 Max 64 GB, sidecar-measured)
 
 | Recipe | 5 sec | 10 sec | 20 sec |
@@ -192,6 +236,20 @@ phosphene-dev.git/
 - **New clips appeared black for 2–3 minutes**: gallery race + browser cache holding incomplete bytes. Fixed in Y1.039 with in-flight skip + mtime cache-bust + `Cache-Control: no-cache`.
 - **S2 noir dialogue attribution swap**: "Same thing, honey" delivered by wrong character. Root cause: prompt format diverged from LTX docs. Documented in Linear HAI-152.
 - **v2.0.2 install sanity check broken by em-dash**: Pinokio shells mangled the unicode em-dash, triggering Python SyntaxError, falsely failing every install. Fixed in v2.0.4 (ASCII colon).
+
+### Fixed in v2.0.5 (May 6–7 2026, agentic-flows polish session)
+- **Stage NOW RENDERING stuck at 0%**: `current.progress` schema went from flat float to structured object (`{phase, phase_label, pct, elapsed_sec, eta_sec, denoise_step}`). Stage pane was calling `Number(progressObj)` → NaN → 0%. Fixed by reading `.pct` directly with backward-compat fallback to flat float.
+- **Offline banner was a 1990s solid-red bar**: floating Phosphene-pill at top-center, pulsing logo icon, three-part text, slide-in animation.
+- **Typing indicator stuck on "Drafting plan"**: only re-evaluated when message count grew. Now refreshes every 1.5s with elapsed seconds appended after 6s ("Thinking · 12s") and contextual phrases like "Calling submit_shot", "Queued ce5c, planning next".
+- **Auto-scroll fought the user**: every async render did `scrollTop = scrollHeight`, yanking users back when scrolled up. Now uses scroll-pinning — auto-scroll only when within 80px of bottom; "↓ New messages" pill appears otherwise.
+- **No abort on long turns**: × button on typing row aborts in-flight fetch via AbortController. Server-side run_turn keeps stepping until it finishes (no kill switch in runtime today); UI is unstuck immediately.
+- **Tool cards visually outweighed prose**: 3px accent borders + bold accent-bright + monospace 12px overpowered the assistant's planning text. Now muted 2px, smaller, near-transparent — reads as side metadata.
+- **Anchor selection only changeable, never removable**: re-clicking the same anchor un-picks it. Per-grid pick-state badge ("✓ picked" / "click to pick") visible at all times. Backend accepts empty `png_path` as remove signal.
+- **No batch trigger**: "Queue them" pill above composer when picks > submitted_shots. One-click injects a structured message authorizing the agent to submit each pick as i2v.
+- **Multiple takes lost previous**: same-label calls overwrote candidates. New `append:true` arg writes under `take_NN/` subdir + appends to `takes` array. Chat renders all takes stacked with "Take N / M" labels.
+- **Memory crashes from OOM**: macOS suspended Claude.app at 83 GB while LTX rendered + Qwen 35B occupied 22 GB. Memory guard now refuses to auto-spawn engine at >92% pressure or >8 GB swap. Plan-and-sleep mode auto-stops engine after `finish` so RAM goes back to renderer.
+- **Reasoning models returned empty content** (CRITICAL — found May 7 1am during overnight session): Qwen 3.6 Abliterated splits output into `message.reasoning` + `message.content`. With `max_tokens=3072`, reasoning consumed budget and content came back empty with `finish_reason="length"` → runtime saw empty assistant message → ended turn. Agent appeared "stuck". Fixed: bumped default to 8192, engine.chat() now reads reasoning, raises actionable error on length truncation, falls back to reasoning when content is empty.
+- **Agent identity drift**: avatar was orange "C" reading as generic chat bot. Now circular Phosphene logo (favicon glyph), label "Phosphene". Identity is the brand, not the underlying model.
 
 ### Open / partially understood
 - **KTDS install case** (Linear HAI-156): user reported `ModuleNotFoundError: No module named 'ltx_pipelines_mlx'` after a "green" install. Symptom is now possibly explained by the v2.0.2/v2.0.3 em-dash bug (the sanity check itself was broken, install completed green for the wrong reason). Asked for log tail + VERSION; pending response. Suggested fix: Reset → Install on v2.0.4.
