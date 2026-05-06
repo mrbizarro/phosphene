@@ -8526,6 +8526,54 @@ HTML = r"""<!doctype html>
       max-width: fit-content;
       animation: agent-fade-in 0.2s ease;
     }
+
+    /* Batch-now bar: appears above the composer when there are picked
+       anchors not yet submitted. One-click trigger to queue them all. */
+    .agent-batch-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 14px 9px 16px;
+      margin: 0 0 10px 0;
+      background: linear-gradient(135deg, rgba(63,185,80,0.10) 0%, rgba(47,129,247,0.08) 100%);
+      border: 1px solid rgba(63,185,80,0.35);
+      border-radius: 12px;
+      animation: agent-fade-in 0.22s ease;
+      box-shadow: 0 4px 16px rgba(63,185,80,0.06);
+    }
+    .agent-batch-bar[hidden] { display: none; }
+    .agent-batch-bar-text {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12.5px;
+      color: var(--text);
+    }
+    .agent-batch-bar-icon {
+      color: var(--success, #3fb950);
+      font-size: 14px;
+      line-height: 1;
+    }
+    .agent-batch-bar-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--success, #3fb950);
+      color: #04130a;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: filter 0.15s, transform 0.15s;
+      width: auto;
+      flex: 0 0 auto;
+    }
+    .agent-batch-bar-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    .agent-batch-bar-btn:active { transform: translateY(0); }
+    .agent-batch-bar-btn svg { flex-shrink: 0; }
     .agent-ref-chip.visible { display: inline-flex; }
     .agent-ref-chip .ref-icon {
       font-size: 11px;
@@ -9508,6 +9556,25 @@ HTML = r"""<!doctype html>
       <div class="agent-chat" id="agentChat"></div>
 
       <div class="agent-composer">
+        <!-- Batch-now bar: surfaces when the user has picked anchors that
+             haven't yet been queued. One click injects a structured message
+             telling the agent to submit each pick as i2v with the durations
+             it already proposed. The agent's existing prompt covers the
+             phrasing; we just trigger it. -->
+        <div class="agent-batch-bar" id="agentBatchBar" hidden>
+          <div class="agent-batch-bar-text">
+            <span class="agent-batch-bar-icon">✦</span>
+            <span id="agentBatchBarSummary">…</span>
+          </div>
+          <button type="button" class="agent-batch-bar-btn"
+                  onclick="agentBatchQueue()">
+            <span>Queue them</span>
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"/>
+              <polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </button>
+        </div>
         <!-- Reference chip: appears when the user clicks Refine on an
              existing clip. Carries the clip's job_id; on Send, we
              prepend "Refine <job_id>: " to the user's message so the
@@ -13875,8 +13942,10 @@ async function agentLoadSession(sid) {
     window.AGENT.sessionId = sid;
     const sess = j.session || {};
     window.AGENT.selectedAnchors = (sess.tool_state || {}).selected_anchors || {};
+    window.AGENT.submittedShots = (sess.tool_state || {}).submitted_shots || [];
     agentSetSessionTitle(sess.title || 'Untitled', sid);
     agentRender(j.rendered_messages || []);
+    agentRenderBatchBar();
   } catch (e) { console.error('agentLoadSession', e); }
 }
 
@@ -14680,6 +14749,57 @@ async function agentPickAnchor(label, cand, gridEl) {
   } catch (e) {
     console.error('agentPickAnchor', e);
   }
+  agentRenderBatchBar();
+}
+
+// Sticky bar above the composer that surfaces "you've picked anchors;
+// click here to queue them all". Drives the user's promised "Ok now batch
+// everything" workflow. Counts picked shots vs already-submitted shots
+// (matched by `label`); shows when picks > submitted.
+function agentRenderBatchBar() {
+  const bar = document.getElementById('agentBatchBar');
+  const text = document.getElementById('agentBatchBarSummary');
+  if (!bar || !text) return;
+  const picks = window.AGENT.selectedAnchors || {};
+  const pickLabels = Object.keys(picks).filter(k => (picks[k] || {}).png_path);
+  // submitted_shots lives on the loaded session; we cache it on AGENT.
+  const submitted = (window.AGENT.submittedShots || []);
+  const submittedLabels = new Set(submitted.map(s => (s.label || '').trim()).filter(Boolean));
+  const pendingLabels = pickLabels.filter(l => !submittedLabels.has(l));
+  if (pendingLabels.length === 0 || window.AGENT.busy) {
+    bar.hidden = true;
+    return;
+  }
+  const total = pickLabels.length;
+  text.textContent = pendingLabels.length === total
+    ? `${total} anchor${total === 1 ? '' : 's'} picked · ready to render`
+    : `${pendingLabels.length} of ${total} picks not yet queued`;
+  bar.hidden = false;
+}
+
+// User clicked "Queue them" — inject a structured message that prompts
+// the agent to submit each picked anchor as i2v, using durations from the
+// plan it already produced. Mirrors how the user would say it themselves
+// ("ok let's batch everything") — we just save them the typing.
+function agentBatchQueue() {
+  const input = document.getElementById('agentInput');
+  if (!input) return;
+  const picks = window.AGENT.selectedAnchors || {};
+  const pickLabels = Object.keys(picks).filter(k => (picks[k] || {}).png_path);
+  const submitted = (window.AGENT.submittedShots || []);
+  const submittedLabels = new Set(submitted.map(s => (s.label || '').trim()).filter(Boolean));
+  const pending = pickLabels.filter(l => !submittedLabels.has(l));
+  if (pending.length === 0) return;
+  const list = pending.map(l => `- ${l}`).join('\n');
+  input.value =
+    `Queue every picked anchor as an i2v shot now using the durations and prompts from your plan. ` +
+    `Use balanced quality + Sharp 720p unless I overrode that earlier. ` +
+    `Pending picks:\n${list}\n` +
+    `Submit them in plan order, then call finish. Don't ask for confirmation — go.`;
+  agentAutoResize(input);
+  agentUpdateSendState();
+  // Auto-fire — the user clicked the button, so they consented.
+  agentSend();
 }
 
 function summarizeToolCall(call) {
@@ -15791,6 +15911,13 @@ async function agentStageTick() {
     ]);
     agentStageRender(statusResp, sessResp);
     agentRenderRamChip(statusResp);
+    // Keep submittedShots cache + batch bar in sync with the live session.
+    if (sessResp && sessResp.session && sessResp.session.tool_state) {
+      const ts = sessResp.session.tool_state;
+      window.AGENT.submittedShots = ts.submitted_shots || [];
+      window.AGENT.selectedAnchors = ts.selected_anchors || window.AGENT.selectedAnchors || {};
+      agentRenderBatchBar();
+    }
   } catch(e) {
     /* swallow — next tick retries */
   }
