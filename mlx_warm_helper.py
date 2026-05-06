@@ -578,6 +578,7 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             num_frames=kwargs["num_frames"],
             seed=kwargs["seed"],
             num_steps=kwargs["num_steps"],
+            frame_rate=kwargs.get("frame_rate", 24.0),
         )
     return pipe.generate(
         prompt=kwargs["prompt"],
@@ -586,6 +587,7 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
         num_frames=kwargs["num_frames"],
         seed=kwargs["seed"],
         num_steps=kwargs["num_steps"],
+        frame_rate=kwargs.get("frame_rate", 24.0),
     )
 
 
@@ -1026,6 +1028,7 @@ for line in sys.__stdin__:
                 num_frames=int(p["frames"]),
                 seed=seed,
                 num_steps=int(p.get("steps", 8)),
+                frame_rate=float(p.get("frame_rate", 24.0)),
             )
             # Y1.037: short-clip VAE-streaming opt-out. Set the env var BEFORE
             # generate() so it propagates through the whole chain (the patched
@@ -1072,7 +1075,7 @@ for line in sys.__stdin__:
                     emit({"event": "log", "line": "Sharper upscale requested but model weights missing — falling back to Lanczos."})
 
             if use_model_upscale:
-                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})
+                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})
                 # Step 1: generate latents (no save)
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
@@ -1087,17 +1090,17 @@ for line in sys.__stdin__:
                 # Free the upscaler before VAE decode (can be ~2-3 GB peak).
                 _free_upscaler()
                 # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
-                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"])
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], fps=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
             else:
-                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f steps={kwargs['num_steps']} accel={accel_mode}"})
+                emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
                 emit({"event": "log", "line": "step:free_generation_modules start"})
                 _free_pipe_for_decode(pipe)
                 emit({"event": "log", "line": "step:free_generation_modules done"})
                 emit({"event": "log", "line": "step:decode_and_save start"})
-                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"])
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], fps=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()

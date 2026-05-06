@@ -18,6 +18,11 @@ Upstream issues we patch around:
    temporal tiled_decode() automatically for longer clips, with
    LTX_VAE_STREAMING=0/1 override.
 
+4. TextToVideoPipeline / ImageToVideoPipeline have fps-aware position helpers
+   in ltx-core-mlx, but the one-stage pipeline hardcodes 24fps at the call
+   site. Patched to expose frame_rate so Phosphene can offer an explicit
+   "12 → 24fps" long-clip mode without desynchronizing generated audio.
+
 Known unfixed: KeyframeInterpolationPipeline OOMs at the stage-1 → stage-2
 transition on 64 GB Macs at full resolution. We tried freeing/reloading
 the DiT around the upscale and it didn't help. Worked around in the panel
@@ -374,6 +379,90 @@ def apply_patch(target: Path, old: str, new: str, marker: str, label: str,
     return OUTCOME_APPLIED
 
 
+def apply_one_stage_fps_patch(target: Path | None) -> str:
+    """Expose frame_rate on the one-stage T2V/I2V pipeline.
+
+    This is a multi-anchor patch because older installs may already have our
+    I2V memory patches applied, which changes the exact generate_and_save()
+    body. Keep it narrow and verify the final required markers instead of
+    replacing one large fragile block.
+    """
+    label = "one-stage frame_rate (12→24fps long clips)"
+    if target is None or not target.exists():
+        print(f"  [{label}] MISSING — target file not found", file=sys.stderr)
+        return OUTCOME_MISSING
+    text = target.read_text()
+    required = (
+        "frame_rate: float = 24.0",
+        "compute_audio_token_count(num_frames, fps=frame_rate)",
+        "compute_video_positions(F, H, W, fps=frame_rate)",
+        "fps=frame_rate",
+    )
+    if all(marker in text for marker in required):
+        print(f"  [{label}] already patched: {target}")
+        return OUTCOME_ALREADY
+
+    original = text
+    replacements = [
+        (
+            "        num_steps: int | None = None,\n"
+            "    ) -> tuple[mx.array, mx.array]:",
+            "        num_steps: int | None = None,\n"
+            "        frame_rate: float = 24.0,\n"
+            "    ) -> tuple[mx.array, mx.array]:",
+        ),
+        (
+            "        num_steps: int | None = None,\n"
+            "    ) -> str:",
+            "        num_steps: int | None = None,\n"
+            "        frame_rate: float = 24.0,\n"
+            "    ) -> str:",
+        ),
+        (
+            "        audio_T = compute_audio_token_count(num_frames)",
+            "        audio_T = compute_audio_token_count(num_frames, fps=frame_rate)",
+        ),
+        (
+            "        video_positions = compute_video_positions(F, H, W)",
+            "        video_positions = compute_video_positions(F, H, W, fps=frame_rate)",
+        ),
+        (
+            "            num_steps=num_steps,\n"
+            "        )",
+            "            num_steps=num_steps,\n"
+            "            frame_rate=frame_rate,\n"
+            "        )",
+        ),
+        (
+            "return super().generate_and_save(prompt, output_path, height, width, num_frames, seed, num_steps)",
+            "return super().generate_and_save(prompt, output_path, height, width, num_frames, seed, num_steps, frame_rate)",
+        ),
+        (
+            "return self._decode_and_save_video(video_latent, audio_latent, output_path)",
+            "return self._decode_and_save_video(video_latent, audio_latent, output_path, fps=frame_rate)",
+        ),
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+
+    if text == original:
+        print(
+            f"  [{label}] DRIFT — no fps anchors matched in {target}.",
+            file=sys.stderr,
+        )
+        return OUTCOME_DRIFT
+    if not all(marker in text for marker in required):
+        missing = [marker for marker in required if marker not in text]
+        print(
+            f"  [{label}] DRIFT — patch incomplete in {target}; missing {missing}",
+            file=sys.stderr,
+        )
+        return OUTCOME_DRIFT
+    _atomic_write(target, text)
+    print(f"  [{label}] patched {target}")
+    return OUTCOME_APPLIED
+
+
 def main() -> int:
     print("Applying LTX23MLX patches:")
     outcomes: list[tuple[str, str]] = []
@@ -467,6 +556,13 @@ def main() -> int:
         label="VAE temporal streaming decode",
     )
     outcomes.append(("VAE temporal streaming decode", vae_stream_outcome))
+
+    # Patch 6: expose frame_rate in the one-stage T2V/I2V path. This is the
+    # shippable hook for the panel's explicit Long Clip Boost mode: generate
+    # fewer semantic frames at 12fps, keep LTX audio duration aligned, then
+    # interpolate the delivered export back to 24fps.
+    fps_outcome = apply_one_stage_fps_patch(i2v_target)
+    outcomes.append(("one-stage frame_rate (12→24fps long clips)", fps_outcome))
 
     # (Keyframe OOM patch was removed — see NOTE in the patches block above.
     #  The fix is currently a panel-side resolution clamp, not a pipeline edit.)

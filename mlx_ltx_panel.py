@@ -2554,7 +2554,21 @@ def run_pipersr_tracked(source: Path, output: Path, mode: str, crf: str,
 
 
 def video_duration(frames: int) -> float:
-    return round(frames / FPS, 3)
+    # LTX 2.x uses frame counts shaped like 8k+1. The encoded file contains
+    # the intervals between those endpoints, so 121 means exactly 5.0s at
+    # 24fps, not 5.0417s.
+    return round(max(0.0, (max(1, int(frames)) - 1) / FPS), 3)
+
+
+def _frames_to_model_duration(frames: int, fps: float = FPS) -> float:
+    """LTX frame counts are 8k+1; the interval duration is (frames - 1) / fps."""
+    return max(0.0, (max(1, int(frames)) - 1) / float(fps))
+
+
+def _duration_to_8k_frames(duration_sec: float, fps: float) -> int:
+    """Nearest LTX-compatible frame count for a duration/fps pair."""
+    k = max(1, int(round(max(0.0, duration_sec) * float(fps) / 8.0)))
+    return k * 8 + 1
 
 
 def stop_current_job(timeout: float = 5.0) -> None:
@@ -2614,6 +2628,9 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         requested_upscale_method = "lanczos"
     if requested_upscale_method not in ("lanczos", "pipersr"):
         requested_upscale_method = "lanczos"
+    temporal_mode = f("temporal_mode", "native").strip().lower()
+    if temporal_mode not in ("native", "fps12_interp24"):
+        temporal_mode = "native"
 
     return {
         "id": _new_job_id(),
@@ -2649,6 +2666,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "label": f("preset_label", "") or None,
             "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
+            "temporal_mode": temporal_mode,         # native / fps12_interp24
             "upscale": upscale,                     # off / fit_720p / x2
             "upscale_method": requested_upscale_method,   # lanczos / pipersr
             # LoRAs the user has enabled for this job. The UI submits a
@@ -2907,6 +2925,33 @@ def run_job_inner(job: dict) -> None:
     width, height = p["width"], p["height"]
     frames = p["frames"]
     quality = p.get("quality", "standard")
+    temporal_mode = (p.get("temporal_mode") or "native").strip().lower()
+    if temporal_mode not in ("native", "fps12_interp24"):
+        temporal_mode = "native"
+    temporal_supported = mode in ("t2v", "i2v") and quality != "high"
+    if temporal_mode != "native" and not temporal_supported:
+        push("Long Clip Boost is only available for Q4 Text/Image renders; using native 24fps.")
+        temporal_mode = "native"
+    p["temporal_mode"] = temporal_mode
+
+    delivery_fps = float(FPS)
+    model_fps = delivery_fps
+    model_frames = frames
+    temporal_plan = None
+    if temporal_mode == "fps12_interp24":
+        model_fps = 12.0
+        requested_duration = _frames_to_model_duration(frames, delivery_fps)
+        model_frames = _duration_to_8k_frames(requested_duration, model_fps)
+        temporal_plan = {
+            "mode": "fps12_interp24",
+            "label": "12 → 24 fps",
+            "model_fps": model_fps,
+            "delivery_fps": delivery_fps,
+            "source_frames": model_frames,
+            "delivery_frames": frames,
+            "requested_duration_sec": round(requested_duration, 3),
+            "method": "ffmpeg_minterpolate_mci",
+        }
 
     # T2V/I2V resolution clamp — only applies on the base tier (< 48 GB).
     # Standard / high / pro tiers pass full user-requested W×H through.
@@ -2934,6 +2979,9 @@ def run_job_inner(job: dict) -> None:
     if needs_mux:
         raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
         final_out = OUTPUT / f"mlx_{tag}_{suffix}_{frames}f_{stamp}.mp4"
+    elif temporal_plan:
+        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{model_frames}f_12fps_{stamp}.mp4"
+        final_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_12to24_{stamp}.mp4"
     else:
         # Single file — name it as the final, no `_raw` suffix.
         raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}.mp4"
@@ -3009,7 +3057,8 @@ def run_job_inner(job: dict) -> None:
                 "output_path": str(raw_out),
                 "height": height,
                 "width": width,
-                "frames": frames,
+                "frames": model_frames,
+                "frame_rate": model_fps,
                 "steps": p["steps"],
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
@@ -3022,14 +3071,20 @@ def run_job_inner(job: dict) -> None:
                 "upscale_method": "lanczos",
             },
         }
+        temporal_suffix = ""
+        if temporal_plan:
+            temporal_suffix = (
+                f" · Long Clip Boost {model_frames}f@{model_fps:g}fps"
+                f" → {frames}f@{delivery_fps:g}fps"
+            )
         if loras:
             push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
-                 f"{width}x{height} {frames}f · {len(loras)} LoRA"
+                 f"{width}x{height} {model_frames}f · {len(loras)} LoRA"
                  f"{'s' if len(loras) != 1 else ''}"
-                 f"{' (incl. HDR)' if p.get('hdr') else ''}")
+                 f"{' (incl. HDR)' if p.get('hdr') else ''}{temporal_suffix}")
         else:
             push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
-                 f"{width}x{height} {frames}f")
+                 f"{width}x{height} {model_frames}f{temporal_suffix}")
 
     result = HELPER.run(job_spec)
     if "seed_used" in result:
@@ -3062,6 +3117,35 @@ def run_job_inner(job: dict) -> None:
             str(final_out),
         ]
         run_ffmpeg_tracked(mux_cmd, "Mux")
+        final_target = final_out
+
+    if temporal_plan:
+        codec = output_codec_settings()
+        mux_pix_fmt = codec["pix_fmt"]
+        mux_crf = codec["crf"]
+        temporal_preset = os.environ.get("LTX_TEMPORAL_PRESET", "medium")
+        temporal_cmd = [
+            str(FFMPEG), "-y", "-i", str(final_target),
+            "-vf", f"minterpolate=fps={FPS}:mi_mode=mci:mc_mode=aobmc:vsbmc=1",
+            "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
+            "-preset", temporal_preset,
+            "-movflags", "+faststart",
+            "-c:a", "copy",
+            "-t", f"{video_duration(frames)}",
+            str(final_out),
+        ]
+        run_ffmpeg_tracked(temporal_cmd, "Long Clip Boost")
+        temporal_plan |= {
+            "source": str(final_target),
+            "output": str(final_out),
+            "codec": output_codec_settings(),
+            "encode_preset": temporal_preset,
+        }
+        set_hidden(str(final_target), True)
+        push(
+            f"Long Clip Boost done → {final_out.name} "
+            f"({model_frames}f @ {model_fps:g}fps interpolated to {frames}f @ {FPS}fps)"
+        )
         final_target = final_out
 
     native_target = final_target
@@ -3119,6 +3203,9 @@ def run_job_inner(job: dict) -> None:
         "params": {
             **p,
             "pad_w": pad_w, "pad_h": pad_h,
+            "model_frames": model_frames if temporal_plan else frames,
+            "model_fps": model_fps if temporal_plan else FPS,
+            "delivery_fps": delivery_fps if temporal_plan else FPS,
             "image": p["image"] if mode != "t2v" else None,
             "audio": p["audio"] if mode == "i2v_clean_audio" else None,
         },
@@ -3132,6 +3219,8 @@ def run_job_inner(job: dict) -> None:
     }
     if result.get("accel_metrics"):
         sidecar["accel_metrics"] = result["accel_metrics"]
+    if temporal_plan:
+        sidecar["temporal"] = temporal_plan
     if upscale_plan:
         sidecar["upscale"] = {
             k: v for k, v in upscale_plan.items()
@@ -5901,6 +5990,7 @@ HTML = r"""<!doctype html>
       </div>
       <input type="hidden" name="quality" id="quality" value="balanced">
       <input type="hidden" name="accel" id="accel" value="off">
+      <input type="hidden" name="temporal_mode" id="temporal_mode" value="native">
       <input type="hidden" name="upscale" id="upscale" value="fit_720p">
 
       <div id="warnBanner" class="warn-banner"></div>
@@ -6182,6 +6272,20 @@ HTML = r"""<!doctype html>
                 <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
                 <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">~10-15% faster</span></button>
                 <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">~20-25% faster</span></button>
+              </div>
+            </div>
+
+            <!-- Long Clip Boost — asks LTX 2.3 to generate fewer semantic
+                 frames at 12fps, then exports a normal 24fps file with
+                 motion interpolation. This is explicit because dialogue,
+                 lip-sync, and fast motion need user judgment. -->
+            <div class="cz-control" id="temporalRow">
+              <div class="cz-label">Long clips
+                <span class="cz-label-hint">experimental temporal interpolation</span>
+              </div>
+              <div class="pill-group cols-2" id="temporalGroup">
+                <button type="button" class="pill-btn active" data-temporal="native"><span>Native</span><span class="sub">24fps from LTX</span></button>
+                <button type="button" class="pill-btn" data-temporal="fps12_interp24"><span>12 → 24fps</span><span class="sub">half frames · interpolated</span></button>
               </div>
             </div>
 
@@ -6646,6 +6750,7 @@ function setMode(mode) {
     setQuality('high');
   }
   updateAccelAvailability();
+  updateTemporalAvailability();
   updateDerived();
   // Refresh the inline models card immediately — switching to FFLF when
   // Q8 is missing should surface the Download Q8 CTA without waiting for
@@ -6684,6 +6789,7 @@ function setQuality(q) {
   if (aspectRow) aspectRow.style.display = (q === 'quick') ? 'none' : '';
   applyQuality();
   updateAccelAvailability();
+  updateTemporalAvailability();
   updateCustomizeSummary();
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
@@ -6692,6 +6798,19 @@ function setAccel(a) {
   const v = allowed ? a : 'off';
   document.getElementById('accel').value = v;
   document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.accel === v));
+  updateCustomizeSummary();
+  updateDerived();
+}
+function temporalModeAllowed() {
+  const q = document.getElementById('quality').value;
+  const mode = document.getElementById('mode').value;
+  return q !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe' && (mode === 't2v' || mode === 'i2v');
+}
+function setTemporalMode(t) {
+  const allowed = temporalModeAllowed();
+  const v = (allowed && t === 'fps12_interp24') ? 'fps12_interp24' : 'native';
+  document.getElementById('temporal_mode').value = v;
+  document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.temporal === v));
   updateCustomizeSummary();
   updateDerived();
 }
@@ -6723,6 +6842,19 @@ function updateAccelAvailability() {
     b.classList.toggle('disabled', disabled);
   });
   if (!allowed && document.getElementById('accel').value !== 'off') setAccel('off');
+}
+function updateTemporalAvailability() {
+  const allowed = temporalModeAllowed();
+  document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => {
+    const disabled = !allowed && b.dataset.temporal !== 'native';
+    b.classList.toggle('disabled', disabled);
+    if (b.dataset.temporal === 'fps12_interp24') {
+      b.title = allowed
+        ? 'Generate at 12fps, then interpolate to a normal 24fps export.'
+        : 'Available for Q4 Text/Image renders. Off for High, FFLF, Extend, and external-audio I2V.';
+    }
+  });
+  if (!allowed && document.getElementById('temporal_mode').value !== 'native') setTemporalMode('native');
 }
 function setAspect(a) {
   if (!ASPECTS[a]) return;
@@ -6756,6 +6888,9 @@ function updateCustomizeSummary() {
   }
   // Speed
   parts.push(accel === 'off' ? 'exact speed' : (accel === 'boost' ? 'boost' : 'turbo'));
+  if ((document.getElementById('temporal_mode')?.value || 'native') === 'fps12_interp24') {
+    parts.push('12→24fps long clip');
+  }
   const method = (document.getElementById('upscale_method')?.value || 'lanczos');
   const methodTag = method === 'pipersr' || method === 'model' ? ' sharp' : '';
   if (upscale === 'fit_720p') parts.push('720p export' + methodTag);
@@ -6777,6 +6912,7 @@ function setExtendMode(m) {
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
 document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setAccel(b.dataset.accel); });
+document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setTemporalMode(b.dataset.temporal); });
 document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
 document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
@@ -6838,6 +6974,9 @@ syncExtendDuration();   // initialize on load
 document.getElementById('i2vMode').addEventListener('change', () => {
   document.getElementById('audioSection').classList.toggle('show', document.getElementById('i2vMode').value === 'i2v_clean_audio');
   if (currentMode === 'i2v') document.getElementById('mode').value = document.getElementById('i2vMode').value;
+  updateTemporalAvailability();
+  updateCustomizeSummary();
+  updateDerived();
 });
 
 function applyAspect(key) {
@@ -6903,7 +7042,7 @@ function updateDerived() {
   const w = parseInt(document.getElementById('width').value || 0);
   const h = parseInt(document.getElementById('height').value || 0);
   const f = parseInt(document.getElementById('frames').value || 0);
-  const dur = (f / FPS).toFixed(2);
+  const dur = framesToDuration(f);
 
   const upscale = document.getElementById('upscale')?.value || 'off';
   let finalRes = `<strong>${w}×${h}</strong>`;
@@ -6922,8 +7061,15 @@ function updateDerived() {
   }
   const accel = document.getElementById('accel')?.value || 'off';
   const accelText = accel === 'off' ? '' : ` · ${accel === 'turbo' ? 'Turbo' : 'Boost'}`;
+  const temporal = document.getElementById('temporal_mode')?.value || 'native';
+  let temporalText = '';
+  if (temporal === 'fps12_interp24') {
+    const intervalSec = Math.max(0, (f - 1) / FPS);
+    const sourceFrames = Math.max(1, Math.round(intervalSec * 12 / 8)) * 8 + 1;
+    temporalText = ` · LTX ${sourceFrames}f @ 12fps → ${FPS}fps`;
+  }
 
-  document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps · ${finalRes} · Steps ${document.getElementById('steps').value}${accelText}`;
+  document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps${temporalText} · ${finalRes} · Steps ${document.getElementById('steps').value}${accelText}`;
 
   const warns = [];
   if (w % 32 !== 0) warns.push(`Width ${w} isn't a multiple of 32 (closest ${Math.round(w/32)*32})`);
@@ -6931,6 +7077,9 @@ function updateDerived() {
   if (f > 1 && (f - 1) % 8 !== 0) {
     const closest = Math.max(1, Math.round((f - 1) / 8) * 8 + 1);
     warns.push(`Frames work best as 8k+1 (closest ${closest})`);
+  }
+  if (temporal === 'fps12_interp24') {
+    warns.push('12→24fps is experimental; check dialogue lip-sync and fast motion');
   }
   const banner = document.getElementById('warnBanner');
   if (warns.length) { banner.innerHTML = '⚠ ' + warns.join(' · '); banner.classList.add('show'); }
@@ -7579,6 +7728,7 @@ async function loadParams() {
   if (p.width) document.getElementById('width').value = p.width;
   if (p.height) document.getElementById('height').value = p.height;
   if (p.accel) setAccel(p.accel);
+  if (p.temporal_mode) setTemporalMode(p.temporal_mode);
   if (p.upscale) setUpscale(p.upscale);
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);
   document.getElementById('prompt').value = p.prompt || '';
@@ -7733,6 +7883,14 @@ function renderOutputInfoBody(path, data) {
       : '';
     const savingsText = savings != null ? ` · ~${escapeHtml(String(savings))}% denoise calls saved` : '';
     genRows.push(`<dt>Accel metrics</dt><dd>${cachedCount}/${totalSteps} cached${savingsText}${cachedList}</dd>`);
+  }
+  if (p.temporal_mode === 'fps12_interp24' || data.temporal) {
+    const t = data.temporal || {};
+    const sourceFrames = t.source_frames || p.model_frames || '—';
+    const deliveryFrames = t.delivery_frames || p.frames || '—';
+    const sourceFps = t.model_fps || p.model_fps || 12;
+    const deliveryFps = t.delivery_fps || p.delivery_fps || 24;
+    genRows.push(`<dt>Long clips</dt><dd>12 → 24fps · LTX ${escapeHtml(String(sourceFrames))}f @ ${escapeHtml(String(sourceFps))}fps → ${escapeHtml(String(deliveryFrames))}f @ ${escapeHtml(String(deliveryFps))}fps</dd>`);
   }
   if (p.upscale && p.upscale !== 'off') {
     const up = data.upscale || {};
