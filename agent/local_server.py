@@ -78,14 +78,31 @@ def start(model_path: str, *, venv_python: str, log_sink=None) -> dict:
             _LAST_ERROR = f"venv python not found: {venv_python}"
             return _status_locked()
 
-        # Conservative concurrency. mlx-lm 0.31.1 has a known KV-cache merge
-        # bug in `_merge_caches` (BatchRotatingKVCache.merge) that fires
-        # under multi-prompt batching, manifesting as
-        # `ValueError: [broadcast_shapes] Shapes (1,8,N+1,256) and
-        # (1,8,N,256) cannot be broadcast.` mid-generation, hanging the
-        # request until the client times out. Setting prompt/decode
-        # concurrency to 1 takes that code path out of play. The agent
-        # is a single-user feature anyway — there's nothing to batch.
+        # Defensive flags for mlx-lm 0.31.1.
+        #
+        # Bug reproduced 2026-05-06: the multi-message agent loop hits
+        # `_merge_caches` → `BatchRotatingKVCache.merge` (mlx_lm/models/
+        # cache.py:1364) and raises
+        #   ValueError: [broadcast_shapes] Shapes (1,8,N,256) and
+        #               (1,8,1024,256) cannot be broadcast.
+        # mid-generation, hanging the request until the client times out
+        # (300 s default). The shapes match Gemma's sliding-window
+        # rotating cache (window=1024); merging caches that crossed the
+        # window with caches that didn't gives mismatched temporal axes.
+        #
+        # Repro details: every second multi-turn request, with a long
+        # system prompt (~3.5 k tokens) and a tool-result-bearing user
+        # turn, triggers it reliably. `--prompt-concurrency 1` alone is
+        # insufficient — the merge fires across cache *snapshots* even
+        # for a single in-flight request.
+        #
+        # The combination below sidesteps both code paths:
+        #   - --prompt-cache-size 0 keeps zero distinct caches between
+        #     requests, so nothing to merge across the request boundary.
+        #   - --prefill-step-size 8192 prefills the entire prompt as
+        #     one chunk for any prompt under 8 k tokens (our system +
+        #     tool-result history fits comfortably), so chunked-prefill
+        #     caches never need merging within a request either.
         cmd = [
             venv_python, "-m", "mlx_lm.server",
             "--model", model_path,
@@ -94,6 +111,8 @@ def start(model_path: str, *, venv_python: str, log_sink=None) -> dict:
             "--log-level", "WARNING",
             "--prompt-concurrency", "1",
             "--decode-concurrency", "1",
+            "--prompt-cache-size", "0",
+            "--prefill-step-size", "8192",
         ]
         env = os.environ.copy()
         # mlx-lm honors HF_HOME for model cache lookup. The bundled

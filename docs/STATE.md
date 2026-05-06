@@ -1,6 +1,7 @@
 # Phosphene — project state, history, open work
 
-Current version: **v2.0.4** on `dev` and `main` (commit `74c7bd1`, May 5 2026).
+Current version: **v2.0.4** on `main` (commit `74c7bd1`, May 5 2026).
+Latest on `dev`: **Agentic Flows + multi-keyframe Layer 2** (May 6 2026, awaiting promotion).
 Live URL: `https://github.com/mrbizarro/phosphene` · Linear project: `https://linear.app/hairstylemojo/project/phosphene-9c11240704bb`
 
 This doc is the **session-start handoff**. A new Claude window entering this project should read this first, then `CLAUDE.md` (architecture), then the relevant Linear issues.
@@ -205,11 +206,11 @@ Everything below is also tracked in Linear (HAI-150 → HAI-158 under the Phosph
 **TL;DR**: ComfyGuy9000 demoed first-frame-last-frame method via `Deno2026/comfyui-deno-custom-nodes`. Phosphene's `ltx_pipelines_mlx.KeyframeInterpolationPipeline` already accepts arbitrary `list[Image]` keyframes + `list[int]` indices — but our panel/helper artificially restrict it to 2 keyframes (start + end). Exposing the full multi-keyframe API gives us the agentic-flow compositional primitive: agent picks N stills, model fills the motion, character is anchored at every shot start.
 
 **Status (2026-05-06)**:
-- **Layer 1 — DONE.** Helper `generate_keyframe` action accepts arbitrary `keyframe_images` + `keyframe_indices` lists, with strict validation. Backward-compatible with the old `start_image`/`end_image` shape so the panel keeps working. Full agent contract in `docs/SDK_KEYFRAME_INTERPOLATION.md` § Agent API contract.
-- **Layer 2 (panel HTTP form-parsing) — NOT YET.** Needed if agents want to POST through the panel queue instead of talking to the helper directly via stdin.
-- **Layer 3 (panel UI multi-row keyframe list) — NOT YET.**
+- **Layer 1 — DONE.** Helper `generate_keyframe` action accepts arbitrary `keyframe_images` + `keyframe_indices` lists, with strict validation. Backward-compatible with the old `start_image`/`end_image` shape so the panel keeps working.
+- **Layer 2 — DONE (commit 1afa1be).** `mlx_ltx_panel.py:make_job` reads a `keyframes_json` form field (JSON-encoded list of `{image_path, frame_index}` plus a `keyframes_total_frames` companion). The keyframe branch in `run_job_inner` decodes, validates strictly-increasing indices within `[0, frames-1]`, and forwards `keyframe_images` + `keyframe_indices` arrays to the helper. Backward compat preserved: empty `keyframes_json` falls back to `start_image`/`end_image`.
+- **Layer 3 (panel UI multi-row keyframe list) — NOT YET.** The manual UI still has 2 drop-zones. Agents already use the full primitive via `submit_shot(keyframes=[{image_path, frame_index}, ...])`.
 
-**Today's agent path**: spawn a helper subprocess and write JSON jobs to its stdin. See the doc for a working Python example.
+**Today's agent path**: through the panel — `agent.tools.submit_shot` composes the form including `keyframes_json` and POSTs to `/queue/add`. The legacy stdin-direct path still works for non-panel callers.
 
 ### Long-video research (Strategy A / B / C)
 
@@ -223,16 +224,13 @@ Codex deep-research brief drafted; awaiting return for literature review on Free
 
 Salo also has Claude.ai / ChatGPT deep-research running (May 5) on inference speed without quality loss.
 
-### Director Mode (agent workflow)
+### Director Mode (agent workflow) — SHIPPED as Agentic Flows
 
-Future feature for 1-minute movies from one user idea:
+What ships: a chat-driven shot planner tab in the panel. User pastes a script or idea, agent breaks it into shots, queues every shot through the existing FIFO queue, writes a `manifest.json`, and finishes. Designed for overnight batch rendering. Auto-stitch is intentionally NOT included — manifest is the deliverable; cuts belong to the user.
 
-1. Planner (Gemma 3 12B already on disk, or external LLM) expands one-line concept to shot-list with style guide
-2. Submitter POSTs each shot to `/queue/add`
-3. Stitcher concatenates the K resulting mp4s with ffmpeg
-4. Director UI in the panel — paste idea, see planned shot-list, edit any prompt, hit "Render Movie"
+See preceding "Agentic Flows" section + `docs/AGENTIC_FLOWS.md` for the full reference.
 
-Compositional primitive **partially unblocked (2026-05-06)**: Layer 1 of multi-keyframe is live, so an agent can already submit jobs via helper stdin. Layer 2 (panel HTTP route) is the remaining piece for queue-based submission. Long-video research (per-shot length sweet spot) still pending Codex deep-research return.
+Long-video research (per-shot length sweet spot, FreeNoise / FIFO-Diffusion / StreamingT2V applicability) still pending Codex deep-research return.
 
 ### Speed optimization candidates (from May 4 research session)
 
@@ -304,7 +302,7 @@ Issue prefixes are `HAI-NN` because of the team constraint. Active:
 - HAI-152 Lab batch 1 (In Progress — folded into this STATE.md going forward)
 - HAI-153 Lab batch 2 (Backlog — depends on what comes next)
 - HAI-154 Long-video research Strategy A/B/C (Backlog)
-- HAI-155 Director Mode agent workflow (Backlog — depends on multi-keyframe shipping)
+- HAI-155 Director Mode agent workflow → SHIPPED as Agentic Flows (2026-05-06, dev branch)
 - HAI-156 KTDS install case (In Progress — pending log tail)
 - HAI-157 Tweet thread + writeup launch (Backlog — drafts ready)
 - HAI-158 Marketing scenes (In Progress)
