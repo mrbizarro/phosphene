@@ -3722,6 +3722,7 @@ def _build_panel_ops() -> agent_tools.PanelOps:
         outputs_dir=OUTPUT,
         uploads_dir=UPLOADS,
         capabilities=_agent_capabilities(include_secrets=True),
+        state_dir=STATE_DIR,
     )
 
 
@@ -3730,12 +3731,37 @@ def _agent_log_sink(line: str) -> None:
     push(line)
 
 
+_ATTACHMENTS_RE = re.compile(
+    r"^<attachments>\s*(.*?)\s*</attachments>\s*", re.DOTALL
+)
+
+
+def _split_user_attachments(content: str) -> tuple[str, list[dict]]:
+    """Pull a leading `<attachments>JSON</attachments>` block off a user
+    message, returning (visible_text, attachments_list).
+
+    The block is the wire convention for image/PDF/text attachments — see
+    the /message handler. Anything that fails to parse is left in place
+    so the user can still read what they typed.
+    """
+    m = _ATTACHMENTS_RE.match(content or "")
+    if not m:
+        return content, []
+    try:
+        atts = json.loads(m.group(1))
+        if not isinstance(atts, list):
+            return content, []
+    except (json.JSONDecodeError, ValueError):
+        return content, []
+    return content[m.end():], atts
+
+
 def _render_session_messages(sess: agent_runtime.Session) -> list[dict]:
     """Format session.messages for the chat UI.
 
     The raw message list contains:
       - the system prompt (skip in UI)
-      - user messages (show as user bubbles)
+      - user messages (show as user bubbles, optionally with attachments)
       - assistant messages (may contain a fenced action block — strip it
         for display, surface the parsed tool name as a chip)
       - tool result wrapper user messages (parse, show as a tool-result
@@ -3760,7 +3786,11 @@ def _render_session_messages(sess: agent_runtime.Session) -> list[dict]:
             out.append({"kind": "tool_result", "result": parsed})
             continue
         if role == "user":
-            out.append({"kind": "user", "content": content})
+            visible, atts = _split_user_attachments(content)
+            entry: dict = {"kind": "user", "content": visible}
+            if atts:
+                entry["attachments"] = atts
+            out.append(entry)
             continue
         if role == "assistant":
             action = agent_tools.parse_action_block(content)
@@ -4537,6 +4567,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"sessions": agent_runtime.list_sessions(STATE_DIR)})
             return
 
+        if parsed.path == "/agent/notes":
+            try:
+                from agent import project as _project
+                content = _project.read_notes(STATE_DIR)
+            except Exception as e:                  # noqa: BLE001
+                self._json({"error": str(e)}, 500); return
+            self._json({"content": content, "bytes": len(content.encode("utf-8"))})
+            return
+
         if parsed.path.startswith("/agent/sessions/"):
             sid = parsed.path[len("/agent/sessions/"):]
             sid = sid.split("/", 1)[0]
@@ -5121,8 +5160,48 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"bad JSON: {e}"}, 400); return
             user_msg = payload.get("message") or payload.get("content") or ""
             user_msg = user_msg.strip()
-            if not user_msg:
-                self._json({"error": "message is required"}, 400); return
+
+            # Validate + normalize attachments. Each path must live under
+            # UPLOADS — the client can lie about the path even though it
+            # came from a /upload response. Without this check, a malicious
+            # page could submit /etc/passwd as an attachment and the agent's
+            # tools would happily inspect it.
+            raw_atts = payload.get("attachments") or []
+            attachments: list[dict] = []
+            uploads_root = UPLOADS.resolve()
+            for a in raw_atts:
+                if not isinstance(a, dict):
+                    continue
+                p_str = (a.get("path") or "").strip()
+                if not p_str:
+                    continue
+                try:
+                    p = Path(p_str).resolve()
+                except Exception:
+                    continue
+                if not p.is_relative_to(uploads_root) or not p.is_file():
+                    self._json({"error": f"attachment outside uploads dir or missing: {p_str}"}, 400)
+                    return
+                attachments.append({
+                    "path": str(p),
+                    "name": (a.get("name") or p.name)[:200],
+                    "mime": (a.get("mime") or "")[:80],
+                    "size": int(a.get("size") or 0),
+                })
+            if not user_msg and not attachments:
+                self._json({"error": "message or attachment is required"}, 400); return
+
+            if attachments:
+                # Embed an <attachments> JSON block in front of the user text
+                # so the agent sees the file references inline. The renderer
+                # strips this block back out for display and exposes the
+                # parsed list as m.attachments.
+                user_msg = (
+                    "<attachments>\n"
+                    + json.dumps(attachments)
+                    + "\n</attachments>\n"
+                    + user_msg
+                )
             # Always re-load the engine config in case the user just changed
             # it via the settings drawer — the session keeps its own copy
             # for record-keeping but we honor the live config for actual calls.
@@ -5199,6 +5278,56 @@ class Handler(BaseHTTPRequestHandler):
             sid = path[len("/agent/sessions/"):-len("/delete")]
             ok = agent_runtime.delete_session(sid, STATE_DIR)
             self._json({"ok": ok})
+            return
+
+        if path == "/agent/notes":
+            # Manual edit from the Project Notes modal. We overwrite the
+            # whole file, so the user gets full control. Empty content
+            # collapses to a deletion (file persists with 0 bytes — the
+            # excerpt helper handles that).
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            content = payload.get("content")
+            if content is None:
+                self._json({"error": "content is required"}, 400); return
+            if len(content.encode("utf-8")) > 4 * 1024 * 1024:
+                self._json({"error": "notes file too large (max 4 MB)"}, 413); return
+            from agent import project as _project
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(_project.notes_path(STATE_DIR), content)
+            self._json({"ok": True, "bytes": len(content.encode("utf-8"))})
+            return
+
+        if path.startswith("/agent/sessions/") and path.endswith("/rename"):
+            sid = path[len("/agent/sessions/"):-len("/rename")]
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            new_title = (payload.get("title") or "").strip()
+            if not new_title:
+                self._json({"error": "title is required"}, 400); return
+            ok = agent_runtime.rename_session(sid, new_title, STATE_DIR)
+            self._json({"ok": ok})
+            return
+
+        if path.startswith("/agent/sessions/") and path.endswith("/pin"):
+            sid = path[len("/agent/sessions/"):-len("/pin")]
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            pinned = bool(payload.get("pinned", True))
+            ok = agent_runtime.set_pinned(sid, pinned, STATE_DIR)
+            self._json({"ok": ok, "pinned": pinned})
             return
 
         # Image-engine config (pluggable: mock | bfl).
@@ -7033,6 +7162,7 @@ HTML = r"""<!doctype html>
 
     /* ---- Pane wrapper ---- */
     .agent-pane {
+      position: relative;          /* anchors agent-drop-overlay */
       display: flex; flex-direction: column;
       background: var(--panel);
       border: 1px solid var(--border);
@@ -7237,6 +7367,62 @@ HTML = r"""<!doctype html>
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       line-height: 1.4;
     }
+    /* Hover-revealed action row at the right edge of each session item.
+       Kept hidden until hover so the list stays scannable; revealed always
+       on the focused (keyboard-navigated) item too. */
+    .asp-actions {
+      position: absolute;
+      top: 8px; right: 8px;
+      display: none;
+      gap: 2px;
+      align-items: center;
+    }
+    .asp-item:hover .asp-actions,
+    .asp-item.is-focused .asp-actions { display: inline-flex; }
+    .asp-action-btn {
+      width: 24px; height: 24px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,0.05);
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      padding: 0;
+    }
+    .asp-action-btn:hover {
+      background: var(--bg-2);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .asp-action-btn.danger:hover { color: #f49a9e; border-color: rgba(244,154,158,0.5); }
+    .asp-action-btn svg { width: 12px; height: 12px; }
+    .asp-item.is-pinned .asp-pin-icon { color: var(--accent-bright); }
+    .asp-item .asp-item-title-edit {
+      flex: 1;
+      background: var(--bg-2);
+      color: var(--text);
+      border: 1px solid var(--accent);
+      border-radius: 5px;
+      padding: 2px 6px;
+      font-size: 13px;
+      font-weight: 500;
+      width: 100%;
+      box-sizing: border-box;
+      outline: none;
+    }
+    .asp-item-preview {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin: 4px 0 0 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    /* Position items so action overlay can absolute. Already in .asp-item base. */
+    .asp-item { position: relative; }
     .asp-item-meta {
       display: flex; gap: 6px; align-items: center;
       margin-top: 5px;
@@ -8492,7 +8678,7 @@ HTML = r"""<!doctype html>
     .agent-composer textarea {
       width: 100%;
       min-height: 48px; max-height: 220px;
-      padding: 13px 56px 13px 16px;
+      padding: 13px 56px 13px 50px;
       background: var(--panel);
       color: var(--text);
       border: 1px solid var(--border);
@@ -8503,6 +8689,171 @@ HTML = r"""<!doctype html>
       resize: none;
       transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
       box-sizing: border-box;
+    }
+    /* Paperclip — mirrors send-btn placement on the left edge of the
+       composer. Same shape, ghost styling so it doesn't compete with Send. */
+    .agent-composer .attach-btn {
+      position: absolute;
+      left: 7px; bottom: 7px;
+      width: 34px; height: 34px;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: background 0.18s, color 0.18s, border-color 0.18s;
+    }
+    .agent-composer .attach-btn:hover {
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .agent-composer .attach-btn svg {
+      width: 16px; height: 16px;
+    }
+    .agent-composer .attach-btn .count {
+      position: absolute;
+      top: -3px; right: -3px;
+      min-width: 14px; height: 14px;
+      padding: 0 3px;
+      background: var(--accent);
+      color: white;
+      border-radius: 7px;
+      font-size: 9px;
+      font-weight: 700;
+      display: none;
+      align-items: center; justify-content: center;
+      letter-spacing: 0;
+    }
+    .agent-composer .attach-btn.has-attach { color: var(--accent); }
+    .agent-composer .attach-btn.has-attach .count { display: inline-flex; }
+    /* Pending-attachment chip row above the textarea. */
+    .agent-attach-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 0 0 8px 0;
+      max-width: 720px;
+      margin-left: auto; margin-right: auto;
+    }
+    .agent-attach-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px 5px 5px;
+      background: var(--bg-3, rgba(255,255,255,0.04));
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      color: var(--text);
+      max-width: 240px;
+    }
+    .agent-attach-chip .thumb {
+      width: 28px; height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: rgba(255,255,255,0.08);
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .agent-attach-chip .name {
+      max-width: 140px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .agent-attach-chip .meta {
+      color: var(--muted);
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .agent-attach-chip .remove {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    .agent-attach-chip .remove:hover { color: #f49a9e; }
+    .agent-attach-chip.pending { opacity: 0.6; }
+    .agent-attach-chip.error { border-color: rgba(244,154,158,0.6); color: #f49a9e; }
+
+    /* In-message attachment chips (rendered inside user bubbles). Slightly
+       softer than the composer chips to read as past, not pending. */
+    .agent-msg-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .agent-msg-attach {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px 5px 5px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 11.5px;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .agent-msg-attach:hover {
+      background: rgba(255,255,255,0.08);
+      border-color: var(--accent-dim);
+    }
+    .agent-msg-attach .thumb {
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.08);
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .agent-msg-attach .name {
+      max-width: 200px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Drag-drop overlay — full-bleed inside the agent pane, visible only
+       while a drag is over the chat surface. Subtle accent ring + dashed
+       border so the user understands a drop is wanted. */
+    .agent-drop-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(47,129,247,0.08);
+      border: 2px dashed var(--accent);
+      border-radius: 14px;
+      display: none;
+      align-items: center; justify-content: center;
+      pointer-events: none;
+      z-index: 50;
+      backdrop-filter: blur(2px);
+    }
+    .agent-drop-overlay.visible { display: flex; }
+    .agent-drop-overlay .drop-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      padding: 18px 28px;
+      background: var(--panel);
+      border: 1px solid var(--accent-dim);
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
     }
     .agent-composer textarea:focus {
       outline: none;
@@ -8903,6 +9254,14 @@ HTML = r"""<!doctype html>
             <line x1="3" y1="21" x2="10" y2="14"/>
           </svg>
         </button>
+        <button type="button" class="icon-btn" onclick="openProjectNotes()" title="Project notes — persistent memory across sessions">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="15" y2="17"/>
+          </svg>
+        </button>
         <button type="button" class="icon-btn" onclick="openAgentSettings()" title="Settings">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"></circle>
@@ -8925,7 +9284,22 @@ HTML = r"""<!doctype html>
           <span class="ref-label" id="agentRefChipLabel">…</span>
           <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine">×</button>
         </div>
+        <!-- Pending-attachment chip row. Filled by agentAddAttachment() as the
+             user picks files (paperclip / drag-drop / paste). Survives between
+             messages until cleared. -->
+        <div class="agent-attach-row" id="agentAttachRow" style="display:none"></div>
         <div class="agent-composer-wrap">
+          <input type="file" id="agentFileInput" multiple
+                 accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,.md,.txt,.pdf"
+                 style="display:none" onchange="agentOnFilesPicked(event)">
+          <button type="button" id="agentAttachBtn" class="attach-btn"
+                  onclick="document.getElementById('agentFileInput').click()"
+                  title="Attach images or documents (drag-drop or ⌘V also work)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+            <span class="count" id="agentAttachCount">0</span>
+          </button>
           <textarea id="agentInput"
                     placeholder="Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight."
                     rows="1"
@@ -8936,7 +9310,19 @@ HTML = r"""<!doctype html>
               <polyline points="5 12 12 5 19 12"/>
             </svg>
           </button>
-          <span class="hint">Cmd/Ctrl + Enter to send</span>
+          <span class="hint">Cmd/Ctrl + Enter to send · ⌘V to paste · drag files to attach</span>
+        </div>
+        <!-- Drag-drop overlay shown only while a drag is over the chat surface. -->
+        <div class="agent-drop-overlay" id="agentDropOverlay">
+          <div class="drop-card">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <div style="font-weight:600">Drop to attach</div>
+            <div style="color:var(--muted); font-size:12px">images, PDFs, and text files</div>
+          </div>
         </div>
       </div>
     </section>
@@ -9757,6 +10143,34 @@ HTML = r"""<!doctype html>
     <div class="model-browser-status" id="modelBrowserStatus">
       <div><span class="label" id="modelBrowserStatusLabel">…</span><span id="modelBrowserStatusSummary"></span></div>
       <div class="last-line" id="modelBrowserStatusLine"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============== PROJECT NOTES MODAL ============== -->
+<!-- Persistent memory across sessions — the agent reads the tail of
+     this file every turn. Editable here too. -->
+<div class="agent-settings-modal" id="agentNotesModal" onclick="if(event.target===this)closeProjectNotes()">
+  <div class="agent-settings-card" style="max-width:780px">
+    <h2>Project notes
+      <button type="button" onclick="closeProjectNotes()">Close</button>
+    </h2>
+    <div class="hint">
+      The agent's persistent memory across sessions. It reads the tail
+      every turn, and can append new entries via
+      <code>append_project_notes</code>. Edit freely; one Markdown file at
+      <code>state/agent_project_notes.md</code>.
+    </div>
+    <div class="field">
+      <label>Notes (Markdown)</label>
+      <textarea id="agentNotesTextarea" rows="20" style="width:100%; min-height:380px; font-family: ui-monospace, Menlo, monospace; font-size:12px; line-height:1.55"></textarea>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:8px">
+      <span id="agentNotesStatus" style="flex:1; color:var(--muted); font-size:11px"></span>
+      <button type="button" onclick="closeProjectNotes()"
+              style="padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer">Cancel</button>
+      <button type="button" onclick="saveProjectNotes()"
+              style="padding:7px 14px;border-radius:8px;border:none;background:var(--accent);color:white;cursor:pointer;font-weight:600">Save</button>
     </div>
   </div>
 </div>
@@ -13283,14 +13697,25 @@ function aspRender() {
   }
   empty.hidden = true;
 
-  // Group into time buckets, render with sticky labels.
+  // Pinned sessions surface at the top regardless of recency. Then the
+  // standard time buckets in order. All rows still share one keyboard
+  // focus index so arrow nav flows naturally across sections.
+  const pinnedItems = items.filter(s => s.pinned);
+  const restItems = items.filter(s => !s.pinned);
   const buckets = {Today: [], Yesterday: [], 'This week': [], Earlier: []};
-  for (const s of items) {
+  for (const s of restItems) {
     const b = aspBucket(s.updated_at);
     if (!buckets[b]) buckets[b] = [];
     buckets[b].push(s);
   }
   let flatIdx = 0;
+  if (pinnedItems.length) {
+    const head = document.createElement('div');
+    head.className = 'asp-section-label';
+    head.textContent = 'Pinned';
+    list.appendChild(head);
+    for (const s of pinnedItems) { list.appendChild(aspMakeItem(s, flatIdx)); flatIdx++; }
+  }
   for (const label of ['Today', 'Yesterday', 'This week', 'Earlier']) {
     const bucket = buckets[label];
     if (!bucket || bucket.length === 0) continue;
@@ -13310,6 +13735,7 @@ function aspMakeItem(s, flatIdx) {
   item.className = 'asp-item';
   if (s.session_id === window.AGENT.sessionId) item.classList.add('is-active');
   if (window.ASP.focusIndex === flatIdx) item.classList.add('is-focused');
+  if (s.pinned) item.classList.add('is-pinned');
   item.dataset.sid = s.session_id;
   // Cross-reference live queue: if any of this session's submitted shots
   // are currently in the panel queue or running, show a live dot.
@@ -13320,19 +13746,138 @@ function aspMakeItem(s, flatIdx) {
   const sessionShotIds = (s.submitted_shot_ids || []);   // optional field
   const isRunning = sessionShotIds.some(id => queueIds.includes(id));
   const time = aspRelTime(s.updated_at);
+  const preview = (s.preview || '').trim();
   item.innerHTML = `
     <div class="asp-row">
       <div class="asp-item-title">${escapeHtml(s.title || 'Untitled')}</div>
       <div class="asp-item-time">${escapeHtml(time)}</div>
     </div>
+    ${preview ? `<div class="asp-item-preview">${escapeHtml(preview)}</div>` : ''}
     <div class="asp-item-meta">
       <span class="asp-chip">${s.messages || 0} msg</span>
       <span class="asp-chip asp-chip-shots">${s.shots_submitted || 0} shots</span>
       ${isRunning ? '<span class="asp-status-running" title="Active in queue"></span>' : ''}
     </div>
+    <div class="asp-actions">
+      <button type="button" class="asp-action-btn" data-action="pin" title="${s.pinned ? 'Unpin' : 'Pin'}">
+        <svg class="asp-pin-icon" viewBox="0 0 24 24" fill="${s.pinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="17" x2="12" y2="22"/>
+          <path d="M5 17h14l-2-7V4H7v6z"/>
+        </svg>
+      </button>
+      <button type="button" class="asp-action-btn" data-action="rename" title="Rename">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>
+      </button>
+      <button type="button" class="asp-action-btn danger" data-action="delete" title="Delete">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+        </svg>
+      </button>
+    </div>
   `;
-  item.addEventListener('click', () => aspLoad(s.session_id));
+  item.addEventListener('click', (e) => {
+    // If user clicked one of the action buttons, dispatch the action
+    // instead of loading the session.
+    const btn = e.target.closest('[data-action]');
+    if (btn) {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      if (action === 'delete')      aspDeleteRow(s, item);
+      else if (action === 'rename') aspBeginRename(s, item);
+      else if (action === 'pin')    aspTogglePinRow(s);
+      return;
+    }
+    aspLoad(s.session_id);
+  });
   return item;
+}
+
+async function aspDeleteRow(s, itemEl) {
+  if (!confirm(`Delete "${s.title || 'Untitled'}"? This can't be undone.`)) return;
+  try {
+    const r = await fetch('/agent/sessions/' + encodeURIComponent(s.session_id) + '/delete', {method: 'POST'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (e) { alert('Delete failed: ' + e.message); return; }
+  // Remove from in-memory list and re-render. If the deleted session
+  // was the active one, fall back to the most-recent remaining.
+  window.ASP.all = (window.ASP.all || []).filter(x => x.session_id !== s.session_id);
+  if (s.session_id === window.AGENT.sessionId) {
+    window.AGENT.sessionId = null;
+    try { localStorage.removeItem('phos_agent_session'); } catch (e) {}
+    const remaining = (window.ASP.all || []).slice().sort((a,b) => (b.updated_at||0) - (a.updated_at||0));
+    if (remaining.length) await agentLoadSession(remaining[0].session_id);
+    else {
+      // Empty UI — clear the chat surface.
+      const chat = document.getElementById('agentChat');
+      if (chat) chat.innerHTML = '';
+      agentSetSessionTitle('New chat', null);
+    }
+  }
+  aspRefilterAndRender();
+}
+
+function aspBeginRename(s, itemEl) {
+  const titleEl = itemEl.querySelector('.asp-item-title');
+  if (!titleEl) return;
+  const original = s.title || '';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'asp-item-title-edit';
+  input.value = original;
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+  const finish = async (commit) => {
+    if (!input.parentNode) return;
+    const next = (input.value || '').trim();
+    const wrap = document.createElement('div');
+    wrap.className = 'asp-item-title';
+    wrap.textContent = (commit && next) ? next : original;
+    input.replaceWith(wrap);
+    if (!commit || !next || next === original) return;
+    try {
+      const r = await fetch('/agent/sessions/' + encodeURIComponent(s.session_id) + '/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title: next}),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      s.title = next;
+      // Update the in-memory cache + active-session header if relevant.
+      const cached = (window.ASP.all || []).find(x => x.session_id === s.session_id);
+      if (cached) cached.title = next;
+      if (window.AGENT.sessionId === s.session_id) {
+        agentSetSessionTitle(next, s.session_id);
+      }
+    } catch (e) { alert('Rename failed: ' + e.message); }
+  };
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    e.stopPropagation();                // don't bubble to global asp shortcuts
+  });
+}
+
+async function aspTogglePinRow(s) {
+  const next = !s.pinned;
+  try {
+    const r = await fetch('/agent/sessions/' + encodeURIComponent(s.session_id) + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pinned: next}),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    s.pinned = next;
+    const cached = (window.ASP.all || []).find(x => x.session_id === s.session_id);
+    if (cached) cached.pinned = next;
+    aspRefilterAndRender();
+  } catch (e) { alert('Pin failed: ' + e.message); }
 }
 
 function aspMoveFocus(delta) {
@@ -13528,11 +14073,15 @@ function renderMessage(m) {
   name.className = 'agent-msg-name';
   name.textContent = m.kind === 'user' ? 'You' : 'Claude';
 
+  body.appendChild(name);
+
+  if (m.attachments && m.attachments.length) {
+    body.appendChild(renderAttachmentChips(m.attachments));
+  }
+
   const content = document.createElement('div');
   content.className = 'agent-msg-content agent-md';
   content.innerHTML = mdToHtml(m.content || '');
-
-  body.appendChild(name);
   body.appendChild(content);
 
   if (m.tool_call) body.appendChild(renderToolCallCard(m.tool_call));
@@ -13540,6 +14089,36 @@ function renderMessage(m) {
   row.appendChild(av);
   row.appendChild(body);
   return row;
+}
+
+function renderAttachmentChips(attachments) {
+  const wrap = document.createElement('div');
+  wrap.className = 'agent-msg-attachments';
+  for (const a of attachments) {
+    const kind = AGENT_ATTACH_KIND(a.mime, a.name);
+    const link = document.createElement('a');
+    link.className = 'agent-msg-attach';
+    link.href = '/image?path=' + encodeURIComponent(a.path);
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.title = a.path;
+
+    const thumb = document.createElement(kind === 'image' ? 'img' : 'div');
+    thumb.className = 'thumb';
+    if (kind === 'image') {
+      thumb.src = '/image?path=' + encodeURIComponent(a.path);
+      thumb.alt = a.name;
+    } else {
+      thumb.textContent = agentAttachIcon(kind);
+    }
+    const nameEl = document.createElement('span');
+    nameEl.className = 'name';
+    nameEl.textContent = a.name;
+    link.appendChild(thumb);
+    link.appendChild(nameEl);
+    wrap.appendChild(link);
+  }
+  return wrap;
 }
 
 function renderSystemNote(text) {
@@ -13788,10 +14367,25 @@ async function agentSend() {
   const input = document.getElementById('agentInput');
   const btn = document.getElementById('agentSendBtn');
   const text = (input.value || '').trim();
-  if (!text) return;
+
+  // Wait for any in-flight uploads so the message arrives WITH its
+  // attachments. UX: don't block the user — if uploads error we surface
+  // them in the chip row and the user can remove/retry.
+  const stillUploading = (window.AGENT.pendingAttachments || []).some(a => a.status === 'uploading');
+  if (stillUploading) {
+    btn.disabled = true;
+    let waited = 0;
+    while ((window.AGENT.pendingAttachments || []).some(a => a.status === 'uploading')) {
+      await new Promise(r => setTimeout(r, 120));
+      waited += 120;
+      if (waited > 60000) break;          // 60 s safety bail
+    }
+  }
+  const ready = agentReadyAttachments();
+  if (!text && !ready.length) return;
 
   if (!window.AGENT.sessionId) {
-    const sess = await agentNewSession(text);
+    const sess = await agentNewSession(text || ready[0].name);
     if (!sess) return;
   }
 
@@ -13811,12 +14405,20 @@ async function agentSend() {
   // Clear empty-state if present, then append user bubble + typing
   const empty = chat.querySelector('.agent-empty');
   if (empty) empty.remove();
-  chat.appendChild(renderMessage({kind: 'user', content: outgoing}));
+  chat.appendChild(renderMessage({
+    kind: 'user',
+    content: outgoing,
+    attachments: ready.map(a => ({path: a.path, name: a.name, mime: a.mime, size: a.size})),
+  }));
   chat.appendChild(renderTypingRow('Drafting plan'));
   chat.scrollTop = chat.scrollHeight;
 
   input.value = '';
   agentAutoResize(input);
+  // Snapshot then clear before send — if the round-trip succeeds we don't
+  // want stale chips. If it fails the user can re-attach.
+  const sentAttachments = ready.map(a => ({path: a.path, name: a.name, mime: a.mime, size: a.size}));
+  agentClearAttachments();
   agentUpdateSendState();
   window.AGENT.busy = true;
   btn.disabled = true;
@@ -13856,7 +14458,7 @@ async function agentSend() {
       {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: outgoing}),
+        body: JSON.stringify({message: outgoing, attachments: sentAttachments}),
       }
     );
     const j = await r.json();
@@ -13918,7 +14520,205 @@ function agentUpdateSendState() {
   const input = document.getElementById('agentInput');
   const btn = document.getElementById('agentSendBtn');
   if (!input || !btn) return;
-  btn.disabled = !input.value.trim() || window.AGENT.busy;
+  // Allow send when there's text OR at least one ready attachment — the
+  // agent can act on attachments alone (e.g. "use this image as the lead").
+  const hasText = !!input.value.trim();
+  const hasAttach = (window.AGENT.pendingAttachments || []).some(a => a.path);
+  btn.disabled = (!hasText && !hasAttach) || window.AGENT.busy;
+}
+
+// ---- Attachments ----------------------------------------------------------
+// `pendingAttachments` is the staged list before send. Each entry:
+//   { id, name, size, mime, path, status: 'uploading'|'ready'|'error', error }
+// `path` is filled in once /upload returns. Send is allowed when at least
+// one attachment is `ready` (or there is text).
+window.AGENT.pendingAttachments = window.AGENT.pendingAttachments || [];
+
+const AGENT_ATTACH_KIND = (mime, name) => {
+  const m = (mime || '').toLowerCase();
+  const n = (name || '').toLowerCase();
+  if (m.startsWith('image/')) return 'image';
+  if (m === 'application/pdf' || n.endsWith('.pdf')) return 'pdf';
+  if (m.startsWith('text/') || n.endsWith('.md') || n.endsWith('.txt')) return 'text';
+  return 'file';
+};
+
+const AGENT_ATTACH_MAX_BYTES = 64 * 1024 * 1024;     // mirrors backend cap
+
+function agentFmtBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(0) + ' KB';
+  return (n/(1024*1024)).toFixed(1) + ' MB';
+}
+
+function agentAttachIcon(kind) {
+  if (kind === 'image') return '🖼';
+  if (kind === 'pdf')   return '📄';
+  if (kind === 'text')  return '📝';
+  return '📎';
+}
+
+function agentRenderAttachRow() {
+  const row = document.getElementById('agentAttachRow');
+  const btn = document.getElementById('agentAttachBtn');
+  const cnt = document.getElementById('agentAttachCount');
+  if (!row) return;
+  const list = window.AGENT.pendingAttachments;
+  if (btn) btn.classList.toggle('has-attach', list.length > 0);
+  if (cnt) cnt.textContent = String(list.length);
+  if (!list.length) { row.style.display = 'none'; row.innerHTML = ''; return; }
+  row.style.display = 'flex';
+  row.innerHTML = '';
+  for (const a of list) {
+    const chip = document.createElement('div');
+    chip.className = 'agent-attach-chip';
+    if (a.status === 'uploading') chip.classList.add('pending');
+    if (a.status === 'error')     chip.classList.add('error');
+    const kind = AGENT_ATTACH_KIND(a.mime, a.name);
+    const thumb = document.createElement(kind === 'image' && a.path ? 'img' : 'div');
+    thumb.className = 'thumb';
+    if (kind === 'image' && a.path) {
+      thumb.src = '/image?path=' + encodeURIComponent(a.path);
+      thumb.alt = a.name;
+    } else {
+      thumb.textContent = agentAttachIcon(kind);
+    }
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.title = a.name;
+    name.textContent = a.name;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = a.status === 'uploading' ? 'uploading…'
+                     : a.status === 'error'     ? (a.error || 'failed')
+                     : agentFmtBytes(a.size);
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'remove';
+    x.title = 'Remove';
+    x.textContent = '×';
+    x.addEventListener('click', () => agentRemoveAttachment(a.id));
+    chip.appendChild(thumb); chip.appendChild(name); chip.appendChild(meta); chip.appendChild(x);
+    row.appendChild(chip);
+  }
+}
+
+function agentRemoveAttachment(id) {
+  window.AGENT.pendingAttachments =
+    window.AGENT.pendingAttachments.filter(a => a.id !== id);
+  agentRenderAttachRow();
+  agentUpdateSendState();
+}
+
+function agentClearAttachments() {
+  window.AGENT.pendingAttachments = [];
+  agentRenderAttachRow();
+  agentUpdateSendState();
+}
+
+async function agentUploadFile(att) {
+  // POST one file to /upload. The backend already exists for the legacy
+  // gallery picker; we reuse it. Returns { ok, path } on success.
+  const fd = new FormData();
+  fd.append('image', att._file, att.name);
+  try {
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    att.path = j.path;
+    att.status = 'ready';
+  } catch (e) {
+    att.status = 'error';
+    att.error  = String(e.message || e);
+  } finally {
+    delete att._file;                // free the File reference
+    agentRenderAttachRow();
+    agentUpdateSendState();
+  }
+}
+
+function agentAddFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  for (const f of Array.from(fileList)) {
+    if (f.size > AGENT_ATTACH_MAX_BYTES) {
+      alert(`"${f.name}" is too large (max ${(AGENT_ATTACH_MAX_BYTES/1024/1024).toFixed(0)} MB)`);
+      continue;
+    }
+    const att = {
+      id: 'att_' + Math.random().toString(36).slice(2, 10),
+      name: f.name,
+      size: f.size,
+      mime: f.type || '',
+      path: '',
+      status: 'uploading',
+      _file: f,
+    };
+    window.AGENT.pendingAttachments.push(att);
+    agentUploadFile(att);                 // fires async; UI updates on settle
+  }
+  agentRenderAttachRow();
+  agentUpdateSendState();
+}
+
+function agentOnFilesPicked(ev) {
+  agentAddFiles(ev.target.files);
+  ev.target.value = '';                   // allow picking the same file again
+}
+
+function agentReadyAttachments() {
+  return (window.AGENT.pendingAttachments || []).filter(a => a.status === 'ready' && a.path);
+}
+
+// ---- Drag-drop on the chat surface ---------------------------------------
+function agentInstallDragDrop() {
+  const pane = document.getElementById('agentPane');
+  const overlay = document.getElementById('agentDropOverlay');
+  if (!pane || !overlay) return;
+  let dragDepth = 0;
+  pane.addEventListener('dragenter', e => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+    e.preventDefault();
+    dragDepth += 1;
+    overlay.classList.add('visible');
+  });
+  pane.addEventListener('dragover', e => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  pane.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) overlay.classList.remove('visible');
+  });
+  pane.addEventListener('drop', e => {
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    dragDepth = 0;
+    overlay.classList.remove('visible');
+    agentAddFiles(e.dataTransfer.files);
+  });
+}
+
+// ---- Paste-from-clipboard on the textarea --------------------------------
+function agentInstallPasteHandler() {
+  const ta = document.getElementById('agentInput');
+  if (!ta) return;
+  ta.addEventListener('paste', e => {
+    if (!e.clipboardData) return;
+    const items = e.clipboardData.items || [];
+    const files = [];
+    for (const it of Array.from(items)) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      agentAddFiles(files);
+    }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -13937,6 +14737,8 @@ document.addEventListener('DOMContentLoaded', () => {
     agentAutoResize(ta);
     agentUpdateSendState();
   }
+  agentInstallDragDrop();
+  agentInstallPasteHandler();
 });
 
 // ---- Engine settings drawer -----------------------------------------------
@@ -14023,6 +14825,52 @@ function openAgentSettings() {
 
 function closeAgentSettings() {
   document.getElementById('agentSettingsModal').classList.remove('open');
+}
+
+// ---- Project notes modal --------------------------------------------------
+async function openProjectNotes() {
+  const modal = document.getElementById('agentNotesModal');
+  const ta = document.getElementById('agentNotesTextarea');
+  const st = document.getElementById('agentNotesStatus');
+  if (!modal || !ta) return;
+  st.textContent = 'Loading…';
+  ta.value = '';
+  modal.classList.add('open');
+  try {
+    const r = await fetch('/agent/notes');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    ta.value = j.content || '';
+    const n = (j.content || '').length;
+    st.textContent = n ? `${n.toLocaleString()} chars` : 'Empty — type to start.';
+  } catch (e) {
+    st.textContent = 'Load failed: ' + e.message;
+  }
+  ta.focus();
+}
+
+function closeProjectNotes() {
+  document.getElementById('agentNotesModal').classList.remove('open');
+}
+
+async function saveProjectNotes() {
+  const ta = document.getElementById('agentNotesTextarea');
+  const st = document.getElementById('agentNotesStatus');
+  if (!ta) return;
+  st.textContent = 'Saving…';
+  try {
+    const r = await fetch('/agent/notes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content: ta.value}),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    st.textContent = `Saved · ${(j.bytes || 0).toLocaleString()} bytes`;
+    setTimeout(closeProjectNotes, 350);
+  } catch (e) {
+    st.textContent = 'Save failed: ' + e.message;
+  }
 }
 
 function agentKindChanged() {

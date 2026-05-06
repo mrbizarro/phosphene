@@ -28,7 +28,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,6 +68,11 @@ class PanelOps:
     # "allows_q8": True, "tier": "standard"}`. Lets the agent clamp its
     # plan to what this Mac can actually render.
     capabilities: dict
+
+    # Persistent state root (for project notes, sessions, configs). The
+    # agent's project-memory tools write under here so notes survive
+    # across sessions and panel restarts.
+    state_dir: Path = field(default_factory=lambda: Path("state"))
 
 
 # ---- Tool registry ---------------------------------------------------------
@@ -873,6 +878,147 @@ def _upload_image(args: dict, ops: PanelOps, session: dict) -> dict:
         "size_bytes": pp.stat().st_size,
         "name": pp.name,
     }
+
+
+@tool("read_document")
+def _read_document(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Read a user-attached text or PDF document and return its contents.
+
+    Use this when the user attaches a script, treatment, character bible,
+    or any text/PDF they want you to act on. The chat UI puts the absolute
+    path inside the user message's `<attachments>` block — pass that path
+    here. Always read the doc BEFORE drafting a plan if one was attached.
+
+    Args:
+      path: str — absolute path of the attached file (from <attachments>).
+      max_chars: int (optional, default 80000) — clamp the returned text
+        so a long PDF doesn't blow the model's context. The tail is
+        replaced with "[truncated, N more chars]" when this fires.
+
+    Returns:
+      { path, name, mime, kind, char_count, truncated, content,
+        page_count? }
+
+    Raises:
+      _ToolValidationError if the path is outside uploads_dir, missing,
+      or unreadable. PDFs require pypdf — if it isn't installed the tool
+      returns {"error": "pypdf not installed; ..."} rather than raising.
+    """
+    raw = _required(args, "path")
+    p = _ensure_under(Path(raw), [ops.uploads_dir])
+    if not p.is_file():
+        raise _ToolValidationError(f"document not found: {p}")
+
+    max_chars = int(args.get("max_chars") or 80_000)
+    name = p.name
+    suffix = p.suffix.lower()
+
+    text = ""
+    page_count: int | None = None
+
+    if suffix in (".txt", ".md", ".markdown", ".rst", ".json", ".csv"):
+        try:
+            raw_b = p.read_bytes()
+        except OSError as e:
+            raise _ToolValidationError(f"cannot read {name}: {e}") from e
+        # Decode tolerantly — script writers sometimes paste text with
+        # mixed encodings. Replacement is better than refusing the whole doc.
+        text = raw_b.decode("utf-8", errors="replace")
+        kind = "text"
+
+    elif suffix == ".pdf":
+        try:
+            import pypdf                            # noqa: F401 — local import on purpose
+        except ImportError:
+            return {
+                "path": str(p), "name": name, "mime": "application/pdf",
+                "kind": "pdf", "error": (
+                    "pypdf is not installed in Phosphene's venv. "
+                    "Install with: ltx-2-mlx/env/bin/pip install pypdf — "
+                    "then re-attach. Alternatively, paste the script text "
+                    "directly into the chat."
+                ),
+            }
+        try:
+            reader = pypdf.PdfReader(str(p))
+            pages: list[str] = []
+            for i, page in enumerate(reader.pages):
+                pages.append(page.extract_text() or "")
+            text = "\n\n".join(pages).strip()
+            page_count = len(reader.pages)
+        except Exception as e:                      # noqa: BLE001
+            raise _ToolValidationError(f"PDF parse failed for {name}: {e}") from e
+        kind = "pdf"
+
+    else:
+        raise _ToolValidationError(
+            f"unsupported document type {suffix!r}. Supported: "
+            ".txt, .md, .pdf"
+        )
+
+    truncated = False
+    full_len = len(text)
+    if full_len > max_chars:
+        head_len = max_chars - 64                   # leave room for the marker
+        text = text[:head_len] + f"\n\n[truncated, {full_len - head_len} more chars]"
+        truncated = True
+
+    out = {
+        "path": str(p),
+        "name": name,
+        "mime": "application/pdf" if kind == "pdf" else "text/plain",
+        "kind": kind,
+        "char_count": full_len,
+        "truncated": truncated,
+        "content": text,
+    }
+    if page_count is not None:
+        out["page_count"] = page_count
+    return out
+
+
+@tool("read_project_notes")
+def _read_project_notes(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Read the full project-notes file.
+
+    Project notes are durable memory across sessions. The system prompt
+    already includes a 6 KB tail every turn — call this tool only when
+    you need OLDER context (e.g. the user references a decision from
+    weeks ago, or you need to see the running cast list in full).
+
+    Returns: { path, char_count, content }.
+    """
+    from agent import project as _project
+    full = _project.read_notes(ops.state_dir)
+    return {
+        "path": str(_project.notes_path(ops.state_dir)),
+        "char_count": len(full),
+        "content": full,
+    }
+
+
+@tool("append_project_notes")
+def _append_project_notes(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Append a durable memory entry to the project notes file.
+
+    Use this whenever a decision deserves to outlive the current chat:
+    a master style choice, a character bible entry, an anchor-PNG path
+    you want reused, a tier choice the user explicitly approved. The
+    entry is timestamped automatically.
+
+    Args:
+      text: str — what to remember (one short paragraph or bullet).
+      kind: str (optional, default "note") — labels: "note", "style",
+        "cast", "decision". Visible in the markdown header for
+        skimmability.
+    """
+    from agent import project as _project
+    text = _required(args, "text")
+    kind = (args.get("kind") or "note").strip()[:24] or "note"
+    try:
+        return _project.append_note(ops.state_dir, text, kind=kind, author="agent")
+    except ValueError as e:
+        raise _ToolValidationError(str(e)) from e
 
 
 @tool("finish")

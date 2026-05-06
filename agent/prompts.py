@@ -16,12 +16,18 @@ from datetime import datetime
 
 
 def build_system_prompt(*, capabilities: dict, tools_doc: str,
-                        repo_version: str = "v2.0.4") -> str:
+                        repo_version: str = "v2.0.4",
+                        project_notes: str = "") -> str:
     """Render the system prompt for the agent given the current panel state.
 
     `capabilities` describes the host Mac (RAM tier, max dimensions,
     whether Q8 is downloaded). The agent uses these to clamp its plan to
     what this hardware can actually render.
+
+    `project_notes` is a tail of the persistent project-memory file —
+    surfaced inline so the agent has cross-session context without
+    needing to read the whole file every turn. Empty string is fine and
+    produces a "no notes yet" line.
     """
     tier = capabilities.get("tier", "standard")
     friendly = {"base": "Compact", "standard": "Comfortable",
@@ -30,6 +36,7 @@ def build_system_prompt(*, capabilities: dict, tools_doc: str,
     max_dim_kf = capabilities.get("max_dim_kf", 768)
     has_q8 = capabilities.get("allows_q8", False)
     today = datetime.now().strftime("%Y-%m-%d")
+    project_notes_block = _format_project_notes_block(project_notes)
 
     return f"""You are the Phosphene Agentic Flows director.
 
@@ -78,8 +85,20 @@ Today is {today}. Phosphene version: {repo_version}. Hardware tier:
    already (e.g. ends with "queue them all so renders run overnight").
 3. **One action block per turn.** Each model reply may contain at most
    ONE tool call. Runtime appends the result and calls you again.
-4. **Never invent file paths.** Attached image paths come inline in
-   the user message. Use them verbatim.
+4. **Never invent file paths.** Attached files come at the top of the
+   user message inside an `<attachments>` JSON block:
+   ```
+   <attachments>
+   [{{"path":"/abs/path/to/hero.png","name":"hero.png","mime":"image/png"}}, ...]
+   </attachments>
+   <user's text continues here>
+   ```
+   Use the `path` value verbatim — for an image, pass it as `image_path`
+   in `submit_shot` (mode `i2v`) or as `clip_path` to `extract_frame`.
+   For PDFs / text files, call `read_document` first to see the contents.
+   Treat the `<attachments>` block itself as METADATA: do not echo it
+   back, do not include it in shot prompts, do not invent a different
+   path for the same file.
 5. **No surprises while the user is asleep.** Don't switch quality
    tiers, change resolutions, or add bonus clips that weren't in the
    approved plan.
@@ -424,4 +443,20 @@ fix. Don't retry the same call — adjust the args.
 If the script asks for a shot that violates LTX's rules (wide multi-
 character composition, fast hands, etc.), **silently adapt** and
 note the change in your plan. The user trusts your director's eye.
+
+# Project memory (persists across sessions)
+
+Below is the tail of your durable project notes. Treat it as YOUR
+prior decisions and the user's prior preferences. When something
+deserves to outlive the chat — a master style, a character bible
+entry, an anchor-PNG path, a tier choice the user approved — call
+`append_project_notes` so future sessions remember.
+
+{project_notes_block}
 """
+
+
+def _format_project_notes_block(notes: str) -> str:
+    if not notes.strip():
+        return "_(no notes yet — first project, or notes file empty)_"
+    return "```\n" + notes.strip() + "\n```"

@@ -61,6 +61,7 @@ class Session:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     finished: bool = False
+    pinned: bool = False                            # surfaced at the top of the sidebar
 
     def to_dict(self) -> dict:
         # NEVER include api_key on the wire — to_public_dict() masks it. The
@@ -76,6 +77,7 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished": self.finished,
+            "pinned": self.pinned,
         }
 
     def to_persisted_dict(self) -> dict:
@@ -90,6 +92,7 @@ class Session:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "finished": self.finished,
+            "pinned": self.pinned,
         }
 
     @classmethod
@@ -103,6 +106,7 @@ class Session:
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
             finished=d.get("finished", False),
+            pinned=d.get("pinned", False),
         )
 
 
@@ -143,7 +147,15 @@ def load_session(session_id: str, state_dir: Path) -> Session | None:
 
 
 def list_sessions(state_dir: Path) -> list[dict]:
-    """Compact summaries — id, title, message count, last update."""
+    """Compact summaries — id, title, message count, last update.
+
+    Includes:
+      preview: first ~80 chars of the first user-text message (skipping
+               attachment header and tool-result wrappers).
+      pinned: surface above all time buckets in the sidebar.
+      submitted_shot_ids: live cross-reference for the "running" dot —
+                          the UI matches these against the panel queue.
+    """
     out = []
     d = sessions_dir(state_dir)
     if not d.is_dir():
@@ -153,11 +165,33 @@ def list_sessions(state_dir: Path) -> list[dict]:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        msgs = data.get("messages") or []
+        preview = ""
+        for m in msgs:
+            if m.get("role") != "user":
+                continue
+            c = (m.get("content") or "").strip()
+            if not c or c.startswith("<tool_result"):
+                continue
+            # Strip leading <attachments>...</attachments> block.
+            if c.startswith("<attachments>"):
+                end = c.find("</attachments>")
+                if end != -1:
+                    c = c[end + len("</attachments>"):].strip()
+            preview = c[:120].replace("\n", " ").strip()
+            if len(c) > 120:
+                preview += "…"
+            break
+        sub_shots = (data.get("tool_state") or {}).get("submitted_shots") or []
+        shot_ids = [s.get("job_id") for s in sub_shots if isinstance(s, dict) and s.get("job_id")]
         out.append({
             "session_id": data.get("session_id", p.stem),
             "title": data.get("title", "Untitled"),
-            "messages": len(data.get("messages") or []),
-            "shots_submitted": len((data.get("tool_state") or {}).get("submitted_shots") or []),
+            "messages": len(msgs),
+            "shots_submitted": len(sub_shots),
+            "submitted_shot_ids": shot_ids,
+            "preview": preview,
+            "pinned": bool(data.get("pinned", False)),
             "updated_at": data.get("updated_at", p.stat().st_mtime),
             "created_at": data.get("created_at", p.stat().st_ctime),
             "finished": data.get("finished", False),
@@ -173,6 +207,31 @@ def delete_session(session_id: str, state_dir: Path) -> bool:
         p.unlink()
         return True
     return False
+
+
+def rename_session(session_id: str, new_title: str, state_dir: Path) -> bool:
+    if not is_valid_session_id(session_id):
+        return False
+    sess = load_session(session_id, state_dir)
+    if sess is None:
+        return False
+    new_title = (new_title or "").strip()[:120]
+    if not new_title:
+        return False
+    sess.title = new_title
+    save_session(sess, state_dir)
+    return True
+
+
+def set_pinned(session_id: str, pinned: bool, state_dir: Path) -> bool:
+    if not is_valid_session_id(session_id):
+        return False
+    sess = load_session(session_id, state_dir)
+    if sess is None:
+        return False
+    sess.pinned = bool(pinned)
+    save_session(sess, state_dir)
+    return True
 
 
 def new_session(*, title: str, engine_config: engine.EngineConfig) -> Session:
@@ -220,11 +279,20 @@ def run_turn(session: Session, user_message: str | None,
                 pass
         return ev
 
-    # 1. Inject (or refresh) the system prompt at index 0.
+    # 1. Inject (or refresh) the system prompt at index 0. The project
+    # notes excerpt is read fresh every turn so a recently appended
+    # memory becomes visible immediately on the next turn.
+    from agent import project as _project
+    notes_excerpt = ""
+    try:
+        notes_excerpt = _project.read_notes_excerpt(panel_ops.state_dir)
+    except Exception:                                  # noqa: BLE001
+        pass
     sys_prompt = prompts.build_system_prompt(
         capabilities=panel_ops.capabilities,
         tools_doc=tools_doc,
         repo_version=(system_prompt_overrides or {}).get("version", "v2.0.4"),
+        project_notes=notes_excerpt,
     )
     if not session.messages or session.messages[0].get("role") != "system":
         session.messages.insert(0, {"role": "system", "content": sys_prompt})
@@ -310,6 +378,8 @@ def render_tools_doc() -> str:
     order = [
         "estimate_shot", "submit_shot", "get_queue_status",
         "wait_for_shot", "extract_frame", "upload_image",
+        "read_document",
+        "read_project_notes", "append_project_notes",
         "write_session_manifest", "finish",
     ]
     for name in order:
