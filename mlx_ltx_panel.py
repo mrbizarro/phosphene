@@ -2952,7 +2952,12 @@ def run_job_inner(job: dict) -> None:
         else:
             width, height = req_w, req_h
         frames = p["frames"]
-        out_path = OUTPUT / f"mlx_keyframe_{width}x{height}_{frames}f_{stamp}.mp4"
+        # Filename: derive from the user's label or first words of the prompt.
+        # Technical metadata (dimensions, frames, timestamp) lives in the
+        # sidecar at <out_path>.json, surfaced by the gallery info button.
+        kf_stem = _descriptive_filename(p.get("label") or "", p.get("prompt") or "",
+                                        fallback="keyframe")
+        out_path = _unique_output_path(OUTPUT, kf_stem)
         job["raw_path"] = str(out_path)
         # When the agent submitted a multi-keyframe list, hand the helper
         # the full keyframe_images + keyframe_indices arrays (its Layer 1
@@ -3074,16 +3079,22 @@ def run_job_inner(job: dict) -> None:
     # file directly, so the "raw" is the final — keeping the `_raw` suffix in
     # that case made the filenames look half-finished and confused later
     # tooling that pattern-matched on `_raw`.
+    # Filename: derive a descriptive stem from label / prompt. Technical
+    # detail (mode/quality/dimensions/frames/timestamp) is preserved in
+    # the sidecar at <final_out>.json — the gallery's ⓘ button surfaces it.
+    desc_stem = _descriptive_filename(p.get("label") or "", p.get("prompt") or "",
+                                      fallback=tag)
     needs_mux = mode == "i2v_clean_audio"
     if needs_mux:
-        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}_raw.mp4"
-        final_out = OUTPUT / f"mlx_{tag}_{suffix}_{frames}f_{stamp}.mp4"
+        raw_out = _unique_output_path(OUTPUT, desc_stem + "_raw")
+        # Strip the _raw suffix from the same stem for the muxed final.
+        final_out = _unique_output_path(OUTPUT, desc_stem)
     elif temporal_plan:
-        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{model_frames}f_12fps_{stamp}.mp4"
-        final_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_12to24_{stamp}.mp4"
+        raw_out = _unique_output_path(OUTPUT, desc_stem + "_12fps")
+        final_out = _unique_output_path(OUTPUT, desc_stem)
     else:
-        # Single file — name it as the final, no `_raw` suffix.
-        raw_out = OUTPUT / f"mlx_{tag}_{width}x{height}_{frames}f_{stamp}.mp4"
+        # Single file — raw == final, no _raw suffix.
+        raw_out = _unique_output_path(OUTPUT, desc_stem)
         final_out = raw_out
     job["raw_path"] = str(raw_out)
 
@@ -3534,6 +3545,51 @@ def _agent_capabilities() -> dict:
         "allows_extend": SYSTEM_CAPS.get("allows_extend", False),
         "image_engine_config": dict(img_cfg.__dict__),
     }
+
+
+def _descriptive_filename(label: str, prompt: str, *, fallback: str) -> str:
+    """Build a descriptive output stem from the user-set label or prompt.
+
+    Salo: 'Additional videos should have the descriptive names instead of
+    being mlx text to video resolution all that you can see on the
+    information button.' The technical info (mode/quality/dimensions/
+    frames/timestamp) lives in the sidecar JSON next to every mp4 and is
+    surfaced by the gallery's ⓘ button — it doesn't need to be in the
+    filename too.
+
+    Order of preference: label → first 6 words of prompt → fallback.
+    Sanitized to lowercase ASCII alnum + underscore, capped at 50 chars.
+    Caller appends a uniqueness suffix and the extension.
+    """
+    src = (label or "").strip()
+    if not src and prompt:
+        # Take the first ~6 words of the prompt; strip dialogue ('...').
+        words = re.findall(r"[A-Za-z0-9]+", prompt)[:6]
+        src = " ".join(words) if words else ""
+    if not src:
+        src = fallback
+    safe = re.sub(r"[^a-z0-9]+", "_", src.lower()).strip("_")
+    if not safe:
+        safe = fallback
+    return safe[:50].rstrip("_")
+
+
+def _unique_output_path(base: Path, stem: str, ext: str = ".mp4") -> Path:
+    """Resolve `<base>/<stem><ext>` to a non-colliding path.
+
+    First call gets the bare name; subsequent collisions get `_2`, `_3`, ...
+    suffixes. The full technical metadata is in the sidecar so users can
+    still tell renders apart.
+    """
+    p = base / f"{stem}{ext}"
+    if not p.exists():
+        return p
+    i = 2
+    while True:
+        p = base / f"{stem}_{i}{ext}"
+        if not p.exists():
+            return p
+        i += 1
 
 
 def _agent_submit_job(form: dict) -> dict:
@@ -12816,16 +12872,16 @@ function renderEmpty() {
     <p>Paste a script or describe a piece. I'll plan the shots, estimate the wall time, and queue the renders.</p>
     <p>You wake up to mp4s and a manifest.json.</p>
     <div class="examples">
-      <div class="example" data-prompt="Plan a 6-second talking-head shot of a serious news anchor announcing a fake new condition called Coffee Cessation Syndrome. Use balanced quality.">
-        <span>News anchor reads a one-line story</span>
+      <div class="example" data-prompt="I want to make a short movie. Help me plan it shot by shot, then we'll generate it together.">
+        <span>I want to make a short movie</span>
         <span class="arrow">→</span>
       </div>
-      <div class="example" data-prompt="Plan a documentary mockumentary scene: a doctor explains a fictional addiction in two sentences. 12 seconds, balanced quality.">
-        <span>Doctor explains a fictional condition</span>
+      <div class="example" data-prompt="I want to make a 30-minute video. Walk me through how to break it into renderable shots given LTX 2.3's per-clip limits.">
+        <span>I want to make a 30-minute video</span>
         <span class="arrow">→</span>
       </div>
-      <div class="example" data-prompt="Plan a 3-shot interview piece about a developer who can't stop refactoring household appliances. Documentary feel. Suggest durations per shot.">
-        <span>Three-shot interview piece</span>
+      <div class="example" data-prompt="I want to make clips for my existing project. Ask me about the project first, then we'll plan the next batch of shots together.">
+        <span>I want to make clips for my existing project</span>
         <span class="arrow">→</span>
       </div>
     </div>
