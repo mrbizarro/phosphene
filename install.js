@@ -211,11 +211,21 @@ module.exports = {
     // failed, and the user sees an actionable error instead of a 30 GB
     // download into a broken venv. Idempotent — costs ~300ms on a working
     // install.
+    //
+    // v2.0.5: stripped the print('venv OK: ...') decoration. KTDS (and one
+    // other Twitter user) hit a SyntaxError on v2.0.4 where the literal
+    // `OK:` was being mangled out of the Python string by something between
+    // install.js and the executed shell line — `OK:` got cut from inside
+    // and `OK` got appended after the closing shell quote, so Python saw
+    // `...importable')OK` and bailed. The exit code from a successful
+    // `import` is already the only success signal `shell.run` needs; the
+    // print was decorative. Keeping the line minimal sidesteps whatever the
+    // rewriter is doing.
     {
       method: "shell.run",
       params: {
         message: [
-          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx; print('venv OK: ltx_core_mlx, ltx_pipelines_mlx, mlx all importable')\""
+          "./ltx-2-mlx/env/bin/python3.11 -c \"import ltx_core_mlx, ltx_pipelines_mlx, mlx\""
         ]
       }
     },
