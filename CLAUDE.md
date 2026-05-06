@@ -1233,6 +1233,42 @@ Tracked here so they don't get lost between sessions.
 - Q8 weights: `dgrauet/ltx-2.3-mlx-q8` on HF
 - Gemma text encoder: `mlx-community/gemma-3-12b-it-4bit` on HF
 
+## 24. Agentic Flows module (`agent/`, shipped 2026-05-06)
+
+A chat-driven shot planner tab in the form-pane. User pastes a script,
+agent breaks it into shots, queues them through the existing `/queue/add`
+path, writes a `mlx_outputs/agentflow_<id>/manifest.json`, and finishes.
+
+**See:** `docs/AGENTIC_FLOWS.md` for the user reference.
+
+The `agent/` package is pure-stdlib Python — imports nothing from
+`mlx_ltx_panel.py`. The panel injects a `tools.PanelOps` callback bundle
+at dispatch time so the agent can submit jobs, snapshot the queue, and
+look up jobs by id without circular imports.
+
+| File | Role |
+|---|---|
+| `agent/engine.py` | OpenAI-compat `chat()` client + `EngineConfig` + role-alternation normalizer for the wire format. |
+| `agent/local_server.py` | Spawns `mlx_lm.server` with safe flags (`--prompt-cache-size 0 --prefill-step-size 8192 --prompt-concurrency 1 --decode-concurrency 1` — sidesteps the mlx-lm 0.31.1 cache-merge bug). Discovers chat-capable models in `mlx_models/`. |
+| `agent/tools.py` | Tool registry + dispatcher. PanelOps protocol. Tools: `estimate_shot`, `submit_shot`, `get_queue_status`, `wait_for_shot`, `extract_frame`, `upload_image`, `write_session_manifest`, `finish`. |
+| `agent/prompts.py` | System prompt builder. Encodes Phosphene's operator manual (modes, empirical wall times from §0, failure modes, prompting rules). Single source of truth — update STATE.md / this file → prompt picks it up next turn. |
+| `agent/runtime.py` | Session dataclass, `run_turn()` generator (chat→tool→chat loop with max_steps cap), atomic-replace persistence to `state/agent_sessions/<id>.json`. |
+
+**Tool fenced-block protocol.** Models emit one ` ```action {tool, args} ``` ` block per turn (in their assistant content); the runtime parses, dispatches, feeds the result back as a `<tool_result>...</tool_result>` user message, and loops. No reliance on OpenAI's tool-calling spec — universal across every Chat Completions server.
+
+**Engine pluggability.** Default = Phosphene Local (`mlx_lm.server` against the bundled Gemma 3 12B IT). Custom = any OpenAI-compatible URL + key (Anthropic compat, OpenAI, OpenRouter, LM Studio). Stronger local = drop a chat-capable MLX model in `mlx_models/`. See `docs/AGENTIC_FLOWS.md` § Engine options.
+
+**HTTP endpoints** (added to `mlx_ltx_panel.py`; documented in §11):
+- `GET /agent/config`, `GET /agent/sessions`, `GET /agent/sessions/<id>`, `GET /agent/local/status`
+- `POST /agent/config`, `POST /agent/local/{start,stop}`, `POST /agent/sessions/new`, `POST /agent/sessions/<id>/{message,delete}`
+
+**Persistence.** `state/agent_config.json` (engine config, api_key masked in HTTP responses) + `state/agent_sessions/<id>.json` (one chat thread, atomic-replaced on every turn). Both under `state/` which is fs.link symlinked + gitignored.
+
+**Don't do** when working in this area:
+- Don't add per-provider client code. The OpenAI-compat shape is the universal interface.
+- Don't bypass `panel_ops.submit_job` to write directly into `STATE['queue']` — `make_job()` is the canonical job-spec builder, with tier clamps, defaults, and validation. The agent goes through the same path the manual UI does.
+- Don't auto-stitch the rendered clips. The user wanted the manifest, not a finished movie. Keep it that way.
+
 ---
 
 # Generic Pinokio Development Guide
