@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phosphene</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png">
+  <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
+  <link rel="stylesheet" href="/webapp/style/all.css">
+  <script src="/webapp/vendor/marked.min.js"></script>
+  <script src="/webapp/vendor/dompurify.min.js"></script>
+  <script>
+  // Bootstrap stub. Synchronous XHR — ugly but it preserves the semantic
+  // that BOOT exists at the top of main.js. The original panel had BOOT
+  // inlined as a JSON literal at the top of <script>; we mirror that
+  // ordering by blocking on /api/page-config before main.js runs.
+  (function () {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "/api/page-config", false);  // sync
+      xhr.send(null);
+      if (xhr.status !== 200) throw new Error("page-config " + xhr.status);
+      const cfg = JSON.parse(xhr.responseText);
+      window.BOOT = cfg;
+      // Profile badge — only visible on dev panel.
+      if (cfg.profile === "dev") {
+        document.addEventListener("DOMContentLoaded", function () {
+          const el = document.getElementById("profileBadge");
+          if (el) el.hidden = false;
+        });
+      }
+    } catch (err) {
+      console.error("[phosphene] bootstrap failed:", err);
+      window.BOOT = {};
+    }
+  })();
+  </script>
+</head>
+<body>
+
+<header>
+  <a href="/" class="brand"><img src="/assets/logo-header.png" alt="Phosphene"></a>
+  <span class="version-badge" title="Phosphene 2.0">2.0</span>
+  <span id="profileBadge" class="profile-badge" hidden>DEV</span>
+  <span class="spacer"></span>
+  <!-- Hardware tier badge — clickable, opens a dialog explaining what
+       this Mac's RAM tier allows. Modes / qualities the tier doesn't
+       support are visibly disabled in the form below. -->
+  <span id="tierPill" class="pill" style="cursor:pointer" onclick="openTierModal()" title="Click to see what this Mac can do">click for system info</span>
+  <span id="memPill" class="pill">memory…</span>
+  <span id="comfyPill" class="pill" style="display:none">comfy…</span>
+  <span id="helperPill" class="pill">helper…</span>
+  <!-- Models pill: shows roll-up status (X / Y models ready) and click-opens
+       a modal with per-repo download buttons. Color reflects readiness:
+       pill-good = all models present, pill-warn = base ready but Q8 missing,
+       pill-bad = base incomplete (panel can't render). -->
+  <span id="modelsPill" class="pill" style="cursor:pointer" onclick="openModelsModal()" title="View / download model status">models…</span>
+  <span id="queuePill" class="pill">queue 0</span>
+  <span id="jobPill" class="pill">idle</span>
+  <!-- Update-available pill. Hidden by default; renders only when the
+       /version poller finds the install behind origin/main. Click → modal
+       listing the unseen commits. We do this because users keep telling
+       us "I clicked Update but I don't see anything" — by the time they
+       do, we've usually pushed three more fixes. -->
+  <!-- Version pill — the "magic button". Always visible so users learn
+       where to look. Clicking does the right thing for the state:
+         pill-current   Y1.001          click → re-check GitHub now
+         pill-update    ↑ Y1.002        click → git pull (then restart)
+         pill-restart   ↻ restart       click → just a reminder hint
+         pill-dev       Y1.001 ⚙        click → toast with reason
+         pill-checking  Y1.001          (idle, while first poll runs)
+       No modal — confirm() + small toast for everything. -->
+  <span id="versionPill" class="pill pill-checking" style="cursor:pointer"
+        onclick="versionPillClick()" title="Phosphene version">phosphene · …</span>
+  <!-- Settings cog: opens the modal that lets users pick output codec
+       presets (Standard / Video production / Web / Custom). Sits between the
+       runtime pills and Stop Comfy so it's findable but not loud. -->
+  <button id="settingsBtn" class="icon-btn" onclick="openSettingsModal()" title="Output settings — codec, file size">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+  </button>
+  <button id="stopComfyBtn" class="ghost-btn" style="display:none" onclick="api('/stop_comfy', 'POST').then(poll)">Stop Comfy</button>
+  <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
+    <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
+    <span>by Bizarro</span>
+    <span class="x-icon">↗ X</span>
+  </a>
+</header>
+
+<main class="layout">
+
+  <!-- ============== FORM PANE ============== -->
+  <aside class="form-pane">
+
+    <!-- Workflow tabs: switch the form-pane between the manual form and
+         the chat-driven planner. Default = manual; toggling persists in
+         localStorage so the user lands on the same tab next session. -->
+    <nav class="workflow-tabs" id="workflowTabs">
+      <button data-workflow="manual" class="active">Manual</button>
+      <button data-workflow="agent">Agentic Flows<span class="new-badge">NEW</span></button>
+    </nav>
+
+    <!-- ============== AGENT SESSIONS SIDEBAR ============== -->
+    <!-- Slides in from the left. Overlay by default (dims chat); pin
+         button turns it inline (chat reflows, padding-left: 280px).
+         Cmd/Ctrl+K toggles, Esc closes (when not pinned). All
+         interaction goes through aspToggle / aspOpen / aspClose / aspLoad.
+         Lives outside .agent-pane so its transform can't smear chat. -->
+    <aside class="agent-sessions-panel" id="agentSessionsPanel"
+           data-state="closed" aria-hidden="true">
+      <header class="asp-head">
+        <div class="asp-title">Sessions</div>
+        <button class="asp-icon" id="aspPinBtn" onclick="aspTogglePin()" title="Pin sidebar (keeps it open)">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="2" x2="12" y2="9"/>
+            <line x1="12" y1="20" x2="12" y2="22"/>
+            <path d="M7 9h10v3a5 5 0 0 1-5 5 5 5 0 0 1-5-5z"/>
+          </svg>
+        </button>
+        <button class="asp-icon" onclick="aspClose()" title="Close (Esc)">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <div class="asp-search">
+        <svg class="asp-search-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="aspSearchInput" placeholder="Search sessions…" autocomplete="off" />
+        <kbd class="asp-kbd">/</kbd>
+      </div>
+      <div class="asp-list" id="aspList" tabindex="0"></div>
+      <div class="asp-empty" id="aspEmpty" hidden>
+        <div class="asp-empty-title">No sessions yet</div>
+        <div class="asp-empty-hint">Type a prompt to start your first one.</div>
+      </div>
+    </aside>
+    <div class="asp-backdrop" id="aspBackdrop" hidden onclick="aspClose()"></div>
+
+    <!-- ============== AGENTIC FLOWS PANE ============== -->
+    <!-- Chat-driven shot planner. The agent loop lives in the panel's
+         Python backend (agent/runtime.py); this UI just sends user
+         messages, renders the message log with markdown + expandable
+         tool cards, and exposes engine settings via a drawer. -->
+    <section class="agent-pane" id="agentPane" hidden>
+      <header class="agent-header" style="position:relative">
+        <!-- Sessions trigger — explicit, labelled, with a count chip.
+             Replaces the old "click-the-title-to-open-popover" pattern
+             which was undiscoverable. Also bound to Cmd+K / Ctrl+K
+             from anywhere on the page. -->
+        <button type="button" class="asp-trigger" id="aspTriggerBtn"
+                onclick="aspToggle()"
+                title="Sessions (Cmd+K)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="14" y2="18"/>
+          </svg>
+          <span>Sessions</span>
+          <span class="asp-trigger-count" id="aspTriggerCount" hidden>0</span>
+        </button>
+        <button type="button" class="engine-pill" id="agentEnginePill"
+                onclick="openAgentSettings()" title="Click to configure the agent engine">
+          <span class="dot" id="agentEngineDot"></span>
+          <span id="agentEngineLabel">engine…</span>
+        </button>
+        <!-- Mode toggle: Plan-and-sleep (default) vs Interactive. In Plan
+             & sleep, the local engine auto-stops the moment the agent
+             finishes its plan, freeing 20+ GB so the LTX renderer can
+             use the full memory budget overnight. -->
+        <button type="button" class="agent-mode-pill" id="agentModePill"
+                onclick="agentToggleMode()"
+                title="Plan & sleep: auto-stop the chat model after the agent finishes (frees RAM for renders).&#10;Click to switch to Interactive mode.">
+          <span class="agent-mode-icon" id="agentModeIcon">🌙</span>
+          <span id="agentModeLabel">Plan & sleep</span>
+        </button>
+        <!-- Quick "stop engine" — only shown when the local engine is
+             running. One-click way to free RAM mid-batch without going
+             through the Settings drawer. -->
+        <button type="button" class="agent-engine-stop" id="agentEngineStopBtn"
+                onclick="agentEngineStopNow()"
+                title="Stop the local chat model now to free RAM"
+                hidden>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+          </svg>
+          <span>Stop engine</span>
+        </button>
+        <!-- Headroom chip — shows how much RAM is left right now AND
+             whether the configured chat model would fit. The single
+             clearest signal "can I run the agent right now?" — so the
+             user doesn't have to do mental math while a render is on. -->
+        <span class="agent-ram-chip" id="agentRamChip"
+              title="Free RAM right now and whether the chat model fits.">
+          <span class="agent-ram-dot"></span>
+          <span id="agentRamLabel">RAM …</span>
+        </span>
+        <div class="session-title" id="agentSessionTitle"
+             title="Current session">
+          New chat
+        </div>
+        <button type="button" class="icon-btn" onclick="agentNewSession()"
+                title="Start a fresh session">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <a class="icon-btn" id="agentPopOutBtn"
+           href="/" target="_blank" rel="noopener"
+           onclick="agentPopOutFlagsBeforeNavigate()"
+           title="Open in your default browser (true OS fullscreen — escapes Pinokio's sidebar)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </a>
+        <button type="button" class="icon-btn" id="agentFullscreenBtn"
+                onclick="agentToggleFullscreen()" title="Expand to fullscreen (Esc to exit)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" id="agentFullscreenIconExpand">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" id="agentFullscreenIconCollapse" style="display:none">
+            <polyline points="4 14 10 14 10 20"/>
+            <polyline points="20 10 14 10 14 4"/>
+            <line x1="14" y1="10" x2="21" y2="3"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" onclick="openProjectNotes()" title="Project notes — persistent memory across sessions">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="15" y2="17"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" onclick="openAgentSettings()" title="Settings">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </header>
+
+      <div class="agent-chat" id="agentChat"></div>
+
+      <div class="agent-composer">
+        <!-- Reference chip: appears when the user clicks Refine on an
+             existing clip. Carries the clip's job_id; on Send, we
+             prepend "Refine <job_id>: " to the user's message so the
+             agent calls inspect_clip and treats the request as a
+             variation. Clear with the × button. -->
+        <div class="agent-ref-chip" id="agentRefChip" style="margin-left:auto;margin-right:auto;max-width:720px">
+          <span class="ref-icon">↻</span>
+          <span style="color:var(--muted);font-size:11px">refine</span>
+          <span class="ref-label" id="agentRefChipLabel">…</span>
+          <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine">×</button>
+        </div>
+        <!-- Pending-attachment chip row. Filled by agentAddAttachment() as the
+             user picks files (paperclip / drag-drop / paste). Survives between
+             messages until cleared. -->
+        <div class="agent-attach-row" id="agentAttachRow" style="display:none"></div>
+        <div class="agent-composer-wrap">
+          <input type="file" id="agentFileInput" multiple
+                 accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,.md,.txt,.pdf"
+                 style="display:none" onchange="agentOnFilesPicked(event)">
+          <button type="button" id="agentAttachBtn" class="attach-btn"
+                  onclick="document.getElementById('agentFileInput').click()"
+                  title="Attach images or documents (drag-drop or ⌘V also work)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+            <span class="count" id="agentAttachCount">0</span>
+          </button>
+          <textarea id="agentInput"
+                    placeholder="Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight."
+                    rows="1"
+                    autocomplete="off"></textarea>
+          <button type="button" id="agentSendBtn" class="send-btn" onclick="agentSend()" title="Send (Cmd/Ctrl+Enter)" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5"/>
+              <polyline points="5 12 12 5 19 12"/>
+            </svg>
+          </button>
+          <span class="hint">Cmd/Ctrl + Enter to send · ⌘V to paste · drag files to attach</span>
+        </div>
+        <!-- Drag-drop overlay shown only while a drag is over the chat surface. -->
+        <div class="agent-drop-overlay" id="agentDropOverlay">
+          <div class="drop-card">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <div style="font-weight:600">Drop to attach</div>
+            <div style="color:var(--muted); font-size:12px">images, PDFs, and text files</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- The original manual form is unchanged; it sits below in the DOM
+         and is shown/hidden by JS as the workflow tab toggles. -->
+    <form id="genForm">
+      <input type="hidden" name="preset_label" id="preset_label" value="">
+
+      <!-- Inline models card. Sits ABOVE the mode picker because for many
+           users the very first thing they need to do is download base
+           weights — burying that in a header modal hides the whole point
+           of the panel. The card has four visual states it cycles through
+           depending on /status data; see updateModelsCard() in the JS. -->
+      <div id="modelsInline" class="models-inline" style="display:none">
+        <button type="button" class="models-inline-dismiss" id="modelsInlineDismiss"
+                title="Hide this card (won't show again until model state changes)"
+                onclick="dismissModelsCard()">×</button>
+        <div class="models-inline-body">
+          <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
+          <div class="models-inline-text">
+            <div class="ttl" id="modelsInlineTitle">Download required</div>
+            <div class="sub" id="modelsInlineSub">Click to start.</div>
+            <div class="models-inline-progress" id="modelsInlineProgress" style="display:none">
+              <div class="bar"><div class="fill" id="modelsInlineFill" style="width:0%"></div></div>
+              <div class="last" id="modelsInlineLast"></div>
+            </div>
+          </div>
+          <div class="models-inline-actions" id="modelsInlineActions"></div>
+        </div>
+        <a class="models-inline-link" onclick="openModelsModal()">Manage all models →</a>
+      </div>
+
+      <h2>Mode</h2>
+      <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+        <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
+        <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
+        <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
+        <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
+      </div>
+      <input type="hidden" name="mode" id="mode" value="t2v">
+
+      <!-- Quality picker (Y1.013): one decision instead of four. Each
+           button bundles dimensions + model + step count + tier
+           recommendation, with the actual specs visible on the pill so
+           power users can read what they're getting. Aspect, custom
+           W/H, and the experimental Speed setting moved into the
+           Customize disclosure below. Beginners pick a button; power
+           users open Customize. -->
+      <h2>Quality</h2>
+      <div class="pill-group cols-2 quality-row" id="qualityGroup">
+        <button type="button" class="pill-btn pill-quality" data-quality="quick">
+          <span class="ql-name">Quick</span>
+          <span class="sub ql-spec">640×480 · ~2 min</span>
+          <span class="ql-tier">Q4 · any Mac</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality active" data-quality="balanced">
+          <span class="ql-name">Balanced</span>
+          <span class="sub ql-spec">1024×576 → 720p</span>
+          <span class="ql-tier">Q4 · ~5 min · no crop</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality" data-quality="standard">
+          <span class="ql-name">Standard</span>
+          <span class="sub ql-spec">1280×704 · ~7 min</span>
+          <span class="ql-tier">Q4 · standard tier+</span>
+        </button>
+        <button type="button" class="pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
+          <span class="ql-name">High</span>
+          <span class="sub ql-spec" id="highSpec">1280×704 · ~12 min</span>
+          <span class="ql-tier" id="highSub">Q8 not installed</span>
+        </button>
+      </div>
+      <input type="hidden" name="quality" id="quality" value="balanced">
+      <input type="hidden" name="accel" id="accel" value="off">
+      <input type="hidden" name="temporal_mode" id="temporal_mode" value="native">
+      <input type="hidden" name="upscale" id="upscale" value="fit_720p">
+
+      <div id="warnBanner" class="warn-banner"></div>
+
+      <!-- Mode-specific: image (I2V).
+           New picker: a clickable / drag-drop tile + a "Recent uploads"
+           strip below. The raw path input is gone — paths are still set
+           via the hidden field for form submission, but never typed by the
+           user. Same component is reused for FFLF Start / End below. -->
+      <div class="mode-only" id="imageSection">
+        <h2>Reference image</h2>
+        <div class="picker" data-key="image">
+          <div class="picker-drop" id="picker_drop_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🖼</div>
+              <div class="picker-cta">Drop image here, or <strong>click to browse</strong></div>
+              <div class="hint">PNG / JPG / WEBP — auto cover-crop to model size</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_image" accept="image/*" style="display:none">
+          <input type="hidden" name="image" id="image" value="">
+          <div class="picker-recent" id="picker_recent_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_image"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode-specific: keyframe (FFLF). Two pickers, same component. -->
+      <div class="mode-only" id="keyframeSection">
+        <h2>Start frame (frame 0)</h2>
+        <div class="picker" data-key="start_image">
+          <div class="picker-drop" id="picker_drop_start_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🎬</div>
+              <div class="picker-cta">Drop the <strong>first frame</strong>, or <strong>click to browse</strong></div>
+              <div class="hint">This image opens the clip — its aspect picks the output dimensions.</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_start_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_start_image" accept="image/*" style="display:none">
+          <input type="hidden" name="start_image" id="start_image" value="">
+          <div class="picker-recent" id="picker_recent_start_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_start_image"></div>
+          </div>
+        </div>
+
+        <h2>End frame (last frame)</h2>
+        <div class="picker" data-key="end_image">
+          <div class="picker-drop" id="picker_drop_end_image">
+            <div class="picker-empty">
+              <div class="picker-icon">🎯</div>
+              <div class="picker-cta">Drop the <strong>last frame</strong>, or <strong>click to browse</strong></div>
+              <div class="hint">A close-up here anchors face identity through the clip.</div>
+            </div>
+            <img class="picker-preview" id="picker_preview_end_image" alt="" style="display:none">
+            <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none">×</button>
+          </div>
+          <input type="file" id="picker_file_end_image" accept="image/*" style="display:none">
+          <input type="hidden" name="end_image" id="end_image" value="">
+          <div class="picker-recent" id="picker_recent_end_image_wrap" style="display:none">
+            <div class="picker-recent-label">Recent uploads · click to use</div>
+            <div class="picker-recent-strip" id="picker_recent_end_image"></div>
+          </div>
+        </div>
+
+        <div class="hint">FFLF needs Q8 (auto-selects High quality). The model interpolates between the two frames you provide.</div>
+      </div>
+
+      <!-- Mode-specific: extend -->
+      <div class="mode-only" id="extendSection">
+        <h2>Source video</h2>
+        <select id="extendSrcSelect" onchange="document.getElementById('video_path').value=this.value"></select>
+        <input name="video_path" id="video_path" placeholder="/path/to/source.mp4" style="margin-top:6px">
+        <div class="row" style="margin-top:8px">
+          <div>
+            <label class="lbl">Extend by (seconds)</label>
+            <!-- min must align to step from value=2: with min=0.4 step=0.5 the
+                 valid sequence is 0.4, 0.9, 1.4, 1.9, 2.4… — `2` is OFF the
+                 grid. Chrome blocks the entire form submission silently when
+                 ANY input fails validation, even hidden ones in inactive
+                 modes. Generate appeared dead until cocktailpeanut diagnosed
+                 it. With min=0.5 the sequence is 0.5, 1.0, 1.5, 2.0… and
+                 value=2 is valid. -->
+            <input id="extend_seconds" type="number" value="2" min="0.5" max="10" step="0.5">
+            <input type="hidden" name="extend_frames" id="extend_frames" value="6">
+            <div class="hint" id="extendDurationHint" style="margin-top:4px">≈ 2.0 s of new content (6 latent frames × 8 video frames at 24 fps)</div>
+          </div>
+          <div>
+            <label class="lbl">Direction</label>
+            <select name="extend_direction" id="extend_direction">
+              <option value="after" selected>After</option>
+              <option value="before">Before</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Speed/quality preset for extend.
+             Fast: cfg_scale=1.0 (no CFG, ~half the activation memory) +
+                   12 steps. Fits comfortably on 64 GB at 1280×704. ~3-5 min.
+             Quality: cfg_scale=3.0 + 30 steps. The upstream defaults. Will
+                   swap on 64 GB at 1280×704 (peak ~47 GB resident + 12 GB
+                   swap) — only pick this on a 96+ GB machine or below 768
+                   max-side. Pinokio 64 GB users should leave this on Fast. -->
+        <label class="lbl" style="margin-top:10px">Extend mode</label>
+        <div class="pill-group cols-2" id="extendModeGroup">
+          <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">12 steps · no CFG · 64 GB safe</span></button>
+          <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">30 steps · CFG 3.0 · 96+ GB</span></button>
+        </div>
+        <input type="hidden" name="extend_steps" id="extend_steps" value="12">
+        <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
+        <div class="hint">Each latent ≈ 8 frames (~0.33s). Quality mode runs the upstream defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Fast unless you've got more RAM.</div>
+      </div>
+
+      <h2>Prompt</h2>
+      <!-- Audio-guidance hint in the placeholder. LTX 2.3 generates audio
+           jointly but is CONDITIONED on prompt cues — visual-only prompts
+           produce near-silent room tone (peaks at -37 dB on test runs).
+           Most users assume "no sound" = bug. Hint nudges them to describe
+           the soundscape too. Documented in the LTX 2.3 paper but unobvious. -->
+      <textarea name="prompt" id="prompt" placeholder="Describe the scene AND the sound: e.g. 'wizard in a forest clearing, fireflies spiraling up — low whispered chant, ember crackle, distant owl'. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
+      <label class="lbl" for="negative_prompt">Avoid</label>
+      <textarea class="avoid-textarea" name="negative_prompt" id="negative_prompt" placeholder="Optional: blurry hands, distorted fingers, extra fingers, smeared face, warped text"></textarea>
+      <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
+           Rewrites your prompt with the structure/keywords LTX 2.3 trained
+           on. ~12-15s on cold start (Gemma needs to load), ~5s warm.
+
+           "No music" checkbox: appends an audio constraint to the prompt
+           on submit so users can keep voice + ambient and skip the model's
+           default soundtrack tendency. Music is annoying in editing because
+           it can't be cleanly removed without affecting the dialogue track.
+           Recommended for clips you plan to score yourself in post. -->
+      <!-- Three controls on one row: Enhance button on the left, then
+           HDR + No-music toggles pushed to the right. HDR is exposed as
+           a plain toggle even though it's implemented as a curated
+           Lightricks LoRA — most users don't care that it's a LoRA, they
+           just want HDR or not. -->
+      <div class="row-actions" style="margin-top:8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+        <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
+        <label class="toggle-pill" id="hdrPill" style="margin-left:auto"
+               title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer. First HDR job spawns a one-time download (~120 MB) of the LoRA weights from Hugging Face, then renders share the cache.">
+          <input type="checkbox" id="hdr" name="hdr">
+          <span class="toggle-dot"></span>
+          <span>HDR</span>
+        </label>
+        <label class="toggle-pill" id="noMusicPill"
+               title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
+          <input type="checkbox" id="noMusic" name="no_music">
+          <span class="toggle-dot"></span>
+          <span>No music</span>
+        </label>
+      </div>
+
+      <!-- LoRA picker. Collapsible because most users won't touch it on
+           a given session, and inline because hiding it behind a modal
+           makes it easy to forget. Loaded from /loras on open; the
+           "Browse CivitAI" affordance opens the search modal. -->
+      <!-- LoRAs section — visually distinct from the surrounding form so
+           users notice "oh, there's a whole controllable area here." A
+           thin separator above + bordered container + a clear chevron
+           on the summary. Default open so first-time users see what's
+           inside without hunting for the disclosure triangle. -->
+      <div class="form-divider"></div>
+      <details id="lorasDetails" open class="loras-section">
+        <summary class="loras-summary">
+          <span class="loras-chevron" aria-hidden="true">▾</span>
+          <span class="loras-title">LoRAs</span>
+          <span class="loras-meta" id="lorasSummaryCount">none active</span>
+          <!-- Action buttons live in the header so they're visible
+               regardless of how far the user has scrolled inside the
+               LoRA list. Rescan is icon-only (the ↻ glyph reads as
+               refresh universally); Browse CivitAI is the primary CTA
+               for adding new LoRAs so it's a coloured button.
+               event.stopPropagation() keeps clicks from toggling the
+               <details> open/closed state. -->
+          <span class="loras-header-actions">
+            <button type="button" class="loras-icon-btn"
+                    title="Rescan mlx_models/loras/ for new files"
+                    onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()">↻</button>
+            <button type="button" class="loras-browse-btn"
+                    onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()">🔍 Browse CivitAI</button>
+          </span>
+        </summary>
+        <div class="loras-body" id="lorasBody">
+          <!-- Filter/search box. Shows up only when 5+ LoRAs are
+               installed; below that it's just visual noise. Filters by
+               name AND trigger words (case-insensitive substring). -->
+          <div id="lorasFilterRow" style="display:none;">
+            <input type="text" id="lorasFilter" class="lora-filter"
+                   placeholder="Filter LoRAs… (name or trigger word)"
+                   oninput="renderLorasList()">
+          </div>
+          <div class="hint" id="lorasEmpty">
+            Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
+            to use them, or click <strong>Browse CivitAI</strong> above.
+            Each LoRA picks up an optional sidecar <code>.json</code> with
+            name + trigger words + recommended strength.
+          </div>
+          <div class="loras-list" id="lorasList"></div>
+        </div>
+      </details>
+      <div class="form-divider"></div>
+      <!-- Hidden field; updated by the LoRA picker JS to a JSON-encoded
+           array of {path, strength} that make_job parses. -->
+      <input type="hidden" id="lorasJson" name="loras" value="">
+
+      <!-- Advanced — power-user options. We trimmed two things in cleanup:
+           1. Removed the "Enhance prompt" checkbox: it was labeled "CLI only,
+              ignored by helper" — actual dead code. The Enhance button next
+              to the prompt textarea is the real thing.
+           2. The I2V audio mode (mux external audio over LTX-generated video)
+              only applies in I2V mode; the panel auto-hides it elsewhere via
+              `.mode-only` on the wrapper. -->
+      <details>
+        <summary>Advanced</summary>
+        <div class="mode-only" id="i2vAudioModeSection">
+          <label class="lbl">I2V audio source</label>
+          <select id="i2vMode">
+            <option value="i2v" selected>Joint audio (LTX generates audio synced with the visual)</option>
+            <option value="i2v_clean_audio">Use external audio file (mux it onto LTX video)</option>
+          </select>
+          <div class="mode-only" id="audioSection">
+            <label class="lbl">Audio file path</label>
+            <input name="audio" id="audio" placeholder="/path/to/your/track.wav">
+          </div>
+        </div>
+        <label class="check" style="margin-top:6px">
+          <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done
+        </label>
+      </details>
+
+      <!-- Sizing for non-extend modes. The headline Quality picker above
+           sets sensible defaults; this disclosure lets power users override
+           aspect, exact dimensions, and the experimental sampler speed. -->
+      <div class="mode-only" id="sizingSection">
+        <details id="customizeDetails" class="customize-section">
+          <summary class="cz-summary">
+            <span class="cz-chevron" aria-hidden="true">▾</span>
+            <span class="cz-title">Customize</span>
+            <span class="cz-meta" id="customizeSummary">16:9 · default speed</span>
+          </summary>
+          <div class="cz-body">
+            <!-- Aspect — only relevant when the active Quality preset has
+                 multiple aspects (Standard / High at 1280×704 vs 704×1280).
+                 Hidden when Quick is active (640×480 is 4:3 only). -->
+            <div id="aspectRow" class="cz-control">
+              <div class="cz-label">Aspect ratio</div>
+              <div class="pill-group cols-2" id="aspectGroup">
+                <button type="button" class="pill-btn active" data-aspect="landscape"><span>16 : 9</span><span class="sub">horizontal</span></button>
+                <button type="button" class="pill-btn" data-aspect="vertical"><span>9 : 16</span><span class="sub">vertical</span></button>
+              </div>
+              <input type="hidden" id="aspect" value="landscape">
+            </div>
+
+            <!-- Width × height. Setting custom dimensions makes the form
+                 leave the active preset (the Quality pill stays highlighted
+                 but the Customize summary shows "custom" so the user knows
+                 they've deviated). -->
+            <div id="dimsRow" class="cz-control">
+              <div class="cz-label">Width × height</div>
+              <div class="row">
+                <div><input name="width" id="width" value="1024" type="number" min="32" step="32" aria-label="Width"></div>
+                <div><input name="height" id="height" value="576" type="number" min="32" step="32" aria-label="Height"></div>
+              </div>
+            </div>
+
+            <!-- Speed — experimental sampler acceleration. Boost/Turbo
+                 skip 2-3 stable middle denoise calls. Off at High quality
+                 (the two-stage HQ sampler doesn't support skipping). -->
+            <div class="cz-control">
+              <div class="cz-label">Speed
+                <span class="cz-label-hint">experimental — skip stable denoise steps</span>
+              </div>
+              <div class="pill-group cols-3" id="accelGroup">
+                <button type="button" class="pill-btn active" data-accel="off"><span>Exact</span><span class="sub">full sampler</span></button>
+                <button type="button" class="pill-btn" data-accel="boost"><span>Boost</span><span class="sub">~10-15% faster</span></button>
+                <button type="button" class="pill-btn" data-accel="turbo"><span>Turbo</span><span class="sub">~20-25% faster</span></button>
+              </div>
+            </div>
+
+            <!-- Long Clip Boost — asks LTX 2.3 to generate fewer semantic
+                 frames at 12fps, then exports a normal 24fps file with
+                 motion interpolation. This is explicit because dialogue,
+                 lip-sync, and fast motion need user judgment. -->
+            <div class="cz-control" id="temporalRow">
+              <div class="cz-label">Long clips
+                <span class="cz-label-hint">experimental temporal interpolation</span>
+              </div>
+              <div class="pill-group cols-2" id="temporalGroup">
+                <button type="button" class="pill-btn active" data-temporal="native"><span>Native</span><span class="sub">24fps from LTX</span></button>
+                <button type="button" class="pill-btn" data-temporal="fps12_interp24"><span>12 → 24fps</span><span class="sub">half frames · interpolated</span></button>
+              </div>
+            </div>
+
+            <!-- Export upscale — target dims after render. "720p fit"
+                 preserves aspect ratio (no crop, no distortion). 2× doubles
+                 each side. Native skips the upscale entirely. The "Method"
+                 row below picks how the upscaling is done. -->
+            <div class="cz-control">
+              <div class="cz-label">Export
+                <span class="cz-label-hint">post-render, no crop</span>
+              </div>
+              <div class="pill-group cols-3" id="upscaleGroup">
+                <button type="button" class="pill-btn active" data-upscale="off"><span>Native</span><span class="sub">as generated</span></button>
+                <button type="button" class="pill-btn" data-upscale="fit_720p"><span>720p fit</span><span class="sub">scale + pad</span></button>
+                <button type="button" class="pill-btn" data-upscale="x2"><span>2×</span><span class="sub">same ratio</span></button>
+              </div>
+            </div>
+
+            <!-- Upscale method. Hidden when Export = Native. Fast = ffmpeg
+                 Lanczos resize, no detail recovery, near-instant. Sharp =
+                 PiperSR/CoreML 2× post-upscale on Apple Neural Engine, then
+                 ffmpeg fit/export. The old LTX latent upscaler path remains
+                 hidden behind LTX_ENABLE_MODEL_UPSCALE for lab archaeology. -->
+            <div class="cz-control" id="upscaleMethodRow" style="display:none;">
+              <div class="cz-label">Method
+                <span class="cz-label-hint">how the upscale is done</span>
+              </div>
+              <div class="pill-group cols-2" id="upscaleMethodGroup">
+                <button type="button" class="pill-btn active" data-method="lanczos"><span>Fast</span><span class="sub">ffmpeg Lanczos · instant</span></button>
+                <button type="button" class="pill-btn" data-method="pipersr"><span>Sharp</span><span class="sub">PiperSR ANE · +30-90 s</span></button>
+              </div>
+              <input type="hidden" name="upscale_method" id="upscale_method" value="lanczos">
+            </div>
+          </div>
+        </details>
+
+        <div class="row3" style="margin-top:10px">
+          <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
+          <div><label class="lbl">Frames (8k+1)</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
+          <div><label class="lbl">Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
+        </div>
+
+        <input type="hidden" name="steps" id="steps" value="8">
+
+        <div class="derived" id="derived"></div>
+      </div>
+
+      <!-- Comfy-kill toggle. Hidden in DOM by default; shown only when the
+           panel detects ComfyUI actually running on this Mac (see updateUI
+           in the poll handler). Default-off for public installs: killing a
+           neighboring Pinokio app should be an explicit choice, even when it
+           can free a lot of memory on 64 GB machines. -->
+      <div id="comfyKillRow" class="comfy-row" style="display:none">
+        <label class="lbl" style="display:flex; align-items:center; gap:8px; cursor:pointer">
+          <input type="checkbox" name="stop_comfy" id="stop_comfy" value="on">
+          <span>Stop ComfyUI before render <span style="color:var(--muted)">(optional · can free ~27 GB)</span></span>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="primary" id="genBtn">Generate</button>
+        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
+      </div>
+      <div class="row-actions" style="margin-top:8px">
+        <button type="button" class="small" onclick="openBatch()">Batch paste</button>
+        <button type="button" class="small" id="pauseBtn" onclick="togglePause()">Pause queue</button>
+        <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
+      </div>
+    </form>
+  </aside>
+
+  <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
+  <section class="stage-pane">
+    <div class="player-wrap empty" id="playerWrap">
+      <div>No outputs yet</div>
+      <div style="font-size:11px;opacity:0.6">generate something on the left to begin</div>
+    </div>
+    <div class="player-meta" id="playerMeta" style="display:none">
+      <div class="name" id="playerName"></div>
+      <div class="actions-bar">
+        <button id="loadParamsBtn" onclick="loadParams()" disabled>Load params</button>
+        <button onclick="useAsExtendSource()">Use as Extend</button>
+        <button onclick="hideActive()">Hide</button>
+      </div>
+    </div>
+    <div class="carousel-wrap">
+      <div class="carousel-head">
+        <h3 id="carouselTitle">Outputs</h3>
+        <div class="seg">
+          <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
+          <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
+        </div>
+      </div>
+      <div class="carousel" id="carousel"></div>
+    </div>
+  </section>
+
+  <!-- ============== AGENT STAGE PANE ============== -->
+  <!-- Right-side live canvas for the agent: code-interpreter feel.
+       Hidden by default; shown via CSS when body[data-workflow="agent"]
+       OR body.agent-fullscreen. Polls /status every ~1.5 s and re-renders
+       the current job, queue depth, and recent session outputs. Click an
+       output to play it inline (lightbox). -->
+  <aside class="agent-stage-pane">
+    <header class="agent-stage-head">
+      <span class="live-dot" id="agentStageDot"></span>
+      <span class="label">Stage</span>
+      <span class="session-pill" id="agentStageSession">no session</span>
+      <span class="spacer"></span>
+    </header>
+    <div class="agent-stage-body" id="agentStageBody">
+      <!-- Now Rendering section -->
+      <div class="agent-stage-section">
+        <h4>Now rendering</h4>
+        <div class="stage-now-card idle" id="agentStageNow">
+          <div>Idle — submit a shot to see it render here.</div>
+        </div>
+      </div>
+      <!-- Activity feed -->
+      <div class="agent-stage-section">
+        <h4>Recent activity <span class="count" id="agentStageActivityCount">0</span></h4>
+        <div class="stage-activity" id="agentStageActivity">
+          <div class="stage-empty">No tool calls yet.</div>
+        </div>
+      </div>
+      <!-- Session outputs -->
+      <div class="agent-stage-section">
+        <h4>Session outputs <span class="count" id="agentStageOutputsCount">0</span></h4>
+        <div class="stage-outputs" id="agentStageOutputs">
+          <div class="stage-empty">No mp4s rendered yet.</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Lightbox for stage outputs — plays a finished mp4 full-size on click.
+       Refine button references the playing clip in the composer so the
+       user can ask the agent for a variation while watching. -->
+  <div class="stage-lightbox" id="agentStageLightbox" onclick="if(event.target===this)agentStageLightboxClose()">
+    <button class="close-btn" onclick="agentStageLightboxClose()">Close · Esc</button>
+    <button class="refine-btn-large" id="agentStageLightboxRefine" onclick="agentStageLightboxRefine()">↻ Refine this clip</button>
+    <video id="agentStageLightboxVideo" controls preload="metadata"></video>
+  </div>
+</main>
+
+<!-- ============== CIVITAI MODAL ============== -->
+<!-- LoRA discovery + install modal. Hits /civitai/search to populate
+     the grid and /civitai/download to fetch a selected LoRA into
+     mlx_models/loras/ with a sidecar JSON capturing the metadata. -->
+<div id="civitaiModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeCivitaiModal()">
+  <div class="models-card" style="width: min(960px, 96vw)">
+    <div class="models-head">
+      <h2>Browse CivitAI for LTX 2.3 LoRAs</h2>
+      <button class="ghost-btn" onclick="closeCivitaiModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      LoRAs land in <code id="civitaiTargetDir">mlx_models/loras/</code>
+      with a sidecar JSON that carries the trigger words and recommended
+      strength. The CivitAI page link stays in the sidecar for attribution.
+    </div>
+    <!-- Inline API-key banner. CivitAI requires a token to download LoRAs
+         (even SFW ones). Three states, all rendered in the same slot by
+         renderCivitaiAuthBanner():
+           - missing: amber, has an input + Save button
+           - set: green checkmark with a "change" link that re-shows the input
+           - error: red, shown after a failed test, with re-input + retry
+         The actual key is POSTed to /settings (same endpoint the cog
+         menu uses) so there's a single source of truth on disk. -->
+    <div id="civitaiAuthBanner" class="civitai-auth" style="display:none"></div>
+    <div class="civitai-search-bar">
+      <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
+             oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
+             onkeydown="if(event.key==='Enter'){ event.preventDefault(); civitaiSearch(); }">
+      <label class="toggle-pill" id="civitaiNsfwPill">
+        <input type="checkbox" id="civitaiNsfw">
+        <span class="toggle-dot"></span>
+        <span>Show NSFW</span>
+      </label>
+    </div>
+    <div class="civitai-grid" id="civitaiGrid">
+      <div class="hint">Loading…</div>
+    </div>
+    <div class="civitai-status-line" id="civitaiStatus"></div>
+    <div style="display:flex; justify-content:center; margin-top:14px">
+      <button type="button" class="ghost-btn" id="civitaiLoadMore"
+              style="display:none" onclick="civitaiLoadMore()">Load more</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== SETTINGS MODAL ============== -->
+<!-- Opened by the gear icon in the header. Lets users pick output codec
+     presets (Standard / Video production / Web) or set custom pix_fmt + crf.
+     Persisted to panel_settings.json; the helper subprocess restarts on
+     codec change so the new ffmpeg args take effect on next job. -->
+<div id="settingsModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeSettingsModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2>Settings</h2>
+      <button class="ghost-btn" onclick="closeSettingsModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Pick how rendered clips are encoded. Settings are saved to
+      <code>panel_settings.json</code> and apply to every new render.
+      Files already in the gallery are not re-encoded.
+    </div>
+
+    <div class="settings-section">
+      <h3>Output format</h3>
+      <div class="preset-grid" id="settingsPresets">
+        <!-- populated by openSettingsModal() from /settings -->
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>API tokens</h3>
+      <div class="hint" style="margin-bottom:8px">
+        Saved locally in <code>panel_settings.json</code>. Never sent
+        anywhere except as auth headers to civitai.com / huggingface.co.
+        Power users can override with <code>CIVITAI_API_KEY</code> /
+        <code>HF_TOKEN</code> env vars; the saved value here wins when
+        both are set.
+      </div>
+
+      <!-- CivitAI token row -->
+      <div class="token-row">
+        <div class="token-label">
+          <span>CivitAI API key</span>
+          <span class="token-status" id="civitaiKeyStatus">—</span>
+        </div>
+        <div class="token-row-input">
+          <input type="password" id="civitaiKeyInput" autocomplete="off"
+                 placeholder="paste key here…"
+                 oninput="onTokenInput('civitai')">
+          <button type="button" class="ghost-btn" id="civitaiKeyToggle"
+                  onclick="toggleTokenVisibility('civitaiKeyInput', this)">show</button>
+          <button type="button" class="primary-btn token-savetest"
+                  onclick="testToken('civitai')" title="Save the pasted key and verify it with CivitAI">save & test</button>
+          <button type="button" class="ghost-btn" id="civitaiKeyClear"
+                  onclick="clearToken('civitai')" style="display:none">clear</button>
+        </div>
+        <div class="hint" id="civitaiTestResult">
+          Required for installing CivitAI LoRAs.
+          Get one at <a href="https://civitai.com/user/account" target="_blank" rel="noopener">civitai.com/user/account</a>
+          (Account → API Keys → Add).
+        </div>
+      </div>
+
+      <!-- HF token row -->
+      <div class="token-row">
+        <div class="token-label">
+          <span>Hugging Face token</span>
+          <span class="token-status" id="hfTokenStatus">—</span>
+        </div>
+        <div class="token-row-input">
+          <input type="password" id="hfTokenInput" autocomplete="off"
+                 placeholder="hf_…"
+                 oninput="onTokenInput('hf')">
+          <button type="button" class="ghost-btn" id="hfTokenToggle"
+                  onclick="toggleTokenVisibility('hfTokenInput', this)">show</button>
+          <button type="button" class="primary-btn token-savetest"
+                  onclick="testToken('hf')" title="Save the pasted token and verify it with Hugging Face">save & test</button>
+          <button type="button" class="ghost-btn" id="hfTokenClear"
+                  onclick="clearToken('hf')" style="display:none">clear</button>
+        </div>
+        <div class="hint" id="hfTestResult">
+          Required for gated LoRAs (Lightricks HDR + Control LoRAs).
+          Get one at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
+          — read access is enough.
+        </div>
+      </div>
+    </div>
+
+    <!-- Spicy mode — gates NSFW LoRA visibility in the CivitAI browser.
+         Default OFF. Turning ON requires an explicit confirm-click pattern
+         so a casual visitor / kid can't toggle it by a stray click. The
+         server enforces the gate independently in _civitai_search, so a
+         tampered client can't bypass this. -->
+    <div class="settings-section">
+      <h3>Spicy mode <span class="hint" style="font-weight:400">(adult content)</span></h3>
+      <div class="hint" style="margin-bottom:10px">
+        When OFF, the CivitAI LoRA browser hides NSFW models entirely —
+        the "Show NSFW" toggle disappears and any NSFW result the API
+        returns is filtered out. When ON, you can choose per-search whether
+        to include NSFW results. The server enforces this gate even if the
+        client is tampered with.
+      </div>
+      <div class="spicy-row">
+        <span class="spicy-state" id="spicyStateBadge">OFF</span>
+        <button type="button" class="ghost-btn" id="spicyToggleBtn"
+                onclick="toggleSpicyMode()" style="margin-left:auto">
+          Enable Spicy mode
+        </button>
+      </div>
+      <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
+    </div>
+
+    <div class="settings-section" id="settingsCustomSection" style="display:none">
+      <h3>Custom (advanced)</h3>
+      <div class="settings-row" style="margin-bottom:10px">
+        <label>pix_fmt</label>
+        <select id="settingsPixFmt" style="flex:1">
+          <option value="yuv420p">yuv420p — web standard, broad support</option>
+          <option value="yuv422p">yuv422p — pro, more chroma than 420p</option>
+          <option value="yuv444p">yuv444p — full chroma, no subsampling</option>
+          <option value="yuv420p10le">yuv420p10le — 10-bit, HDR-ready</option>
+          <option value="yuv422p10le">yuv422p10le — 10-bit pro</option>
+          <option value="yuv444p10le">yuv444p10le — 10-bit, full chroma</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <label>CRF</label>
+        <input type="range" id="settingsCrfRange" min="0" max="30" step="1"
+               style="flex:1; width:auto" oninput="document.getElementById('settingsCrfNum').value = this.value">
+        <input type="number" id="settingsCrfNum" min="0" max="30" step="1"
+               style="width:60px"
+               oninput="document.getElementById('settingsCrfRange').value = this.value">
+      </div>
+      <div class="hint" style="margin-top:6px">
+        0 = mathematically lossless · 18 = visually lossless ·
+        23 = web default · 28+ = lossy
+      </div>
+    </div>
+
+    <div class="settings-foot">
+      <span class="settings-status" id="settingsStatus"></span>
+      <button class="ghost-btn" onclick="closeSettingsModal()">Cancel</button>
+      <button class="primary-btn" id="settingsApplyBtn" onclick="applySettings()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== TIER MODAL ============== -->
+<!-- Opened by the "tier" pill in the header. Renders the detected
+     hardware tier + what it allows. Helps users understand WHY some
+     options are disabled instead of just hitting a wall mid-flow. -->
+<div id="tierModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeTierModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2 id="tierModalTitle">Hardware tier</h2>
+      <button class="ghost-btn" onclick="closeTierModal()">Close</button>
+    </div>
+    <div class="models-hint" id="tierModalBlurb"></div>
+    <ul class="models-list" id="tierCapsList"></ul>
+    <div class="models-foot">
+      Set <code>LTX_TIER_OVERRIDE=base|standard|high|pro</code> in the env to
+      force a tier (useful for testing what other users see).
+    </div>
+  </div>
+</div>
+
+<!-- ============== MODELS MODAL ============== -->
+<!-- Opened by the "models" pill in the header. Shows per-repo download
+     status from /models, with a Download button per row. Active downloads
+     stream into the existing log at the bottom of the page. -->
+<div id="modelsModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeModelsModal()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2>Models</h2>
+      <button class="ghost-btn" onclick="closeModelsModal()">Close</button>
+    </div>
+    <div class="models-hint" id="modelsHint">Loading…</div>
+    <ul class="models-list" id="modelsList"></ul>
+    <div class="models-foot" id="modelsFoot"></div>
+  </div>
+</div>
+
+<!-- (Version modal removed in the magic-button rewrite. Pill itself is the
+     full UI now: click while behind → confirm + git pull; click while
+     current → live re-check. See versionPillClick() in the JS section.) -->
+
+<!-- ============== OUTPUT INFO MODAL ============== -->
+<!-- Opened by the ⓘ button on each gallery card. Shows everything we
+     wrote into the .mp4.json sidecar at render time: prompt, seed,
+     mode/quality, frames + dimensions, LoRAs used (with name + strength),
+     elapsed time, queue id, model. Plus copy-buttons for prompt + seed
+     so users can easily re-use them. -->
+<div id="outputInfoModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeOutputInfoModal()">
+  <div class="models-card" style="width: min(720px, 96vw)">
+    <div class="models-head">
+      <h2 id="outputInfoTitle">Generation info</h2>
+      <button class="ghost-btn" onclick="closeOutputInfoModal()">Close</button>
+    </div>
+    <div id="outputInfoBody" class="output-info-body">
+      <div class="hint">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============== BOTTOM TABBED PANE ============== -->
+<aside class="bottom-pane" id="bottomPane">
+  <nav class="tabs">
+    <button data-tab="now" class="active">Now</button>
+    <button data-tab="queue">Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
+    <button data-tab="recent">Recent</button>
+    <button data-tab="logs">Logs</button>
+    <span class="spacer"></span>
+    <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
+    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">Collapse</button>
+  </nav>
+  <div class="bottom-body">
+    <div class="tab-content show" id="tab-now">
+      <div class="now-card idle" id="nowCard">
+        <div class="ttl">Idle</div>
+        <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
+        <div class="meta" id="nowDetail">No job running</div>
+      </div>
+    </div>
+    <div class="tab-content" id="tab-queue">
+      <ul class="row-list" id="queueList"></ul>
+    </div>
+    <div class="tab-content" id="tab-recent">
+      <ul class="row-list" id="historyList"></ul>
+    </div>
+    <div class="tab-content" id="tab-logs">
+      <pre class="log" id="log">No log yet.</pre>
+    </div>
+  </div>
+</aside>
+
+<!-- ============== HF MODEL BROWSER MODAL ============== -->
+<!-- Search + install MLX-format chat models from Hugging Face. Hits
+     huggingface.co/api/models with library=mlx + pipeline_tag=text-generation
+     filters. Click Install → backend spawns `hf download`, status streams
+     in the bottom strip until done. Newly-installed models appear in the
+     local-engine model picker on next refresh. -->
+<div class="model-browser-modal" id="modelBrowserModal" onclick="if(event.target===this)closeModelBrowser()">
+  <div class="model-browser-card">
+    <div class="model-browser-head">
+      <h2>Browse + install models</h2>
+      <span class="subtitle">Hugging Face · MLX</span>
+      <button type="button" class="close-btn" onclick="closeModelBrowser()">Close</button>
+    </div>
+    <div class="model-browser-controls">
+      <input type="text" id="modelBrowserQuery" placeholder="Search HF (e.g. qwen coder, devstral, llama 3.3, granite)" autocomplete="off" />
+      <label class="checkbox-label" title="Filter to abliterated / uncensored variants — the huihui-ai conventions on HF.">
+        <input type="checkbox" id="modelBrowserAbliterated">
+        Abliterated only
+      </label>
+      <button type="button" id="modelBrowserSearchBtn" onclick="modelBrowserSearch()">Search</button>
+    </div>
+    <div class="model-browser-results" id="modelBrowserResults">
+      <div class="model-browser-empty">Type a query and hit Search. Try "qwen3 coder", "devstral", "abliterated", "32b".</div>
+    </div>
+    <div class="model-browser-status" id="modelBrowserStatus">
+      <div><span class="label" id="modelBrowserStatusLabel">…</span><span id="modelBrowserStatusSummary"></span></div>
+      <div class="last-line" id="modelBrowserStatusLine"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============== PROJECT NOTES MODAL ============== -->
+<!-- Persistent memory across sessions — the agent reads the tail of
+     this file every turn. Editable here too. -->
+<div class="agent-settings-modal" id="agentNotesModal" onclick="if(event.target===this)closeProjectNotes()">
+  <div class="agent-settings-card" style="max-width:780px">
+    <h2>Project notes
+      <button type="button" onclick="closeProjectNotes()">Close</button>
+    </h2>
+    <div class="hint">
+      The agent's persistent memory across sessions. It reads the tail
+      every turn, and can append new entries via
+      <code>append_project_notes</code>. Edit freely; one Markdown file at
+      <code>state/agent_project_notes.md</code>.
+    </div>
+    <div class="field">
+      <label>Notes (Markdown)</label>
+      <textarea id="agentNotesTextarea" rows="20" style="width:100%; min-height:380px; font-family: ui-monospace, Menlo, monospace; font-size:12px; line-height:1.55"></textarea>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:8px">
+      <span id="agentNotesStatus" style="flex:1; color:var(--muted); font-size:11px"></span>
+      <button type="button" onclick="closeProjectNotes()"
+              style="padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer">Cancel</button>
+      <button type="button" onclick="saveProjectNotes()"
+              style="padding:7px 14px;border-radius:8px;border:none;background:var(--accent);color:white;cursor:pointer;font-weight:600">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== AGENT SETTINGS MODAL ============== -->
+<div class="agent-settings-modal" id="agentSettingsModal" onclick="if(event.target===this)closeAgentSettings()">
+  <div class="agent-settings-card">
+    <h2>Agent engine
+      <button type="button" onclick="closeAgentSettings()">Close</button>
+    </h2>
+
+    <div class="hint">
+      The agent uses any OpenAI-compatible chat endpoint. Default is
+      <strong>Phosphene Local</strong> — a small mlx-lm.server pointed at the
+      bundled Gemma 3 12B IT (the same weights LTX uses as its text encoder,
+      doubling as a chat model). Stronger options: drop a Qwen 3 Coder 30B
+      MLX model into <code>mlx_models/</code> and pick it below; or point at
+      a cloud endpoint (Anthropic compat, OpenAI, OpenRouter, your LM Studio
+      box on the LAN).
+    </div>
+
+    <div class="agent-engine-row" id="agentLocalRow" style="display:none">
+      <span class="pill" id="agentLocalPill">stopped</span>
+      <span style="flex:1; font-size:12px; color:var(--muted)" id="agentLocalDetail">mlx-lm.server</span>
+      <button type="button" onclick="agentLocalToggle()" id="agentLocalToggleBtn"
+              style="padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:11px;cursor:pointer">Start</button>
+    </div>
+
+    <div class="field">
+      <label>Engine kind</label>
+      <select id="agentKind" onchange="agentKindChanged()">
+        <option value="phosphene_local">Phosphene Local — bundled mlx-lm.server</option>
+        <option value="ollama">Ollama bridge — talks to your `ollama serve` on port 11434</option>
+        <option value="custom">Custom — any OpenAI-compatible URL (Anthropic compat, OpenAI, OpenRouter, LM Studio…)</option>
+      </select>
+    </div>
+
+    <div class="field" id="agentLocalModelField">
+      <label>
+        Local model (chat-capable, MLX 4-bit recommended)
+        <button type="button" onclick="openModelBrowser()" style="margin-left:8px;font-size:10px;padding:3px 9px;background:transparent;color:var(--accent-bright);border:1px solid var(--accent);border-radius:6px;cursor:pointer;width:auto">Browse + install…</button>
+      </label>
+      <select id="agentLocalModel"></select>
+    </div>
+
+    <!-- Ollama: shown only when engine kind == 'ollama'. Status is fetched
+         live from /agent/ollama/status; if Ollama isn't running we surface
+         a clear hint instead of a useless empty dropdown. -->
+    <div class="field" id="agentOllamaField" style="display:none">
+      <label>
+        Ollama installed model
+        <button type="button" onclick="agentOllamaRefresh()" style="margin-left:8px;font-size:10px;padding:3px 9px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;width:auto">Refresh</button>
+      </label>
+      <select id="agentOllamaModel"></select>
+      <div id="agentOllamaHint" style="margin-top:6px;font-size:11px;color:var(--muted)">
+        Manage Ollama models from the terminal: <code>ollama pull qwen2.5-coder:32b</code>, <code>ollama pull huihui_ai/llama3.3-abliterated:70b</code>, etc. Phosphene only talks to Ollama's <code>/v1/chat/completions</code> endpoint — the model has to already be installed in Ollama.
+      </div>
+    </div>
+
+    <div class="field" id="agentBaseUrlField" style="display:none">
+      <label>Base URL</label>
+      <input type="text" id="agentBaseUrl" placeholder="https://api.openai.com/v1">
+    </div>
+
+    <div class="field" id="agentApiKeyField" style="display:none">
+      <label>API key (saved locally; only sent as Authorization header)</label>
+      <input type="password" id="agentApiKey" placeholder="(leave blank to keep saved key)">
+    </div>
+
+    <div class="field" id="agentRemoteModelField" style="display:none">
+      <label>Model identifier</label>
+      <input type="text" id="agentRemoteModel" placeholder="e.g. claude-sonnet-4-6 or gpt-5">
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>Temperature</label>
+        <input type="number" id="agentTemp" min="0" max="2" step="0.05" value="0.4">
+      </div>
+      <div class="field">
+        <label>Max tokens</label>
+        <input type="number" id="agentMaxTokens" min="256" max="32768" step="256" value="3072">
+      </div>
+    </div>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:18px 0 12px">
+
+    <h2 style="font-size:14px">Image generation
+      <span class="pill" id="agentImagePill" style="font-size:10px;padding:3px 8px;border-radius:999px;background:var(--bg-2);color:var(--muted);border:1px solid var(--border)">…</span>
+    </h2>
+    <div class="subtitle" style="margin-bottom:12px">
+      For the director-collaboration workflow: agent generates 4 candidate stills per
+      shot, you pick the best one, then i2v anchors lock the look before each render.
+    </div>
+
+    <div class="field">
+      <label>Backend</label>
+      <select id="agentImageKind" onchange="agentImageKindChanged()">
+        <option value="mock">Mock — PIL placeholders, free, instant (for testing the flow)</option>
+        <option value="mflux">Phosphene Local Flux (mflux + Flux Krea Dev) — fully on-Mac, free, ~25–60 s/img</option>
+        <option value="bfl">Black Forest Labs API — cloud Flux, ~$0.025/img on flux-dev, ~10–15 s/img</option>
+      </select>
+    </div>
+
+    <!-- mflux fields -->
+    <div class="field" id="agentMfluxModelField" style="display:none">
+      <label>mflux model</label>
+      <select id="agentMfluxModel" onchange="agentMfluxModelChanged()">
+        <option value="krea-dev">Flux Krea Dev — recommended (best photorealism)</option>
+        <option value="dev">Flux.1 Dev — vanilla 28-step</option>
+        <option value="schnell">Flux.1 Schnell — 4-step, fastest</option>
+        <option value="__custom__">Custom HF id / local path…</option>
+      </select>
+    </div>
+    <div class="field" id="agentMfluxCustomField" style="display:none">
+      <label>Custom model (HF repo id or local path)</label>
+      <input type="text" id="agentMfluxCustomPath" placeholder="filipstrand/FLUX.1-Krea-dev-mflux-4bit">
+      <div style="margin-top:4px;font-size:11px;color:var(--muted)">
+        Required when using a non-named model. mflux will download to <code>~/.cache/huggingface</code> on first use (~6 GB for Krea Dev 4-bit).
+      </div>
+    </div>
+    <div class="field" id="agentMfluxBaseField" style="display:none">
+      <label>Base model (when using custom path)</label>
+      <select id="agentMfluxBaseModel">
+        <option value="krea-dev">krea-dev</option>
+        <option value="dev">dev</option>
+        <option value="schnell">schnell</option>
+      </select>
+    </div>
+    <div class="row" id="agentMfluxParamsField" style="display:none">
+      <div class="field">
+        <label>Steps</label>
+        <input type="number" id="agentMfluxSteps" min="1" max="50" value="25">
+      </div>
+      <div class="field">
+        <label>Quantize (bits)</label>
+        <select id="agentMfluxQuantize">
+          <option value="4">4-bit (~6 GB, recommended)</option>
+          <option value="8">8-bit (~12 GB, sharper)</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint" id="agentMfluxInstallHint" style="display:none">
+      <strong>First-time setup:</strong> install mflux into the panel's venv with
+      <code>ltx-2-mlx/env/bin/pip install mflux</code> (one-time, ~50 MB of code; weights download separately on first generate).
+      Verify the install with <code>ltx-2-mlx/env/bin/mflux-generate --help</code>.
+    </div>
+
+    <!-- BFL fields -->
+    <div class="field" id="agentBflModelField" style="display:none">
+      <label>BFL model</label>
+      <select id="agentBflModel">
+        <option value="flux-dev">flux-dev — 25 steps, ~$0.025 per image (recommended)</option>
+        <option value="flux-pro">flux-pro — premium quality, ~$0.05 per image</option>
+        <option value="flux-pro-1.1">flux-pro-1.1 — newer pro, ~$0.04 per image</option>
+        <option value="flux-schnell">flux-schnell — 4 steps, ~$0.003 per image (fastest)</option>
+      </select>
+    </div>
+
+    <div class="field" id="agentBflKeyField" style="display:none">
+      <label>BFL API key</label>
+      <input type="password" id="agentBflKey" placeholder="(leave blank to keep saved)">
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+        Get one at <code>https://api.bfl.ml</code> · stored in <code>state/agent_image_config.json</code>, only sent as the <code>X-Key</code> header.
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="ghost" onclick="closeAgentSettings()">Cancel</button>
+      <button type="button" class="save" onclick="agentSaveSettings()">Save settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== BATCH MODAL ============== -->
+<div class="modal-bg" id="batchModal" onclick="if(event.target===this)closeBatch()">
+  <div class="modal">
+    <h3>Batch paste — split prompts with <code>---</code> on its own line</h3>
+    <textarea class="batch" id="batchPrompts" placeholder="First prompt here.
+
+---
+
+Second prompt.
+
+---
+
+Third prompt."></textarea>
+    <div class="hint" style="margin-top:6px">Each chunk between <code>---</code> lines becomes a queued job using the current form settings. Auto-open is forced off for batches.</div>
+    <div class="modal-actions">
+      <button class="small" onclick="closeBatch()">Cancel</button>
+      <button class="small primary" style="padding:6px 14px" onclick="queueBatch().then(closeBatch)">Queue all</button>
+    </div>
+  </div>
+</div>
+
+<script src="/webapp/js/main.js"></script>
+</body>
+</html>

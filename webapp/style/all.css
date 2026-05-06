@@ -1,0 +1,3552 @@
+    :root {
+      /* Phosphene void = #00061a — the canonical dark-navy backdrop the
+         brand artwork was rendered against. Body uses it as-is; elevated
+         panels lift slightly toward blue-violet so the brand color story
+         carries from the logo through every surface. */
+      --bg: #00061a; --bg-2: #050b22; --panel: #0c1330; --panel-2: #141a3a;
+      --border: #1f2547; --border-strong: #2e3658; --text: #e6edf3; --muted: #8b949e;
+      --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
+      --success: #3fb950; --warning: #d29922; --danger: #f85149;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      display: flex; flex-direction: column; min-height: 100vh;
+    }
+
+    /* ===== HEADER =====
+       Background uses var(--bg) which is the brand-void (#00061a) — same
+       color baked into the logo PNG so it blends seamlessly into the
+       header. Logo height 72px so the wordmark reads. */
+    header {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 12px 18px; border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+    header h1 {
+      margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
+    .brand img { height: 104px; width: auto; display: block; }
+    /* DEV badge — visible only on the dev panel (PROFILE == 'dev'). Sits
+       next to the Phosphene wordmark so it's the first thing you notice
+       when comparing dev vs production tabs. */
+    .profile-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 12px;
+      padding: 3px 9px;
+      border-radius: 5px;
+      background: rgba(240,185,64,0.18);
+      color: var(--warning, #f0b940);
+      border: 1px solid rgba(240,185,64,0.55);
+      font-size: 10px; font-weight: 700;
+      letter-spacing: 0.12em;
+      cursor: help;
+    }
+    /* When profile !== 'dev' the badge ships with the [hidden] attribute.
+       The .profile-badge `display: inline-flex` above wins specificity-wise
+       over the UA's `[hidden]{display:none}`, so we restate the hide rule
+       here. The bootstrap stub flips el.hidden=false on dev panels.) */
+    .profile-badge[hidden] { display: none; }
+    /* Phosphene 2.0 release badge — sits next to the wordmark logo so
+       users immediately know they're on the major version bump. Brand
+       violet vs the DEV badge's amber so they don't visually clash when
+       both are shown on the dev panel. */
+    .version-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 10px;
+      padding: 3px 10px;
+      border-radius: 5px;
+      background: rgba(140,120,255,0.16);
+      color: #b6a4ff;
+      border: 1px solid rgba(140,120,255,0.45);
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.06em;
+    }
+    .tag { color: var(--muted); font-size: 11px; }
+    .pill {
+      padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 500;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+      white-space: nowrap;
+    }
+    .pill .dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; margin-right: 5px; background: currentColor; vertical-align: middle; }
+    .pill-good { color: var(--success); border-color: rgba(63,185,80,0.4); }
+    .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.5); }
+    .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.5); }
+
+    /* ---- Panel-offline banner ----
+       Floating pill at the top-center, NOT a full-bleed bar. Reads as
+       "alert" via the danger color but stays off the chrome's eyelines.
+       Slides down + fades on first show; stays put while visible.
+       The banner is created lazily by _setOfflineBanner() — class names
+       must match what that helper emits. */
+    @keyframes panel-offline-in {
+      from { transform: translate(-50%, -16px); opacity: 0; }
+      to   { transform: translate(-50%, 0);     opacity: 1; }
+    }
+    .panel-offline-banner {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translate(-50%, 0);
+      z-index: 9999;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      max-width: min(560px, calc(100vw - 32px));
+      padding: 10px 16px;
+      background: rgba(31, 12, 14, 0.92);
+      border: 1px solid rgba(248, 81, 73, 0.55);
+      border-radius: 999px;
+      box-shadow:
+        0 0 0 4px rgba(248, 81, 73, 0.06),
+        0 12px 32px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: #ffd9d6;
+      font: 12.5px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      letter-spacing: 0.1px;
+      animation: panel-offline-in 0.28s cubic-bezier(.2,.8,.2,1);
+    }
+    .panel-offline-banner .icon {
+      flex-shrink: 0;
+      width: 22px; height: 22px;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      position: relative;
+      /* Desaturate the logo while the panel is offline so it reads
+         "asleep" — comes back to full color the moment we reconnect. */
+      filter: grayscale(0.45) brightness(0.85);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .panel-offline-banner .icon img {
+      width: 100%; height: 100%;
+      display: block;
+    }
+    .panel-offline-banner .label {
+      font-weight: 600;
+      color: var(--danger);
+    }
+    .panel-offline-banner .text {
+      color: rgba(255, 220, 220, 0.82);
+    }
+    .panel-offline-banner .hint {
+      color: var(--muted);
+      font-size: 11px;
+      margin-left: 4px;
+    }
+    .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+    /* Version pill states. Always rendered so the spot is part of the
+       user's mental map — when state changes, the colour shift draws
+       the eye. Only `pill-update` glows; the other states are quiet. */
+    .pill-update {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.55);
+      background: rgba(240,185,64,0.08);
+      font-weight: 600;
+      animation: glow-update 2.4s ease-in-out infinite;
+    }
+    .pill-update:hover { background: rgba(240,185,64,0.18); }
+    @keyframes glow-update {
+      0%,100% { box-shadow: 0 0 0 0 rgba(240,185,64,0.0); }
+      50%     { box-shadow: 0 0 0 3px rgba(240,185,64,0.18); }
+    }
+    /* Current — install is on origin/main HEAD. Subtle success tint so
+       it reads as "all good" without competing for attention. */
+    .pill-current {
+      color: var(--success, #8ec07c);
+      border-color: rgba(63,185,80,0.35);
+    }
+    .pill-current:hover { background: rgba(63,185,80,0.06); }
+    /* Dev — non-main branch / dirty tree / no git. We don't know if the
+       user is "behind"; surfacing the SHA in muted text just helps them
+       confirm what's running. */
+    .pill-dev {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .pill-dev:hover { color: var(--text); }
+    /* Checking — first /version poll hasn't completed yet. Same look as
+       dev (muted) so the pill doesn't flash colours in the first 30s of
+       boot before the GitHub fetch lands. */
+    .pill-checking {
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    /* Restart — set after a successful /version/pull. The user needs to
+       click Stop+Start in Pinokio for the new code to take effect; this
+       state nudges them to do that. Accent-blue so it reads as an
+       actionable next-step, not a problem. */
+    .pill-restart {
+      color: var(--accent-bright, #7e98ff);
+      border-color: rgba(126,152,255,0.55);
+      background: rgba(126,152,255,0.08);
+      font-weight: 600;
+      animation: glow-update 2.4s ease-in-out infinite;
+    }
+    .pill-restart:hover { background: rgba(126,152,255,0.18); }
+    /* Busy — temporary in-flight state during /version/check and
+       /version/pull round-trips. Faded so the user knows the click
+       registered without us flashing alarming colours. */
+    .pill-busy {
+      opacity: 0.7; pointer-events: none;
+      animation: none !important;
+    }
+    @keyframes pulse { 50% { opacity: 0.7; } }
+    .spacer { flex: 1; }
+    .ghost-btn {
+      /* width:auto overrides the global `button { width:100% }` rule above
+         so ghost buttons sit at intrinsic width inside flex rows. Without
+         this, the Enhance button stretches full-width and forces the
+         No-music pill to wrap to a second line. */
+      width: auto;
+      background: transparent; border: 1px solid var(--border); color: var(--text);
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+    }
+    .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+
+    /* Toggle pill — used for binary on/off controls (e.g. "No music")
+       living next to ghost-btn actions. Same height + radius family as
+       ghost-btn so they line up cleanly, but visually distinct: when ON,
+       fills with the accent color so it reads as an active filter. */
+    .toggle-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: transparent; border: 1px solid var(--border); color: var(--muted);
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+      user-select: none; transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+      white-space: nowrap;
+    }
+    .toggle-pill:hover { border-color: var(--accent); color: var(--text); }
+    .toggle-pill input[type="checkbox"] {
+      position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0;
+    }
+    .toggle-pill .toggle-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--border-strong); border: 1px solid transparent;
+      transition: background 120ms ease, box-shadow 120ms ease;
+      flex-shrink: 0;
+    }
+    .toggle-pill.on {
+      background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright);
+    }
+    .toggle-pill.on .toggle-dot {
+      background: var(--accent-bright);
+      box-shadow: 0 0 0 2px rgba(47,129,247,0.25);
+    }
+    /* "by Bizarro" link in the top-right of the header. Bumped from a
+       muted 11px chip to something with actual presence — accent-color
+       border ring + bold text + subtle lift on hover. The avatar is a
+       hand-drawn portrait so deserves to read at a glance. */
+    .creator-link {
+      display: inline-flex; align-items: center; gap: 9px;
+      color: var(--fg, #d8e0ee); font-size: 12px; font-weight: 500;
+      text-decoration: none;
+      padding: 4px 12px 4px 4px; border-radius: 999px;
+      border: 1.5px solid var(--accent, #5a7cff);
+      background: linear-gradient(135deg, rgba(90,124,255,0.10), rgba(90,124,255,0.02));
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+      box-shadow: 0 0 0 1px rgba(90,124,255,0.18), 0 2px 8px rgba(90,124,255,0.10);
+    }
+    .creator-link:hover {
+      color: var(--accent-bright, #93a8ff);
+      border-color: var(--accent-bright, #93a8ff);
+      transform: translateY(-1px);
+      box-shadow: 0 0 0 1px rgba(147,168,255,0.30), 0 4px 14px rgba(90,124,255,0.25);
+    }
+    .creator-avatar {
+      width: 28px; height: 28px; border-radius: 50%;
+      object-fit: cover; display: block;
+      box-shadow: 0 0 0 2px var(--accent, #5a7cff), 0 0 0 3px var(--bg, #0d1017);
+    }
+    .creator-link .x-icon {
+      font-size: 10px; opacity: 0.6; margin-left: -2px;
+      letter-spacing: 0.05em;
+    }
+
+    /* Inline models card — sits at the top of the form, where users
+       actually look. Four states drawn from /status:
+         missing-base    big red CTA, blocks generation
+         missing-current big amber CTA when the SELECTED mode needs Q8
+         downloading     green progress bar with last hf line
+         hidden          (everything ready, no urgency — link in header)
+       See updateModelsCard() in the JS. */
+    .models-inline {
+      border-radius: 10px; padding: 12px 14px; margin-bottom: 14px;
+      border: 1.5px solid var(--border, #2a3140);
+      background: var(--panel-2, #131724);
+      transition: border-color 150ms ease, background 150ms ease;
+      position: relative;
+    }
+    /* Dismiss × — only rendered (visible) in dismissible states (warn /
+       partial-ok). The download-active and base-missing states omit it
+       so users can't accidentally hide a hard blocker. */
+    .models-inline-dismiss {
+      position: absolute; top: 6px; right: 8px;
+      width: 22px; height: 22px; border-radius: 4px;
+      background: transparent; border: 1px solid transparent;
+      color: var(--muted); font-size: 14px; line-height: 1;
+      cursor: pointer; padding: 0;
+      display: none;
+    }
+    .models-inline-dismiss:hover { color: var(--text); border-color: var(--border); }
+    .models-inline.dismissible .models-inline-dismiss { display: inline-block; }
+    .models-inline.state-missing  { border-color: rgba(220,80,80,0.55); background: rgba(220,80,80,0.06); }
+    .models-inline.state-warn     { border-color: rgba(210,153,34,0.55); background: rgba(210,153,34,0.06); }
+    .models-inline.state-downloading {
+      border-color: var(--accent, #5a7cff);
+      background: rgba(90,124,255,0.07);
+      animation: keyframes-modeldl 1.6s ease-in-out infinite;
+    }
+    .models-inline-body {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      gap: 12px; align-items: center;
+    }
+    .models-inline-icon { font-size: 22px; line-height: 1; text-align: center; }
+    .models-inline-text { min-width: 0; }
+    .models-inline-text .ttl { font-weight: 600; font-size: 13px; color: var(--fg, #d8e0ee); }
+    .models-inline-text .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .models-inline-progress { margin-top: 8px; }
+    .models-inline-progress .bar {
+      height: 6px; border-radius: 3px; background: rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+    .models-inline-progress .bar .fill {
+      height: 100%; background: var(--accent, #5a7cff);
+      transition: width 250ms ease;
+    }
+    .models-inline-progress .last {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--muted); margin-top: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .models-inline-actions button {
+      padding: 7px 14px; border-radius: 7px;
+      background: var(--accent, #5a7cff); color: white; border: none;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      white-space: nowrap;
+    }
+    .models-inline-actions button:hover { background: var(--accent-bright, #7e98ff); }
+    .models-inline-actions button.danger { background: rgba(220,80,80,0.7); }
+    .models-inline-actions button.ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border, #2a3140); font-weight: 500;
+    }
+    .models-inline-link {
+      display: block; margin-top: 10px;
+      font-size: 11px; color: var(--muted); text-align: right;
+      cursor: pointer; text-decoration: none;
+    }
+    .models-inline-link:hover { color: var(--accent-bright, #93a8ff); }
+
+    /* ===== MAIN LAYOUT ===== */
+    .layout {
+      flex: 1 1 auto; display: grid; grid-template-columns: 440px 1fr;
+      gap: 14px; padding: 14px; min-height: 0;
+    }
+    .form-pane, .stage-pane {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .form-pane { padding: 16px; overflow-y: auto; }
+    .stage-pane { padding: 0; }
+
+    /* Agentic Flows is a chat — it deserves more horizontal real estate
+       than the manual form. When data-workflow="agent" is on the body,
+       the form-pane grows to ~55% and the agent-stage-pane on the right
+       takes over for showing live queue / renders / outputs. */
+    body[data-workflow="agent"] .layout {
+      grid-template-columns: minmax(560px, 1.2fr) minmax(440px, 1fr);
+    }
+    body[data-workflow="agent"] .form-pane { padding: 0; }
+    body[data-workflow="agent"] .stage-pane { display: none; }
+    body[data-workflow="agent"] .agent-stage-pane { display: flex; }
+
+    /* ===== FORM ===== */
+    h2 {
+      font-size: 10px; margin: 14px 0 8px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
+    }
+    h2:first-child { margin-top: 0; }
+    label.lbl {
+      display: block; margin: 10px 0 4px; color: var(--muted);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+    }
+    input, textarea, select, button {
+      width: 100%; padding: 8px 11px; font: inherit; color: inherit;
+      background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); background: var(--bg-2); }
+    textarea { min-height: 84px; resize: vertical; font-family: inherit; }
+    textarea.avoid-textarea { min-height: 54px; }
+
+    /* Pill button groups (mode/quality/aspect) */
+    .pill-group {
+      display: grid; gap: 6px; margin-bottom: 6px;
+    }
+    .pill-group.cols-2 { grid-template-columns: 1fr 1fr; }
+    .pill-group.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .pill-group.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+    .pill-btn {
+      width: 100%; padding: 9px 8px; border-radius: 8px;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+      cursor: pointer; transition: 0.12s; text-align: center;
+      font-size: 12px; font-weight: 500;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+    }
+    .pill-btn:hover { border-color: var(--accent); color: var(--text); }
+    .pill-btn.active {
+      background: var(--accent-dim); border-color: var(--accent);
+      color: var(--accent-bright); font-weight: 600;
+    }
+    .pill-btn .ico { font-size: 16px; line-height: 1; }
+    .pill-btn .sub { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .pill-btn:disabled, .pill-btn.disabled {
+      opacity: 0.45; cursor: not-allowed; pointer-events: none;
+    }
+
+    /* Quality pills (Y1.013) — richer than the standard pill-btn so each
+       button can carry: name, dimensions+time, model+tier requirement.
+       Same .pill-btn skeleton; just looser padding and explicit children
+       for the three lines of content. */
+    .quality-row .pill-quality {
+      padding: 12px 8px 10px;
+      gap: 4px;
+      min-height: 76px;
+      justify-content: flex-start;
+    }
+    .pill-quality .ql-name {
+      font-size: 13px; font-weight: 600;
+      color: inherit;            /* picks up muted/active colour from .pill-btn */
+    }
+    .pill-quality .ql-spec {
+      font-size: 10.5px;
+      color: var(--text);
+      opacity: 0.85;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0;
+    }
+    .pill-quality .ql-tier {
+      font-size: 9.5px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .pill-quality.active .ql-name { color: var(--accent-bright); }
+    .pill-quality.active .ql-spec { opacity: 1; }
+    .pill-quality.active .ql-tier { color: var(--accent-bright); opacity: 0.7; }
+
+    /* Customize disclosure inside the form — sub-tier UI, lighter than
+       a top-level <details>. Subtle border, indented body, distinct
+       chevron so it doesn't compete with the LoRAs section header. */
+    .customize-section {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.012);
+      overflow: hidden;
+    }
+    .customize-section > summary { list-style: none; cursor: pointer; }
+    .customize-section > summary::-webkit-details-marker { display: none; }
+    .cz-summary {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      user-select: none;
+      transition: background 100ms;
+    }
+    .cz-summary:hover { background: rgba(255,255,255,0.02); color: var(--text); }
+    .customize-section[open] .cz-summary { color: var(--text); }
+    .cz-summary .cz-chevron {
+      display: inline-block; width: 12px;
+      font-size: 10px;
+      transform: rotate(-90deg);
+      transition: transform 140ms ease;
+      color: var(--muted);
+    }
+    .customize-section[open] .cz-summary .cz-chevron {
+      transform: rotate(0deg);
+      color: var(--accent-bright, #58a6ff);
+    }
+    .cz-summary .cz-title {
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0;
+    }
+    .cz-summary .cz-meta {
+      margin-left: auto;
+      font-size: 11px; font-weight: 400;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .cz-body {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .cz-control { display: block; }
+    .cz-label {
+      font-size: 11px; font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .cz-label .cz-label-hint {
+      font-weight: 400;
+      letter-spacing: 0;
+      text-transform: none;
+      font-size: 10.5px;
+      color: var(--muted);
+      opacity: 0.85;
+    }
+    .cz-control .row { gap: 8px; }
+
+    /* Mode-specific blocks (image/audio/extend sections) */
+    .mode-only { display: none; }
+    .mode-only.show { display: block; }
+
+    /* Image preview */
+    .img-row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+    .img-row input[type="file"] { display: none; }
+    .img-preview {
+      display: none; margin-top: 8px; max-width: 100%;
+      border-radius: 8px; border: 1px solid var(--border);
+    }
+    .img-preview.show { display: block; }
+
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .check { display: flex; align-items: center; gap: 8px; margin: 10px 0; cursor: pointer; color: var(--text); font-size: 12px; }
+    .check input { width: auto; margin: 0; }
+    .hint { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .derived {
+      margin-top: 8px; padding: 9px 11px; border-radius: 6px;
+      background: var(--panel-2); border: 1px solid var(--border);
+      font-size: 12px; color: var(--muted);
+    }
+    .derived strong { color: var(--accent-bright); font-weight: 600; }
+    .warn-banner {
+      background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.4);
+      color: var(--warning); padding: 8px 11px; border-radius: 6px; margin: 8px 0;
+      font-size: 11px; display: none;
+    }
+    .warn-banner.show { display: block; }
+
+    button.primary {
+      background: var(--accent); border-color: var(--accent); color: white;
+      padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    button.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
+    button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.danger {
+      color: var(--danger); border-color: rgba(248,81,73,0.4); background: transparent;
+      padding: 11px; font-weight: 600; cursor: pointer;
+    }
+    button.danger:hover { background: rgba(248,81,73,0.1); }
+    .actions { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-top: 14px; }
+    button.small {
+      width: auto; padding: 6px 10px; font-size: 11px;
+      background: var(--panel-2); font-weight: 500; cursor: pointer;
+    }
+    button.small:hover { border-color: var(--accent); }
+
+    details summary { cursor: pointer; color: var(--muted); font-size: 11px; padding: 4px 0; }
+    details summary:hover { color: var(--text); }
+    details[open] summary { margin-bottom: 6px; }
+
+    /* ===== STAGE (PLAYER + CAROUSEL) ===== */
+    .stage-pane {
+      background: linear-gradient(180deg, #0a0d12 0%, var(--panel) 100%);
+    }
+    .player-wrap {
+      flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+      background: black; min-height: 0; position: relative;
+      overflow: hidden;
+    }
+    .player-wrap video {
+      max-width: 100%; max-height: 100%; width: auto; height: auto;
+      display: block;
+    }
+    .player-wrap.empty {
+      background: var(--panel-2); color: var(--muted); font-size: 13px;
+      flex-direction: column; gap: 6px; text-align: center;
+    }
+    .player-wrap.empty .dim-icon { font-size: 36px; opacity: 0.4; }
+    .player-meta {
+      flex: 0 0 auto; padding: 10px 16px;
+      background: var(--panel); border-top: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      font-size: 12px; color: var(--muted);
+    }
+    .player-meta .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .player-meta .actions-bar { display: flex; gap: 6px; flex-shrink: 0; }
+    .player-meta button { width: auto; padding: 5px 10px; font-size: 11px; background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px; }
+    .player-meta button:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Carousel */
+    .carousel-wrap {
+      flex: 0 0 auto; padding: 10px 14px 14px;
+      background: var(--panel); border-top: 1px solid var(--border);
+    }
+    .carousel-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px; gap: 10px;
+    }
+    .carousel-head h3 {
+      margin: 0; font-size: 11px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+    }
+    .carousel-head .seg {
+      display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    }
+    .carousel-head .seg button {
+      width: auto; padding: 4px 10px; font-size: 11px; background: transparent;
+      border: 0; border-right: 1px solid var(--border); border-radius: 0;
+      color: var(--muted); font-weight: 500; cursor: pointer;
+    }
+    .carousel-head .seg button:last-child { border-right: 0; }
+    .carousel-head .seg button.active { background: var(--accent); color: white; }
+    .carousel {
+      display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+      scroll-snap-type: x proximity;
+    }
+    .carousel::-webkit-scrollbar { height: 8px; }
+    .carousel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    .car-card {
+      flex: 0 0 168px; scroll-snap-align: start;
+      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+      background: var(--panel-2); cursor: pointer; transition: 0.12s;
+      display: flex; flex-direction: column;
+    }
+    .car-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .car-card.active { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
+    .car-card.hidden-card { opacity: 0.4; }
+    .car-card video { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
+    /* ⓘ info button overlaid on the card thumbnail. Subtle until hover so
+       it doesn't compete with the video preview itself. Click → opens
+       outputInfoModal with the full sidecar data. */
+    .car-card { position: relative; }
+    .car-card .car-info-btn {
+      position: absolute; top: 6px; right: 6px;
+      width: 24px; height: 24px; padding: 0;
+      border-radius: 6px;
+      border: 1px solid rgba(0,0,0,0.5);
+      background: rgba(15,18,28,0.7); backdrop-filter: blur(4px);
+      color: rgba(255,255,255,0.85);
+      font-size: 14px; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer; opacity: 0; transition: opacity 100ms, background 100ms;
+      z-index: 2;
+    }
+    .car-card:hover .car-info-btn,
+    .car-card.active .car-info-btn { opacity: 1; }
+    .car-card .car-info-btn:hover { background: rgba(20,25,40,0.92); color: #fff; }
+
+    /* Output info modal — clean detail-pane styling. Reuses
+       .models-modal scaffolding for the dim backdrop and centred card,
+       but the body is intentionally chrome-light: no nested boxes, no
+       coloured uppercase headers. Sections are separated by spacing
+       and a thin top-border on the section title — closer to a Linear
+       detail pane than a "developer console" dump. */
+    .output-info-body {
+      display: flex; flex-direction: column;
+      gap: 22px;
+      max-height: 70vh; overflow-y: auto;
+      padding: 4px 6px 4px 0;       /* breathing room around the scrollbar */
+    }
+    .oi-section { /* no border, no background — separation is purely typographic */ }
+    .oi-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+    }
+    .oi-section-title .oi-count {
+      font-weight: 400; letter-spacing: 0;
+      text-transform: none; color: var(--muted);
+    }
+    .oi-grid {
+      display: grid; grid-template-columns: 96px 1fr;
+      row-gap: 9px; column-gap: 16px;
+      margin: 0;
+    }
+    .oi-grid dt {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 400;
+    }
+    .oi-grid dd {
+      margin: 0;
+      color: var(--text);
+      font-size: 13px;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      min-width: 0;
+    }
+    .oi-grid dd code {
+      background: rgba(255,255,255,0.04);
+      padding: 1px 6px; border-radius: 3px;
+      font-size: 11.5px;
+      color: var(--text);
+    }
+    .oi-prompt {
+      font-size: 12.5px; line-height: 1.55; color: var(--text);
+      background: rgba(255,255,255,0.025);
+      border-radius: 5px;
+      padding: 12px 14px;
+      max-height: 240px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .oi-copy {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer; font-weight: 500;
+      letter-spacing: 0;
+      transition: color 100ms, border-color 100ms, background 100ms;
+    }
+    .oi-copy:hover {
+      color: var(--text); border-color: var(--accent);
+      background: rgba(47,129,247,0.07);
+    }
+    /* LoRA list — flat rows, separated by hairlines instead of each
+       row being its own card. Reads as a list, not a stack of cards. */
+    .oi-lora-list {
+      display: flex; flex-direction: column;
+    }
+    .oi-lora-row {
+      display: flex; align-items: center; gap: 14px;
+      padding: 9px 0; font-size: 13px;
+    }
+    .oi-lora-row + .oi-lora-row { border-top: 1px solid var(--border); }
+    .oi-lora-row .oi-lora-name {
+      flex: 1; color: var(--text); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    .oi-lora-row .oi-lora-strength {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted); font-size: 12px; flex: none;
+    }
+    .oi-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: 4px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .oi-actions .oi-primary {
+      padding: 7px 14px;
+      border-radius: 6px;
+      background: var(--accent); color: white;
+      border: 1px solid var(--accent);
+      font-size: 12px; font-weight: 600;
+      cursor: pointer;
+      transition: background 100ms;
+    }
+    .oi-actions .oi-primary:hover { background: var(--accent-bright, #58a6ff); }
+    .car-card .info { padding: 6px 8px; font-size: 10px; }
+    .car-card .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .car-card .sub { color: var(--muted); margin-top: 2px; }
+    .car-card .row-btns { display: flex; gap: 4px; padding: 0 6px 6px; }
+    .car-card .row-btns button {
+      flex: 1; padding: 3px 4px; font-size: 9px; background: transparent;
+      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 4px;
+    }
+    .car-card .row-btns button:hover { color: var(--text); border-color: var(--accent); }
+    .empty-msg { color: var(--muted); font-size: 12px; padding: 12px; text-align: center; width: 100%; }
+
+    /* ===== BOTTOM TABBED PANE ===== */
+    .bottom-pane {
+      flex: 0 0 auto; max-height: 280px;
+      background: var(--panel); border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .bottom-pane.collapsed .bottom-body { display: none; }
+    .bottom-pane.collapsed { max-height: 38px; }
+    .tabs {
+      display: flex; align-items: center; gap: 0; padding: 0 12px;
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .tabs button {
+      width: auto; padding: 9px 14px; font-size: 12px; background: transparent;
+      border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+      color: var(--muted); font-weight: 500; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .tabs button:hover { color: var(--text); }
+    .tabs button.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
+    .tabs button .badge {
+      background: var(--accent-dim); color: var(--accent-bright);
+      padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+    }
+    .tabs .spacer { flex: 1; }
+    .tabs .model-credit {
+      font-size: 11px; color: var(--muted); padding: 0 12px;
+      text-decoration: none; border-right: 1px solid var(--border);
+      align-self: stretch; display: inline-flex; align-items: center;
+      transition: 0.12s;
+    }
+    .tabs .model-credit:hover { color: var(--accent-bright); }
+    .tabs .model-credit::after { content: " ↗"; opacity: 0.6; margin-left: 4px; }
+    .tabs .tab-collapse {
+      width: auto; padding: 4px 8px; font-size: 11px; background: transparent;
+      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px;
+      align-self: center;
+    }
+    .bottom-body {
+      flex: 1 1 auto; overflow-y: auto; padding: 12px 16px; min-height: 0;
+    }
+    .tab-content { display: none; }
+    .tab-content.show { display: block; }
+
+    /* Now panel */
+    .now-card {
+      padding: 10px 12px; border-radius: 8px; background: var(--panel-2);
+      border: 1px solid var(--border);
+    }
+    .now-card.idle { opacity: 0.7; }
+    /* Failed-job state — kept loud instead of letting the panel drift back
+       to a sleepy "Idle". Border + background tint match the danger color
+       so the eye lands on it immediately. Stays visible until the user
+       submits a new job (next render flips us out of failed state). */
+    .now-card.failed {
+      border-color: rgba(248,81,73,0.55);
+      background: rgba(248,81,73,0.06);
+      opacity: 1;
+    }
+    .now-card .ttl { font-weight: 600; font-size: 13px; }
+    .now-card .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+    .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 7px 0; }
+    .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+
+    /* Queue/recent lists */
+    .row-list { list-style: none; padding: 0; margin: 0; }
+    .row-list li {
+      display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px;
+      align-items: center; padding: 7px 9px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel-2);
+      margin-bottom: 5px; font-size: 11px;
+    }
+    .row-list li .pos { color: var(--muted); font-weight: 600; min-width: 22px; }
+    .row-list li .ttl, .row-list li .params {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .row-list li .params { color: var(--muted); font-size: 10px; }
+    /* Inline error text in failed history rows. Shown in the title slot
+       so users see the cause without reading the log. */
+    .row-list li .err-inline { color: var(--danger, #f85149); font-weight: 500; }
+    .row-list li .badge {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
+      font-weight: 600;
+    }
+    .row-list li.done .badge { color: var(--success); }
+    .row-list li.failed .badge { color: var(--danger); }
+    .row-list li.cancelled .badge { color: var(--muted); }
+    .row-list li button {
+      width: auto; background: transparent; border: 0; color: var(--muted);
+      cursor: pointer; padding: 2px 6px; font-size: 14px; line-height: 1;
+    }
+    .row-list li button:hover { color: var(--danger); }
+    .row-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+    /* Logs */
+    pre.log {
+      white-space: pre-wrap; word-break: break-all;
+      background: #06080c; border: 1px solid var(--border); border-radius: 6px;
+      padding: 10px; font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+      color: #b0b8c4; margin: 0; max-height: 220px; overflow-y: auto;
+    }
+
+    /* Modal */
+    .modal-bg {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+      display: none; align-items: center; justify-content: center;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: var(--panel); border: 1px solid var(--border-strong);
+      border-radius: var(--radius); padding: 18px; width: min(640px, 92vw);
+      max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .modal h3 { margin: 0 0 12px; font-size: 14px; }
+    .modal textarea.batch {
+      flex: 1 1 auto; min-height: 280px; font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+    /* Empty state */
+    .empty-state { color: var(--muted); font-size: 12px; padding: 14px 0; text-align: center; }
+
+    /* ----- Image picker (FFLF + I2V) -----
+       Replaces the old `<input>` with a path placeholder that confused
+       non-technical users. Tile is the entire interaction surface: click
+       opens the file dialog, drop receives the file, and below the tile
+       is a thumbnail strip of recent uploads for one-click reuse. */
+    .picker { margin-bottom: 14px; }
+    .picker-drop {
+      position: relative;
+      border: 1.5px dashed var(--border, #2a3140);
+      border-radius: 10px;
+      min-height: 130px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      background: rgba(255,255,255,0.015);
+      transition: border-color 120ms ease, background 120ms ease;
+      overflow: hidden;
+    }
+    .picker-drop:hover { border-color: var(--accent, #5a7cff); background: rgba(90,124,255,0.04); }
+    .picker-drop.dragover {
+      border-color: var(--accent-bright, #7e98ff);
+      background: rgba(90,124,255,0.10);
+      border-style: solid;
+    }
+    .picker-drop.has-image { border-style: solid; cursor: zoom-in; min-height: 0; }
+    .picker-empty {
+      text-align: center; padding: 18px 14px; color: var(--muted);
+      pointer-events: none;
+    }
+    .picker-icon { font-size: 28px; margin-bottom: 6px; line-height: 1; }
+    .picker-cta { font-size: 13px; color: var(--fg, #d8e0ee); margin-bottom: 4px; }
+    .picker-empty .hint { font-size: 11px; color: var(--muted); }
+    .picker-preview {
+      max-width: 100%; max-height: 240px;
+      display: block; margin: 0 auto;
+      border-radius: 8px;
+    }
+    .picker-clear {
+      position: absolute; top: 6px; right: 6px;
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 1px solid var(--border, #2a3140);
+      background: rgba(0,0,0,0.6); color: var(--fg, #d8e0ee);
+      cursor: pointer; font-size: 16px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .picker-clear:hover { background: rgba(220,80,80,0.45); border-color: rgba(220,80,80,0.6); }
+    .picker-uploading {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); border-radius: 8px;
+      color: var(--fg, #d8e0ee); font-size: 12px;
+    }
+    .picker-recent { margin-top: 8px; }
+    .picker-recent-label {
+      font-size: 11px; color: var(--muted); margin-bottom: 4px;
+    }
+    .picker-recent-strip {
+      display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px;
+      scrollbar-width: thin;
+    }
+    .picker-recent-strip::-webkit-scrollbar { height: 6px; }
+    .picker-recent-strip::-webkit-scrollbar-thumb { background: var(--border, #2a3140); border-radius: 3px; }
+    .picker-recent-thumb {
+      flex: 0 0 auto; width: 56px; height: 56px;
+      border-radius: 6px; border: 2px solid transparent;
+      object-fit: cover; cursor: pointer;
+      background: rgba(255,255,255,0.04);
+      transition: border-color 120ms ease, transform 120ms ease;
+    }
+    .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
+    .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
+
+    /* LoRA picker — collapsible <details>. Compact list rows (Y1.007).
+       Distinct visual section so users notice it (Y1.008): wrapped in a
+       bordered container, separator dividers above/below, custom chevron
+       in the summary header so it's obviously expandable.
+       Each LoRA = one ~36px row. Active rows expand to show a strength
+       slider inline. Filter input appears at 5+ LoRAs. */
+
+    /* Thin horizontal separator used both above and below the LoRAs
+       section. Reused in case we want it elsewhere in the form. */
+    .form-divider {
+      height: 1px; margin: 16px 0 14px;
+      background: linear-gradient(to right,
+        transparent, var(--border) 18%, var(--border) 82%, transparent);
+    }
+    /* Bordered container wrapping the whole <details>. Subtle accent
+       background so the section pulls the eye but doesn't shout. */
+    .loras-section {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.015);
+      overflow: hidden;     /* keeps the summary's hover bg inside the radius */
+    }
+    /* Hide the native disclosure marker; we render our own chevron
+       inline so it can be sized + animated consistently. */
+    .loras-section > summary { list-style: none; }
+    .loras-section > summary::-webkit-details-marker { display: none; }
+    .loras-summary {
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 10px;
+      padding: 11px 14px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      transition: background 100ms;
+    }
+    .loras-summary:hover { background: rgba(255,255,255,0.02); }
+    .loras-section[open] .loras-summary {
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.025);
+    }
+    .loras-summary .loras-chevron {
+      display: inline-block; width: 14px;
+      font-size: 11px; color: var(--muted);
+      transform: rotate(-90deg);    /* points right when collapsed */
+      transition: transform 140ms ease;
+      text-align: center;
+    }
+    .loras-section[open] .loras-summary .loras-chevron {
+      transform: rotate(0deg);      /* points down when open */
+      color: var(--accent-bright, #93a8ff);
+    }
+    .loras-summary .loras-title {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.01em;
+    }
+    .loras-summary .loras-meta {
+      margin-left: auto; font-size: 11px; font-weight: 400;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    /* Action buttons in the LoRAs section header. Rescan is icon-only,
+       Browse CivitAI is the primary CTA. Both stop propagation so they
+       don't toggle the <details>. */
+    .loras-summary .loras-header-actions {
+      display: inline-flex; gap: 6px; align-items: center;
+      margin-left: 10px;
+    }
+    .loras-summary .loras-icon-btn {
+      width: 28px; height: 28px; padding: 0;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+      color: var(--muted);
+      font-size: 14px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center;
+      transition: color 100ms, border-color 100ms, background 100ms;
+    }
+    .loras-summary .loras-icon-btn:hover {
+      color: var(--text); border-color: var(--accent);
+      background: rgba(47,129,247,0.08);
+    }
+    .loras-summary .loras-browse-btn {
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: white;
+      font-size: 11.5px; font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      transition: background 100ms, transform 80ms;
+    }
+    .loras-summary .loras-browse-btn:hover {
+      background: var(--accent-bright, #58a6ff);
+    }
+    .loras-summary .loras-browse-btn:active { transform: translateY(1px); }
+    /* Body padding + internal layout. All children get consistent
+       spacing without each one declaring its own margin. */
+    .loras-body {
+      display: flex; flex-direction: column;
+      gap: 10px; padding: 12px 14px 14px;
+    }
+    .lora-filter {
+      width: 100%; padding: 6px 9px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
+      color: var(--text); font-size: 12px;
+      box-sizing: border-box;
+    }
+    .lora-filter:focus { outline: 1px solid var(--accent); }
+    .loras-list {
+      display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+      max-height: 340px; overflow-y: auto;
+      padding-right: 2px;        /* avoid scrollbar overlap on row content */
+    }
+    .lora-row {
+      position: relative;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      transition: border-color 100ms, background 100ms;
+    }
+    .lora-row.active {
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.06));
+    }
+    .lora-row .lora-row-main {
+      display: grid;
+      grid-template-columns: 18px 1fr auto auto;
+      gap: 8px; align-items: center;
+      padding: 7px 10px;
+      cursor: pointer; user-select: none;
+    }
+    .lora-row .lora-toggle-dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 1.5px solid var(--muted);
+      background: transparent;
+      transition: background 100ms, border-color 100ms;
+      box-sizing: border-box;
+    }
+    .lora-row.active .lora-toggle-dot {
+      background: var(--accent); border-color: var(--accent);
+      box-shadow: inset 0 0 0 3px var(--bg, #0a0c14);
+    }
+    .lora-row .lora-name {
+      font-size: 12px; font-weight: 500; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    .lora-row .lora-name .badge {
+      display: inline-block; font-size: 9px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      padding: 1px 5px; border-radius: 999px; margin-left: 6px;
+      border: 1px solid var(--accent); color: var(--accent-bright);
+      vertical-align: middle;
+    }
+    .lora-row .lora-name-meta {
+      font-size: 10px; color: var(--muted); margin-top: 1px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .lora-row .lora-text {
+      min-width: 0; display: flex; flex-direction: column;
+    }
+    .lora-row .lora-row-actions {
+      display: flex; gap: 4px; align-items: center;
+      opacity: 0.4; transition: opacity 100ms;
+    }
+    .lora-row:hover .lora-row-actions,
+    .lora-row.active .lora-row-actions { opacity: 1; }
+    .lora-row .lora-icon-btn {
+      width: 22px; height: 22px; padding: 0;
+      border-radius: 4px; border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted); font-size: 12px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center;
+      justify-content: center; text-decoration: none;
+    }
+    .lora-row .lora-icon-btn:hover {
+      color: var(--text); border-color: var(--border);
+    }
+    .lora-row .lora-icon-btn.danger:hover {
+      color: #ff8a8a; border-color: rgba(220,80,80,0.5);
+    }
+    /* Expanded section (visible only on active rows) — strength slider
+       + trigger chips. Shows below the main row. */
+    .lora-row .lora-row-extra { display: none; }
+    .lora-row.active .lora-row-extra {
+      display: block;
+      padding: 0 10px 9px;
+      border-top: 1px dashed var(--border);
+      margin-top: 0;
+    }
+    .lora-row .lora-strength-row {
+      display: flex; align-items: center; gap: 8px;
+      padding-top: 7px;
+    }
+    .lora-row .lora-strength-row label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--muted); width: 52px; flex: none;
+    }
+    .lora-row .lora-strength-row input[type="range"] {
+      flex: 1; min-width: 0; accent-color: var(--accent);
+    }
+    .lora-row .lora-strength-row input[type="number"] {
+      width: 54px; padding: 2px 5px; font-size: 11px; text-align: right;
+    }
+    .lora-row .trigger-chips {
+      display: flex; flex-wrap: wrap; gap: 3px; margin-top: 7px;
+    }
+    .lora-row .trigger-chip {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; padding: 2px 7px; border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border); color: var(--text);
+      cursor: pointer; user-select: none;
+      transition: background 80ms, border-color 80ms;
+    }
+    .lora-row .trigger-chip:hover {
+      background: rgba(90,124,255,0.18); border-color: var(--accent);
+    }
+    .lora-row .trigger-chip.empty {
+      color: var(--muted); font-style: italic;
+      cursor: default; background: transparent; border: none; padding: 0;
+      font-family: inherit;
+    }
+    /* Brief flash on the prompt textarea when a trigger chip is clicked
+       but the word is already present — visual ack that the click did
+       fire (we just chose not to duplicate). */
+    textarea.flash-ok {
+      box-shadow: 0 0 0 2px rgba(80,200,120,0.45);
+      transition: box-shadow 240ms ease;
+    }
+
+    /* CivitAI browser modal — grid of cards with thumbnail, name,
+       creator, downloads, NSFW indicator, and an Install button per
+       card. Layered on the .models-modal scaffold. */
+    .civitai-search-bar {
+      display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
+    }
+    .civitai-search-bar input[type="text"] { flex: 1; }
+    .civitai-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px; margin-top: 10px;
+    }
+    .civitai-card {
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--panel-2); overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .civitai-card .preview {
+      width: 100%; aspect-ratio: 16/10; background: var(--bg-2);
+      object-fit: cover; display: block;
+    }
+    .civitai-card .preview-empty {
+      width: 100%; aspect-ratio: 16/10; background: var(--bg-2);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 11px;
+    }
+    .civitai-card .body { padding: 10px 12px; flex: 1;
+      display: flex; flex-direction: column; gap: 4px; }
+    .civitai-card .ttl {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    .civitai-card .meta {
+      font-size: 10px; color: var(--muted);
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+    .civitai-card .nsfw-badge {
+      display: inline-block; font-size: 9px; font-weight: 700;
+      letter-spacing: 0.05em; padding: 1px 6px; border-radius: 999px;
+      background: rgba(248,81,73,0.15); border: 1px solid var(--danger, #f85149);
+      color: var(--danger, #f85149);
+    }
+    .civitai-card .civitai-source-link {
+      color: var(--accent-bright, #7e98ff);
+      text-decoration: none; font-size: 11px;
+    }
+    .civitai-card .civitai-source-link:hover { text-decoration: underline; }
+    .civitai-card .actions { padding: 0 12px 12px; }
+    .civitai-card .actions button { width: 100%; }
+    .civitai-status-line { color: var(--muted); font-size: 11px; margin-top: 12px; }
+    .civitai-status-line.err { color: var(--danger, #f85149); }
+    .civitai-status-line.ok { color: var(--success, #3fb950); }
+
+    /* Inline CivitAI auth banner. Lives at the top of the browser modal,
+       above the search bar. Three states: missing (amber, has input),
+       set (green check, dismissable into a "change" link), or testing/error. */
+    .civitai-auth {
+      margin: 4px 0 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 12px; line-height: 1.45;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .civitai-auth.missing {
+      background: rgba(240,185,64,0.07);
+      border: 1px solid rgba(240,185,64,0.4);
+      color: var(--text);
+    }
+    .civitai-auth.missing strong { color: var(--warning, #f0b940); }
+    .civitai-auth.set {
+      background: rgba(63,185,80,0.06);
+      border: 1px solid rgba(63,185,80,0.35);
+      color: var(--text);
+    }
+    .civitai-auth.err {
+      background: rgba(220,80,80,0.06);
+      border: 1px solid rgba(220,80,80,0.4);
+      color: var(--text);
+    }
+    .civitai-auth .grow { flex: 1; min-width: 200px; }
+    .civitai-auth input[type="password"],
+    .civitai-auth input[type="text"] {
+      flex: 1; min-width: 180px;
+      padding: 6px 8px; border-radius: 5px;
+      border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
+      color: var(--text); font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .civitai-auth button {
+      padding: 6px 12px; border-radius: 5px;
+      background: var(--accent); color: white; border: none;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .civitai-auth button:disabled { opacity: 0.6; cursor: default; }
+    .civitai-auth a.changekey {
+      color: var(--accent-bright, #7e98ff);
+      cursor: pointer; text-decoration: none; font-size: 11px;
+    }
+    .civitai-auth a.changekey:hover { text-decoration: underline; }
+
+    /* Header icon button — same height/feel as ghost-btn but icon-only.
+       Used for the settings cog. width:auto overrides the global
+       button{width:100%} rule. */
+    .icon-btn {
+      width: auto;
+      background: transparent; border: 1px solid var(--border);
+      color: var(--muted); padding: 4px 7px; border-radius: 6px;
+      cursor: pointer; display: inline-flex; align-items: center;
+      transition: border-color 120ms ease, color 120ms ease;
+    }
+    .icon-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+    .icon-btn svg { display: block; }
+
+    /* Settings modal — preset pills, advanced controls, Apply button.
+       Reuses the .models-modal frame so spacing/elevation match. */
+    .preset-grid {
+      display: grid; grid-template-columns: 1fr; gap: 8px;
+      margin: 12px 0;
+    }
+    .preset-card {
+      display: flex; align-items: flex-start; gap: 10px;
+      border: 1.5px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; cursor: pointer; user-select: none;
+      transition: border-color 120ms ease, background 120ms ease;
+      background: var(--panel-2);
+    }
+    .preset-card:hover { border-color: var(--accent); }
+    .preset-card.active {
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.18));
+    }
+    .preset-card input[type="radio"] {
+      width: auto; margin: 4px 0 0 0; flex-shrink: 0;
+      accent-color: var(--accent);
+    }
+    .preset-card .preset-text { flex: 1; min-width: 0; }
+    .preset-card .preset-label {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      margin: 0 0 4px 0;
+    }
+    .preset-card .preset-blurb {
+      font-size: 11px; color: var(--muted); line-height: 1.4;
+    }
+    .preset-card .preset-spec {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; color: var(--accent-bright);
+      margin-top: 4px; letter-spacing: 0.02em;
+    }
+    .settings-section { margin-top: 14px; }
+    .settings-section h3 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px 0;
+    }
+    .settings-row { display: flex; gap: 10px; align-items: center; }
+    .settings-row label {
+      font-size: 11px; color: var(--muted); min-width: 70px;
+    }
+    /* Spicy mode toggle row — explicit state badge + button.
+       OFF: muted neutral chip, button reads "Enable Spicy mode"
+       ARMED (mid-confirm): amber chip, button reads "Click again to confirm"
+       ON: amber chip, button reads "Disable" (single click off — easy to
+       turn off, harder to turn on, intentional per user spec). */
+    .spicy-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .spicy-state {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.08em;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: rgba(255,255,255,0.03);
+    }
+    .spicy-state.on {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.55);
+      background: rgba(240,185,64,0.16);
+    }
+    .spicy-state.armed {
+      color: var(--warning, #f0b940);
+      border-color: rgba(240,185,64,0.85);
+      background: rgba(240,185,64,0.26);
+      animation: spicyArm 1.2s ease-in-out infinite;
+    }
+    @keyframes spicyArm {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    /* Token rows in the Settings modal. The status pill on the right
+       of the label tells the user at a glance whether a key is
+       configured (green ✓) or missing (muted —). The input is masked
+       by default; a 'show' button reveals so the user can confirm a
+       paste landed correctly. Cleared by a separate button so accidental
+       Apply with empty input doesn't wipe a saved key (we treat empty
+       input as 'don't change' — actual removal is explicit). */
+    .token-row { margin-bottom: 14px; }
+    .token-row .token-label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 500; color: var(--text);
+      margin-bottom: 4px;
+    }
+    .token-row .token-status {
+      font-size: 10px; font-weight: 600;
+      padding: 1px 7px; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted);
+      letter-spacing: 0.05em; text-transform: uppercase;
+    }
+    .token-row .token-status.set {
+      color: var(--success, #3fb950);
+      border-color: var(--success, #3fb950);
+    }
+    .token-row .token-status.dirty {
+      color: var(--warning, #d29922);
+      border-color: var(--warning, #d29922);
+    }
+    .token-row .token-row-input {
+      display: flex; gap: 6px; align-items: center;
+    }
+    .token-row .token-row-input input {
+      flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; padding: 5px 9px;
+    }
+    .token-row .token-row-input button { flex-shrink: 0; }
+    /* The primary action on each token row. Sized small to fit inline,
+       but visually weighted as the main button so users naturally click
+       it instead of leaving the modal without saving. */
+    .token-row .token-savetest {
+      padding: 5px 11px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+
+    .settings-foot {
+      display: flex; gap: 10px; justify-content: flex-end;
+      margin-top: 18px; padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .settings-status { color: var(--muted); font-size: 11px; flex: 1; align-self: center; }
+    .settings-status.ok { color: var(--success, #3fb950); }
+    .settings-status.err { color: var(--danger, #f85149); }
+    button.primary-btn {
+      width: auto;
+      background: var(--accent); color: white; border: 1px solid var(--accent);
+      padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500;
+      cursor: pointer;
+    }
+    button.primary-btn:hover { background: var(--accent-bright); }
+    button.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Models modal — opened by the header `models` pill. Layered on top
+       of everything; the form/log keep working underneath while a
+       download streams in (via the existing log panel at the bottom). */
+    .models-modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .models-card {
+      background: var(--bg-elevated, #1a1f29); color: var(--fg, #d8e0ee);
+      border: 1px solid var(--border, #2a3140); border-radius: 12px;
+      width: min(640px, 92vw); max-height: 86vh; overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+      padding: 22px 24px;
+    }
+    .models-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .models-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+    .models-hint { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+    .models-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+    .models-list li {
+      display: grid; grid-template-columns: 24px 1fr auto; gap: 10px;
+      align-items: center;
+      background: rgba(255,255,255,0.02); border: 1px solid var(--border, #2a3140);
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .models-list li .icon { font-size: 18px; line-height: 1; text-align: center; }
+    .models-list li .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .models-list li .meta .ttl { font-weight: 500; font-size: 13px; }
+    .models-list li .meta .sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .models-list li .progress {
+      font-size: 11px; color: var(--muted); margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .models-list li.ready    { border-color: rgba(63,185,80,0.35); }
+    .models-list li.partial  { border-color: rgba(210,153,34,0.45); }
+    .models-list li.missing  { border-color: rgba(220,80,80,0.35); }
+    .models-list li.downloading { border-color: var(--accent, #5a7cff); animation: keyframes-modeldl 1.6s ease-in-out infinite; }
+    @keyframes keyframes-modeldl { 50% { box-shadow: 0 0 0 3px rgba(90,124,255,0.18); } }
+    .models-list li button {
+      padding: 6px 12px; font-size: 12px; border-radius: 6px;
+      background: var(--accent, #5a7cff); color: white; border: none; cursor: pointer;
+    }
+    .models-list li button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .models-list li button.ghost {
+      background: transparent; color: var(--muted); border: 1px solid var(--border, #2a3140);
+    }
+    .models-foot { font-size: 11px; color: var(--muted); margin-top: 14px; line-height: 1.4; }
+
+    /* ============== AGENTIC FLOWS — chat UI =====================
+       Aim: feel like Claude.ai — generous typography, soft surfaces,
+       avatars, expandable tool cards, markdown rendering. The form-pane
+       gets a top strip switching between the manual form and the chat;
+       the chat itself runs full-height with header / scroll / composer.
+    */
+    .workflow-tabs {
+      display: flex; gap: 4px;
+      padding: 5px; margin: 0 0 14px 0;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .workflow-tabs button {
+      flex: 1; padding: 9px 14px;
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: 8px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      letter-spacing: 0.2px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .workflow-tabs button:hover { color: var(--text); }
+    .workflow-tabs button.active {
+      background: var(--accent-dim); color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    .workflow-tabs .new-badge {
+      display: inline-block; margin-left: 6px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+      padding: 2px 6px; border-radius: 999px;
+      background: var(--accent); color: white;
+      vertical-align: middle;
+    }
+
+    /* ---- Pane wrapper ---- */
+    .agent-pane {
+      position: relative;          /* anchors agent-drop-overlay */
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      --agent-text: 14px;
+      --agent-line: 1.6;
+      --agent-bubble-pad: 14px 16px;
+      --agent-radius: 12px;
+      --avatar: 28px;
+    }
+
+    /* ---- Header ---- */
+    .agent-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    }
+    .agent-header .engine-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      max-width: 320px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-header .engine-pill:hover { border-color: var(--accent); }
+    .agent-header .engine-pill .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+    }
+    .agent-header .engine-pill .dot.live {
+      background: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.18);
+    }
+    .agent-header .engine-pill .dot.warn { background: #d29922; }
+    .agent-header .engine-pill .dot.bad { background: #cf222e; }
+
+    /* Mode pill — same shape as engine pill, neutral when plan_sleep,
+       accent-tinted when interactive (visible reminder that the engine
+       will stay resident). */
+    .agent-header .agent-mode-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+      white-space: nowrap;
+      width: auto;            /* form-reset rule sets buttons to 100% */
+      flex: 0 0 auto;
+    }
+    .agent-header .agent-mode-pill:hover { border-color: var(--accent); color: var(--text); }
+    .agent-header .agent-mode-pill.is-interactive {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.12));
+    }
+    .agent-mode-icon {
+      font-size: 13px; line-height: 1;
+      filter: saturate(0.85);
+    }
+    /* Stop-engine quick action — same height as the pills, danger color
+       on hover so it reads as "this kills something". Only shown when
+       the engine is running (toggled by JS). */
+    .agent-header .agent-engine-stop {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      white-space: nowrap;
+      width: auto;            /* form-reset rule sets buttons to 100% */
+      flex: 0 0 auto;
+    }
+    .agent-header .agent-engine-stop:hover {
+      color: var(--danger);
+      border-color: rgba(248,81,73,0.5);
+      background: rgba(248,81,73,0.08);
+    }
+    .agent-header .agent-engine-stop svg { flex-shrink: 0; }
+    /* `display: inline-flex` on the pill rules above wins over the
+       built-in `[hidden] { display:none }` cascade, so toggling the
+       hidden attribute did nothing. Force the override here. */
+    .agent-header [hidden] { display: none !important; }
+
+    /* RAM headroom chip — reads whether you can comfortably run the
+       configured chat model RIGHT NOW given current LTX renderer usage.
+       Color-coded so a glance is enough; tooltip explains the breakdown.
+       Lives in the agent header, where the action is. */
+    .agent-header .agent-ram-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      color: var(--muted);
+      white-space: nowrap;
+      cursor: help;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .agent-header .agent-ram-chip .agent-ram-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    /* Roomy — chat model fits with comfortable margin. */
+    .agent-header .agent-ram-chip.is-roomy { color: var(--success); border-color: rgba(63,185,80,0.4); }
+    .agent-header .agent-ram-chip.is-roomy .agent-ram-dot {
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgba(63,185,80,0.15);
+    }
+    /* Tight — fits but close to the edge; runs the risk of swap. */
+    .agent-header .agent-ram-chip.is-tight { color: var(--warning); border-color: rgba(210,153,34,0.5); }
+    .agent-header .agent-ram-chip.is-tight .agent-ram-dot {
+      background: var(--warning);
+      box-shadow: 0 0 0 3px rgba(210,153,34,0.15);
+    }
+    /* Bad — wouldn't fit, would force swap immediately. */
+    .agent-header .agent-ram-chip.is-bad { color: var(--danger); border-color: rgba(248,81,73,0.55); }
+    .agent-header .agent-ram-chip.is-bad .agent-ram-dot {
+      background: var(--danger);
+      box-shadow: 0 0 0 3px rgba(248,81,73,0.18);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    .agent-header .session-title {
+      flex: 1; min-width: 0;
+      font-size: 13px; font-weight: 500; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-header .session-title .meta {
+      font-size: 11px; color: var(--muted); margin-left: 8px;
+    }
+    .agent-header .icon-btn {
+      width: 30px; height: 30px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 14px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .agent-header .icon-btn:hover {
+      color: var(--accent-bright); border-color: var(--accent);
+    }
+
+    /* ---- Sessions sidebar (Cmd+K, slides in from left) ---- */
+    /* Replaces the old absolute-positioned popover. Slides in from the
+       left edge as an overlay (default) or pin-pushes the form-pane
+       (when body.asp-pinned is set). Lives at z-index 60 so it covers
+       the workflow tabs / engine pill / settings modal trigger but
+       sits below the settings modal itself (z-200) and the model
+       browser (z-220). */
+    .agent-sessions-panel {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: 290px;
+      background: var(--panel);
+      border-right: 1px solid var(--border-strong);
+      box-shadow: 14px 0 40px rgba(0, 0, 0, 0.5);
+      display: flex; flex-direction: column;
+      transform: translateX(-100%);
+      transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.2, 1);
+      z-index: 60;
+      will-change: transform;
+    }
+    .agent-sessions-panel[data-state="open"] { transform: translateX(0); }
+    body.asp-pinned .agent-sessions-panel { box-shadow: none; }
+    body.asp-pinned .form-pane { padding-left: 290px; transition: padding 0.22s; }
+    body.asp-pinned .agent-stage-pane,
+    body.asp-pinned .stage-pane { /* untouched in regular mode */ }
+    body.agent-fullscreen.asp-pinned .layout {
+      grid-template-columns: 290px 1fr minmax(420px, 480px);
+    }
+    body.agent-fullscreen.asp-pinned .agent-sessions-panel {
+      position: fixed; /* still fixed, but column makes content reflow */
+    }
+    body.asp-pinned .asp-backdrop { display: none !important; }
+
+    .asp-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 14px 14px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .asp-head .asp-title {
+      flex: 1;
+      font-size: 13px; font-weight: 600;
+      letter-spacing: -0.1px; color: var(--text);
+      text-transform: none;       /* override the panel-wide h2/title rules */
+    }
+    .asp-head .asp-icon {
+      width: 26px; height: 26px;
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 7px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0;
+    }
+    .asp-head .asp-icon:hover {
+      color: var(--text);
+      background: var(--bg-2); border-color: var(--border);
+    }
+    body.asp-pinned #aspPinBtn { color: var(--accent-bright); border-color: var(--accent); background: var(--accent-dim); }
+
+    .asp-search {
+      position: relative;
+      padding: 10px 12px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+    .asp-search-icon {
+      position: absolute; left: 22px; top: 18px;
+      color: var(--muted);
+    }
+    .asp-search input {
+      width: 100%;
+      padding: 7px 36px 7px 32px;
+      background: var(--bg-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      box-sizing: border-box;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .asp-search input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: var(--bg);
+    }
+    .asp-search input::placeholder { color: var(--muted); opacity: 0.7; }
+    .asp-kbd {
+      position: absolute; right: 20px; top: 16px;
+      font-size: 10px; padding: 1px 6px;
+      border: 1px solid var(--border); border-radius: 4px;
+      color: var(--muted); background: var(--panel-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .asp-list {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 4px 8px 12px;
+      min-height: 0;
+    }
+    .asp-list::-webkit-scrollbar { width: 8px; }
+    .asp-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.06); border-radius: 4px; }
+    .asp-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.14); }
+    .asp-section-label {
+      padding: 10px 12px 4px;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.6px;
+      color: var(--muted);
+    }
+    .asp-item {
+      display: block; position: relative;
+      padding: 9px 12px;
+      margin: 2px 0;
+      border-radius: 8px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .asp-item:hover { background: var(--bg-2); }
+    .asp-item.is-active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    .asp-item.is-active .asp-item-title { color: var(--accent-bright); }
+    .asp-item.is-focused {
+      background: var(--bg-2); border-color: var(--border-strong);
+    }
+    .asp-row {
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .asp-item-title {
+      flex: 1; font-size: 13px; font-weight: 500;
+      color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .asp-item-time {
+      font-size: 10px; color: var(--muted); flex-shrink: 0;
+    }
+    .asp-item-preview {
+      font-size: 11px; color: var(--muted);
+      margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      line-height: 1.4;
+    }
+    /* Hover-revealed action row at the right edge of each session item.
+       Kept hidden until hover so the list stays scannable; revealed always
+       on the focused (keyboard-navigated) item too. */
+    .asp-actions {
+      position: absolute;
+      top: 8px; right: 8px;
+      display: none;
+      gap: 2px;
+      align-items: center;
+    }
+    .asp-item:hover .asp-actions,
+    .asp-item.is-focused .asp-actions { display: inline-flex; }
+    .asp-action-btn {
+      width: 24px; height: 24px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,0.05);
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      padding: 0;
+    }
+    .asp-action-btn:hover {
+      background: var(--bg-2);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .asp-action-btn.danger:hover { color: #f49a9e; border-color: rgba(244,154,158,0.5); }
+    .asp-action-btn svg { width: 12px; height: 12px; }
+    .asp-item.is-pinned .asp-pin-icon { color: var(--accent-bright); }
+    .asp-item .asp-item-title-edit {
+      flex: 1;
+      background: var(--bg-2);
+      color: var(--text);
+      border: 1px solid var(--accent);
+      border-radius: 5px;
+      padding: 2px 6px;
+      font-size: 13px;
+      font-weight: 500;
+      width: 100%;
+      box-sizing: border-box;
+      outline: none;
+    }
+    .asp-item-preview {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin: 4px 0 0 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    /* Position items so action overlay can absolute. Already in .asp-item base. */
+    .asp-item { position: relative; }
+    .asp-item-meta {
+      display: flex; gap: 6px; align-items: center;
+      margin-top: 5px;
+    }
+    .asp-chip {
+      font-size: 10px;
+      padding: 1px 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .asp-chip-shots { color: var(--accent-bright); border-color: var(--accent); }
+    .asp-status-running {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #3fb950;
+      box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+      animation: stage-pulse 1.6s ease-in-out infinite;
+    }
+    .asp-empty {
+      padding: 32px 18px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .asp-empty-title {
+      font-size: 13px; font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .asp-empty-hint { font-size: 11px; }
+
+    .asp-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0, 2, 12, 0.32);
+      backdrop-filter: blur(2px);
+      z-index: 55;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.22s;
+    }
+    .asp-backdrop.is-shown {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* Sessions trigger pill in the agent header */
+    .asp-trigger {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 5px 10px 5px 9px;
+      height: 30px;
+      background: var(--bg-2); color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      width: auto;
+    }
+    .asp-trigger:hover {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: rgba(47, 129, 247, 0.06);
+    }
+    .asp-trigger svg { color: inherit; }
+    .asp-trigger-count {
+      font-size: 10px;
+      padding: 1px 6px;
+      background: var(--panel-2); color: var(--text);
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    /* Fullscreen overrides — sidebar lives in front of the page,
+       darker translucent panel for contrast against the gradient backdrop */
+    body.agent-fullscreen .agent-sessions-panel {
+      background: rgba(12, 19, 48, 0.96);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-right-color: rgba(255, 255, 255, 0.06);
+    }
+
+    /* ---- Chat scroll area ---- */
+    .agent-chat {
+      flex: 1;
+      min-height: 360px; max-height: 60vh;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 24px 20px 8px;
+      scroll-behavior: smooth;
+    }
+    .agent-chat::-webkit-scrollbar { width: 8px; }
+    .agent-chat::-webkit-scrollbar-track { background: transparent; }
+    .agent-chat::-webkit-scrollbar-thumb {
+      background: var(--border-strong); border-radius: 4px;
+    }
+    .agent-chat::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+    /* ---- Empty state ---- */
+    .agent-empty {
+      max-width: 540px; margin: 24px auto 12px;
+      text-align: center; color: var(--muted);
+      animation: agent-fade-in 0.4s ease;
+    }
+    .agent-empty .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      border: 1px solid var(--accent);
+      font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .agent-empty h3 {
+      font-size: 18px; font-weight: 600; color: var(--text);
+      margin: 0 0 10px;
+    }
+    .agent-empty p {
+      font-size: 13px; line-height: 1.55; margin: 6px 0;
+    }
+    .agent-empty .examples {
+      display: flex; flex-direction: column; gap: 8px;
+      max-width: 420px; margin: 24px auto 0;
+    }
+    .agent-empty .example {
+      text-align: left;
+      padding: 12px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border); border-radius: 10px;
+      cursor: pointer;
+      color: var(--text); font-size: 13px;
+      transition: border-color 0.15s, background 0.15s;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .agent-empty .example:hover {
+      border-color: var(--accent);
+      background: var(--panel);
+    }
+    .agent-empty .example .arrow {
+      color: var(--muted); flex-shrink: 0;
+      transition: transform 0.15s, color 0.15s;
+    }
+    .agent-empty .example:hover .arrow {
+      color: var(--accent-bright);
+      transform: translateX(2px);
+    }
+
+    /* ---- Message rows ---- */
+    .agent-msg-row {
+      display: flex; gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 22px;
+      animation: agent-fade-in 0.3s ease;
+    }
+    @keyframes agent-fade-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .agent-avatar {
+      width: var(--avatar); height: var(--avatar);
+      border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      flex-shrink: 0;
+      letter-spacing: 0.3px;
+      user-select: none;
+    }
+    .agent-avatar.claude {
+      background: linear-gradient(135deg, #cc7a3a, #d18b4f);
+      color: white;
+      box-shadow: 0 0 0 1px rgba(204,122,58,0.3);
+    }
+    .agent-avatar.user {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+    }
+    .agent-msg-body { flex: 1; min-width: 0; }
+    .agent-msg-name {
+      font-size: 12px; font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+      letter-spacing: 0.2px;
+    }
+    .agent-msg-content {
+      font-size: var(--agent-text);
+      line-height: var(--agent-line);
+      color: var(--text);
+      word-wrap: break-word; overflow-wrap: break-word;
+    }
+
+    /* ---- Markdown rendering inside .agent-md ---- */
+    .agent-md > *:first-child { margin-top: 0; }
+    .agent-md > *:last-child { margin-bottom: 0; }
+    .agent-md p { margin: 8px 0; }
+    .agent-md h1, .agent-md h2, .agent-md h3, .agent-md h4 {
+      font-weight: 600; color: var(--text); margin: 16px 0 8px;
+      line-height: 1.3;
+    }
+    .agent-md h1 { font-size: 17px; }
+    .agent-md h2 { font-size: 15px; }
+    .agent-md h3 { font-size: 14px; color: var(--accent-bright); }
+    .agent-md h4 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+    .agent-md ul, .agent-md ol { margin: 8px 0; padding-left: 22px; }
+    .agent-md li { margin: 4px 0; }
+    .agent-md li > p { margin: 2px 0; }
+    .agent-md strong { font-weight: 600; color: var(--text); }
+    .agent-md em { font-style: italic; color: var(--muted); }
+    .agent-md a { color: var(--accent-bright); text-decoration: underline; }
+    .agent-md code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--accent-bright);
+    }
+    .agent-md pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .agent-md pre code {
+      background: transparent; border: none; padding: 0;
+      color: var(--text);
+      font-size: inherit;
+    }
+    .agent-md blockquote {
+      margin: 10px 0;
+      padding: 6px 14px;
+      border-left: 3px solid var(--accent);
+      color: var(--muted);
+      background: var(--accent-dim);
+      border-radius: 0 6px 6px 0;
+    }
+    .agent-md table {
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 12px;
+      width: 100%;
+    }
+    .agent-md th, .agent-md td {
+      border: 1px solid var(--border);
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .agent-md th {
+      background: var(--bg-2);
+      font-weight: 600;
+      color: var(--text);
+    }
+    .agent-md hr {
+      border: none; border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+
+    /* ---- Tool cards (calls + results, expandable) ---- */
+    .agent-tool-card {
+      margin: 10px 0;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+      animation: agent-fade-in 0.25s ease;
+    }
+    .agent-tool-card:hover { border-color: var(--accent); }
+    .agent-tool-card.success { border-left-color: #2ea043; }
+    .agent-tool-card.error { border-left-color: #cf222e; }
+    .agent-tool-card.pending { border-left-color: var(--accent); }
+    .agent-tool-card .head {
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer;
+      user-select: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .agent-tool-card .head:hover { background: var(--panel); }
+    .agent-tool-card .head .icon {
+      font-size: 13px; flex-shrink: 0; line-height: 1;
+    }
+    .agent-tool-card .head .icon.success { color: #2ea043; }
+    .agent-tool-card .head .icon.error { color: #cf222e; }
+    .agent-tool-card .head .name {
+      font-weight: 700; color: var(--accent-bright);
+      flex-shrink: 0;
+    }
+    .agent-tool-card.success .head .name { color: #9be7a4; }
+    .agent-tool-card.error .head .name { color: #f49a9e; }
+    .agent-tool-card .head .summary {
+      color: var(--muted); flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-tool-card .head .chevron {
+      color: var(--muted); flex-shrink: 0;
+      transition: transform 0.2s ease;
+      font-size: 11px;
+    }
+    .agent-tool-card.open .head .chevron { transform: rotate(90deg); }
+    .agent-tool-card .body {
+      display: none;
+      padding: 0 14px 12px;
+      border-top: 1px solid var(--border);
+      margin-top: 0;
+    }
+    .agent-tool-card.open .body {
+      display: block;
+      padding-top: 10px;
+    }
+    .agent-tool-card .body pre {
+      margin: 0;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 11px;
+      line-height: 1.45;
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+    }
+
+    /* ---- Anchor candidate grid (Phase B of the director workflow) ---- */
+    .anchor-grid-wrap {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--border);
+    }
+    .anchor-grid-meta {
+      font-size: 11px; color: var(--muted);
+      margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .anchor-grid-meta .label-pill {
+      padding: 2px 8px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      font-weight: 600; font-size: 10px;
+      letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .anchor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 10px;
+    }
+    .anchor-cell {
+      position: relative;
+      aspect-ratio: 16/9;
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+      border: 2px solid transparent;
+      background: var(--bg);
+      padding: 0;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .anchor-cell:hover {
+      border-color: var(--accent);
+      transform: scale(1.02);
+    }
+    .anchor-cell.selected {
+      border-color: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.25);
+    }
+    .anchor-cell img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .anchor-cell .check {
+      position: absolute; top: 6px; right: 6px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--bg-2);
+      color: var(--muted);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px;
+      font-weight: 800;
+      border: 1px solid var(--border);
+      transition: background 0.15s, color 0.15s;
+    }
+    .anchor-cell.selected .check {
+      background: #2ea043;
+      color: white;
+      border-color: #2ea043;
+    }
+    .anchor-cell .seed {
+      position: absolute; bottom: 4px; left: 4px;
+      font-size: 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 2px 6px;
+      background: rgba(0,0,0,0.55);
+      color: white;
+      border-radius: 4px;
+      letter-spacing: 0.3px;
+    }
+    .anchor-cell .engine-tag {
+      position: absolute; bottom: 4px; right: 4px;
+      font-size: 9px;
+      padding: 2px 5px;
+      background: rgba(0,0,0,0.55);
+      color: white;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .anchor-prompt {
+      font-size: 11px; color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      background: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-style: italic;
+      max-height: 80px; overflow-y: auto;
+    }
+
+    /* ============================================================
+       AGENT STAGE PANE — the right-side "live canvas" / code-interpreter
+       ============================================================
+       Shows what the agent is actually doing with the renderer in real
+       time: current job + progress, queue, generated anchors waiting on
+       a pick, finished mp4s playing inline. Polls /status every ~1.5s.
+
+       Hidden by default; appears when body[data-workflow="agent"] OR
+       body.agent-fullscreen. Cards are layered (top: now, middle:
+       activity feed, bottom: gallery of session outputs) and scroll
+       independently. */
+    .agent-stage-pane {
+      display: none;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      min-height: 0;
+    }
+    .agent-stage-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex; align-items: center; gap: 10px;
+      flex-shrink: 0;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+    }
+    .agent-stage-head .label {
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--muted);
+    }
+    .agent-stage-head .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted);
+    }
+    .agent-stage-head .live-dot.live {
+      background: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.18);
+      animation: stage-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes stage-pulse {
+      0%, 100% { box-shadow: 0 0 0 3px rgba(46,160,67,0.18); }
+      50% { box-shadow: 0 0 0 6px rgba(46,160,67,0.05); }
+    }
+    .agent-stage-head .session-pill {
+      font-size: 10px; padding: 3px 8px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: 999px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      flex: 0 0 auto;
+    }
+    .agent-stage-head .spacer { flex: 1; }
+    .agent-stage-head .stage-tab {
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: 7px;
+      padding: 5px 10px; font-size: 11px; cursor: pointer;
+      width: auto;
+    }
+    .agent-stage-head .stage-tab.active {
+      background: var(--accent-dim); color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    .agent-stage-head .stage-tab:hover:not(.active) {
+      color: var(--text);
+    }
+    .agent-stage-body {
+      flex: 1 1 auto;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 14px 16px 18px;
+      display: flex; flex-direction: column; gap: 14px;
+      min-height: 0;
+    }
+    .agent-stage-body::-webkit-scrollbar { width: 8px; }
+    .agent-stage-body::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.06); border-radius: 4px;
+    }
+    .agent-stage-body::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.14);
+    }
+    .agent-stage-section {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .agent-stage-section h4 {
+      margin: 0 0 8px; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--muted); font-weight: 700;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .agent-stage-section h4 .count {
+      padding: 1px 7px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      font-weight: 700;
+    }
+
+    /* "Now rendering" card */
+    .stage-now-card {
+      padding: 14px 14px 12px;
+    }
+    .stage-now-card.idle {
+      text-align: center; color: var(--muted);
+      font-size: 12px; padding: 24px 14px;
+      font-style: italic;
+    }
+    .stage-now-label {
+      font-size: 13px; font-weight: 600;
+      color: var(--text); margin-bottom: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-now-meta {
+      font-size: 11px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin-bottom: 10px;
+    }
+    .stage-progress-bar {
+      height: 6px; border-radius: 3px;
+      background: rgba(255,255,255,0.06);
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .stage-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+      transition: width 600ms ease;
+      box-shadow: 0 0 12px rgba(47,129,247,0.4);
+    }
+    .stage-progress-text {
+      font-size: 10px; color: var(--muted);
+      display: flex; justify-content: space-between;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    /* Session outputs gallery */
+    .stage-outputs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 8px;
+    }
+    .stage-output-cell {
+      position: relative;
+      aspect-ratio: 16/9;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .stage-output-cell:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .stage-output-cell.failed {
+      border-color: rgba(207,34,46,0.5);
+      background: rgba(207,34,46,0.04);
+    }
+    .stage-output-cell .vid {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .stage-output-cell .label {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 4px 8px;
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,0.7));
+      color: white;
+      font-size: 10px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-output-cell .badge {
+      position: absolute; top: 4px; left: 4px;
+      font-size: 9px; padding: 2px 6px;
+      background: rgba(0,0,0,0.6); color: white;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0.3px;
+    }
+    .stage-output-cell.failed .badge {
+      background: rgba(207,34,46,0.85);
+    }
+    /* Refine button — small circular icon top-right of every output cell.
+       Distinct from the main click area (which opens the lightbox to
+       play the clip). Click → drops a reference into the chat composer
+       so the user can ask the agent for a variation. */
+    .stage-output-cell .refine-btn {
+      position: absolute; top: 4px; right: 4px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.6);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.15);
+      font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s;
+      z-index: 1;
+      width: 22px;
+    }
+    .stage-output-cell:hover .refine-btn { opacity: 1; }
+    .stage-output-cell .refine-btn:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .stage-empty {
+      text-align: center; color: var(--muted);
+      font-size: 12px; padding: 16px;
+      font-style: italic;
+    }
+
+    /* Activity feed (recent agent actions) */
+    .stage-activity {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 220px; overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+    }
+    .stage-activity-row {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .stage-activity-row:last-child { border-bottom: none; }
+    .stage-activity-row .icon {
+      width: 14px; flex-shrink: 0;
+      font-size: 11px;
+    }
+    .stage-activity-row.ok .icon { color: #2ea043; }
+    .stage-activity-row.fail .icon { color: #cf222e; }
+    .stage-activity-row.run .icon { color: var(--accent-bright); }
+    .stage-activity-row .text {
+      flex: 1; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-activity-row .when {
+      color: var(--muted); font-size: 10px;
+      flex-shrink: 0;
+    }
+
+    /* ============== HF MODEL BROWSER MODAL ============== */
+    .model-browser-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.7); backdrop-filter: blur(6px);
+      z-index: 220;
+      display: none;
+      align-items: center; justify-content: center;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .model-browser-modal.open { display: flex; }
+    .model-browser-card {
+      width: min(820px, 96vw); max-height: 88vh;
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+      overflow: hidden;
+    }
+    .model-browser-head {
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .model-browser-head h2 {
+      margin: 0; font-size: 17px; font-weight: 600;
+      text-transform: none; letter-spacing: -0.1px;
+      color: var(--text);
+      flex: 1;
+    }
+    .model-browser-head .subtitle {
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.3px; text-transform: uppercase;
+      flex: 0 0 auto;
+    }
+    .model-browser-head .close-btn {
+      width: auto; padding: 5px 12px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px; font-size: 11px; font-weight: 600;
+      cursor: pointer;
+    }
+    .model-browser-head .close-btn:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .model-browser-controls {
+      padding: 14px 22px;
+      display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      background: var(--bg-2);
+    }
+    .model-browser-controls input[type="text"] {
+      flex: 1; padding: 9px 12px;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px; font-size: 13px;
+      width: auto;
+    }
+    .model-browser-controls input[type="text"]:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .model-browser-controls .checkbox-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--muted);
+      cursor: pointer; user-select: none;
+      flex: 0 0 auto;
+    }
+    .model-browser-controls .checkbox-label input {
+      width: auto; margin: 0;
+    }
+    .model-browser-controls button {
+      padding: 9px 16px; border-radius: 8px;
+      border: none; background: var(--accent); color: white;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      width: auto;
+    }
+    .model-browser-controls button:hover { background: var(--accent-bright); }
+    .model-browser-controls button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .model-browser-results {
+      flex: 1; overflow-y: auto;
+      padding: 8px 14px 18px;
+    }
+    .model-result {
+      padding: 12px 14px; margin: 6px 0;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: 10px;
+      display: grid; grid-template-columns: 1fr auto;
+      gap: 14px;
+      transition: border-color 0.15s;
+    }
+    .model-result:hover { border-color: var(--accent); }
+    .model-result .info { min-width: 0; }
+    .model-result .name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px; color: var(--text);
+      font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .model-result .meta {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      margin-top: 4px;
+      font-size: 11px; color: var(--muted);
+    }
+    .model-result .meta .tag {
+      padding: 1px 7px; border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+    }
+    .model-result .meta .tag.gated {
+      background: rgba(207,34,46,0.12); color: #f49a9e;
+      border: 1px solid rgba(207,34,46,0.3);
+    }
+    .model-result .meta .tag.abliterated {
+      background: rgba(204,122,58,0.12); color: #ffb37a;
+      border: 1px solid rgba(204,122,58,0.3);
+    }
+    .model-result .actions {
+      display: flex; align-items: center; gap: 8px;
+      flex-shrink: 0;
+    }
+    .model-result .install-btn {
+      padding: 7px 14px; border-radius: 7px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      border: 1px solid var(--accent);
+      font-size: 11px; font-weight: 600; cursor: pointer;
+      width: auto;
+      transition: background 0.15s, color 0.15s;
+    }
+    .model-result .install-btn:hover {
+      background: var(--accent); color: white;
+    }
+    .model-result .install-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .model-result .info-btn {
+      padding: 7px 10px; border-radius: 7px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+      font-size: 11px; cursor: pointer; width: auto;
+    }
+    .model-result .info-btn:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .model-browser-status {
+      padding: 12px 22px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--muted);
+      display: none;
+    }
+    .model-browser-status.visible { display: block; }
+    .model-browser-status .label {
+      color: var(--accent-bright); font-weight: 700;
+      margin-right: 8px;
+    }
+    .model-browser-status .last-line {
+      max-height: 60px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+      margin-top: 6px;
+      color: var(--text);
+    }
+    .model-browser-empty {
+      text-align: center; padding: 60px 20px;
+      color: var(--muted); font-size: 13px;
+    }
+
+    /* Lightbox: clicking a stage-output-cell plays the video full-size */
+    .stage-lightbox {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.85);
+      backdrop-filter: blur(8px);
+      z-index: 250;
+      display: none;
+      align-items: center; justify-content: center;
+      padding: 40px;
+    }
+    .stage-lightbox.open { display: flex; }
+    .stage-lightbox video {
+      max-width: 90vw; max-height: 80vh;
+      border-radius: 12px;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    }
+    .stage-lightbox .close-btn {
+      position: absolute;
+      top: 16px; right: 20px;
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 12px;
+      cursor: pointer;
+      width: auto;
+    }
+    .stage-lightbox .close-btn:hover {
+      background: rgba(255,255,255,0.14);
+    }
+    .stage-lightbox .refine-btn-large {
+      position: absolute;
+      top: 16px; right: 110px;
+      background: var(--accent);
+      color: white;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 12px; font-weight: 600;
+      cursor: pointer; width: auto;
+      box-shadow: 0 4px 14px rgba(47,129,247,0.4);
+    }
+    .stage-lightbox .refine-btn-large:hover {
+      background: var(--accent-bright);
+    }
+
+    /* ---- Composer reference chip ----
+       When the user clicks Refine on a clip, a chip appears just above
+       the textarea with the clip's label + a × to clear it. The chip's
+       data is sent verbatim as a prefix to the user's next message so
+       the agent picks up the reference and calls inspect_clip first. */
+    .agent-ref-chip {
+      display: none;
+      align-items: center; gap: 8px;
+      padding: 6px 10px 6px 12px;
+      margin: 0 0 6px 0;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--accent-bright);
+      max-width: fit-content;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .agent-ref-chip.visible { display: inline-flex; }
+    .agent-ref-chip .ref-icon {
+      font-size: 11px;
+    }
+    .agent-ref-chip .ref-label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      max-width: 320px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-ref-chip .clear {
+      background: transparent;
+      color: var(--accent-bright);
+      border: none;
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .agent-ref-chip .clear:hover {
+      background: rgba(255,255,255,0.1);
+    }
+
+    /* =========================================================
+       FULLSCREEN / FOCUS MODE — pro-app polish
+       =========================================================
+       Toggle via .agent-fullscreen on <body>. Hides every chrome
+       element, paints a soft radial-gradient backdrop, centers
+       the conversation in a comfortable reading column, and
+       floats the composer with a glass-blur effect so the chat
+       fades under it.
+       Esc exits — bound in JS. */
+
+    /* Wipe all the regular panel chrome.
+       NOTE: `body.agent-fullscreen > header` (direct child only) — without
+       the > combinator the rule also matches the agent's own
+       <header class="agent-header"> inside the chat, which is exactly
+       what we DON'T want to hide.
+       Stage pane (right column) STAYS visible — it becomes the agent's
+       live canvas / code-interpreter view. */
+    body.agent-fullscreen > header,
+    body.agent-fullscreen .bottom-pane,
+    body.agent-fullscreen .form-pane > :not(.agent-pane),
+    body.agent-fullscreen .workflow-tabs,
+    body.agent-fullscreen .stage-pane {
+      display: none !important;
+    }
+    body.agent-fullscreen { overflow: hidden; }
+    /* Fullscreen layout: chat on the left, stage pane on the right.
+       Like Claude.ai with Artifacts open — conversation + live canvas. */
+    body.agent-fullscreen .layout {
+      max-width: none; padding: 0; margin: 0; gap: 0;
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 1fr minmax(420px, 480px);
+    }
+    body.agent-fullscreen .form-pane {
+      max-width: none; padding: 0;
+      width: 100%; height: 100vh;
+      border: none; border-radius: 0;
+      background: transparent;
+    }
+    body.agent-fullscreen .agent-stage-pane {
+      display: flex !important;
+      border: none; border-radius: 0;
+      border-left: 1px solid rgba(255,255,255,0.05);
+      background: rgba(0, 6, 26, 0.3);
+      backdrop-filter: blur(8px);
+      height: 100vh; width: 100%;
+    }
+
+    /* Soft body backdrop — subtle radial wash gives depth without
+       fighting the conversation. */
+    body.agent-fullscreen {
+      background:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(47,129,247,0.06), transparent 70%),
+        radial-gradient(ellipse 70% 50% at 50% 110%, rgba(204,122,58,0.04), transparent 70%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+
+    /* The pane fills the screen, no borders, no card */
+    body.agent-fullscreen .agent-pane {
+      width: 100vw; height: 100vh; max-height: 100vh;
+      border: none; border-radius: 0;
+      background: transparent;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+
+    /* Header: minimal, transparent, generous padding, no bottom rule */
+    body.agent-fullscreen .agent-header {
+      background: transparent;
+      border-bottom: none;
+      padding: 16px 28px;
+      max-width: 1080px; width: 100%;
+      margin: 0 auto;
+      box-sizing: border-box;
+    }
+    body.agent-fullscreen .agent-header .engine-pill {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(255,255,255,0.06);
+    }
+    body.agent-fullscreen .agent-header .engine-pill:hover {
+      background: rgba(47,129,247,0.08);
+      border-color: var(--accent);
+    }
+    body.agent-fullscreen .agent-header .icon-btn {
+      background: transparent;
+      border: 1px solid transparent;
+    }
+    body.agent-fullscreen .agent-header .icon-btn:hover {
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.08);
+      color: var(--accent-bright);
+    }
+    body.agent-fullscreen .agent-header .session-title {
+      font-size: 14px;
+      letter-spacing: -0.1px;
+    }
+    body.agent-fullscreen .agent-header .session-title .meta {
+      font-size: 11px;
+      opacity: 0.55;
+    }
+
+    /* Chat: takes the rest, content column centered at reading width */
+    body.agent-fullscreen .agent-chat {
+      max-height: none;
+      flex: 1;
+      padding: 8px 28px 0;
+      scroll-padding-bottom: 140px;
+    }
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar { width: 10px; }
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.06);
+      border-radius: 4px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    body.agent-fullscreen .agent-chat::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.14);
+      background-clip: padding-box;
+    }
+
+    /* Center every direct child of the chat at reading width */
+    body.agent-fullscreen .agent-chat > * {
+      max-width: 720px;
+      margin-left: auto; margin-right: auto;
+      width: 100%;
+    }
+    body.agent-fullscreen .agent-empty {
+      max-width: 580px; margin: 80px auto 24px;
+    }
+    body.agent-fullscreen .agent-msg-row {
+      margin-bottom: 26px;
+    }
+    body.agent-fullscreen .agent-avatar {
+      width: 30px; height: 30px;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.04);
+    }
+    body.agent-fullscreen .agent-avatar.claude {
+      box-shadow: 0 0 0 1px rgba(204,122,58,0.4),
+                  0 4px 16px rgba(204,122,58,0.18);
+    }
+
+    /* Composer: floating glass card with soft shadow + fading
+       gradient above so chat appears to dissolve under it. */
+    body.agent-fullscreen .agent-composer {
+      background: transparent;
+      border-top: none;
+      padding: 0 28px 24px;
+      position: relative;
+      z-index: 5;
+    }
+    body.agent-fullscreen .agent-composer::before {
+      content: '';
+      position: absolute; inset: -56px 0 0 0;
+      pointer-events: none;
+      background: linear-gradient(
+        180deg,
+        transparent 0%,
+        rgba(0,6,26,0.5) 30%,
+        rgba(0,6,26,0.85) 65%,
+        var(--bg) 100%
+      );
+    }
+    body.agent-fullscreen .agent-composer-wrap {
+      max-width: 720px; width: 100%;
+      margin: 0 auto;
+      position: relative; z-index: 1;
+    }
+    body.agent-fullscreen .agent-composer textarea {
+      background: rgba(20, 26, 58, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 18px;
+      padding: 14px 60px 14px 18px;          /* room for the inline send button */
+      box-shadow:
+        0 12px 36px rgba(0,0,0,0.45),
+        0 0 0 1px rgba(47,129,247,0.0);
+      font-size: 14.5px;
+      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    }
+    body.agent-fullscreen .agent-composer textarea:focus {
+      background: rgba(28, 36, 72, 0.92);
+      border-color: rgba(47,129,247,0.5);
+      box-shadow:
+        0 12px 36px rgba(0,0,0,0.5),
+        0 0 0 4px rgba(47,129,247,0.12);
+    }
+    body.agent-fullscreen .agent-composer .hint {
+      bottom: -22px; left: 0;
+      width: 100%; text-align: center;
+      opacity: 0.5;
+    }
+
+    /* Send button polish for fullscreen — slightly larger, deeper shadow */
+    body.agent-fullscreen .agent-composer .send-btn {
+      width: 38px; height: 38px;
+      right: 8px; bottom: 8px;
+      border-radius: 11px;
+      z-index: 2;
+      box-shadow: 0 6px 20px rgba(47,129,247,0.45);
+    }
+    body.agent-fullscreen .agent-composer .send-btn:hover:not(:disabled) {
+      box-shadow: 0 8px 28px rgba(47,129,247,0.55);
+    }
+    body.agent-fullscreen .agent-composer .send-btn:disabled {
+      background: rgba(255,255,255,0.05);
+      box-shadow: none;
+    }
+    body.agent-fullscreen .agent-composer .send-btn svg {
+      width: 17px; height: 17px;
+    }
+
+    /* Tool cards: tighten + soften in fullscreen */
+    body.agent-fullscreen .agent-tool-card {
+      background: rgba(255,255,255,0.025);
+      border-color: rgba(255,255,255,0.06);
+    }
+    body.agent-fullscreen .agent-tool-card:hover {
+      border-color: rgba(47,129,247,0.4);
+    }
+    body.agent-fullscreen .agent-tool-card .head {
+      padding: 9px 14px;
+      font-size: 12px;
+    }
+    body.agent-fullscreen .agent-tool-card .body {
+      padding: 0 14px 12px;
+    }
+
+    /* Anchor grid in fullscreen: roomier cells, no card border around them */
+    body.agent-fullscreen .anchor-grid {
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+    }
+    body.agent-fullscreen .anchor-cell {
+      border-width: 1px;
+      border-color: rgba(255,255,255,0.06);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+    }
+    body.agent-fullscreen .anchor-cell:hover {
+      transform: translateY(-2px) scale(1.01);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+
+    /* Empty state in fullscreen — magazine-feel layout */
+    body.agent-fullscreen .agent-empty {
+      padding: 40px 0 60px;
+    }
+    body.agent-fullscreen .agent-empty h3 {
+      font-size: 26px; font-weight: 600;
+      letter-spacing: -0.4px;
+      margin: 14px 0 12px;
+    }
+    body.agent-fullscreen .agent-empty p {
+      font-size: 14px; line-height: 1.65;
+      max-width: 460px; margin: 8px auto;
+    }
+    body.agent-fullscreen .agent-empty .examples {
+      gap: 10px; margin-top: 32px;
+    }
+    body.agent-fullscreen .agent-empty .example {
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.025);
+      border-color: rgba(255,255,255,0.06);
+      border-radius: 12px;
+    }
+    body.agent-fullscreen .agent-empty .example:hover {
+      background: rgba(47,129,247,0.06);
+      border-color: rgba(47,129,247,0.4);
+    }
+
+    /* Sessions popover anchored to the header — keep it usable in fullscreen */
+    /* (Old .agent-sessions-pop fullscreen override removed — sidebar
+       handles its own fullscreen positioning now.) */
+
+    /* Fullscreen entrance */
+    body.agent-fullscreen .agent-pane {
+      animation: agent-fullscreen-in 0.28s cubic-bezier(0.2, 0.7, 0.2, 1);
+    }
+    @keyframes agent-fullscreen-in {
+      from { opacity: 0.6; transform: scale(0.99); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    /* ---- Typing indicator ---- */
+    .agent-typing-row {
+      display: flex; gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 22px;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .agent-typing-bubble {
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .agent-typing-dots {
+      display: inline-flex; gap: 4px;
+    }
+    .agent-typing-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      animation: agent-typing-pulse 1.4s ease-in-out infinite;
+    }
+    .agent-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .agent-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes agent-typing-pulse {
+      0%, 60%, 100% { opacity: 0.25; transform: scale(0.85); }
+      30% { opacity: 1; transform: scale(1); }
+    }
+
+    /* ---- Composer ---- */
+    /* Button sits INSIDE the textarea (absolute) so it feels like one
+       integrated input — the modern chat-app convention. Textarea has
+       padding-right to keep typed text clear of the button. */
+    .agent-composer {
+      border-top: 1px solid var(--border);
+      padding: 14px 16px 18px;
+      background: var(--bg-2);
+    }
+    .agent-composer-wrap {
+      position: relative;
+    }
+    .agent-composer textarea {
+      width: 100%;
+      min-height: 48px; max-height: 220px;
+      padding: 13px 56px 13px 50px;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      font-family: inherit;
+      font-size: var(--agent-text);
+      line-height: 1.55;
+      resize: none;
+      transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+      box-sizing: border-box;
+    }
+    /* Paperclip — mirrors send-btn placement on the left edge of the
+       composer. Same shape, ghost styling so it doesn't compete with Send. */
+    .agent-composer .attach-btn {
+      position: absolute;
+      left: 7px; bottom: 7px;
+      width: 34px; height: 34px;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: background 0.18s, color 0.18s, border-color 0.18s;
+    }
+    .agent-composer .attach-btn:hover {
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .agent-composer .attach-btn svg {
+      width: 16px; height: 16px;
+    }
+    .agent-composer .attach-btn .count {
+      position: absolute;
+      top: -3px; right: -3px;
+      min-width: 14px; height: 14px;
+      padding: 0 3px;
+      background: var(--accent);
+      color: white;
+      border-radius: 7px;
+      font-size: 9px;
+      font-weight: 700;
+      display: none;
+      align-items: center; justify-content: center;
+      letter-spacing: 0;
+    }
+    .agent-composer .attach-btn.has-attach { color: var(--accent); }
+    .agent-composer .attach-btn.has-attach .count { display: inline-flex; }
+    /* Pending-attachment chip row above the textarea. */
+    .agent-attach-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 0 0 8px 0;
+      max-width: 720px;
+      margin-left: auto; margin-right: auto;
+    }
+    .agent-attach-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px 5px 5px;
+      background: var(--bg-3, rgba(255,255,255,0.04));
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      color: var(--text);
+      max-width: 240px;
+    }
+    .agent-attach-chip .thumb {
+      width: 28px; height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      background: rgba(255,255,255,0.08);
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .agent-attach-chip .name {
+      max-width: 140px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .agent-attach-chip .meta {
+      color: var(--muted);
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .agent-attach-chip .remove {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    .agent-attach-chip .remove:hover { color: #f49a9e; }
+    .agent-attach-chip.pending { opacity: 0.6; }
+    .agent-attach-chip.error { border-color: rgba(244,154,158,0.6); color: #f49a9e; }
+
+    /* In-message attachment chips (rendered inside user bubbles). Slightly
+       softer than the composer chips to read as past, not pending. */
+    .agent-msg-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .agent-msg-attach {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px 5px 5px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 11.5px;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .agent-msg-attach:hover {
+      background: rgba(255,255,255,0.08);
+      border-color: var(--accent-dim);
+    }
+    .agent-msg-attach .thumb {
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.08);
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .agent-msg-attach .name {
+      max-width: 200px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Drag-drop overlay — full-bleed inside the agent pane, visible only
+       while a drag is over the chat surface. Subtle accent ring + dashed
+       border so the user understands a drop is wanted. */
+    .agent-drop-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(47,129,247,0.08);
+      border: 2px dashed var(--accent);
+      border-radius: 14px;
+      display: none;
+      align-items: center; justify-content: center;
+      pointer-events: none;
+      z-index: 50;
+      backdrop-filter: blur(2px);
+    }
+    .agent-drop-overlay.visible { display: flex; }
+    .agent-drop-overlay .drop-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      padding: 18px 28px;
+      background: var(--panel);
+      border: 1px solid var(--accent-dim);
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .agent-composer textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .agent-composer textarea::placeholder {
+      color: var(--muted);
+      opacity: 0.7;
+    }
+    .agent-composer .hint {
+      position: absolute;
+      bottom: -16px; right: 4px;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.2px;
+      pointer-events: none;
+      opacity: 0.55;
+    }
+    .agent-composer .send-btn {
+      position: absolute;
+      right: 7px; bottom: 7px;
+      width: 34px; height: 34px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: background 0.18s, transform 0.18s, box-shadow 0.18s;
+      box-shadow: 0 2px 8px rgba(47,129,247,0.3);
+    }
+    .agent-composer .send-btn:hover:not(:disabled) {
+      background: var(--accent-bright);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(47,129,247,0.45);
+    }
+    .agent-composer .send-btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    .agent-composer .send-btn:disabled {
+      background: rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.3);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .agent-composer .send-btn svg {
+      width: 16px; height: 16px;
+    }
+
+    /* ---- Settings drawer ---- */
+    .agent-settings-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.7);
+      backdrop-filter: blur(6px);
+      z-index: 200;
+      display: none;
+      align-items: center; justify-content: center;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .agent-settings-modal.open { display: flex; }
+    .agent-settings-card {
+      width: min(580px, 96vw); max-height: 90vh;
+      overflow-y: auto;
+      padding: 24px;
+      border-radius: 14px;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+    }
+    .agent-settings-card h2 {
+      margin: 0 0 6px;
+      font-size: 17px; font-weight: 600;
+      /* Override the panel-wide h2 rule (line ~5322) which sets uppercase
+         + 0.1em letter-spacing. The settings-card titles are sentence-
+         case, like a real settings sheet, not eyebrow labels. */
+      text-transform: none;
+      letter-spacing: -0.1px;
+      color: var(--text);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+    }
+    .agent-settings-card h2 button,
+    .agent-settings-card h2 .close-btn {
+      flex-shrink: 0;          /* don't let the close button grow huge */
+    }
+    /* Inline 'Close' button next to the title. The button has no class,
+       just sits inside h2 — keep it small and ghosty. */
+    .agent-settings-card h2 > button {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      text-transform: none;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .agent-settings-card h2 > button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    /* The panel has a global `input, textarea, select, button { width: 100% }`
+       rule (see ~line 5331). It makes EVERY button full-width by default,
+       which destroys the inline button layout in the modal: the Close
+       button stretches across the whole card, the Start button next to
+       the engine status pill takes 350px, etc. Override for the agent
+       modal — buttons here are inline elements managed by their flex
+       containers. */
+    .agent-settings-card h2 > button,
+    .agent-engine-row > button,
+    .agent-settings-card .actions > button {
+      width: auto;
+    }
+    .agent-settings-card .subtitle {
+      font-size: 12px; color: var(--muted);
+      margin-bottom: 18px;
+    }
+    .agent-settings-card .close-btn {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 5px 11px; font-size: 11px; cursor: pointer;
+    }
+    .agent-settings-card .close-btn:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .agent-settings-card .field { margin-bottom: 14px; }
+    .agent-settings-card label {
+      display: block; margin-bottom: 6px;
+      font-size: 11px;
+      color: var(--muted); font-weight: 600;
+      letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .agent-settings-card input,
+    .agent-settings-card select,
+    .agent-settings-card textarea {
+      width: 100%;
+      padding: 9px 12px;
+      background: var(--bg-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      font-family: inherit; font-size: 13px;
+      box-sizing: border-box;
+      transition: border-color 0.15s;
+    }
+    .agent-settings-card input:focus,
+    .agent-settings-card select:focus,
+    .agent-settings-card textarea:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .agent-settings-card .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .agent-settings-card .actions {
+      display: flex; gap: 8px; margin-top: 18px;
+      justify-content: flex-end;
+    }
+    .agent-settings-card .actions button {
+      padding: 9px 18px; border-radius: 8px;
+      border: none; cursor: pointer;
+      font-size: 13px; font-weight: 600;
+      transition: background 0.15s;
+    }
+    .agent-settings-card .actions .save {
+      background: var(--accent); color: white;
+    }
+    .agent-settings-card .actions .save:hover { background: var(--accent-bright); }
+    .agent-settings-card .actions .ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .agent-settings-card .actions .ghost:hover {
+      color: var(--text); border-color: var(--accent);
+    }
+    .agent-settings-card .hint {
+      font-size: 12px; color: var(--muted); line-height: 1.55;
+      padding: 12px 14px; border-radius: 8px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .agent-settings-card .hint code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      padding: 1px 5px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 3px;
+      color: var(--accent-bright);
+    }
+    .agent-engine-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-radius: 8px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      margin-bottom: 12px;
+      font-size: 12px;
+    }
+    .agent-engine-row .pill {
+      font-size: 10px; padding: 3px 9px; border-radius: 999px;
+      background: var(--panel-2); color: var(--muted);
+      border: 1px solid var(--border);
+      font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    }
+    .agent-engine-row .pill.live {
+      color: #9be7a4; border-color: rgba(46,160,67,0.5);
+      background: rgba(46,160,67,0.08);
+    }
+    .agent-engine-row .pill.bad {
+      color: #f49a9e; border-color: rgba(207,34,46,0.5);
+      background: rgba(207,34,46,0.08);
+    }
+    .agent-engine-row .row-detail {
+      flex: 1; color: var(--muted); min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-engine-row button {
+      padding: 6px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 11px; font-weight: 600;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .agent-engine-row button:hover {
+      border-color: var(--accent);
+      color: var(--accent-bright);
+    }
