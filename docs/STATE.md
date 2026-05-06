@@ -90,8 +90,9 @@ Pre-2.0 was the `Y1.NNN` sequential counter. v2.0.0 cut over to semver on May 3 
 **v2.0.2** — Install fails loud when pipeline packages are missing (sanity-import step in `install.js`).
 **v2.0.3** — Install log self-documents Python toolchain (uv version, system python presence, post-pip site-packages list).
 **v2.0.4** (May 5) — Strip em-dash from install.js sanity check. Was breaking install on some Pinokio shells (KTDS + second user hit identical SyntaxError). Pure ASCII now.
+**v2.0.5** (May 6) — Drop the `print('venv OK: ...')` decoration from the sanity-import step. KTDS reproduced the SyntaxError on v2.0.4 — turns out something in their environment (Pinokio's command preprocessor or a user-side rewriter) was cutting the literal `OK:` out of the Python string AND appending `OK` after the closing shell quote, so Python received `...importable')OK` and bailed. Removing the print sidesteps the rewriter entirely. The exit code from a successful `import` is the only success signal `shell.run` needs anyway.
 
-Full git log on `main`. Tags `v2.0.0` through `v2.0.4` published.
+Full git log on `main`. Tags `v2.0.0` through `v2.0.4` published. v2.0.5 awaiting promotion on dev.
 
 ## 5. The folder layout
 
