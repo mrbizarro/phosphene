@@ -240,6 +240,25 @@ Ordered by what to try first:
 5. **Character anchoring via I2V keyframe** — quality unlock, not speed (but enables SDK).
 6. **Two parallel helpers on 64 GB** — 2× throughput on batch renders. Refactor risk.
 
+### Optimization paths ruled out (May 5 lab — see PERF_RESEARCH_2026-05-05.md)
+
+Full research log: `docs/PERF_RESEARCH_2026-05-05.md`. Tested + ruled out:
+mlx-mfa SDPA, `mx.compile`, RoPE caching, sliding-window attention, 8→6/4 step
+reduction (catastrophic on the distilled model), block-skip caching (DeepCache
+for DiT — works at tiny scale, fails at production: SSIM 0.69-0.72, "different
+identity"). Most useful finding: **conv3d kernel port is NOT a real M4 path
+forward** — MLX already uses steel implicit-GEMM at 50-70% of M4 peak; the
+Draw Things "2.4×" was vs MPSGraph (which MLX doesn't use). Saves 1-2 weeks.
+
+Block-skip patch infrastructure (with full A/B strips and per-config numbers)
+parked on the `experiment/block-skip` branch — reusable if Lightricks ships a
+block-skip-aware fine-tune.
+
+Honest verdict: M4 Max + MLX 0.31 + LTX-2.3 Q4 distilled is already running at
+50-70% of theoretical peak. Real breakthroughs need M5 hardware (Neural
+Accelerators, ~3× free), NVFP4 quantization (when MLX supports it), or
+research-grade work on token merging.
+
 ### Marketing / launch (HAI-157, HAI-158)
 
 - Tweet thread + slides drafted in scrollback (5-6 tweets, copy-paste ready).
