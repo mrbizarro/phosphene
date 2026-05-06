@@ -1,6 +1,6 @@
 # Multi-keyframe interpolation — the SDK shot-composition primitive
 
-Status: **research + design doc.** Not yet implemented. Documents a known gap in Phosphene where the underlying engine supports more than the UI exposes.
+Status: **Layer 1 shipped 2026-05-06** — helper now accepts arbitrary keyframe lists. Layer 2 (panel HTTP form-parsing) and Layer 3 (UI) not yet. Engine has supported this all along; we just exposed it. See [Agent API contract](#agent-api-contract-layer-1-2026-05-06) for the call shape.
 
 ## TL;DR
 
@@ -123,37 +123,21 @@ This is the SDK's compositional primitive in one sentence: **the editor controls
 
 Three layers, in order:
 
-### Layer 1 — helper (smallest change, biggest unlock)
+### Layer 1 — DONE (2026-05-06)
 
-`mlx_warm_helper.py` action `generate_keyframe`. Currently:
+Helper `generate_keyframe` action now accepts arbitrary `keyframe_images` + `keyframe_indices` lists with strict input validation. The hardcoded 2-keyframe path remains as a backward-compat fallback so the panel keeps working unchanged. See `mlx_warm_helper.py` lines ~1251-1360.
 
-```python
-keyframe_images=[p["start_image"], p["end_image"]],
-keyframe_indices=[0, num_frames - 1],
-```
+Full agent contract below.
 
-Change to read `keyframe_images` and `keyframe_indices` directly from the job spec (lists). Default to the existing 2-keyframe behavior if the spec only provides `start_image` + `end_image` (backward compat). New job spec accepts:
-
-```json
-{
-  "action": "generate_keyframe",
-  "params": {
-    "keyframe_images": ["<path1>", "<path2>", "<path3>"],
-    "keyframe_indices": [0, 60, 120],
-    ...
-  }
-}
-```
-
-Three lines of code, no model change, no upstream change.
-
-### Layer 2 — panel (form parsing + worker dispatch)
+### Layer 2 — panel HTTP form parsing — NOT YET
 
 `mlx_ltx_panel.py` `mode == "keyframe"` branch. Currently parses `start_image` + `end_image` form fields and constructs the helper job spec. Change to parse a **list of keyframes** from the form (e.g. `keyframe_image_0`, `keyframe_image_1`, ... or a JSON-encoded list field). Build the lists for the helper.
 
 Backward compat: if the form has `start_image` + `end_image` only, behave as today.
 
-### Layer 3 — UI (the user-visible surface)
+This is the layer the agent will use if it goes through the panel's HTTP queue endpoint instead of talking to the helper directly.
+
+### Layer 3 — UI (the user-visible surface) — NOT YET
 
 The current Keyframe section in the panel HTML has two drop-zones. Replace with a list:
 
@@ -174,6 +158,156 @@ Once multi-keyframe ships, the Director Mode (HAI-155) gains the compositional p
 4. Stitches the resulting clips with ffmpeg-concat (no transitions needed — keyframes guarantee continuity).
 
 The agent never has to "describe a scene in words and pray." Composition is concrete, predictable, controllable.
+
+## Agent API contract (Layer 1 — 2026-05-06)
+
+The helper subprocess (`mlx_warm_helper.py`) is a long-lived JSON-line server. Each line on stdin is one job; each line on stdout is one event. To use multi-keyframe interpolation, write a single JSON line to the helper's stdin with `action: "generate_keyframe"`.
+
+### Request shape
+
+```json
+{
+  "id": "<your-unique-job-id-string>",
+  "action": "generate_keyframe",
+  "params": {
+    "prompt": "A young woman walks across a sunlit kitchen, opens the fridge, takes out an apple.",
+    "keyframe_images": [
+      "/abs/path/to/keyframe_0.png",
+      "/abs/path/to/keyframe_1.png",
+      "/abs/path/to/keyframe_2.png"
+    ],
+    "keyframe_indices": [0, 60, 120],
+    "frames": 121,
+    "width": 768,
+    "height": 416,
+    "output_path": "/abs/path/to/output.mp4",
+    "seed": -1,
+    "stage1_steps": 15,
+    "stage2_steps": 3,
+    "cfg_scale": 3.0,
+    "negative_prompt": null,
+    "model_dir": null
+  }
+}
+```
+
+### Field rules
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | str | yes | Echoed back in `done` / `error` events so the agent can match. Use any unique string (UUID, monotonic counter, etc). |
+| `action` | str | yes | Must be exactly `"generate_keyframe"`. |
+| `params.prompt` | str | yes | Scene description. The model uses this for the motion between keyframes; the keyframes themselves dominate composition. |
+| `params.keyframe_images` | list[str] | yes (multi-keyframe) | Absolute file paths. PNG/JPEG. Length must equal `keyframe_indices`. **N ≥ 2.** Files must exist at job-submission time. |
+| `params.keyframe_indices` | list[int] | yes (multi-keyframe) | Pixel-frame indices, 0-based, **strictly ascending**, all in `[0, frames-1]`. Must include at least 2 entries. Same length as `keyframe_images`. |
+| `params.start_image` + `params.end_image` | str | yes (FFLF backward-compat) | Used only if `keyframe_images`/`keyframe_indices` are absent. Equivalent to `keyframe_indices=[0, frames-1]`. |
+| `params.frames` | int | yes | Total pixel frames. Latent grid is 8 frames per slot, so use 8k+1 (49, 121, 241). 24 fps is hardcoded ⇒ 121 frames = ~5.0 sec. |
+| `params.width`, `params.height` | int | yes | Output dimensions. Comfortable tier (M-Max 64 GB) is clamped to **768×416** for keyframe jobs (OOM history at full 1280×704). |
+| `params.output_path` | str | yes | Absolute path where the resulting `.mp4` will be written (with audio). |
+| `params.seed` | int | optional | `-1` (default) = random, otherwise fixed. Echoed back in the `done` event as `seed_used` so the agent can reproduce. |
+| `params.stage1_steps` | int | optional | Default `15`. Stage-1 (half-res guided denoise) sigma count. Quality knob. |
+| `params.stage2_steps` | int | optional | Default `3`. Stage-2 (full-res refine) sigma count. |
+| `params.cfg_scale` | float | optional | Default `3.0`. Classifier-free-guidance strength. |
+| `params.negative_prompt` | str \| null | optional | If provided, used as native CFG negative. Null = use default. |
+| `params.model_dir` | str \| null | optional | Override the transformer directory. Null = default Q8 dev path. Don't change this unless you know why. |
+
+### Response events
+
+The helper emits JSON lines on stdout:
+
+```json
+{"event": "log",      "line": "Keyframe multi-3kf — indices=[0, 60, 120], pipeline cover-crops all to 768x416"}
+{"event": "progress", "id": "...", "phase": "stage1", "step": 5, "total": 15, "pct": 33}
+{"event": "progress", "id": "...", "phase": "stage2", "step": 1, "total": 3,  "pct": 90}
+{"event": "done",     "id": "...", "output": "/abs/path/out.mp4", "elapsed_sec": 312.4, "seed_used": 1234567}
+```
+
+On any failure (validation error, OOM, model error):
+
+```json
+{"event": "error", "id": "...", "error": "<message>", "trace": "<python-traceback>"}
+```
+
+The helper continues running after errors; submit the next job whenever ready.
+
+### Validation errors (fail-fast at submission, before any GPU work)
+
+The helper rejects bad jobs immediately so agent bugs surface early:
+
+- `keyframe_images and keyframe_indices must both be provided as lists`
+- `keyframe_images and keyframe_indices must be lists`
+- `keyframe_images (N) and keyframe_indices (M) must have the same length`
+- `at least 2 keyframes required`
+- `keyframe image not found: <path>`
+- `keyframe_indices must be integers, got: <repr>`
+- `keyframe_index <i> out of range [0, <frames-1>]`
+- `keyframe_indices must be strictly ascending, got <list>`
+
+### Concurrency model
+
+The helper handles **one job at a time**. The agent's queue should serialize submissions or wait for `done` / `error` before submitting the next job. Multiple jobs interleaved on stdin will queue but the helper won't process the second until the first finishes.
+
+If you need parallelism, spawn multiple helpers (each takes ~30 GB VRAM + ~30s warm-up; M4 Max 64 GB fits 1 reliably, 2 is tight).
+
+### Wall-time budget
+
+For a 121-frame (5-sec) clip at 768×416 with `stage1_steps=15`, `stage2_steps=3`:
+
+- Cold helper (first job after start): ~30 s warm-up + ~5 min generate = ~5:30
+- Warm helper (subsequent jobs): ~5 min generate
+
+Going from 2 keyframes to 8 keyframes adds a few seconds of front-end VAE encoding, not significant against the ~5-min denoise.
+
+### Concrete example — Director Mode three-shot scene
+
+```python
+import json, subprocess, uuid, sys
+
+helper = subprocess.Popen(
+    ["./ltx-2-mlx/env/bin/python3.11", "-u", "mlx_warm_helper.py"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, bufsize=1,
+)
+
+def submit(job):
+    helper.stdin.write(json.dumps(job) + "\n")
+    helper.stdin.flush()
+    while True:
+        line = helper.stdout.readline()
+        if not line: raise RuntimeError("helper died")
+        evt = json.loads(line)
+        print(evt, file=sys.stderr)
+        if evt.get("event") == "done"  and evt.get("id") == job["id"]: return evt
+        if evt.get("event") == "error" and evt.get("id") == job["id"]: raise RuntimeError(evt["error"])
+
+# Shot 1 — establishing wide. 4 keyframes for explicit choreography.
+result = submit({
+    "id": str(uuid.uuid4()),
+    "action": "generate_keyframe",
+    "params": {
+        "prompt": "A woman walks across a kitchen, dappled morning light through window blinds.",
+        "keyframe_images": [
+            "/tmp/agent/kitchen_01_start.png",
+            "/tmp/agent/kitchen_02_mid_left.png",
+            "/tmp/agent/kitchen_03_mid_right.png",
+            "/tmp/agent/kitchen_04_at_fridge.png",
+        ],
+        "keyframe_indices": [0, 40, 80, 120],
+        "frames": 121,
+        "width": 768, "height": 416,
+        "output_path": "/tmp/agent/shot_01.mp4",
+        "seed": 42,
+    }
+})
+# result["output"], result["elapsed_sec"], result["seed_used"]
+```
+
+### What's NOT in this layer
+
+- **Per-keyframe strength.** All keyframes are pinned at strength 1.0 (pure anchor). The model cannot "lightly suggest" a keyframe yet — it's all-or-nothing. Strength control requires an upstream patch in `ltx-pipelines-mlx`.
+- **Panel HTTP route.** Layer 2 is needed to reach this from the panel's queue (HTTP form-data). Today the only path is the helper's stdin.
+- **Panel UI.** Today's panel still has 2 image drop-zones. Adding more rows is Layer 3.
+- **Audio across keyframe boundaries between shots.** Each clip is its own audio render — boundaries are hard cuts. See "What this doesn't solve" below.
 
 ## Memory budget
 
