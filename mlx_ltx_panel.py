@@ -10986,10 +10986,46 @@ async function api(path, method = 'GET', body = null) {
 // setQuality) can refresh tier-gated UI without waiting for the next tick.
 let LAST_STATUS = null;
 
+// Tracks consecutive /status failures so we can surface a panel-offline
+// banner instead of silently freezing the UI. Two-strike threshold so a
+// single transient hiccup (network blip, panel reload) doesn't flash.
+let _POLL_FAILS = 0;
+
+function _setOfflineBanner(visible, msg) {
+  let bar = document.getElementById('panelOfflineBanner');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'panelOfflineBanner';
+    bar.style.cssText =
+      'position:fixed; top:0; left:0; right:0; z-index:9999; ' +
+      'padding:8px 14px; background:#cf222e; color:#fff; ' +
+      'font:13px/1.4 ui-sans-serif,system-ui,sans-serif; ' +
+      'text-align:center; box-shadow:0 2px 12px rgba(0,0,0,0.35); ' +
+      'display:none;';
+    document.body.appendChild(bar);
+  }
+  if (visible) {
+    bar.textContent = msg || "Phosphene panel offline — uploads, chat, and renders will fail until it's back. Restart from Pinokio.";
+    bar.style.display = 'block';
+    document.body.style.paddingTop = '34px';
+  } else {
+    bar.style.display = 'none';
+    document.body.style.paddingTop = '';
+  }
+}
+
 async function poll() {
   let s;
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
-  try { s = await (await fetch(url)).json(); } catch (e) { return; }
+  try {
+    s = await (await fetch(url)).json();
+    _POLL_FAILS = 0;
+    _setOfflineBanner(false);
+  } catch (e) {
+    _POLL_FAILS += 1;
+    if (_POLL_FAILS >= 2) _setOfflineBanner(true);
+    return;
+  }
   LAST_STATUS = s;
 
   // Memory
