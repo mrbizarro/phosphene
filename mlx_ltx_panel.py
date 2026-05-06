@@ -7362,6 +7362,52 @@ HTML = r"""<!doctype html>
       background: rgba(248,81,73,0.08);
     }
     .agent-header .agent-engine-stop svg { flex-shrink: 0; }
+    /* `display: inline-flex` on the pill rules above wins over the
+       built-in `[hidden] { display:none }` cascade, so toggling the
+       hidden attribute did nothing. Force the override here. */
+    .agent-header [hidden] { display: none !important; }
+
+    /* RAM headroom chip — reads whether you can comfortably run the
+       configured chat model RIGHT NOW given current LTX renderer usage.
+       Color-coded so a glance is enough; tooltip explains the breakdown.
+       Lives in the agent header, where the action is. */
+    .agent-header .agent-ram-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      color: var(--muted);
+      white-space: nowrap;
+      cursor: help;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .agent-header .agent-ram-chip .agent-ram-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    /* Roomy — chat model fits with comfortable margin. */
+    .agent-header .agent-ram-chip.is-roomy { color: var(--success); border-color: rgba(63,185,80,0.4); }
+    .agent-header .agent-ram-chip.is-roomy .agent-ram-dot {
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgba(63,185,80,0.15);
+    }
+    /* Tight — fits but close to the edge; runs the risk of swap. */
+    .agent-header .agent-ram-chip.is-tight { color: var(--warning); border-color: rgba(210,153,34,0.5); }
+    .agent-header .agent-ram-chip.is-tight .agent-ram-dot {
+      background: var(--warning);
+      box-shadow: 0 0 0 3px rgba(210,153,34,0.15);
+    }
+    /* Bad — wouldn't fit, would force swap immediately. */
+    .agent-header .agent-ram-chip.is-bad { color: var(--danger); border-color: rgba(248,81,73,0.55); }
+    .agent-header .agent-ram-chip.is-bad .agent-ram-dot {
+      background: var(--danger);
+      box-shadow: 0 0 0 3px rgba(248,81,73,0.18);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
     .agent-header .session-title {
       flex: 1; min-width: 0;
       font-size: 13px; font-weight: 500; color: var(--text);
@@ -9399,6 +9445,15 @@ HTML = r"""<!doctype html>
           </svg>
           <span>Stop engine</span>
         </button>
+        <!-- Headroom chip — shows how much RAM is left right now AND
+             whether the configured chat model would fit. The single
+             clearest signal "can I run the agent right now?" — so the
+             user doesn't have to do mental math while a render is on. -->
+        <span class="agent-ram-chip" id="agentRamChip"
+              title="Free RAM right now and whether the chat model fits.">
+          <span class="agent-ram-dot"></span>
+          <span id="agentRamLabel">RAM …</span>
+        </span>
         <div class="session-title" id="agentSessionTitle"
              title="Current session">
           New chat
@@ -13610,6 +13665,35 @@ document.querySelectorAll('#workflowTabs button[data-workflow]').forEach(b => {
 });
 
 // ---- Engine status (in the header pill) -----------------------------------
+// Human-readable model name. mlx-community ships ugly slugs like
+// "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4Bit" or
+// "gemma-3-12b-it-4bit" that fill the pill. Keep the "family · size"
+// signal and drop the rest.
+function formatModelName(raw) {
+  if (!raw) return '';
+  let s = String(raw);
+  // Strip common quantization / format suffixes anywhere in the slug.
+  s = s.replace(/-(MLX|mlx|GGUF|gguf|AWQ|GPTQ)\b.*$/, '');
+  s = s.replace(/-(it|chat|instruct|inst)\b/i, '');
+  s = s.replace(/-?(4bit|8bit|q4|q8|bf16|fp16|int4|int8)$/i, '');
+  // If it still has flavor tags like "-Abliterated-Heretic", drop those
+  // tail tokens unless they're size-bearing.
+  // First collapse the family + size if we can detect them.
+  const fam = (s.match(/^([A-Za-z][A-Za-z0-9.]*)/) || [])[1] || '';
+  const size = (s.match(/(\d+(?:\.\d+)?)[Bb]\b/) || [])[1] || '';
+  if (fam && size) {
+    // Special-case Gemma's "gemma-3-12b" → "Gemma 3 12B".
+    if (/^gemma$/i.test(fam)) {
+      const ver = (s.match(/^gemma-(\d)/i) || [])[1];
+      return ver ? `Gemma ${ver} ${size}B` : `Gemma ${size}B`;
+    }
+    // Default: "Qwen3.6 35B"
+    return `${fam} ${size}B`;
+  }
+  // Fallback — truncate the raw slug.
+  return s.length > 22 ? s.slice(0, 20) + '…' : s;
+}
+
 async function agentRefreshConfig() {
   try {
     const r = await fetch('/agent/config');
@@ -13624,10 +13708,19 @@ async function agentRefreshConfig() {
     let summary = '';
     if (eng.kind === 'phosphene_local') {
       live = !!local.running;
-      const modelName = (eng.model || '').replace('-it-4bit', '').replace(/^gemma-3-/, 'Gemma 3 ').replace(/(\d+)b/, '$1B');
+      const modelName = formatModelName(eng.model || '');
+      // Look up the resident size from the discovered models so the user
+      // sees "22 GB" inline next to the name — no surprise loads.
+      let sizeBit = '';
+      try {
+        const path = eng.local_model_path || '';
+        const list = j.available_models || [];
+        const hit = list.find(m => m.path === path);
+        if (hit && hit.size_gb) sizeBit = ` · ${hit.size_gb.toFixed(1)} GB`;
+      } catch (e) {}
       summary = live
-        ? `${modelName || 'Local'} · live`
-        : `${modelName || 'Local'} · click to start`;
+        ? `${modelName || 'Local'}${sizeBit} · live`
+        : `${modelName || 'Local'}${sizeBit} · click to start`;
     } else {
       const u = (eng.base_url || '').replace(/^https?:\/\//, '').replace(/\/v1$/, '');
       summary = `${eng.model || 'remote'} · ${u}`;
@@ -15623,9 +15716,85 @@ async function agentStageTick() {
         : null,
     ]);
     agentStageRender(statusResp, sessResp);
+    agentRenderRamChip(statusResp);
   } catch(e) {
     /* swallow — next tick retries */
   }
+}
+
+// RAM headroom chip in the agent header. The single answer to
+// "can I send a message right now without putting the Mac in swap?"
+// — colored green when comfortable, amber when tight, red when not.
+function agentRenderRamChip(status) {
+  const chip = document.getElementById('agentRamChip');
+  const label = document.getElementById('agentRamLabel');
+  if (!chip || !label || !status) return;
+  const m = status.memory || {};
+  const total = Number(m.total_gb) || 0;
+  const used = Number(m.used_gb) || 0;
+  const free = Math.max(0, total - used);
+  // Pull the configured chat model's resident size if we know it. The
+  // /agent/config response carries `available_models[*].size_gb`; match
+  // by `path` for local engines.
+  let modelGb = null;
+  let modelName = '';
+  let isLocal = false;
+  let isLoaded = false;
+  try {
+    const cfg = window.AGENT && window.AGENT.config;
+    const eng = cfg && cfg.engine;
+    if (eng && eng.kind === 'phosphene_local') {
+      isLocal = true;
+      isLoaded = !!(cfg.local_server && cfg.local_server.running);
+      const path = eng.local_model_path || '';
+      const list = cfg.available_models || [];
+      const hit = list.find(m => m.path === path);
+      if (hit && hit.size_gb) {
+        modelGb = Number(hit.size_gb);
+        modelName = hit.name || '';
+      }
+    }
+  } catch (e) {}
+
+  // If the chat model is already resident, its weights are already in
+  // `used` — the question is simply "is there room left to keep going?"
+  // If it's NOT loaded yet, we need to subtract its expected size from
+  // `free` to predict whether spawning would push us into swap.
+  const swapGb = Number(m.swap_gb) || 0;
+  let cls = 'is-roomy';
+  let text = `${free.toFixed(0)} GB free`;
+  let tip = `Total ${total.toFixed(0)} GB · Used ${used.toFixed(1)} GB · Free ${free.toFixed(1)} GB`;
+  if (swapGb >= 1) tip += ` · Swap ${swapGb.toFixed(1)} GB`;
+
+  if (isLocal && modelGb && !isLoaded) {
+    const after = free - modelGb;
+    tip += `\n${modelName || 'Selected model'}: ~${modelGb.toFixed(1)} GB`;
+    tip += `\nIf started: ${after.toFixed(1)} GB would remain for renders`;
+    if (after < 2 || swapGb >= 8) {
+      cls = 'is-bad';
+      text = `Tight · ${free.toFixed(0)} GB free`;
+    } else if (after < 8) {
+      cls = 'is-tight';
+      text = `${free.toFixed(0)} GB free · model fits`;
+    } else {
+      cls = 'is-roomy';
+      text = `${free.toFixed(0)} GB free · plenty`;
+    }
+  } else if (isLocal && isLoaded) {
+    tip += `\nChat model loaded${modelName ? ' (' + modelName + ', ~' + (modelGb||0).toFixed(1) + ' GB)' : ''}`;
+    if (free < 4 || swapGb >= 8) { cls = 'is-bad'; text = `Tight · ${free.toFixed(0)} GB free`; }
+    else if (free < 12)            { cls = 'is-tight'; text = `${free.toFixed(0)} GB free`; }
+    else                            { cls = 'is-roomy'; text = `${free.toFixed(0)} GB free`; }
+  } else {
+    // Remote engine — the chat model isn't on this Mac. Just report
+    // raw headroom for the renderer's benefit.
+    if (free < 4 || swapGb >= 8) { cls = 'is-bad'; text = `Tight · ${free.toFixed(0)} GB free`; }
+    else if (free < 12)            { cls = 'is-tight'; text = `${free.toFixed(0)} GB free`; }
+    else                            { cls = 'is-roomy'; text = `${free.toFixed(0)} GB free`; }
+  }
+  chip.className = 'agent-ram-chip ' + cls;
+  chip.title = tip;
+  label.textContent = text;
 }
 
 function agentStageRender(status, sess) {
