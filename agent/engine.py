@@ -42,6 +42,16 @@ class EngineConfig:
     # `local_model_path` may be a Hugging Face id ("Qwen/Qwen3-30B-A3B-Instruct-4bit")
     # OR an absolute path to a local model dir (the bundled Gemma path).
     local_model_path: str = ""
+    # Operating mode for the agent.
+    #   "plan_sleep"  — agent plans, queues all shots, calls finish; the panel
+    #                   auto-stops the local engine the moment finish lands so
+    #                   the chat model's RAM (often 20+ GB for Qwen 35B) is
+    #                   handed back to the LTX renderer for the overnight run.
+    #                   The right default on a 64 GB Mac.
+    #   "interactive" — engine stays resident across finishes so follow-up
+    #                   chat is instant. Use only when the Mac has headroom
+    #                   (no concurrent renders, or a small chat model).
+    mode: str = "plan_sleep"
 
     def to_public_dict(self) -> dict:
         """Strip the api_key for safe display in /agent/config GETs."""

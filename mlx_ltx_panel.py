@@ -5294,11 +5294,32 @@ class Handler(BaseHTTPRequestHandler):
                 push(f"agent: run_turn errored: {e}")
                 self._json({"error": str(e), "events": events}, 500); return
             agent_runtime.save_session(sess, STATE_DIR)
+
+            # Plan-and-sleep mode: the agent has just called `finish` which
+            # means the plan is queued and the agent is done thinking for
+            # this batch. Drop the local chat model's memory NOW so the
+            # LTX renderer has the full RAM budget for the overnight run.
+            # On a 64 GB Mac, leaving Qwen 35B (22 GB) resident alongside
+            # active renders pushes the system into swap — exactly the
+            # scenario the user wants to avoid.
+            engine_stopped = False
+            if (sess.finished
+                    and sess.engine_config.kind == "phosphene_local"
+                    and getattr(sess.engine_config, "mode", "plan_sleep") == "plan_sleep"
+                    and agent_local_server.is_running()):
+                try:
+                    agent_local_server.stop("plan-and-sleep auto-stop after finish")
+                    engine_stopped = True
+                    push("agent: plan-and-sleep — stopped local engine to free RAM for renders")
+                except Exception as e:                  # noqa: BLE001
+                    push(f"agent: failed to auto-stop local engine: {e}")
+
             self._json({
                 "ok": True,
                 "events": events,
                 "session": sess.to_dict(),
                 "rendered_messages": _render_session_messages(sess),
+                "engine_stopped": engine_stopped,
             })
             return
 
@@ -7294,6 +7315,53 @@ HTML = r"""<!doctype html>
     }
     .agent-header .engine-pill .dot.warn { background: #d29922; }
     .agent-header .engine-pill .dot.bad { background: #cf222e; }
+
+    /* Mode pill — same shape as engine pill, neutral when plan_sleep,
+       accent-tinted when interactive (visible reminder that the engine
+       will stay resident). */
+    .agent-header .agent-mode-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+      white-space: nowrap;
+      width: auto;            /* form-reset rule sets buttons to 100% */
+      flex: 0 0 auto;
+    }
+    .agent-header .agent-mode-pill:hover { border-color: var(--accent); color: var(--text); }
+    .agent-header .agent-mode-pill.is-interactive {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.12));
+    }
+    .agent-mode-icon {
+      font-size: 13px; line-height: 1;
+      filter: saturate(0.85);
+    }
+    /* Stop-engine quick action — same height as the pills, danger color
+       on hover so it reads as "this kills something". Only shown when
+       the engine is running (toggled by JS). */
+    .agent-header .agent-engine-stop {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px 5px 9px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 11.5px; font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      white-space: nowrap;
+      width: auto;            /* form-reset rule sets buttons to 100% */
+      flex: 0 0 auto;
+    }
+    .agent-header .agent-engine-stop:hover {
+      color: var(--danger);
+      border-color: rgba(248,81,73,0.5);
+      background: rgba(248,81,73,0.08);
+    }
+    .agent-header .agent-engine-stop svg { flex-shrink: 0; }
     .agent-header .session-title {
       flex: 1; min-width: 0;
       font-size: 13px; font-weight: 500; color: var(--text);
@@ -9308,6 +9376,28 @@ HTML = r"""<!doctype html>
                 onclick="openAgentSettings()" title="Click to configure the agent engine">
           <span class="dot" id="agentEngineDot"></span>
           <span id="agentEngineLabel">engine…</span>
+        </button>
+        <!-- Mode toggle: Plan-and-sleep (default) vs Interactive. In Plan
+             & sleep, the local engine auto-stops the moment the agent
+             finishes its plan, freeing 20+ GB so the LTX renderer can
+             use the full memory budget overnight. -->
+        <button type="button" class="agent-mode-pill" id="agentModePill"
+                onclick="agentToggleMode()"
+                title="Plan & sleep: auto-stop the chat model after the agent finishes (frees RAM for renders).&#10;Click to switch to Interactive mode.">
+          <span class="agent-mode-icon" id="agentModeIcon">🌙</span>
+          <span id="agentModeLabel">Plan & sleep</span>
+        </button>
+        <!-- Quick "stop engine" — only shown when the local engine is
+             running. One-click way to free RAM mid-batch without going
+             through the Settings drawer. -->
+        <button type="button" class="agent-engine-stop" id="agentEngineStopBtn"
+                onclick="agentEngineStopNow()"
+                title="Stop the local chat model now to free RAM"
+                hidden>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+          </svg>
+          <span>Stop engine</span>
         </button>
         <div class="session-title" id="agentSessionTitle"
              title="Current session">
@@ -13548,9 +13638,72 @@ async function agentRefreshConfig() {
       dot.classList.add(live ? 'live' : 'warn');
     }
     if (label) label.textContent = summary;
+    agentRenderModePill();
+    // Stop-engine quick action: only meaningful when a local engine is
+    // actually running. Hide it for remote engines and when nothing is
+    // resident (clicking would no-op).
+    const stopBtn = document.getElementById('agentEngineStopBtn');
+    if (stopBtn) {
+      const isLocal = eng.kind === 'phosphene_local';
+      stopBtn.hidden = !(isLocal && local && local.running);
+    }
   } catch (e) {
     const label = document.getElementById('agentEngineLabel');
     if (label) label.textContent = 'engine unavailable';
+  }
+}
+
+function agentRenderModePill() {
+  const pill = document.getElementById('agentModePill');
+  const icon = document.getElementById('agentModeIcon');
+  const label = document.getElementById('agentModeLabel');
+  if (!pill) return;
+  const mode = ((window.AGENT.config && window.AGENT.config.engine
+                 && window.AGENT.config.engine.mode) || 'plan_sleep');
+  if (mode === 'interactive') {
+    pill.classList.add('is-interactive');
+    if (icon) icon.textContent = '💬';
+    if (label) label.textContent = 'Interactive';
+    pill.title = 'Interactive: chat model stays resident across finishes (uses ~22 GB for Qwen 35B).\nClick to switch to Plan & sleep mode.';
+  } else {
+    pill.classList.remove('is-interactive');
+    if (icon) icon.textContent = '🌙';
+    if (label) label.textContent = 'Plan & sleep';
+    pill.title = 'Plan & sleep: auto-stop the chat model after the agent finishes (frees RAM for renders).\nClick to switch to Interactive mode.';
+  }
+}
+
+async function agentToggleMode() {
+  const cur = ((window.AGENT.config && window.AGENT.config.engine
+                && window.AGENT.config.engine.mode) || 'plan_sleep');
+  const next = cur === 'interactive' ? 'plan_sleep' : 'interactive';
+  try {
+    const r = await fetch('/agent/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: next}),
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    await agentRefreshConfig();
+  } catch (e) {
+    alert('Could not switch mode: ' + e.message);
+  }
+}
+
+async function agentEngineStopNow() {
+  const btn = document.getElementById('agentEngineStopBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/agent/local/stop', {method: 'POST'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // Reflect the new state in the header without waiting for the next
+    // /status poll.
+    await agentRefreshConfig();
+  } catch (e) {
+    alert('Stop failed: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
