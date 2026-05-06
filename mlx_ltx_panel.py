@@ -29,6 +29,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+# Agentic Flows runtime — chat-driven shot planner + queue submitter.
+# The agent module is self-contained (pure stdlib, imports nothing from
+# this panel); we wire it up via a PanelOps callback object built at the
+# end of this module just before the HTTP handler.
+from agent import engine as agent_engine
+from agent import local_server as agent_local_server
+from agent import prompts as agent_prompts
+from agent import runtime as agent_runtime
+from agent import tools as agent_tools
+
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
 # run from any directory without source edits. Defaults assume the repo layout:
@@ -3352,6 +3362,227 @@ def worker_loop() -> None:
             persist_queue()
 
 
+# ---- Agentic Flows integration -----------------------------------------------
+#
+# Wires the `agent/` module into this panel. The agent runs *inside* the panel
+# process (no new microservice — see CLAUDE.md §9 hard constraints), submitting
+# jobs through the same FIFO queue + helper that the manual UI uses.
+#
+# State lives in two places:
+#   - state/agent_config.json  — engine config (which LLM, which URL, key)
+#   - state/agent_sessions/    — one JSON per chat session (atomic-replaced)
+#
+# Both survive Pinokio Reset → Reinstall via the existing fs.link symlink on
+# state/ (see install.js / CLAUDE.md §7 "fs.link"). No extra plumbing needed.
+
+AGENT_CONFIG_PATH = STATE_DIR / "agent_config.json"
+AGENT_LOCK = threading.RLock()
+_AGENT_CONFIG_CACHE: agent_engine.EngineConfig | None = None
+
+
+def _default_agent_engine_config() -> agent_engine.EngineConfig:
+    """Default engine config: bundled Gemma 3 12B IT via mlx-lm.server.
+
+    The Gemma weights ship with Phosphene as the LTX text encoder. They're
+    a perfectly capable instruction-tuned chat model — zero extra download
+    required to use the agent on a fresh Phosphene install. Users who want
+    a stronger agent can drop Qwen 3 Coder 30B-A3B (or similar MLX 4-bit
+    chat model) into mlx_models/ and switch via the engine settings drawer.
+    """
+    return agent_engine.EngineConfig(
+        kind="phosphene_local",
+        base_url=f"http://127.0.0.1:{agent_local_server._PORT}/v1",
+        model="gemma-3-12b-it-4bit",
+        local_model_path=str(GEMMA),
+        api_key="",
+        temperature=0.4,
+        max_tokens=3072,
+    )
+
+
+def _load_agent_config() -> agent_engine.EngineConfig:
+    """Read state/agent_config.json (creating defaults on first call).
+
+    Cached after the first read; updates go through _save_agent_config()
+    which atomically replaces the file and updates the cache.
+    """
+    global _AGENT_CONFIG_CACHE
+    with AGENT_LOCK:
+        if _AGENT_CONFIG_CACHE is not None:
+            return _AGENT_CONFIG_CACHE
+        if AGENT_CONFIG_PATH.is_file():
+            try:
+                data = json.loads(AGENT_CONFIG_PATH.read_text(encoding="utf-8"))
+                cfg = agent_engine.EngineConfig(**data)
+            except (OSError, json.JSONDecodeError, TypeError) as e:
+                push(f"agent: invalid agent_config.json ({e}); using defaults")
+                cfg = _default_agent_engine_config()
+        else:
+            cfg = _default_agent_engine_config()
+        _AGENT_CONFIG_CACHE = cfg
+        return cfg
+
+
+def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
+    """Merge `updates` into the current engine config and persist.
+
+    Empty-string values are treated as 'leave as-is' for `api_key` so the
+    masked /agent/config GET → echo POST round-trip doesn't accidentally
+    erase the saved key (mirrors the panel_settings.json convention).
+    """
+    global _AGENT_CONFIG_CACHE
+    with AGENT_LOCK:
+        cur = _load_agent_config()
+        merged = {**cur.__dict__}
+        for k, v in (updates or {}).items():
+            if k not in merged:
+                continue            # ignore unknown fields
+            if k == "api_key" and v == "":
+                continue            # treat blank as no-change for secrets
+            merged[k] = v
+        cfg = agent_engine.EngineConfig(**merged)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(AGENT_CONFIG_PATH, json.dumps(cfg.__dict__, indent=2))
+        _AGENT_CONFIG_CACHE = cfg
+        return cfg
+
+
+def _agent_capabilities() -> dict:
+    """Hardware-tier snapshot the agent uses to clamp its plan.
+
+    Mirrors the SYSTEM_CAPS table in tier-friendly form so the system
+    prompt can show the user what this Mac can actually render.
+    """
+    return {
+        "tier": SYSTEM_TIER,
+        "tier_label": SYSTEM_CAPS.get("label", SYSTEM_TIER),
+        "max_dim_t2v": tier_max_dim("t2v"),
+        "max_dim_i2v": tier_max_dim("i2v"),
+        "max_dim_kf": tier_max_dim("keyframe"),
+        "max_dim_extend": tier_max_dim("extend"),
+        "allows_q8": SYSTEM_CAPS.get("allows_q8", False),
+        "allows_keyframe": SYSTEM_CAPS.get("allows_keyframe", False),
+        "allows_extend": SYSTEM_CAPS.get("allows_extend", False),
+    }
+
+
+def _agent_submit_job(form: dict) -> dict:
+    """PanelOps.submit_job: build a job and append to the live FIFO queue.
+
+    Goes through the exact same path /run / /queue/add use, so jobs
+    submitted by the agent are indistinguishable from manual ones once
+    queued (same params, same worker, same history bucket).
+    """
+    job = make_job(form)
+    with QUEUE_COND:
+        STATE["queue"].append(job)
+        QUEUE_COND.notify_all()
+    persist_queue()
+    push(f"agent: queued job {job['id']} mode={job['params'].get('mode')} "
+         f"label={job['params'].get('label') or '-'}")
+    return job
+
+
+def _agent_queue_snapshot() -> dict:
+    with LOCK:
+        return {
+            "running": STATE.get("running", False),
+            "current": dict(STATE["current"]) if STATE.get("current") else None,
+            "queue": [dict(j) for j in STATE.get("queue", [])],
+            "history": [dict(j) for j in STATE.get("history", [])][:30],
+        }
+
+
+def _agent_find_job(job_id: str) -> dict | None:
+    with LOCK:
+        cur = STATE.get("current")
+        if cur and cur.get("id") == job_id:
+            return dict(cur)
+        for j in STATE.get("queue", []):
+            if j.get("id") == job_id:
+                return dict(j)
+        for j in STATE.get("history", []):
+            if j.get("id") == job_id:
+                return dict(j)
+    return None
+
+
+def _build_panel_ops() -> agent_tools.PanelOps:
+    return agent_tools.PanelOps(
+        submit_job=_agent_submit_job,
+        queue_snapshot=_agent_queue_snapshot,
+        find_job=_agent_find_job,
+        outputs_dir=OUTPUT,
+        uploads_dir=UPLOADS,
+        capabilities=_agent_capabilities(),
+    )
+
+
+def _agent_log_sink(line: str) -> None:
+    """Forward mlx-lm.server stdout into the panel's Logs tab."""
+    push(line)
+
+
+def _render_session_messages(sess: agent_runtime.Session) -> list[dict]:
+    """Format session.messages for the chat UI.
+
+    The raw message list contains:
+      - the system prompt (skip in UI)
+      - user messages (show as user bubbles)
+      - assistant messages (may contain a fenced action block — strip it
+        for display, surface the parsed tool name as a chip)
+      - tool result wrapper user messages (parse, show as a tool-result
+        chip rather than another user bubble)
+
+    The UI renders each entry's `kind`: "user" | "assistant" | "tool_call"
+    | "tool_result" | "system_note".
+    """
+    out = []
+    for m in sess.messages:
+        role = m.get("role", "")
+        content = m.get("content", "") or ""
+        if role == "system":
+            continue                # never shown to the user
+        if role == "user" and content.startswith("<tool_result"):
+            # Synthetic tool-result message inserted by run_turn
+            try:
+                inner = content.split(">", 1)[1].rsplit("</tool_result>", 1)[0].strip()
+                parsed = json.loads(inner) if inner.startswith("{") else {"raw": inner}
+            except Exception:                       # noqa: BLE001
+                parsed = {"raw": content}
+            out.append({"kind": "tool_result", "result": parsed})
+            continue
+        if role == "user":
+            out.append({"kind": "user", "content": content})
+            continue
+        if role == "assistant":
+            action = agent_tools.parse_action_block(content)
+            display = agent_tools.strip_action_block(content)
+            entry = {"kind": "assistant", "content": display}
+            if action:
+                entry["tool_call"] = {
+                    "tool": action.get("tool"),
+                    "args": action.get("args", {}),
+                }
+            out.append(entry)
+            continue
+        out.append({"kind": role, "content": content})
+    return out
+
+
+def _agent_local_start(model_path: str | None = None) -> dict:
+    """Spawn the bundled mlx-lm.server against the current config's model.
+
+    `model_path` overrides the saved `local_model_path` for one-off boots
+    (e.g. switching models without persisting the change).
+    """
+    cfg = _load_agent_config()
+    target = model_path or cfg.local_model_path or str(GEMMA)
+    venv_py = str(MLX / "env/bin/python3.11")
+    return agent_local_server.start(target, venv_python=venv_py,
+                                    log_sink=_agent_log_sink)
+
+
 # ---- HTTP --------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -3786,6 +4017,44 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404); return
             self._ok(sidecar.read_bytes(), "application/json")
             return
+
+        # ---- Agentic Flows GETs --------------------------------------------
+        if parsed.path == "/agent/config":
+            cfg = _load_agent_config()
+            local = agent_local_server.status()
+            self._json({
+                "engine": cfg.to_public_dict(),
+                "capabilities": _agent_capabilities(),
+                "local_server": local,
+                "available_models": agent_local_server.discover_local_models(ROOT),
+            })
+            return
+
+        if parsed.path == "/agent/sessions":
+            self._json({"sessions": agent_runtime.list_sessions(STATE_DIR)})
+            return
+
+        if parsed.path.startswith("/agent/sessions/"):
+            sid = parsed.path[len("/agent/sessions/"):]
+            sid = sid.split("/", 1)[0]
+            if not sid:
+                self.send_error(404); return
+            sess = agent_runtime.load_session(sid, STATE_DIR)
+            if sess is None:
+                self.send_error(404); return
+            self._json({
+                "session": sess.to_dict(),
+                "rendered_messages": _render_session_messages(sess),
+            })
+            return
+
+        if parsed.path == "/agent/local/status":
+            self._json({
+                "local_server": agent_local_server.status(),
+                "available_models": agent_local_server.discover_local_models(ROOT),
+            })
+            return
+
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -4221,6 +4490,101 @@ class Handler(BaseHTTPRequestHandler):
                 "mode": mode,
                 "elapsed_sec": result.get("elapsed_sec"),
             })
+            return
+
+        # ---- Agentic Flows POSTs -------------------------------------------
+        if path == "/agent/config":
+            # JSON or urlencoded body. JSON is what the chat UI sends; form
+            # is here so curl-from-the-terminal still works.
+            try:
+                if ctype.startswith("application/json"):
+                    payload = json.loads(body or "{}")
+                else:
+                    payload = {k: v[0] if v else "" for k, v in form.items()}
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            cfg = _save_agent_config(payload)
+            push(f"agent: engine config updated ({cfg.kind} → {cfg.model})")
+            self._json({"ok": True, "engine": cfg.to_public_dict()})
+            return
+
+        if path == "/agent/local/start":
+            try:
+                if ctype.startswith("application/json"):
+                    payload = json.loads(body or "{}")
+                else:
+                    payload = {k: v[0] if v else "" for k, v in form.items()}
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            override = (payload.get("model_path") or "").strip() or None
+            status = _agent_local_start(override)
+            self._json({"ok": status.get("running"), "local_server": status})
+            return
+
+        if path == "/agent/local/stop":
+            status = agent_local_server.stop("manual stop via panel")
+            self._json({"ok": True, "local_server": status})
+            return
+
+        if path == "/agent/sessions/new":
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            title = (payload.get("title") or "").strip() or "Untitled"
+            cfg = _load_agent_config()
+            sess = agent_runtime.new_session(title=title, engine_config=cfg)
+            agent_runtime.save_session(sess, STATE_DIR)
+            push(f"agent: new session {sess.session_id} ({sess.title!r})")
+            self._json({"ok": True, "session": sess.to_dict()})
+            return
+
+        if path.startswith("/agent/sessions/") and path.endswith("/message"):
+            sid = path[len("/agent/sessions/"):-len("/message")]
+            sess = agent_runtime.load_session(sid, STATE_DIR)
+            if sess is None:
+                self._json({"error": "session not found"}, 404); return
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            user_msg = payload.get("message") or payload.get("content") or ""
+            user_msg = user_msg.strip()
+            if not user_msg:
+                self._json({"error": "message is required"}, 400); return
+            # Always re-load the engine config in case the user just changed
+            # it via the settings drawer — the session keeps its own copy
+            # for record-keeping but we honor the live config for actual calls.
+            sess.engine_config = _load_agent_config()
+
+            ops = _build_panel_ops()
+            tools_doc = agent_runtime.render_tools_doc()
+            events: list[dict] = []
+            try:
+                for ev in agent_runtime.run_turn(
+                    sess, user_msg, ops, tools_doc=tools_doc,
+                ):
+                    events.append({"kind": ev.kind, "payload": ev.payload})
+            except Exception as e:                       # noqa: BLE001
+                push(f"agent: run_turn errored: {e}")
+                self._json({"error": str(e), "events": events}, 500); return
+            agent_runtime.save_session(sess, STATE_DIR)
+            self._json({
+                "ok": True,
+                "events": events,
+                "session": sess.to_dict(),
+                "rendered_messages": _render_session_messages(sess),
+            })
+            return
+
+        if path.startswith("/agent/sessions/") and path.endswith("/delete"):
+            sid = path[len("/agent/sessions/"):-len("/delete")]
+            ok = agent_runtime.delete_session(sid, STATE_DIR)
+            self._json({"ok": ok})
             return
 
         self.send_error(404)
@@ -5925,6 +6289,259 @@ HTML = r"""<!doctype html>
       background: transparent; color: var(--muted); border: 1px solid var(--border, #2a3140);
     }
     .models-foot { font-size: 11px; color: var(--muted); margin-top: 14px; line-height: 1.4; }
+
+    /* ============== AGENTIC FLOWS UI (workflow tabs + chat) ===============
+       The form-pane gets a top strip switching between the manual form and
+       the chat-driven planner. Manual is the default; Agent shows a chat,
+       a small engine status row, and a settings drawer for picking the LLM.
+    */
+    .workflow-tabs {
+      display: flex; gap: 4px;
+      padding: 6px; margin: 0 0 12px 0;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .workflow-tabs button {
+      flex: 1; padding: 9px 14px;
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: 7px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      letter-spacing: 0.2px;
+    }
+    .workflow-tabs button:hover { color: var(--text); }
+    .workflow-tabs button.active {
+      background: var(--accent-dim); color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    .workflow-tabs .new-badge {
+      display: inline-block; margin-left: 6px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.4px;
+      padding: 2px 6px; border-radius: 999px;
+      background: var(--accent); color: white;
+      vertical-align: middle;
+    }
+
+    .agent-pane { display: flex; flex-direction: column; gap: 12px; }
+
+    .agent-statusbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; border-radius: 9px;
+      background: var(--panel); border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .agent-statusbar .label { color: var(--muted); flex: 0 0 auto; }
+    .agent-statusbar .engine { color: var(--text); font-weight: 600; flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-statusbar .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--muted); flex: 0 0 auto; }
+    .agent-statusbar .dot.live { background: #2ea043; box-shadow: 0 0 0 3px rgba(46,160,67,0.18); }
+    .agent-statusbar .dot.warn { background: #d29922; }
+    .agent-statusbar .dot.bad { background: #cf222e; }
+    .agent-statusbar button {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 10px; font-size: 11px; cursor: pointer;
+    }
+    .agent-statusbar button:hover { color: var(--text); border-color: var(--accent); }
+
+    .agent-session-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 4px 0;
+    }
+    .agent-session-head .title {
+      flex: 1; font-size: 12px; color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-session-head button {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 9px; font-size: 11px; cursor: pointer;
+    }
+    .agent-session-head button:hover { color: var(--text); border-color: var(--accent); }
+
+    .agent-chat {
+      display: flex; flex-direction: column; gap: 10px;
+      min-height: 260px; max-height: 60vh; overflow-y: auto;
+      padding: 12px; border-radius: 9px;
+      background: var(--bg-2); border: 1px solid var(--border);
+    }
+    .agent-chat:empty::before {
+      content: "Paste a script, brief, or one-line idea. The agent will plan a shot list, estimate the wall time, and queue the renders.";
+      color: var(--muted); font-style: italic; font-size: 12px;
+      max-width: 540px; line-height: 1.5; align-self: flex-start;
+    }
+    .agent-msg {
+      max-width: 92%;
+      padding: 10px 12px; border-radius: 8px;
+      font-size: 13px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .agent-msg.user {
+      align-self: flex-end;
+      background: var(--accent-dim); color: var(--text);
+      border: 1px solid var(--accent);
+    }
+    .agent-msg.assistant {
+      align-self: flex-start;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .agent-msg.system_note {
+      align-self: center;
+      background: transparent; color: var(--muted);
+      font-style: italic; font-size: 11px; max-width: 560px;
+      text-align: center;
+    }
+    .agent-msg .tool-chip {
+      display: inline-block; margin-top: 8px;
+      padding: 3px 8px; border-radius: 999px;
+      background: rgba(47,129,247,0.12); color: var(--accent-bright);
+      border: 1px solid var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.2px;
+    }
+    .agent-tool-result {
+      align-self: flex-start; max-width: 92%;
+      padding: 8px 10px; border-radius: 8px;
+      background: rgba(46,160,67,0.06); border: 1px solid rgba(46,160,67,0.3);
+      color: #9be7a4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; line-height: 1.45;
+      max-height: 200px; overflow-y: auto;
+    }
+    .agent-tool-result.error {
+      background: rgba(207,34,46,0.06); border-color: rgba(207,34,46,0.4);
+      color: #f49a9e;
+    }
+    .agent-tool-result .tool-name { color: var(--accent-bright); font-weight: 700; }
+
+    .agent-composer {
+      display: grid; grid-template-columns: 1fr auto; gap: 8px;
+      padding-top: 4px;
+    }
+    .agent-composer textarea {
+      width: 100%; min-height: 64px; max-height: 240px;
+      padding: 10px 12px; font-size: 13px; line-height: 1.5;
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 9px;
+      resize: vertical;
+      font-family: inherit;
+    }
+    .agent-composer textarea:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .agent-composer button {
+      align-self: flex-end;
+      padding: 10px 18px; border-radius: 9px;
+      background: var(--accent); color: white; border: none;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      min-width: 88px;
+    }
+    .agent-composer button:hover { background: var(--accent-bright); }
+    .agent-composer button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .agent-typing {
+      align-self: flex-start;
+      padding: 8px 12px; border-radius: 8px;
+      background: var(--panel); border: 1px dashed var(--border);
+      color: var(--muted); font-size: 12px; font-style: italic;
+    }
+    .agent-typing::after {
+      content: ""; display: inline-block; width: 28px;
+      animation: agent-dots 1.4s steps(4, end) infinite;
+    }
+    @keyframes agent-dots {
+      0% { content: ""; } 25% { content: "."; }
+      50% { content: ".."; } 75% { content: "..."; }
+    }
+
+    /* Settings drawer (engine config) */
+    .agent-settings-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.65); backdrop-filter: blur(4px);
+      z-index: 200; display: none;
+      align-items: center; justify-content: center;
+    }
+    .agent-settings-modal.open { display: flex; }
+    .agent-settings-card {
+      width: min(560px, 96vw); max-height: 90vh; overflow-y: auto;
+      padding: 22px; border-radius: 12px;
+      background: var(--panel); border: 1px solid var(--border-strong);
+      box-shadow: 0 18px 48px rgba(0,0,0,0.6);
+    }
+    .agent-settings-card h2 {
+      margin: 0 0 16px; font-size: 16px; font-weight: 600;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .agent-settings-card h2 button {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 10px; font-size: 11px; cursor: pointer;
+    }
+    .agent-settings-card .field {
+      margin-bottom: 12px;
+    }
+    .agent-settings-card label {
+      display: block; margin-bottom: 5px; font-size: 11px;
+      color: var(--muted); font-weight: 600; letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+    .agent-settings-card input,
+    .agent-settings-card select,
+    .agent-settings-card textarea {
+      width: 100%; padding: 8px 10px; font-size: 13px;
+      background: var(--bg-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 7px;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+    .agent-settings-card input:focus,
+    .agent-settings-card select:focus,
+    .agent-settings-card textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .agent-settings-card .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .agent-settings-card .actions {
+      display: flex; gap: 8px; margin-top: 16px;
+      justify-content: flex-end;
+    }
+    .agent-settings-card .actions button {
+      padding: 8px 16px; border-radius: 7px;
+      border: none; cursor: pointer; font-size: 13px; font-weight: 600;
+    }
+    .agent-settings-card .actions .save {
+      background: var(--accent); color: white;
+    }
+    .agent-settings-card .actions .save:hover { background: var(--accent-bright); }
+    .agent-settings-card .actions .ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .agent-settings-card .hint {
+      font-size: 11px; color: var(--muted); line-height: 1.5;
+      padding: 10px 12px; border-radius: 7px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .agent-engine-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; border-radius: 7px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      margin-bottom: 10px;
+    }
+    .agent-engine-row .pill {
+      font-size: 10px; padding: 2px 8px; border-radius: 999px;
+      background: var(--panel-2); color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .agent-engine-row .pill.live { color: #9be7a4; border-color: rgba(46,160,67,0.4); }
+    .agent-engine-row .pill.bad { color: #f49a9e; border-color: rgba(207,34,46,0.4); }
+
+    .agent-shot-summary {
+      margin-top: 6px; font-size: 11px; color: var(--muted);
+      padding: 6px 10px; border-radius: 6px;
+      background: rgba(47,129,247,0.06); border: 1px solid rgba(47,129,247,0.25);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .agent-shot-summary.ok { color: #9be7a4; background: rgba(46,160,67,0.06); border-color: rgba(46,160,67,0.3); }
   </style>
 </head>
 <body>
@@ -5984,6 +6601,44 @@ HTML = r"""<!doctype html>
 
   <!-- ============== FORM PANE ============== -->
   <aside class="form-pane">
+
+    <!-- Workflow tabs: switch the form-pane between the manual form and
+         the chat-driven planner. Default = manual; toggling persists in
+         localStorage so the user lands on the same tab next session. -->
+    <nav class="workflow-tabs" id="workflowTabs">
+      <button data-workflow="manual" class="active">Manual</button>
+      <button data-workflow="agent">Agentic Flows<span class="new-badge">NEW</span></button>
+    </nav>
+
+    <!-- ============== AGENTIC FLOWS PANE ============== -->
+    <!-- Hidden by default; shown when the agent workflow tab is active.
+         The actual agent loop lives in the panel's Python backend; this UI
+         just sends user messages and renders the message log + tool chips. -->
+    <section class="agent-pane" id="agentPane" hidden>
+      <div class="agent-statusbar">
+        <span class="dot" id="agentEngineDot"></span>
+        <span class="label">Engine</span>
+        <span class="engine" id="agentEngineLabel">…</span>
+        <button type="button" onclick="openAgentSettings()" title="Configure engine">⚙ Settings</button>
+      </div>
+
+      <div class="agent-session-head">
+        <span class="title" id="agentSessionTitle">New session</span>
+        <button type="button" onclick="agentNewSession()" title="Discard current and start fresh">+ New session</button>
+      </div>
+
+      <div class="agent-chat" id="agentChat"></div>
+
+      <div class="agent-composer">
+        <textarea id="agentInput"
+                  placeholder="Paste a script, or describe one shot. The agent will plan and queue."
+                  autocomplete="off"></textarea>
+        <button type="button" id="agentSendBtn" onclick="agentSend()">Send</button>
+      </div>
+    </section>
+
+    <!-- The original manual form is unchanged; it sits below in the DOM
+         and is shown/hidden by JS as the workflow tab toggles. -->
     <form id="genForm">
       <input type="hidden" name="preset_label" id="preset_label" value="">
 
@@ -6723,6 +7378,76 @@ HTML = r"""<!doctype html>
     </div>
   </div>
 </aside>
+
+<!-- ============== AGENT SETTINGS MODAL ============== -->
+<div class="agent-settings-modal" id="agentSettingsModal" onclick="if(event.target===this)closeAgentSettings()">
+  <div class="agent-settings-card">
+    <h2>Agent engine
+      <button type="button" onclick="closeAgentSettings()">Close</button>
+    </h2>
+
+    <div class="hint">
+      The agent uses any OpenAI-compatible chat endpoint. Default is
+      <strong>Phosphene Local</strong> — a small mlx-lm.server pointed at the
+      bundled Gemma 3 12B IT (the same weights LTX uses as its text encoder,
+      doubling as a chat model). Stronger options: drop a Qwen 3 Coder 30B
+      MLX model into <code>mlx_models/</code> and pick it below; or point at
+      a cloud endpoint (Anthropic compat, OpenAI, OpenRouter, your LM Studio
+      box on the LAN).
+    </div>
+
+    <div class="agent-engine-row" id="agentLocalRow" style="display:none">
+      <span class="pill" id="agentLocalPill">stopped</span>
+      <span style="flex:1; font-size:12px; color:var(--muted)" id="agentLocalDetail">mlx-lm.server</span>
+      <button type="button" onclick="agentLocalToggle()" id="agentLocalToggleBtn"
+              style="padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text);font-size:11px;cursor:pointer">Start</button>
+    </div>
+
+    <div class="field">
+      <label>Engine kind</label>
+      <select id="agentKind" onchange="agentKindChanged()">
+        <option value="phosphene_local">Phosphene Local (bundled mlx-lm.server)</option>
+        <option value="custom">Custom (any OpenAI-compatible URL)</option>
+      </select>
+    </div>
+
+    <div class="field" id="agentLocalModelField">
+      <label>Local model (chat-capable, MLX 4-bit recommended)</label>
+      <select id="agentLocalModel"></select>
+    </div>
+
+    <div class="field" id="agentBaseUrlField" style="display:none">
+      <label>Base URL</label>
+      <input type="text" id="agentBaseUrl" placeholder="https://api.openai.com/v1">
+    </div>
+
+    <div class="field" id="agentApiKeyField" style="display:none">
+      <label>API key (saved locally; only sent as Authorization header)</label>
+      <input type="password" id="agentApiKey" placeholder="(leave blank to keep saved key)">
+    </div>
+
+    <div class="field" id="agentRemoteModelField" style="display:none">
+      <label>Model identifier</label>
+      <input type="text" id="agentRemoteModel" placeholder="e.g. claude-sonnet-4-6 or gpt-5">
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>Temperature</label>
+        <input type="number" id="agentTemp" min="0" max="2" step="0.05" value="0.4">
+      </div>
+      <div class="field">
+        <label>Max tokens</label>
+        <input type="number" id="agentMaxTokens" min="256" max="32768" step="256" value="3072">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="ghost" onclick="closeAgentSettings()">Cancel</button>
+      <button type="button" class="save" onclick="agentSaveSettings()">Save engine config</button>
+    </div>
+  </div>
+</div>
 
 <!-- ============== BATCH MODAL ============== -->
 <div class="modal-bg" id="batchModal" onclick="if(event.target===this)closeBatch()">
@@ -9710,6 +10435,375 @@ refreshUploadsStrip();
 // don't fire here), and whenever the user opens FFLF — covers the case
 // where they uploaded something via I2V, then switched to FFLF.
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListener('click', refreshUploadsStrip));
+
+
+// ============================================================================
+// AGENTIC FLOWS — chat-driven shot planner
+// ============================================================================
+//
+// State on the page is held in window.AGENT for a few reasons:
+//   1. The user can switch the "Manual" / "Agentic Flows" tab any time, so
+//      the chat UI must keep its session in memory while hidden.
+//   2. The active session id is persisted in localStorage so a page reload
+//      doesn't lose the conversation (sessions also persist server-side).
+window.AGENT = {
+  sessionId: null,
+  config: null,         // last fetched /agent/config payload
+  busy: false,          // a turn is in flight; disables the Send button
+  models: [],           // discovered local models from /agent/local/status
+};
+
+function workflowSwitch(name) {
+  const tabs = document.querySelectorAll('#workflowTabs button[data-workflow]');
+  tabs.forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
+  const manual = document.getElementById('genForm');
+  const agent = document.getElementById('agentPane');
+  if (name === 'agent') {
+    if (manual) manual.style.display = 'none';
+    if (agent) agent.hidden = false;
+    agentRefreshConfig();
+    if (!window.AGENT.sessionId) {
+      const stored = localStorage.getItem('phos_agent_session');
+      if (stored) {
+        agentLoadSession(stored);
+      }
+    } else {
+      agentLoadSession(window.AGENT.sessionId);
+    }
+  } else {
+    if (manual) manual.style.display = '';
+    if (agent) agent.hidden = true;
+  }
+  try { localStorage.setItem('phos_workflow', name); } catch(e) {}
+}
+
+document.querySelectorAll('#workflowTabs button[data-workflow]').forEach(b => {
+  b.addEventListener('click', () => workflowSwitch(b.dataset.workflow));
+});
+
+async function agentRefreshConfig() {
+  try {
+    const r = await fetch('/agent/config');
+    const j = await r.json();
+    window.AGENT.config = j;
+    window.AGENT.models = j.available_models || [];
+    const eng = j.engine || {};
+    const local = j.local_server || {};
+    const dot = document.getElementById('agentEngineDot');
+    const label = document.getElementById('agentEngineLabel');
+    let live = false;
+    let summary = '';
+    if (eng.kind === 'phosphene_local') {
+      live = !!local.running;
+      summary = `Phosphene Local · ${eng.model || '(no model)'} · ${live ? 'running' : 'stopped'}`;
+    } else {
+      // For custom engines we can't easily probe — just show config.
+      summary = `${eng.kind} · ${eng.model || ''} · ${eng.base_url || ''}`;
+      live = !!eng.has_api_key || !eng.api_key === '';   // best-effort
+    }
+    if (dot) {
+      dot.classList.remove('live', 'warn', 'bad');
+      dot.classList.add(live ? 'live' : 'warn');
+    }
+    if (label) label.textContent = summary;
+  } catch (e) {
+    const label = document.getElementById('agentEngineLabel');
+    if (label) label.textContent = 'engine config unavailable';
+  }
+}
+
+async function agentNewSession(initialMessage) {
+  const title = (initialMessage || '').slice(0, 60) || 'New session';
+  const r = await fetch('/agent/sessions/new', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title}),
+  });
+  const j = await r.json();
+  if (!j.ok) {
+    alert('Could not create session: ' + (j.error || 'unknown'));
+    return null;
+  }
+  window.AGENT.sessionId = j.session.session_id;
+  try { localStorage.setItem('phos_agent_session', j.session.session_id); } catch(e) {}
+  document.getElementById('agentSessionTitle').textContent =
+    `${j.session.title} · ${j.session.session_id}`;
+  document.getElementById('agentChat').innerHTML = '';
+  return j.session;
+}
+
+async function agentLoadSession(sid) {
+  try {
+    const r = await fetch('/agent/sessions/' + encodeURIComponent(sid));
+    if (!r.ok) {
+      // Session was deleted or panel restarted with no state — just clear.
+      try { localStorage.removeItem('phos_agent_session'); } catch(e) {}
+      window.AGENT.sessionId = null;
+      document.getElementById('agentSessionTitle').textContent = 'New session';
+      document.getElementById('agentChat').innerHTML = '';
+      return;
+    }
+    const j = await r.json();
+    window.AGENT.sessionId = sid;
+    const sess = j.session || {};
+    document.getElementById('agentSessionTitle').textContent =
+      `${sess.title || 'Untitled'} · ${sid}`;
+    agentRender(j.rendered_messages || []);
+  } catch (e) {
+    console.error('agentLoadSession', e);
+  }
+}
+
+function agentRender(messages) {
+  const chat = document.getElementById('agentChat');
+  if (!chat) return;
+  chat.innerHTML = '';
+  for (const m of messages) {
+    chat.appendChild(agentMakeBubble(m));
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function agentMakeBubble(m) {
+  if (m.kind === 'tool_result') {
+    const div = document.createElement('div');
+    const r = m.result || {};
+    const ok = r.ok !== false && !r.error;
+    div.className = 'agent-tool-result' + (ok ? '' : ' error');
+    let label = '';
+    if (r.tool) label = `<span class="tool-name">${r.tool}</span> → `;
+    let body = '';
+    try {
+      body = JSON.stringify(r.result ?? r, null, 2);
+    } catch(e) {
+      body = String(r);
+    }
+    if (body.length > 1500) body = body.slice(0, 1500) + '\n…';
+    div.innerHTML = label + escapeHtml(body);
+    return div;
+  }
+  const div = document.createElement('div');
+  div.className = 'agent-msg ' + (m.kind || 'assistant');
+  div.textContent = m.content || '';
+  if (m.tool_call) {
+    const chip = document.createElement('div');
+    chip.className = 'tool-chip';
+    chip.textContent = '➜ ' + (m.tool_call.tool || '?');
+    div.appendChild(document.createElement('br'));
+    div.appendChild(chip);
+  }
+  return div;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+async function agentSend() {
+  if (window.AGENT.busy) return;
+  const input = document.getElementById('agentInput');
+  const btn = document.getElementById('agentSendBtn');
+  const text = (input.value || '').trim();
+  if (!text) return;
+
+  // No session yet → create one with the user's first message as title hint.
+  if (!window.AGENT.sessionId) {
+    const sess = await agentNewSession(text);
+    if (!sess) return;
+  }
+
+  // Optimistic render: append user bubble + typing indicator immediately.
+  const chat = document.getElementById('agentChat');
+  chat.appendChild(agentMakeBubble({kind: 'user', content: text}));
+  const typing = document.createElement('div');
+  typing.className = 'agent-typing';
+  typing.textContent = 'Thinking';
+  chat.appendChild(typing);
+  chat.scrollTop = chat.scrollHeight;
+
+  input.value = '';
+  window.AGENT.busy = true;
+  btn.disabled = true;
+  btn.textContent = '…';
+
+  try {
+    const r = await fetch(
+      '/agent/sessions/' + encodeURIComponent(window.AGENT.sessionId) + '/message',
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: text}),
+      }
+    );
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      typing.classList.add('error');
+      typing.textContent = 'Error: ' + (j.error || ('HTTP ' + r.status));
+    } else {
+      // Re-render the whole conversation from the authoritative server state.
+      agentRender(j.rendered_messages || []);
+    }
+  } catch (e) {
+    typing.textContent = 'Network error: ' + e;
+  } finally {
+    window.AGENT.busy = false;
+    btn.disabled = false;
+    btn.textContent = 'Send';
+    chat.scrollTop = chat.scrollHeight;
+  }
+}
+
+// Send on Cmd/Ctrl+Enter from the textarea.
+document.addEventListener('DOMContentLoaded', () => {
+  const ta = document.getElementById('agentInput');
+  if (ta) {
+    ta.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        agentSend();
+      }
+    });
+  }
+});
+
+// ----- Engine settings drawer -----
+function openAgentSettings() {
+  agentRefreshConfig().then(() => {
+    const modal = document.getElementById('agentSettingsModal');
+    if (!modal) return;
+    const cfg = (window.AGENT.config && window.AGENT.config.engine) || {};
+    const local = (window.AGENT.config && window.AGENT.config.local_server) || {};
+    document.getElementById('agentKind').value = cfg.kind || 'phosphene_local';
+    document.getElementById('agentBaseUrl').value = cfg.base_url || '';
+    document.getElementById('agentRemoteModel').value = cfg.kind === 'custom' ? (cfg.model || '') : '';
+    document.getElementById('agentApiKey').value = '';
+    document.getElementById('agentApiKey').placeholder =
+      cfg.has_api_key ? '(saved key — leave blank to keep)' : 'Paste API key';
+    document.getElementById('agentTemp').value = cfg.temperature ?? 0.4;
+    document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 3072;
+
+    // Populate the local-model dropdown.
+    const sel = document.getElementById('agentLocalModel');
+    sel.innerHTML = '';
+    const models = (window.AGENT.config && window.AGENT.config.available_models) || [];
+    if (models.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No chat-capable models found in mlx_models/';
+      sel.appendChild(opt);
+    } else {
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.path;
+        opt.textContent = `${m.name} (${m.size_gb} GB)`;
+        if ((cfg.local_model_path || '') === m.path) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+    agentKindChanged();
+    agentLocalRefreshRow(local);
+    modal.classList.add('open');
+  });
+}
+
+function closeAgentSettings() {
+  document.getElementById('agentSettingsModal').classList.remove('open');
+}
+
+function agentKindChanged() {
+  const kind = document.getElementById('agentKind').value;
+  document.getElementById('agentLocalModelField').style.display = kind === 'phosphene_local' ? '' : 'none';
+  document.getElementById('agentLocalRow').style.display = kind === 'phosphene_local' ? '' : 'none';
+  document.getElementById('agentBaseUrlField').style.display = kind === 'custom' ? '' : 'none';
+  document.getElementById('agentApiKeyField').style.display = kind === 'custom' ? '' : 'none';
+  document.getElementById('agentRemoteModelField').style.display = kind === 'custom' ? '' : 'none';
+}
+
+function agentLocalRefreshRow(local) {
+  const pill = document.getElementById('agentLocalPill');
+  const detail = document.getElementById('agentLocalDetail');
+  const btn = document.getElementById('agentLocalToggleBtn');
+  if (!pill || !detail || !btn) return;
+  if (local.running) {
+    pill.textContent = 'running';
+    pill.classList.add('live'); pill.classList.remove('bad');
+    detail.textContent = `mlx-lm.server pid ${local.pid} on :${local.port}`;
+    btn.textContent = 'Stop';
+  } else {
+    pill.textContent = 'stopped';
+    pill.classList.remove('live');
+    if (local.last_error) pill.classList.add('bad');
+    detail.textContent = local.last_error || 'mlx-lm.server';
+    btn.textContent = 'Start';
+  }
+}
+
+async function agentLocalToggle() {
+  const cfg = (window.AGENT.config && window.AGENT.config.engine) || {};
+  const local = (window.AGENT.config && window.AGENT.config.local_server) || {};
+  if (local.running) {
+    await fetch('/agent/local/stop', {method: 'POST'});
+  } else {
+    const sel = document.getElementById('agentLocalModel');
+    const modelPath = sel ? sel.value : '';
+    await fetch('/agent/local/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_path: modelPath || undefined}),
+    });
+  }
+  // Server side spawn-and-wait is fast (process forks return ~immediately;
+  // the model load happens lazily in the first /chat/completions call).
+  await new Promise(r => setTimeout(r, 300));
+  await agentRefreshConfig();
+  const local2 = (window.AGENT.config && window.AGENT.config.local_server) || {};
+  agentLocalRefreshRow(local2);
+}
+
+async function agentSaveSettings() {
+  const kind = document.getElementById('agentKind').value;
+  const payload = {
+    kind,
+    temperature: parseFloat(document.getElementById('agentTemp').value || '0.4'),
+    max_tokens: parseInt(document.getElementById('agentMaxTokens').value || '3072', 10),
+  };
+  if (kind === 'phosphene_local') {
+    const sel = document.getElementById('agentLocalModel');
+    if (sel && sel.value) {
+      payload.local_model_path = sel.value;
+      // The "model" field for local engines is just a label sent to mlx-lm
+      // (which doesn't actually filter on it — it serves whatever model it
+      // was launched with). Still, surface a sensible name.
+      const parts = sel.value.split('/');
+      payload.model = parts[parts.length - 1] || sel.value;
+    }
+  } else {
+    payload.base_url = (document.getElementById('agentBaseUrl').value || '').trim();
+    payload.model = (document.getElementById('agentRemoteModel').value || '').trim();
+    const ak = (document.getElementById('agentApiKey').value || '').trim();
+    if (ak) payload.api_key = ak;
+  }
+  const r = await fetch('/agent/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const j = await r.json();
+  if (!r.ok || j.error) {
+    alert('Could not save: ' + (j.error || ('HTTP ' + r.status)));
+    return;
+  }
+  closeAgentSettings();
+  await agentRefreshConfig();
+}
+
+// Initial workflow tab restore from localStorage.
+try {
+  const saved = localStorage.getItem('phos_workflow');
+  if (saved === 'agent') workflowSwitch('agent');
+} catch(e) {}
 </script>
 </body>
 </html>
