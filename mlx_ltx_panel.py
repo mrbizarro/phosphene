@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, quote, urlparse
 # this panel); we wire it up via a PanelOps callback object built at the
 # end of this module just before the HTTP handler.
 from agent import engine as agent_engine
+from agent import image_engine as agent_image_engine
 from agent import local_server as agent_local_server
 from agent import prompts as agent_prompts
 from agent import runtime as agent_runtime
@@ -3376,8 +3377,10 @@ def worker_loop() -> None:
 # state/ (see install.js / CLAUDE.md §7 "fs.link"). No extra plumbing needed.
 
 AGENT_CONFIG_PATH = STATE_DIR / "agent_config.json"
+AGENT_IMAGE_CONFIG_PATH = STATE_DIR / "agent_image_config.json"
 AGENT_LOCK = threading.RLock()
 _AGENT_CONFIG_CACHE: agent_engine.EngineConfig | None = None
+_AGENT_IMAGE_CONFIG_CACHE: agent_image_engine.ImageEngineConfig | None = None
 
 
 def _default_agent_engine_config() -> agent_engine.EngineConfig:
@@ -3447,12 +3450,52 @@ def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
         return cfg
 
 
+def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
+    """Read state/agent_image_config.json (creating defaults on first call)."""
+    global _AGENT_IMAGE_CONFIG_CACHE
+    with AGENT_LOCK:
+        if _AGENT_IMAGE_CONFIG_CACHE is not None:
+            return _AGENT_IMAGE_CONFIG_CACHE
+        if AGENT_IMAGE_CONFIG_PATH.is_file():
+            try:
+                data = json.loads(AGENT_IMAGE_CONFIG_PATH.read_text(encoding="utf-8"))
+                cfg = agent_image_engine.ImageEngineConfig(**data)
+            except (OSError, json.JSONDecodeError, TypeError) as e:
+                push(f"agent: invalid agent_image_config.json ({e}); using mock defaults")
+                cfg = agent_image_engine.ImageEngineConfig()
+        else:
+            cfg = agent_image_engine.ImageEngineConfig()
+        _AGENT_IMAGE_CONFIG_CACHE = cfg
+        return cfg
+
+
+def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineConfig:
+    global _AGENT_IMAGE_CONFIG_CACHE
+    with AGENT_LOCK:
+        cur = _load_agent_image_config()
+        merged = {**cur.__dict__}
+        for k, v in (updates or {}).items():
+            if k not in merged:
+                continue
+            if k == "bfl_api_key" and v == "":
+                continue                        # blank means "leave as-is"
+            merged[k] = v
+        cfg = agent_image_engine.ImageEngineConfig(**merged)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(AGENT_IMAGE_CONFIG_PATH, json.dumps(cfg.__dict__, indent=2))
+        _AGENT_IMAGE_CONFIG_CACHE = cfg
+        return cfg
+
+
 def _agent_capabilities() -> dict:
     """Hardware-tier snapshot the agent uses to clamp its plan.
 
     Mirrors the SYSTEM_CAPS table in tier-friendly form so the system
-    prompt can show the user what this Mac can actually render.
+    prompt can show the user what this Mac can actually render. Also
+    carries the current image-engine config so the `generate_shot_images`
+    tool can dispatch without circular imports.
     """
+    img_cfg = _load_agent_image_config()
     return {
         "tier": SYSTEM_TIER,
         "tier_label": SYSTEM_CAPS.get("label", SYSTEM_TIER),
@@ -3463,6 +3506,7 @@ def _agent_capabilities() -> dict:
         "allows_q8": SYSTEM_CAPS.get("allows_q8", False),
         "allows_keyframe": SYSTEM_CAPS.get("allows_keyframe", False),
         "allows_extend": SYSTEM_CAPS.get("allows_extend", False),
+        "image_engine_config": dict(img_cfg.__dict__),
     }
 
 
@@ -4055,6 +4099,16 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/agent/image/config":
+            cfg = _load_agent_image_config()
+            ok, msg = agent_image_engine.health_check(cfg)
+            self._json({
+                "image_engine": cfg.to_public_dict(),
+                "ok": ok,
+                "message": msg,
+            })
+            return
+
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -4598,6 +4652,66 @@ class Handler(BaseHTTPRequestHandler):
             sid = path[len("/agent/sessions/"):-len("/delete")]
             ok = agent_runtime.delete_session(sid, STATE_DIR)
             self._json({"ok": ok})
+            return
+
+        # Image-engine config (pluggable: mock | bfl).
+        if path == "/agent/image/config":
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            cfg = _save_agent_image_config(payload)
+            push(f"agent: image engine updated to {cfg.kind}"
+                 + (f" ({cfg.bfl_model})" if cfg.kind == "bfl" else ""))
+            ok, msg = agent_image_engine.health_check(cfg)
+            self._json({"ok": True, "image_engine": cfg.to_public_dict(),
+                        "health_ok": ok, "health_message": msg})
+            return
+
+        # Anchor selection — user clicked a thumbnail in the chat.
+        # Records {shot_label: candidate_dict} in the session's tool_state.
+        if path.startswith("/agent/sessions/") and path.endswith("/anchors/select"):
+            sid = path[len("/agent/sessions/"):-len("/anchors/select")]
+            sess = agent_runtime.load_session(sid, STATE_DIR)
+            if sess is None:
+                self._json({"error": "session not found"}, 404); return
+            try:
+                payload = (json.loads(body or "{}")
+                           if ctype.startswith("application/json")
+                           else {k: v[0] if v else "" for k, v in form.items()})
+            except json.JSONDecodeError as e:
+                self._json({"error": f"bad JSON: {e}"}, 400); return
+            label = (payload.get("shot_label") or "").strip()
+            png_path = (payload.get("png_path") or "").strip()
+            if not label or not png_path:
+                self._json({"error": "shot_label and png_path are required"}, 400); return
+            # Validate path is real and inside our uploads dir (no traversal).
+            try:
+                p = Path(png_path).resolve()
+                _ = p.relative_to(UPLOADS.resolve())
+                if not p.is_file():
+                    raise ValueError("not a file")
+            except (ValueError, OSError) as e:
+                self._json({"error": f"invalid png_path: {e}"}, 400); return
+            # Find the matching candidate by path (so we keep seed/engine info)
+            candidates = ((sess.tool_state.get("anchor_candidates") or {})
+                          .get(label, {}).get("candidates")) or []
+            picked = next((c for c in candidates if c.get("png_path") == str(p)), None)
+            if picked is None:
+                # Path didn't match a known candidate — accept anyway with a
+                # synthetic record. Useful when the user uploads their own.
+                picked = {"png_path": str(p), "engine": "user", "seed": -1}
+            sess.tool_state.setdefault("selected_anchors", {})[label] = picked
+            agent_runtime.save_session(sess, STATE_DIR)
+            push(f"agent: anchor picked for {label}: {p.name}")
+            self._json({
+                "ok": True,
+                "shot_label": label,
+                "selected": picked,
+                "all_selected": sess.tool_state.get("selected_anchors", {}),
+            })
             return
 
         self.send_error(404)
@@ -6686,6 +6800,100 @@ HTML = r"""<!doctype html>
       color: var(--text);
     }
 
+    /* ---- Anchor candidate grid (Phase B of the director workflow) ---- */
+    .anchor-grid-wrap {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--border);
+    }
+    .anchor-grid-meta {
+      font-size: 11px; color: var(--muted);
+      margin-bottom: 8px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .anchor-grid-meta .label-pill {
+      padding: 2px 8px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      font-weight: 600; font-size: 10px;
+      letter-spacing: 0.4px; text-transform: uppercase;
+    }
+    .anchor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 10px;
+    }
+    .anchor-cell {
+      position: relative;
+      aspect-ratio: 16/9;
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+      border: 2px solid transparent;
+      background: var(--bg);
+      padding: 0;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .anchor-cell:hover {
+      border-color: var(--accent);
+      transform: scale(1.02);
+    }
+    .anchor-cell.selected {
+      border-color: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.25);
+    }
+    .anchor-cell img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .anchor-cell .check {
+      position: absolute; top: 6px; right: 6px;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--bg-2);
+      color: var(--muted);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px;
+      font-weight: 800;
+      border: 1px solid var(--border);
+      transition: background 0.15s, color 0.15s;
+    }
+    .anchor-cell.selected .check {
+      background: #2ea043;
+      color: white;
+      border-color: #2ea043;
+    }
+    .anchor-cell .seed {
+      position: absolute; bottom: 4px; left: 4px;
+      font-size: 9px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 2px 6px;
+      background: rgba(0,0,0,0.55);
+      color: white;
+      border-radius: 4px;
+      letter-spacing: 0.3px;
+    }
+    .anchor-cell .engine-tag {
+      position: absolute; bottom: 4px; right: 4px;
+      font-size: 9px;
+      padding: 2px 5px;
+      background: rgba(0,0,0,0.55);
+      color: white;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .anchor-prompt {
+      font-size: 11px; color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      background: var(--bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-style: italic;
+      max-height: 80px; overflow-y: auto;
+    }
+
     /* ---- Typing indicator ---- */
     .agent-typing-row {
       display: flex; gap: 12px;
@@ -7846,9 +8054,45 @@ HTML = r"""<!doctype html>
       </div>
     </div>
 
+    <hr style="border:none;border-top:1px solid var(--border);margin:18px 0 12px">
+
+    <h2 style="font-size:14px">Image generation
+      <span class="pill" id="agentImagePill" style="font-size:10px;padding:3px 8px;border-radius:999px;background:var(--bg-2);color:var(--muted);border:1px solid var(--border)">…</span>
+    </h2>
+    <div class="subtitle" style="margin-bottom:12px">
+      For the director-collaboration workflow: agent generates 4 candidate stills per
+      shot, you pick the best one, then i2v anchors lock the look before each render.
+    </div>
+
+    <div class="field">
+      <label>Backend</label>
+      <select id="agentImageKind" onchange="agentImageKindChanged()">
+        <option value="mock">Mock (PIL placeholders, free, instant — for testing the flow)</option>
+        <option value="bfl">Black Forest Labs API (real Flux, ~$0.025/img on flux-dev)</option>
+      </select>
+    </div>
+
+    <div class="field" id="agentBflModelField" style="display:none">
+      <label>BFL model</label>
+      <select id="agentBflModel">
+        <option value="flux-dev">flux-dev — 25 steps, ~$0.025 per image (recommended)</option>
+        <option value="flux-pro">flux-pro — premium quality, ~$0.05 per image</option>
+        <option value="flux-pro-1.1">flux-pro-1.1 — newer pro, ~$0.04 per image</option>
+        <option value="flux-schnell">flux-schnell — 4 steps, ~$0.003 per image (fastest)</option>
+      </select>
+    </div>
+
+    <div class="field" id="agentBflKeyField" style="display:none">
+      <label>BFL API key</label>
+      <input type="password" id="agentBflKey" placeholder="(leave blank to keep saved)">
+      <div style="margin-top:6px;font-size:11px;color:var(--muted)">
+        Get one at <code>https://api.bfl.ml</code> · stored in <code>state/agent_image_config.json</code>, only sent as the <code>X-Key</code> header.
+      </div>
+    </div>
+
     <div class="actions">
       <button type="button" class="ghost" onclick="closeAgentSettings()">Cancel</button>
-      <button type="button" class="save" onclick="agentSaveSettings()">Save engine config</button>
+      <button type="button" class="save" onclick="agentSaveSettings()">Save settings</button>
     </div>
   </div>
 </div>
@@ -10862,7 +11106,9 @@ window.AGENT = {
   config: null,
   busy: false,
   models: [],
-  sessions: [],         // cached list for the dropdown
+  sessions: [],            // cached list for the dropdown
+  selectedAnchors: {},     // {shot_label: candidate_obj} — synced from session.tool_state
+  imageConfig: null,       // {kind, has_bfl_api_key, ...}
 };
 
 function workflowSwitch(name) {
@@ -10973,6 +11219,7 @@ async function agentLoadSession(sid) {
     if (!r.ok) {
       try { localStorage.removeItem('phos_agent_session'); } catch(e) {}
       window.AGENT.sessionId = null;
+      window.AGENT.selectedAnchors = {};
       agentSetSessionTitle('New chat', null);
       agentRender([]);
       return;
@@ -10980,6 +11227,7 @@ async function agentLoadSession(sid) {
     const j = await r.json();
     window.AGENT.sessionId = sid;
     const sess = j.session || {};
+    window.AGENT.selectedAnchors = (sess.tool_state || {}).selected_anchors || {};
     agentSetSessionTitle(sess.title || 'Untitled', sid);
     agentRender(j.rendered_messages || []);
   } catch (e) { console.error('agentLoadSession', e); }
@@ -11263,16 +11511,126 @@ function renderToolResultCard(result) {
     <span class="summary">${escapeHtml(summary)}</span>
     <span class="chevron">›</span>
   `;
+
   const body = document.createElement('div');
   body.className = 'body';
   const pre = document.createElement('pre');
   try { pre.textContent = JSON.stringify(ok ? inner : result, null, 2); }
   catch(e) { pre.textContent = String(result); }
   body.appendChild(pre);
+
   card.appendChild(head);
   card.appendChild(body);
   head.addEventListener('click', () => card.classList.toggle('open'));
+
+  // Phase B of the director workflow: when the result carries
+  // `candidates`, render an interactive thumbnail grid below the head.
+  // The card stays expanded by default so the user can immediately pick.
+  if (ok && inner && Array.isArray(inner.candidates) && inner.candidates.length > 0) {
+    card.classList.add('open');                    // open by default
+    const grid = renderAnchorGrid(inner);
+    card.appendChild(grid);
+  }
   return card;
+}
+
+function renderAnchorGrid(payload) {
+  const wrap = document.createElement('div');
+  wrap.className = 'anchor-grid-wrap';
+  const label = payload.shot_label || 'shot';
+  const prompt = payload.prompt || '';
+  const engine = payload.engine || '';
+
+  const meta = document.createElement('div');
+  meta.className = 'anchor-grid-meta';
+  meta.innerHTML = `
+    <span class="label-pill">${escapeHtml(label)}</span>
+    <span>${payload.candidates.length} candidates · ${escapeHtml(engine)}</span>
+    <span style="flex:1"></span>
+    <span style="font-size:10px">click to pick</span>
+  `;
+  wrap.appendChild(meta);
+
+  if (prompt) {
+    const p = document.createElement('div');
+    p.className = 'anchor-prompt';
+    p.textContent = prompt;
+    wrap.appendChild(p);
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'anchor-grid';
+
+  const selected = window.AGENT.selectedAnchors || {};
+  const currentPick = (selected[label] || {}).png_path;
+
+  for (const cand of payload.candidates) {
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'anchor-cell' + (cand.png_path === currentPick ? ' selected' : '');
+    cell.dataset.shotLabel = label;
+    cell.dataset.pngPath = cand.png_path;
+
+    const img = document.createElement('img');
+    img.src = '/image?path=' + encodeURIComponent(cand.png_path);
+    img.alt = label + ' candidate';
+    img.loading = 'lazy';
+    cell.appendChild(img);
+
+    const check = document.createElement('span');
+    check.className = 'check';
+    check.textContent = '✓';
+    cell.appendChild(check);
+
+    if (typeof cand.seed === 'number' && cand.seed >= 0) {
+      const s = document.createElement('span');
+      s.className = 'seed';
+      s.textContent = 'seed ' + cand.seed;
+      cell.appendChild(s);
+    }
+    if (cand.engine) {
+      const e = document.createElement('span');
+      e.className = 'engine-tag';
+      e.textContent = cand.engine;
+      cell.appendChild(e);
+    }
+
+    cell.addEventListener('click', () => agentPickAnchor(label, cand, grid));
+    grid.appendChild(cell);
+  }
+
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+async function agentPickAnchor(label, cand, gridEl) {
+  if (!window.AGENT.sessionId) return;
+  // Optimistic UI: mark this cell selected, deselect siblings
+  if (gridEl) {
+    gridEl.querySelectorAll('.anchor-cell').forEach(c => c.classList.remove('selected'));
+    const me = gridEl.querySelector(`[data-png-path="${CSS.escape(cand.png_path)}"]`);
+    if (me) me.classList.add('selected');
+  }
+  window.AGENT.selectedAnchors[label] = cand;
+
+  try {
+    const r = await fetch(
+      '/agent/sessions/' + encodeURIComponent(window.AGENT.sessionId) + '/anchors/select',
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({shot_label: label, png_path: cand.png_path}),
+      }
+    );
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      alert('Could not save selection: ' + (j.error || ('HTTP ' + r.status)));
+      return;
+    }
+    window.AGENT.selectedAnchors = j.all_selected || window.AGENT.selectedAnchors;
+  } catch (e) {
+    console.error('agentPickAnchor', e);
+  }
 }
 
 function summarizeToolCall(call) {
@@ -11489,12 +11847,24 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ---- Engine settings drawer -----------------------------------------------
+async function agentRefreshImageConfig() {
+  try {
+    const r = await fetch('/agent/image/config');
+    const j = await r.json();
+    window.AGENT.imageConfig = j;
+    return j;
+  } catch (e) {
+    return null;
+  }
+}
+
 function openAgentSettings() {
-  agentRefreshConfig().then(() => {
+  Promise.all([agentRefreshConfig(), agentRefreshImageConfig()]).then(() => {
     const modal = document.getElementById('agentSettingsModal');
     if (!modal) return;
     const cfg = (window.AGENT.config && window.AGENT.config.engine) || {};
     const local = (window.AGENT.config && window.AGENT.config.local_server) || {};
+    const imgCfg = (window.AGENT.imageConfig && window.AGENT.imageConfig.image_engine) || {};
     document.getElementById('agentKind').value = cfg.kind || 'phosphene_local';
     document.getElementById('agentBaseUrl').value = cfg.base_url || '';
     document.getElementById('agentRemoteModel').value = cfg.kind === 'custom' ? (cfg.model || '') : '';
@@ -11503,6 +11873,22 @@ function openAgentSettings() {
       cfg.has_api_key ? '(saved key — leave blank to keep)' : 'Paste API key';
     document.getElementById('agentTemp').value = cfg.temperature ?? 0.4;
     document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 3072;
+
+    // Image-engine fields
+    document.getElementById('agentImageKind').value = imgCfg.kind || 'mock';
+    document.getElementById('agentBflModel').value = imgCfg.bfl_model || 'flux-dev';
+    document.getElementById('agentBflKey').value = '';
+    document.getElementById('agentBflKey').placeholder =
+      imgCfg.has_bfl_api_key ? '(saved key — leave blank to keep)' : 'Paste BFL API key';
+    const imgPill = document.getElementById('agentImagePill');
+    if (imgPill) {
+      const okMsg = window.AGENT.imageConfig || {};
+      imgPill.textContent = okMsg.ok === false ? 'needs config' : (imgCfg.kind || 'mock');
+      imgPill.style.color = okMsg.ok === false ? '#f49a9e' : '#9be7a4';
+      imgPill.style.borderColor = okMsg.ok === false ? 'rgba(207,34,46,0.5)' : 'rgba(46,160,67,0.5)';
+      imgPill.title = okMsg.message || '';
+    }
+    agentImageKindChanged();
 
     const sel = document.getElementById('agentLocalModel');
     sel.innerHTML = '';
@@ -11538,6 +11924,12 @@ function agentKindChanged() {
   document.getElementById('agentBaseUrlField').style.display = kind === 'custom' ? '' : 'none';
   document.getElementById('agentApiKeyField').style.display = kind === 'custom' ? '' : 'none';
   document.getElementById('agentRemoteModelField').style.display = kind === 'custom' ? '' : 'none';
+}
+
+function agentImageKindChanged() {
+  const kind = document.getElementById('agentImageKind').value;
+  document.getElementById('agentBflModelField').style.display = kind === 'bfl' ? '' : 'none';
+  document.getElementById('agentBflKeyField').style.display = kind === 'bfl' ? '' : 'none';
 }
 
 function agentLocalRefreshRow(local) {
@@ -11608,8 +12000,31 @@ async function agentSaveSettings() {
     alert('Could not save: ' + (j.error || ('HTTP ' + r.status)));
     return;
   }
+
+  // Save image-engine config too (separate file).
+  const imgPayload = {
+    kind: document.getElementById('agentImageKind').value,
+    bfl_model: document.getElementById('agentBflModel').value,
+  };
+  const bk = (document.getElementById('agentBflKey').value || '').trim();
+  if (bk) imgPayload.bfl_api_key = bk;
+  try {
+    const ir = await fetch('/agent/image/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(imgPayload),
+    });
+    const ij = await ir.json();
+    if (!ir.ok || ij.error) {
+      alert('Image config could not be saved: ' + (ij.error || ('HTTP ' + ir.status)));
+    }
+  } catch(e) {
+    alert('Image config save failed: ' + e);
+  }
+
   closeAgentSettings();
   await agentRefreshConfig();
+  await agentRefreshImageConfig();
 }
 
 // Initial workflow tab restore from localStorage.

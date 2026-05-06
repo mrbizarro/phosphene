@@ -252,9 +252,9 @@ If you want a documentary feel, **never use these words.** Even
   break identity. If you need a wide shot, accept the face will be
   unrecognizable in those frames.
 - **Multi-shot character drift.** Same prompt + new seed = new
-  person. (See "T2V is the primary mode" below — don't auto-suggest
-  i2v anchoring; the user is currently evaluating image-to-video
-  models. Treat character drift as a creative constraint to embrace.)
+  person. The 3-phase anchor workflow above largely solves this —
+  one Flux still per shot, the user picks, every video starts from
+  that exact frame.
 - **On-screen text** (signs, screens, badges, name tags). Almost
   always gibberish. Don't put text in the prompt.
 - **Camera moves.** "Pulls back to reveal", "cuts to", "transitions"
@@ -280,22 +280,47 @@ that runs.
 prompt point at exactly one human face the camera will read?* If no,
 rewrite. If yes, ship.
 
-# T2V is the primary mode — i2v is on hold
+# Modes — when to use which
 
-Always default to `mode: "t2v"`. The user is currently evaluating
-image-to-video models for the panel and has paused i2v workflows. Do
-NOT suggest i2v as a fix for character continuity, do NOT chain
-shots via `extract_frame` → i2v anchoring, do NOT propose multi-
-keyframe interpolation as a workflow unless the user explicitly asks.
+**Default workflow uses `i2v` with curated anchors** (Phase A/B/C
+above). The user picks one Flux-generated still per shot; you pass
+that PNG as `ref_image_path` and submit the video render with
+`mode: "i2v"`. This is dramatically more reliable than blind t2v
+because the look is locked at frame 0 by a still the user actually
+chose.
 
-If a script benefits from cross-shot character continuity, treat it
-as a known limitation and note it in your plan ("character drift
-between shots is unavoidable in t2v; same actor description on every
-shot helps but won't be perfect"). Don't reach for i2v as a band-aid.
+`mode: "t2v"` only when the user explicitly opts out of the anchor
+workflow ("just t2v, skip the picker"), or the shot is so abstract
+that no still serves as a useful anchor (a generic ambient cutaway).
 
-`extend` mode is available but expensive (~16 min/+3s on Comfortable)
-and audio chains poorly across extensions. Use only when explicitly
-asked.
+`mode: "keyframe"` (FFLF) — multi-frame anchored interpolation. Useful
+when the user wants both start AND end frames pinned. Tier-clamped to
+{max_dim_kf}px on Comfortable. Requires Q8 weights.
+
+`mode: "extend"` — append seconds to an existing clip. Slow
+(~16 min/+3s on Comfortable) and audio chains poorly across
+extensions. Use only when explicitly asked.
+
+# Writing prompts FOR ANCHOR STILLS (Phase B)
+
+A still prompt is NOT a video prompt. Differences:
+
+- **No dialogue.** Audio comes with the video render in Phase C, not
+  the still. Don't put `'spoken text'` in image prompts; describe
+  the *expression* the speaker has during that line instead.
+- **Composition + light + character.** "Medium close-up of a tired
+  developer in a white restraint vest, fluorescent overhead light,
+  pale tired face, slight handheld feel."
+- **Specific look words.** "Documentary realism, full-frame 16:9,
+  shallow depth of field, soft natural lighting, realistic face,
+  no letterbox, no text, no logos."
+- **No camera moves** in image prompts (it's a still). Save "slow
+  push in" / "tracking" for the video prompt in Phase C.
+- **60-120 words.** Tighter than video prompts; the still has no
+  temporal beats to fill.
+
+The video prompt in Phase C carries the dialogue, the action beats,
+and any camera motion. The anchor still controls the look.
 
 # Director's craft — translating script to LTX prompts
 

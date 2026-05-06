@@ -648,6 +648,106 @@ def _write_session_manifest(args: dict, ops: PanelOps, session: dict) -> dict:
     }
 
 
+@tool("generate_shot_images")
+def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Generate candidate anchor stills for ONE shot.
+
+    Used in the director-collaboration workflow:
+      Phase A: agent calls this for each shot — 4 candidates appear in chat.
+      Phase B: user picks the best one (UI thumbnail click).
+      Phase C: agent submits the i2v video render with the chosen anchor.
+
+    Args:
+      shot_label: str (required) — the same label you'll pass to submit_shot
+                                   in phase C, so anchors and renders match.
+      prompt: str (required) — visual description for the still. Focus on
+                              framing, lighting, character, expression,
+                              setting. Do NOT include dialogue (audio comes
+                              with the video render, not the still). Keep
+                              it 60-120 words.
+      n: int = 4 — number of candidates (1-8). 4 is the sweet spot.
+      aspect: "16:9" | "9:16" | "1:1" | "4:3" | "21:9" | "3:4" = "16:9"
+      seed_base: int = -1 — when >= 0, candidates use seed_base + i so the
+                            run is reproducible. Use -1 for random seeds.
+
+    Returns: {shot_label, prompt, candidates: [{png_path, seed, ...}, ...],
+              elapsed_seconds, engine}.
+
+    The UI renders the candidates as a clickable thumbnail grid in the
+    tool-result card. When the user clicks one, that selection is recorded
+    in `session.tool_state["selected_anchors"][shot_label]`. The agent
+    can read the selections later via `get_selected_anchors`.
+    """
+    from agent import image_engine as _image_engine
+
+    label = (args.get("shot_label") or "").strip() or "untitled"
+    prompt = (args.get("prompt") or "").strip()
+    if not prompt:
+        raise _ToolValidationError("prompt is required")
+    n = max(1, min(8, int(args.get("n", 4))))
+    aspect = args.get("aspect", "16:9")
+    seed_base = int(args.get("seed_base", -1))
+
+    # Image engine config travels in PanelOps.capabilities so tools.py
+    # stays free of panel imports.
+    cfg_dict = (ops.capabilities or {}).get("image_engine_config") or {}
+    cfg = _image_engine.ImageEngineConfig(**cfg_dict)
+
+    safe_label = re.sub(r"[^a-z0-9_-]", "_", label.lower())[:40] or "untitled"
+    sid = session.get("session_id") or "session"
+    out_dir = ops.uploads_dir / "agentflow" / sid / safe_label
+
+    t0 = time.time()
+    candidates = _image_engine.generate(
+        prompt=prompt, n=n, aspect=aspect,
+        output_dir=out_dir,
+        base_seed=(seed_base if seed_base >= 0 else None),
+        config=cfg,
+    )
+    elapsed = round(time.time() - t0, 2)
+
+    # Track in session state.
+    session.setdefault("anchor_candidates", {})
+    session["anchor_candidates"][label] = {
+        "prompt": prompt,
+        "candidates": candidates,
+        "generated_at": time.time(),
+    }
+
+    return {
+        "shot_label": label,
+        "prompt": prompt,
+        "candidates": candidates,
+        "engine": cfg.kind,
+        "elapsed_seconds": elapsed,
+    }
+
+
+@tool("get_selected_anchors")
+def _get_selected_anchors(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Return the user's anchor selections so far.
+
+    Between phase B (generate) and phase C (render), the user clicks
+    thumbnails in the UI; those clicks are recorded in
+    `session.tool_state["selected_anchors"]`. Call this at the START of
+    phase C (when the user types "render") to discover which still goes
+    with which shot, then submit each video with `mode: "i2v"` and the
+    matching `ref_image_path`.
+
+    Returns: {selected_anchors, missing, total_candidates, total_selected}.
+    `missing` is a list of shot_labels with candidates but no user pick.
+    """
+    selected = session.get("selected_anchors", {})
+    candidates = session.get("anchor_candidates", {})
+    missing = [lbl for lbl in candidates.keys() if lbl not in selected]
+    return {
+        "selected_anchors": selected,
+        "missing": missing,
+        "total_candidates": len(candidates),
+        "total_selected": len(selected),
+    }
+
+
 @tool("upload_image")
 def _upload_image(args: dict, ops: PanelOps, session: dict) -> dict:
     """Resolve an image path the user attached to the chat.
