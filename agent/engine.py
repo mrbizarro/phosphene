@@ -37,7 +37,12 @@ class EngineConfig:
     model: str = "mlx-community/gemma-3-12b-it-4bit"
     api_key: str = ""
     temperature: float = 0.4
-    max_tokens: int = 3072
+    # 8192 was 3072 — reasoning-class models (Qwen 3.6, DeepSeek R1) put
+    # their full chain-of-thought into the response, separately from the
+    # final answer, and 3k tokens isn't enough room for both. Symptom on
+    # the older budget: content="", finish_reason="length", and the agent
+    # appears "stuck" because the runtime sees an empty assistant message.
+    max_tokens: int = 8192
     # mlx-lm.server boot args — only used when kind == "phosphene_local".
     # `local_model_path` may be a Hugging Face id ("Qwen/Qwen3-30B-A3B-Instruct-4bit")
     # OR an absolute path to a local model dir (the bundled Gemma path).
@@ -185,6 +190,32 @@ def chat(messages: list[dict], config: EngineConfig,
     content = msg.get("content") or ""
     finish = data["choices"][0].get("finish_reason") or "stop"
     usage = data.get("usage") or {}
+
+    # Reasoning-model handling. mlx-lm.server (and similar) split a
+    # thinking model's output into `message.reasoning` (chain-of-thought)
+    # and `message.content` (final answer). When max_tokens is too small,
+    # reasoning consumes the budget and content comes back empty with
+    # finish_reason="length" — the agent gets nothing and the chat
+    # appears "stuck". Two recovery paths:
+    #   1. Empty content + non-empty reasoning + finish="length" → raise
+    #      a clear error so the user knows to bump max_tokens.
+    #   2. Empty content + non-empty reasoning + finish="stop" → use
+    #      the reasoning as content. This is unusual (the model
+    #      decided to put its answer in the thinking block) but better
+    #      than silently dropping output.
+    reasoning = msg.get("reasoning") or ""
+    if not content and reasoning:
+        if finish == "length":
+            raise RuntimeError(
+                "Reasoning model truncated mid-thought "
+                f"({len(reasoning)} chars of reasoning, no answer). "
+                f"Bump 'Max tokens' in agent settings — current is "
+                f"{config.max_tokens}; try 12000+ for Qwen 3.6 / DeepSeek R1."
+            )
+        # No length issue but content is empty — fall back to reasoning
+        # so SOMETHING surfaces in the chat.
+        content = reasoning
+
     return ChatResult(content=content, finish_reason=finish, usage=usage,
                       model=data.get("model", config.model))
 

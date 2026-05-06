@@ -3443,7 +3443,7 @@ def _default_agent_engine_config() -> agent_engine.EngineConfig:
         local_model_path=str(GEMMA),
         api_key="",
         temperature=0.4,
-        max_tokens=3072,
+        max_tokens=8192,
     )
 
 
@@ -7843,10 +7843,22 @@ HTML = r"""<!doctype html>
       letter-spacing: 0.3px;
       user-select: none;
     }
+    /* Phosphene-branded avatar — circular logo on a dark background.
+       Replaces the prior orange "C" placeholder so the agent reads as
+       Phosphene, not a generic chat bot. The logo is the same circular
+       glyph used as the favicon and in the offline banner. */
     .agent-avatar.claude {
-      background: linear-gradient(135deg, #cc7a3a, #d18b4f);
-      color: white;
-      box-shadow: 0 0 0 1px rgba(204,122,58,0.3);
+      background: radial-gradient(circle at 50% 50%, #1a0e2e 0%, #0a0518 70%);
+      color: transparent;
+      padding: 2px;
+      box-shadow: 0 0 0 1px rgba(187, 89, 233, 0.25);
+      overflow: hidden;
+    }
+    .agent-avatar.claude::before {
+      content: '';
+      display: block;
+      width: 100%; height: 100%;
+      background: url('/assets/favicon-64.png') center/contain no-repeat;
     }
     .agent-avatar.user {
       background: var(--panel-2);
@@ -10693,7 +10705,7 @@ HTML = r"""<!doctype html>
       </div>
       <div class="field">
         <label>Max tokens</label>
-        <input type="number" id="agentMaxTokens" min="256" max="32768" step="256" value="3072">
+        <input type="number" id="agentMaxTokens" min="256" max="32768" step="256" value="8192">
       </div>
     </div>
 
@@ -14685,14 +14697,17 @@ function renderMessage(m) {
 
   const av = document.createElement('div');
   av.className = `agent-avatar ${m.kind === 'user' ? 'user' : 'claude'}`;
-  av.textContent = m.kind === 'user' ? 'U' : 'C';
+  // User shows initial "U"; assistant shows the circular Phosphene logo
+  // via CSS background — leave textContent empty for assistant so the
+  // ::before sprite is visible.
+  av.textContent = m.kind === 'user' ? 'U' : '';
 
   const body = document.createElement('div');
   body.className = 'agent-msg-body';
 
   const name = document.createElement('div');
   name.className = 'agent-msg-name';
-  name.textContent = m.kind === 'user' ? 'You' : 'Claude';
+  name.textContent = m.kind === 'user' ? 'You' : 'Phosphene';
 
   body.appendChild(name);
 
@@ -15068,7 +15083,7 @@ function renderTypingRow(msg) {
   row.id = 'agentTypingRow';
   const av = document.createElement('div');
   av.className = 'agent-avatar claude';
-  av.textContent = 'C';
+  av.textContent = '';            // CSS ::before paints the Phosphene logo
   const bubble = document.createElement('div');
   bubble.className = 'agent-typing-bubble';
   bubble.innerHTML = `
@@ -15565,7 +15580,7 @@ function openAgentSettings() {
       document.getElementById('agentAnthropicCustomModel').style.display = 'none';
     }
     document.getElementById('agentTemp').value = cfg.temperature ?? 0.4;
-    document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 3072;
+    document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 8192;
 
     // Image-engine fields
     document.getElementById('agentImageKind').value = imgCfg.kind || 'mock';
@@ -15809,7 +15824,7 @@ async function agentSaveSettings() {
   const payload = {
     kind,
     temperature: parseFloat(document.getElementById('agentTemp').value || '0.4'),
-    max_tokens: parseInt(document.getElementById('agentMaxTokens').value || '3072', 10),
+    max_tokens: parseInt(document.getElementById('agentMaxTokens').value || '8192', 10),
   };
   if (kind === 'phosphene_local') {
     const sel = document.getElementById('agentLocalModel');
