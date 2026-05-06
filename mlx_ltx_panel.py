@@ -6894,6 +6894,52 @@ HTML = r"""<!doctype html>
       max-height: 80px; overflow-y: auto;
     }
 
+    /* ---- Fullscreen / Focus mode ---- */
+    /* Toggle via .agent-fullscreen on <body>. Hides every chrome
+       element except the agent pane itself and pins the pane to the
+       full viewport. ESC also exits. */
+    body.agent-fullscreen header,
+    body.agent-fullscreen .bottom-pane,
+    body.agent-fullscreen .form-pane > :not(.agent-pane),
+    body.agent-fullscreen .workflow-tabs {
+      display: none !important;
+    }
+    body.agent-fullscreen .layout {
+      max-width: none; padding: 0; margin: 0;
+      height: 100vh;
+      display: block;
+    }
+    body.agent-fullscreen .form-pane {
+      max-width: none; padding: 0;
+      width: 100vw; height: 100vh;
+    }
+    body.agent-fullscreen .agent-pane {
+      width: min(960px, 100vw);
+      margin: 0 auto;
+      height: 100vh; max-height: 100vh;
+      border-radius: 0; border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+      border-top: none; border-bottom: none;
+    }
+    body.agent-fullscreen .agent-chat {
+      max-height: none;
+      flex: 1;
+    }
+    /* Show a thin "Exit fullscreen" badge top-left when in fullscreen
+       so the user always knows how to get out, even if they forget
+       Esc. */
+    body.agent-fullscreen::before {
+      content: "Esc to exit fullscreen";
+      position: fixed; top: 12px; left: 14px;
+      z-index: 1000;
+      font-size: 10px; letter-spacing: 0.5px;
+      padding: 4px 9px;
+      background: var(--panel); color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      pointer-events: none;
+      opacity: 0.7;
+    }
+
     /* ---- Typing indicator ---- */
     .agent-typing-row {
       display: flex; gap: 12px;
@@ -7219,6 +7265,21 @@ HTML = r"""<!doctype html>
                 title="Start a fresh session">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" id="agentFullscreenBtn"
+                onclick="agentToggleFullscreen()" title="Expand to fullscreen (Esc to exit)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" id="agentFullscreenIconExpand">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" id="agentFullscreenIconCollapse" style="display:none">
+            <polyline points="4 14 10 14 10 20"/>
+            <polyline points="20 10 14 10 14 4"/>
+            <line x1="14" y1="10" x2="21" y2="3"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
           </svg>
         </button>
         <button type="button" class="icon-btn" onclick="openAgentSettings()" title="Settings">
@@ -8067,11 +8128,57 @@ HTML = r"""<!doctype html>
     <div class="field">
       <label>Backend</label>
       <select id="agentImageKind" onchange="agentImageKindChanged()">
-        <option value="mock">Mock (PIL placeholders, free, instant — for testing the flow)</option>
-        <option value="bfl">Black Forest Labs API (real Flux, ~$0.025/img on flux-dev)</option>
+        <option value="mock">Mock — PIL placeholders, free, instant (for testing the flow)</option>
+        <option value="mflux">Phosphene Local Flux (mflux + Flux Krea Dev) — fully on-Mac, free, ~25–60 s/img</option>
+        <option value="bfl">Black Forest Labs API — cloud Flux, ~$0.025/img on flux-dev, ~10–15 s/img</option>
       </select>
     </div>
 
+    <!-- mflux fields -->
+    <div class="field" id="agentMfluxModelField" style="display:none">
+      <label>mflux model</label>
+      <select id="agentMfluxModel" onchange="agentMfluxModelChanged()">
+        <option value="krea-dev">Flux Krea Dev — recommended (best photorealism)</option>
+        <option value="dev">Flux.1 Dev — vanilla 28-step</option>
+        <option value="schnell">Flux.1 Schnell — 4-step, fastest</option>
+        <option value="__custom__">Custom HF id / local path…</option>
+      </select>
+    </div>
+    <div class="field" id="agentMfluxCustomField" style="display:none">
+      <label>Custom model (HF repo id or local path)</label>
+      <input type="text" id="agentMfluxCustomPath" placeholder="filipstrand/FLUX.1-Krea-dev-mflux-4bit">
+      <div style="margin-top:4px;font-size:11px;color:var(--muted)">
+        Required when using a non-named model. mflux will download to <code>~/.cache/huggingface</code> on first use (~6 GB for Krea Dev 4-bit).
+      </div>
+    </div>
+    <div class="field" id="agentMfluxBaseField" style="display:none">
+      <label>Base model (when using custom path)</label>
+      <select id="agentMfluxBaseModel">
+        <option value="krea-dev">krea-dev</option>
+        <option value="dev">dev</option>
+        <option value="schnell">schnell</option>
+      </select>
+    </div>
+    <div class="row" id="agentMfluxParamsField" style="display:none">
+      <div class="field">
+        <label>Steps</label>
+        <input type="number" id="agentMfluxSteps" min="1" max="50" value="25">
+      </div>
+      <div class="field">
+        <label>Quantize (bits)</label>
+        <select id="agentMfluxQuantize">
+          <option value="4">4-bit (~6 GB, recommended)</option>
+          <option value="8">8-bit (~12 GB, sharper)</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint" id="agentMfluxInstallHint" style="display:none">
+      <strong>First-time setup:</strong> install mflux into the panel's venv with
+      <code>ltx-2-mlx/env/bin/pip install mflux</code> (one-time, ~50 MB of code; weights download separately on first generate).
+      Verify the install with <code>ltx-2-mlx/env/bin/mflux-generate --help</code>.
+    </div>
+
+    <!-- BFL fields -->
     <div class="field" id="agentBflModelField" style="display:none">
       <label>BFL model</label>
       <select id="agentBflModel">
@@ -11876,6 +11983,20 @@ function openAgentSettings() {
 
     // Image-engine fields
     document.getElementById('agentImageKind').value = imgCfg.kind || 'mock';
+    // mflux
+    const namedMfluxModels = ['krea-dev', 'dev', 'schnell'];
+    const mfModel = imgCfg.mflux_model || 'krea-dev';
+    if (namedMfluxModels.includes(mfModel)) {
+      document.getElementById('agentMfluxModel').value = mfModel;
+      document.getElementById('agentMfluxCustomPath').value = '';
+    } else {
+      document.getElementById('agentMfluxModel').value = '__custom__';
+      document.getElementById('agentMfluxCustomPath').value = mfModel;
+    }
+    document.getElementById('agentMfluxBaseModel').value = imgCfg.mflux_base_model || 'krea-dev';
+    document.getElementById('agentMfluxSteps').value = imgCfg.mflux_steps || 25;
+    document.getElementById('agentMfluxQuantize').value = String(imgCfg.mflux_quantize || 4);
+    // BFL
     document.getElementById('agentBflModel').value = imgCfg.bfl_model || 'flux-dev';
     document.getElementById('agentBflKey').value = '';
     document.getElementById('agentBflKey').placeholder =
@@ -11928,8 +12049,32 @@ function agentKindChanged() {
 
 function agentImageKindChanged() {
   const kind = document.getElementById('agentImageKind').value;
+  // mflux fields
+  const isMflux = kind === 'mflux';
+  document.getElementById('agentMfluxModelField').style.display = isMflux ? '' : 'none';
+  document.getElementById('agentMfluxParamsField').style.display = isMflux ? '' : 'none';
+  document.getElementById('agentMfluxInstallHint').style.display = isMflux ? '' : 'none';
+  if (isMflux) agentMfluxModelChanged();
+  else {
+    document.getElementById('agentMfluxCustomField').style.display = 'none';
+    document.getElementById('agentMfluxBaseField').style.display = 'none';
+  }
+  // BFL fields
   document.getElementById('agentBflModelField').style.display = kind === 'bfl' ? '' : 'none';
   document.getElementById('agentBflKeyField').style.display = kind === 'bfl' ? '' : 'none';
+}
+
+function agentMfluxModelChanged() {
+  const v = document.getElementById('agentMfluxModel').value;
+  const isCustom = v === '__custom__';
+  document.getElementById('agentMfluxCustomField').style.display = isCustom ? '' : 'none';
+  document.getElementById('agentMfluxBaseField').style.display = isCustom ? '' : 'none';
+  // For schnell, drop the recommended steps to 4
+  const stepsInput = document.getElementById('agentMfluxSteps');
+  if (stepsInput && !stepsInput.dataset.userTouched) {
+    if (v === 'schnell') stepsInput.value = 4;
+    else if (v === 'krea-dev' || v === 'dev') stepsInput.value = 25;
+  }
 }
 
 function agentLocalRefreshRow(local) {
@@ -12002,12 +12147,29 @@ async function agentSaveSettings() {
   }
 
   // Save image-engine config too (separate file).
+  const imgKind = document.getElementById('agentImageKind').value;
   const imgPayload = {
-    kind: document.getElementById('agentImageKind').value,
+    kind: imgKind,
     bfl_model: document.getElementById('agentBflModel').value,
   };
   const bk = (document.getElementById('agentBflKey').value || '').trim();
   if (bk) imgPayload.bfl_api_key = bk;
+  // mflux fields (only meaningful when kind === 'mflux', but we save them
+  // either way so the form retains the user's previous setup when they
+  // toggle backends back and forth).
+  const mfSel = document.getElementById('agentMfluxModel').value;
+  if (mfSel === '__custom__') {
+    const cp = (document.getElementById('agentMfluxCustomPath').value || '').trim();
+    if (cp) {
+      imgPayload.mflux_model = cp;
+      imgPayload.mflux_base_model = document.getElementById('agentMfluxBaseModel').value;
+    }
+  } else {
+    imgPayload.mflux_model = mfSel;
+    imgPayload.mflux_base_model = '';
+  }
+  imgPayload.mflux_steps = parseInt(document.getElementById('agentMfluxSteps').value || '25', 10);
+  imgPayload.mflux_quantize = parseInt(document.getElementById('agentMfluxQuantize').value || '4', 10);
   try {
     const ir = await fetch('/agent/image/config', {
       method: 'POST',
@@ -12027,10 +12189,43 @@ async function agentSaveSettings() {
   await agentRefreshImageConfig();
 }
 
+// ---- Fullscreen / focus mode ---------------------------------------------
+function agentToggleFullscreen(force) {
+  // `force === true` to enter, `false` to exit, undefined to toggle
+  const cur = document.body.classList.contains('agent-fullscreen');
+  const next = (typeof force === 'boolean') ? force : !cur;
+  document.body.classList.toggle('agent-fullscreen', next);
+  const btn = document.getElementById('agentFullscreenBtn');
+  if (btn) btn.title = next ? 'Exit fullscreen (Esc)' : 'Expand to fullscreen';
+  const ix = document.getElementById('agentFullscreenIconExpand');
+  const iy = document.getElementById('agentFullscreenIconCollapse');
+  if (ix) ix.style.display = next ? 'none' : '';
+  if (iy) iy.style.display = next ? '' : 'none';
+  try { localStorage.setItem('phos_agent_fullscreen', next ? '1' : ''); } catch(e) {}
+  // After collapse animation settles, scroll chat to bottom so the
+  // user keeps their place.
+  requestAnimationFrame(() => {
+    const chat = document.getElementById('agentChat');
+    if (chat) chat.scrollTop = chat.scrollHeight;
+  });
+}
+
+// Esc to exit fullscreen.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('agent-fullscreen')) {
+    agentToggleFullscreen(false);
+  }
+});
+
 // Initial workflow tab restore from localStorage.
 try {
   const saved = localStorage.getItem('phos_workflow');
   if (saved === 'agent') workflowSwitch('agent');
+  // Restore fullscreen state, but ONLY when the agent tab is the
+  // active workflow — otherwise we'd hide the manual form too.
+  if (localStorage.getItem('phos_agent_fullscreen') && saved === 'agent') {
+    agentToggleFullscreen(true);
+  }
 } catch(e) {}
 </script>
 </body>

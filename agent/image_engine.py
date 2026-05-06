@@ -45,10 +45,24 @@ class ImageEngineConfig:
     GET masks `bfl_api_key` (returns `has_bfl_api_key` bool only).
     """
 
-    kind: str = "mock"                              # "mock" | "bfl"
+    kind: str = "mock"                              # "mock" | "mflux" | "bfl"
+
+    # BFL (cloud)
     bfl_api_key: str = ""
-    bfl_model: str = "flux-dev"                     # flux-dev | flux-pro | flux-schnell
+    bfl_model: str = "flux-dev"                     # flux-dev | flux-pro | flux-pro-1.1 | flux-schnell
     bfl_base_url: str = "https://api.bfl.ml/v1"
+
+    # mflux (local, MLX-native — `pip install mflux`)
+    # `mflux_model` accepts either a named shorthand the CLI understands
+    # ("krea-dev", "dev", "schnell", "dev-fill") OR a HF repo id / local
+    # path (e.g. "filipstrand/FLUX.1-Krea-dev-mflux-4bit"). When the value
+    # is a path, `mflux_base_model` MUST be set (krea-dev / dev / schnell)
+    # so mflux knows the architecture to instantiate.
+    mflux_model: str = "krea-dev"
+    mflux_base_model: str = ""                      # only needed when mflux_model is a path/HF id
+    mflux_steps: int = 25                           # 25 for dev/krea, 4 for schnell
+    mflux_quantize: int = 4                         # 4 | 8 | 16 — 4-bit fits comfortably on 64 GB
+    mflux_python_path: str = ""                     # optional override for `mflux-generate` location
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -86,6 +100,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
 
     if config.kind == "mock":
         return _generate_mock(prompt, n, width, height, output_dir, base_seed)
+    if config.kind == "mflux":
+        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config)
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
@@ -99,11 +115,43 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
             return True, "mock engine ready (PIL available)"
         except ImportError:
             return False, "PIL not installed — pip install Pillow"
+    if config.kind == "mflux":
+        bin_path = _resolve_mflux_bin(config)
+        if not bin_path:
+            return False, ("mflux not installed. Run: "
+                           "ltx-2-mlx/env/bin/pip install mflux")
+        return True, f"mflux ready at {bin_path}; model={config.mflux_model}"
     if config.kind == "bfl":
         if not config.bfl_api_key:
             return False, "BFL API key not configured"
         return True, f"BFL configured for {config.bfl_model}"
     return False, f"unknown engine kind: {config.kind!r}"
+
+
+def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
+    """Find the `mflux-generate` executable.
+
+    Order:
+      1. config.mflux_python_path (explicit override — useful when mflux
+         is installed in a venv outside the panel's standard location)
+      2. The Phosphene panel's bundled venv (ltx-2-mlx/env/bin/mflux-generate)
+      3. shutil.which("mflux-generate") — system PATH fallback
+    """
+    import os
+    import shutil
+
+    if config.mflux_python_path:
+        cand = Path(config.mflux_python_path)
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    panel_venv_bin = repo_root / "ltx-2-mlx" / "env" / "bin" / "mflux-generate"
+    if panel_venv_bin.is_file() and os.access(panel_venv_bin, os.X_OK):
+        return str(panel_venv_bin)
+
+    found = shutil.which("mflux-generate")
+    return found
 
 
 # ---- Backends ---------------------------------------------------------------
@@ -173,6 +221,97 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
         img.save(out_path, "PNG")
         results.append({
             "png_path": str(out_path), "seed": seed, "engine": "mock",
+            "width": width, "height": height,
+        })
+    return results
+
+
+def _generate_mflux(prompt: str, n: int, width: int, height: int,
+                    output_dir: Path, base_seed: int | None,
+                    config: ImageEngineConfig) -> list[dict]:
+    """Subprocess `mflux-generate` once per candidate.
+
+    Loads the model fresh on every call (mflux's CLI doesn't keep it
+    warm), so first call eats ~10-30 s of model-load time per
+    candidate. For batch generation this is the simplest path; if it
+    becomes a real bottleneck, swap in a long-lived `mflux_warm_helper.py`
+    subprocess that mirrors `mlx_warm_helper.py`.
+
+    Recommended model: **Flux Krea Dev** (`krea-dev`) — Krea AI's
+    fine-tune of Flux.1 Dev, generally regarded as the best
+    photorealistic Flux variant. Particularly strong for documentary /
+    interview / sterile-clinic looks the agent gravitates toward. The
+    mflux 4-bit weights ship at filipstrand/FLUX.1-Krea-dev-mflux-4bit.
+    First run downloads ~6 GB to ~/.cache/huggingface.
+    """
+    import os
+    import subprocess
+
+    bin_path = _resolve_mflux_bin(config)
+    if not bin_path:
+        raise RuntimeError(
+            "mflux-generate not found. Install mflux into the panel's "
+            "venv: `ltx-2-mlx/env/bin/pip install mflux` "
+            "(see docs/AGENTIC_FLOWS.md § Image generation backends). "
+            "First-run model download is ~6 GB."
+        )
+
+    results: list[dict] = []
+    for i in range(n):
+        seed = (base_seed + i) if base_seed is not None else None
+        out_path = output_dir / f"cand_{i:02d}_mflux.png"
+        cmd = [
+            bin_path,
+            "--model", config.mflux_model,
+            "--prompt", prompt,
+            "--output", str(out_path),
+            "--steps", str(config.mflux_steps),
+            "--width", str(width),
+            "--height", str(height),
+            "-q", str(config.mflux_quantize),
+        ]
+        if seed is not None:
+            cmd.extend(["--seed", str(seed)])
+        # When `--model` is a HuggingFace id or local path (i.e. contains
+        # a slash or starts with `~` or `/`), mflux needs `--base-model`
+        # to know which Flux architecture to instantiate.
+        looks_like_path = ("/" in config.mflux_model
+                           or config.mflux_model.startswith("~"))
+        if looks_like_path and config.mflux_base_model:
+            cmd.extend(["--base-model", config.mflux_base_model])
+
+        # Inherit env so HF_HOME / HF_TOKEN are honored for the
+        # one-time weight download. Capture stderr so the user gets a
+        # readable error if anything explodes.
+        env = os.environ.copy()
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, env=env, timeout=420,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"mflux-generate timed out after 420s on candidate {i}. "
+                f"First run downloads weights — give it longer for the "
+                f"first candidate, or pre-download with: "
+                f"`{bin_path} --model {config.mflux_model} "
+                f"--prompt 'warmup' --steps 1 --output /tmp/_mflux_warmup.png`"
+            ) from e
+        if result.returncode != 0:
+            err = result.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"mflux-generate failed (exit {result.returncode}) "
+                f"on candidate {i}: {err[:600]}"
+            )
+        if not out_path.is_file():
+            raise RuntimeError(
+                f"mflux-generate exited 0 but produced no file at {out_path}"
+            )
+
+        results.append({
+            "png_path": str(out_path),
+            "seed": seed if seed is not None else 0,
+            "engine": "mflux",
+            "model": config.mflux_model,
             "width": width, "height": height,
         })
     return results

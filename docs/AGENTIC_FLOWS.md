@@ -15,25 +15,44 @@ Panel header → form-pane → top tab strip: **Manual | Agentic Flows**.
 Manual is the existing form. Agentic Flows is the new tab. Selection
 persists in localStorage.
 
-## How a session goes
+## How a session goes (3-phase director loop)
 
-1. **You paste** a brief, an idea, or a full script. The composer is
-   one big textarea — Cmd/Ctrl+Enter sends.
-2. **The agent plans in plain text first.** A numbered shot list with
-   one-line visual descriptions, durations, and a total wall-time
-   estimate. Nothing is queued yet.
-3. **You approve.** "go", "queue it", "yes" — anything that reads as
-   confirmation. Tweak the plan in the chat first if you want.
-4. **The agent submits each shot** by calling `submit_shot` on the
-   panel's existing `/queue/add` endpoint. Each submission produces a
-   tool-result chip in the chat with the job id and ETA.
-5. **The agent writes a `manifest.json`** listing the queued shots in
-   cut order. Lands in `mlx_outputs/agentflow_<session_id>/`.
-6. **The agent calls `finish`** — the loop ends and you're returned
-   control. The manual queue keeps rendering while you sleep.
+The default workflow is collaboration: agent generates candidate
+stills, you pick the best one per shot, agent renders videos with
+your picks as i2v anchors. Locking the look BEFORE the 4-minute
+video render dramatically reduces "guess and pray" t2v failures.
+
+1. **Phase A — You paste** a brief, an idea, or a full script. The
+   composer is one big textarea — Cmd/Ctrl+Enter sends.
+2. **Agent plans in plain text** with a master style suffix, director's
+   adjustments, numbered shot list. Nothing queued yet.
+3. **Phase B — Agent generates anchor candidates.** For each shot it
+   calls `generate_shot_images` (4 candidates default). Each call
+   appears as a tool-result card with a thumbnail grid below. Click
+   a thumbnail to pick — green border + checkmark. Selection persists
+   in `session.tool_state.selected_anchors`.
+4. **Phase C — You type "render".** Agent reads `get_selected_anchors`,
+   submits each shot via `submit_shot` with `mode: "i2v"` and
+   `ref_image_path: <picked anchor>`, writes `manifest.json`, calls
+   `finish`. Renders run overnight on your locked anchors.
+
+You can opt out of the anchor flow ("just t2v, skip the picker") for
+abstract cutaways or fast tests, in which case the agent skips
+phase B and submits straight to t2v.
 
 The agent intentionally does **not** auto-stitch the clips. It writes
 the manifest; the cut belongs to you.
+
+## Fullscreen / focus mode
+
+Click the expand icon in the agent header (between the "+" new-chat
+button and the gear) to spread the chat across the full window —
+the panel header, bottom pane (Now/Queue/Recent/Logs), and workflow
+tab strip all fold away. **Esc** exits. State persists in
+localStorage so reopening the tab keeps you in fullscreen.
+
+Useful when planning a long multi-shot piece: more vertical real
+estate for the conversation, less chrome competing for attention.
 
 ## Engine options
 
@@ -145,6 +164,68 @@ agent/runtime.py
     │
     └── loop until no action block OR finish OR max_steps
 ```
+
+## Image generation backends (Phase B)
+
+The agent uses a pluggable image engine to generate anchor stills.
+Configure under *Settings → Image generation*. Three backends ship:
+
+### `mock` (default — zero setup)
+
+Flat-colored PNGs drawn with PIL. Each candidate carries a
+distinguishable hue + the prompt excerpt overlaid in white. Free,
+instant, useful for testing the pick-flow without spending a dime.
+Not for actual production renders — just verifies the UX.
+
+### `mflux` — Phosphene Local Flux (recommended for local)
+
+`mflux` is a MLX-native port of Flux that runs on Apple Silicon. It
+ships with several Flux variants; **Flux Krea Dev** (`krea-dev`) is
+the recommended default — Krea AI's fine-tune of Flux.1 Dev with
+better photorealism, stronger documentary / interview / clinical
+aesthetics. Particularly well-suited to the kinds of looks the agent
+gravitates toward.
+
+Install once into the panel's bundled venv:
+
+```bash
+ltx-2-mlx/env/bin/pip install mflux
+```
+
+That brings the `mflux-generate` CLI into `ltx-2-mlx/env/bin/` where
+the panel auto-discovers it. First generate downloads the Krea Dev
+4-bit weights to `~/.cache/huggingface` (~6 GB), one-time.
+
+Performance on M4 Max 64 GB: ~25–60 s per image (model loads each
+call — first candidate per shot is the slow one, subsequent ones
+amortize once HF caches are warm). 4 candidates per shot ≈ 2–4 min.
+12 shots ≈ 25–50 min for a complete plan's anchors.
+
+Settings exposed:
+- **Model**: `krea-dev` (recommended) / `dev` / `schnell` / Custom HF id
+- **Custom path**: e.g. `filipstrand/FLUX.1-Krea-dev-mflux-4bit`
+- **Base model**: required when Custom path is used (`krea-dev` /
+  `dev` / `schnell`)
+- **Steps**: 25 for dev/krea, 4 for schnell
+- **Quantize**: 4 (~6 GB) or 8 (~12 GB, sharper)
+
+### `bfl` — Black Forest Labs API (recommended for cloud)
+
+The canonical Flux source. `flux-dev` ≈ $0.025/img, `flux-pro` ≈
+$0.05, `flux-pro-1.1` ≈ $0.04, `flux-schnell` ≈ $0.003. Roughly
+10–15 s per image. Get a key at `https://api.bfl.ml`; paste into
+*Settings → Image generation → BFL API key*. Stored in
+`state/agent_image_config.json`, only sent as the `X-Key` header.
+
+### Future backends
+
+The interface is open — `_generate_<kind>()` in
+`agent/image_engine.py` is the only place to add. Likely candidates:
+
+- **DiffusionKit / CoreML** for ANE acceleration (~10 s / image, fully
+  local). Heavier install (CoreML model conversion).
+- **Replicate** API (mirrors BFL flow + supports Flux Krea hosted)
+- **fal.ai** API (very fast, generous trial credits)
 
 ## Known limitations + workarounds
 
