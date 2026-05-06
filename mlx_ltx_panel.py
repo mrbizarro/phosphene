@@ -4564,9 +4564,22 @@ class Handler(BaseHTTPRequestHandler):
             ops = _build_panel_ops()
             tools_doc = agent_runtime.render_tools_doc()
             events: list[dict] = []
+
+            # Persist after every event so a client polling
+            # /agent/sessions/<id> mid-loop sees the agent's incremental
+            # progress (plan, tool call, tool result, next message, ...)
+            # rather than a 5-minute silence followed by a single batch.
+            # mid-loop disk writes are atomic via runtime.save_session.
+            def _on_event(ev: agent_runtime.TurnEvent) -> None:
+                try:
+                    agent_runtime.save_session(sess, STATE_DIR)
+                except Exception as e:                  # noqa: BLE001
+                    push(f"agent: mid-loop save failed: {e}")
+
             try:
                 for ev in agent_runtime.run_turn(
                     sess, user_msg, ops, tools_doc=tools_doc,
+                    on_event=_on_event,
                 ):
                     events.append({"kind": ev.kind, "payload": ev.payload})
             except Exception as e:                       # noqa: BLE001
@@ -6290,23 +6303,25 @@ HTML = r"""<!doctype html>
     }
     .models-foot { font-size: 11px; color: var(--muted); margin-top: 14px; line-height: 1.4; }
 
-    /* ============== AGENTIC FLOWS UI (workflow tabs + chat) ===============
-       The form-pane gets a top strip switching between the manual form and
-       the chat-driven planner. Manual is the default; Agent shows a chat,
-       a small engine status row, and a settings drawer for picking the LLM.
+    /* ============== AGENTIC FLOWS — chat UI =====================
+       Aim: feel like Claude.ai — generous typography, soft surfaces,
+       avatars, expandable tool cards, markdown rendering. The form-pane
+       gets a top strip switching between the manual form and the chat;
+       the chat itself runs full-height with header / scroll / composer.
     */
     .workflow-tabs {
       display: flex; gap: 4px;
-      padding: 6px; margin: 0 0 12px 0;
+      padding: 5px; margin: 0 0 14px 0;
       background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
     }
     .workflow-tabs button {
       flex: 1; padding: 9px 14px;
       background: transparent; color: var(--muted);
-      border: 1px solid transparent; border-radius: 7px;
+      border: 1px solid transparent; border-radius: 8px;
       font-size: 13px; font-weight: 600; cursor: pointer;
       letter-spacing: 0.2px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
     .workflow-tabs button:hover { color: var(--text); }
     .workflow-tabs button.active {
@@ -6315,197 +6330,532 @@ HTML = r"""<!doctype html>
     }
     .workflow-tabs .new-badge {
       display: inline-block; margin-left: 6px;
-      font-size: 9px; font-weight: 700; letter-spacing: 0.4px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
       padding: 2px 6px; border-radius: 999px;
       background: var(--accent); color: white;
       vertical-align: middle;
     }
 
-    .agent-pane { display: flex; flex-direction: column; gap: 12px; }
+    /* ---- Pane wrapper ---- */
+    .agent-pane {
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      --agent-text: 14px;
+      --agent-line: 1.6;
+      --agent-bubble-pad: 14px 16px;
+      --agent-radius: 12px;
+      --avatar: 28px;
+    }
 
-    .agent-statusbar {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border-radius: 9px;
-      background: var(--panel); border: 1px solid var(--border);
-      font-size: 12px;
+    /* ---- Header ---- */
+    .agent-header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
     }
-    .agent-statusbar .label { color: var(--muted); flex: 0 0 auto; }
-    .agent-statusbar .engine { color: var(--text); font-weight: 600; flex: 1; min-width: 0;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .agent-statusbar .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--muted); flex: 0 0 auto; }
-    .agent-statusbar .dot.live { background: #2ea043; box-shadow: 0 0 0 3px rgba(46,160,67,0.18); }
-    .agent-statusbar .dot.warn { background: #d29922; }
-    .agent-statusbar .dot.bad { background: #cf222e; }
-    .agent-statusbar button {
-      background: transparent; color: var(--muted);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 5px 10px; font-size: 11px; cursor: pointer;
-    }
-    .agent-statusbar button:hover { color: var(--text); border-color: var(--accent); }
-
-    .agent-session-head {
-      display: flex; align-items: center; gap: 8px;
-      padding: 4px 4px 0;
-    }
-    .agent-session-head .title {
-      flex: 1; font-size: 12px; color: var(--muted);
+    .agent-header .engine-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 11px 5px 9px;
+      background: var(--bg-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 999px;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      max-width: 320px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .agent-session-head button {
-      background: transparent; color: var(--muted);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 4px 9px; font-size: 11px; cursor: pointer;
+    .agent-header .engine-pill:hover { border-color: var(--accent); }
+    .agent-header .engine-pill .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
     }
-    .agent-session-head button:hover { color: var(--text); border-color: var(--accent); }
+    .agent-header .engine-pill .dot.live {
+      background: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.18);
+    }
+    .agent-header .engine-pill .dot.warn { background: #d29922; }
+    .agent-header .engine-pill .dot.bad { background: #cf222e; }
+    .agent-header .session-title {
+      flex: 1; min-width: 0;
+      font-size: 13px; font-weight: 500; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-header .session-title .meta {
+      font-size: 11px; color: var(--muted); margin-left: 8px;
+    }
+    .agent-header .icon-btn {
+      width: 30px; height: 30px;
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 14px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .agent-header .icon-btn:hover {
+      color: var(--accent-bright); border-color: var(--accent);
+    }
 
+    /* ---- Sessions dropdown ---- */
+    .agent-sessions-pop {
+      position: absolute;
+      top: 52px; right: 16px;
+      width: min(380px, calc(100% - 32px));
+      max-height: 320px; overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      box-shadow: 0 14px 40px rgba(0,0,0,0.5);
+      z-index: 50;
+      display: none;
+      padding: 6px;
+    }
+    .agent-sessions-pop.open { display: block; }
+    .agent-sessions-pop .item {
+      display: block; padding: 9px 12px;
+      border-radius: 8px;
+      cursor: pointer; color: var(--text);
+      font-size: 13px;
+      transition: background 0.12s;
+    }
+    .agent-sessions-pop .item:hover { background: var(--bg-2); }
+    .agent-sessions-pop .item.active {
+      background: var(--accent-dim); color: var(--accent-bright);
+    }
+    .agent-sessions-pop .item .meta {
+      font-size: 11px; color: var(--muted);
+      margin-top: 3px;
+      display: flex; gap: 10px;
+    }
+    .agent-sessions-pop .empty {
+      padding: 14px; text-align: center;
+      font-size: 12px; color: var(--muted); font-style: italic;
+    }
+
+    /* ---- Chat scroll area ---- */
     .agent-chat {
-      display: flex; flex-direction: column; gap: 10px;
-      min-height: 260px; max-height: 60vh; overflow-y: auto;
-      padding: 12px; border-radius: 9px;
-      background: var(--bg-2); border: 1px solid var(--border);
+      flex: 1;
+      min-height: 360px; max-height: 60vh;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 24px 20px 8px;
+      scroll-behavior: smooth;
     }
-    .agent-chat:empty::before {
-      content: "Paste a script, brief, or one-line idea. The agent will plan a shot list, estimate the wall time, and queue the renders.";
-      color: var(--muted); font-style: italic; font-size: 12px;
-      max-width: 540px; line-height: 1.5; align-self: flex-start;
+    .agent-chat::-webkit-scrollbar { width: 8px; }
+    .agent-chat::-webkit-scrollbar-track { background: transparent; }
+    .agent-chat::-webkit-scrollbar-thumb {
+      background: var(--border-strong); border-radius: 4px;
     }
-    .agent-msg {
-      max-width: 92%;
-      padding: 10px 12px; border-radius: 8px;
-      font-size: 13px; line-height: 1.5;
-      white-space: pre-wrap; word-break: break-word;
-    }
-    .agent-msg.user {
-      align-self: flex-end;
-      background: var(--accent-dim); color: var(--text);
-      border: 1px solid var(--accent);
-    }
-    .agent-msg.assistant {
-      align-self: flex-start;
-      background: var(--panel); color: var(--text);
-      border: 1px solid var(--border);
-    }
-    .agent-msg.system_note {
-      align-self: center;
-      background: transparent; color: var(--muted);
-      font-style: italic; font-size: 11px; max-width: 560px;
-      text-align: center;
-    }
-    .agent-msg .tool-chip {
-      display: inline-block; margin-top: 8px;
-      padding: 3px 8px; border-radius: 999px;
-      background: rgba(47,129,247,0.12); color: var(--accent-bright);
-      border: 1px solid var(--accent);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 10px; font-weight: 600; letter-spacing: 0.2px;
-    }
-    .agent-tool-result {
-      align-self: flex-start; max-width: 92%;
-      padding: 8px 10px; border-radius: 8px;
-      background: rgba(46,160,67,0.06); border: 1px solid rgba(46,160,67,0.3);
-      color: #9be7a4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px; line-height: 1.45;
-      max-height: 200px; overflow-y: auto;
-    }
-    .agent-tool-result.error {
-      background: rgba(207,34,46,0.06); border-color: rgba(207,34,46,0.4);
-      color: #f49a9e;
-    }
-    .agent-tool-result .tool-name { color: var(--accent-bright); font-weight: 700; }
+    .agent-chat::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 
+    /* ---- Empty state ---- */
+    .agent-empty {
+      max-width: 540px; margin: 24px auto 12px;
+      text-align: center; color: var(--muted);
+      animation: agent-fade-in 0.4s ease;
+    }
+    .agent-empty .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      border: 1px solid var(--accent);
+      font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .agent-empty h3 {
+      font-size: 18px; font-weight: 600; color: var(--text);
+      margin: 0 0 10px;
+    }
+    .agent-empty p {
+      font-size: 13px; line-height: 1.55; margin: 6px 0;
+    }
+    .agent-empty .examples {
+      display: flex; flex-direction: column; gap: 8px;
+      max-width: 420px; margin: 24px auto 0;
+    }
+    .agent-empty .example {
+      text-align: left;
+      padding: 12px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border); border-radius: 10px;
+      cursor: pointer;
+      color: var(--text); font-size: 13px;
+      transition: border-color 0.15s, background 0.15s;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .agent-empty .example:hover {
+      border-color: var(--accent);
+      background: var(--panel);
+    }
+    .agent-empty .example .arrow {
+      color: var(--muted); flex-shrink: 0;
+      transition: transform 0.15s, color 0.15s;
+    }
+    .agent-empty .example:hover .arrow {
+      color: var(--accent-bright);
+      transform: translateX(2px);
+    }
+
+    /* ---- Message rows ---- */
+    .agent-msg-row {
+      display: flex; gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 22px;
+      animation: agent-fade-in 0.3s ease;
+    }
+    @keyframes agent-fade-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .agent-avatar {
+      width: var(--avatar); height: var(--avatar);
+      border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700;
+      flex-shrink: 0;
+      letter-spacing: 0.3px;
+      user-select: none;
+    }
+    .agent-avatar.claude {
+      background: linear-gradient(135deg, #cc7a3a, #d18b4f);
+      color: white;
+      box-shadow: 0 0 0 1px rgba(204,122,58,0.3);
+    }
+    .agent-avatar.user {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+    }
+    .agent-msg-body { flex: 1; min-width: 0; }
+    .agent-msg-name {
+      font-size: 12px; font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+      letter-spacing: 0.2px;
+    }
+    .agent-msg-content {
+      font-size: var(--agent-text);
+      line-height: var(--agent-line);
+      color: var(--text);
+      word-wrap: break-word; overflow-wrap: break-word;
+    }
+
+    /* ---- Markdown rendering inside .agent-md ---- */
+    .agent-md > *:first-child { margin-top: 0; }
+    .agent-md > *:last-child { margin-bottom: 0; }
+    .agent-md p { margin: 8px 0; }
+    .agent-md h1, .agent-md h2, .agent-md h3, .agent-md h4 {
+      font-weight: 600; color: var(--text); margin: 16px 0 8px;
+      line-height: 1.3;
+    }
+    .agent-md h1 { font-size: 17px; }
+    .agent-md h2 { font-size: 15px; }
+    .agent-md h3 { font-size: 14px; color: var(--accent-bright); }
+    .agent-md h4 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+    .agent-md ul, .agent-md ol { margin: 8px 0; padding-left: 22px; }
+    .agent-md li { margin: 4px 0; }
+    .agent-md li > p { margin: 2px 0; }
+    .agent-md strong { font-weight: 600; color: var(--text); }
+    .agent-md em { font-style: italic; color: var(--muted); }
+    .agent-md a { color: var(--accent-bright); text-decoration: underline; }
+    .agent-md code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      padding: 2px 6px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--accent-bright);
+    }
+    .agent-md pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin: 10px 0;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .agent-md pre code {
+      background: transparent; border: none; padding: 0;
+      color: var(--text);
+      font-size: inherit;
+    }
+    .agent-md blockquote {
+      margin: 10px 0;
+      padding: 6px 14px;
+      border-left: 3px solid var(--accent);
+      color: var(--muted);
+      background: var(--accent-dim);
+      border-radius: 0 6px 6px 0;
+    }
+    .agent-md table {
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 12px;
+      width: 100%;
+    }
+    .agent-md th, .agent-md td {
+      border: 1px solid var(--border);
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .agent-md th {
+      background: var(--bg-2);
+      font-weight: 600;
+      color: var(--text);
+    }
+    .agent-md hr {
+      border: none; border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+
+    /* ---- Tool cards (calls + results, expandable) ---- */
+    .agent-tool-card {
+      margin: 10px 0;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+      animation: agent-fade-in 0.25s ease;
+    }
+    .agent-tool-card:hover { border-color: var(--accent); }
+    .agent-tool-card.success { border-left-color: #2ea043; }
+    .agent-tool-card.error { border-left-color: #cf222e; }
+    .agent-tool-card.pending { border-left-color: var(--accent); }
+    .agent-tool-card .head {
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer;
+      user-select: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    .agent-tool-card .head:hover { background: var(--panel); }
+    .agent-tool-card .head .icon {
+      font-size: 13px; flex-shrink: 0; line-height: 1;
+    }
+    .agent-tool-card .head .icon.success { color: #2ea043; }
+    .agent-tool-card .head .icon.error { color: #cf222e; }
+    .agent-tool-card .head .name {
+      font-weight: 700; color: var(--accent-bright);
+      flex-shrink: 0;
+    }
+    .agent-tool-card.success .head .name { color: #9be7a4; }
+    .agent-tool-card.error .head .name { color: #f49a9e; }
+    .agent-tool-card .head .summary {
+      color: var(--muted); flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-tool-card .head .chevron {
+      color: var(--muted); flex-shrink: 0;
+      transition: transform 0.2s ease;
+      font-size: 11px;
+    }
+    .agent-tool-card.open .head .chevron { transform: rotate(90deg); }
+    .agent-tool-card .body {
+      display: none;
+      padding: 0 14px 12px;
+      border-top: 1px solid var(--border);
+      margin-top: 0;
+    }
+    .agent-tool-card.open .body {
+      display: block;
+      padding-top: 10px;
+    }
+    .agent-tool-card .body pre {
+      margin: 0;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 11px;
+      line-height: 1.45;
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+    }
+
+    /* ---- Typing indicator ---- */
+    .agent-typing-row {
+      display: flex; gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 22px;
+      animation: agent-fade-in 0.2s ease;
+    }
+    .agent-typing-bubble {
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .agent-typing-dots {
+      display: inline-flex; gap: 4px;
+    }
+    .agent-typing-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      animation: agent-typing-pulse 1.4s ease-in-out infinite;
+    }
+    .agent-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .agent-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes agent-typing-pulse {
+      0%, 60%, 100% { opacity: 0.25; transform: scale(0.85); }
+      30% { opacity: 1; transform: scale(1); }
+    }
+
+    /* ---- Composer ---- */
     .agent-composer {
-      display: grid; grid-template-columns: 1fr auto; gap: 8px;
-      padding-top: 4px;
+      border-top: 1px solid var(--border);
+      padding: 14px 16px;
+      background: var(--bg-2);
+      display: flex; gap: 10px;
+      align-items: flex-end;
+    }
+    .agent-composer-wrap {
+      flex: 1; min-width: 0;
+      position: relative;
     }
     .agent-composer textarea {
-      width: 100%; min-height: 64px; max-height: 240px;
-      padding: 10px 12px; font-size: 13px; line-height: 1.5;
-      background: var(--panel); color: var(--text);
-      border: 1px solid var(--border); border-radius: 9px;
-      resize: vertical;
+      width: 100%;
+      min-height: 48px; max-height: 220px;
+      padding: 12px 14px;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
       font-family: inherit;
+      font-size: var(--agent-text);
+      line-height: 1.55;
+      resize: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      box-sizing: border-box;
     }
     .agent-composer textarea:focus {
-      outline: none; border-color: var(--accent);
+      outline: none;
+      border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--accent-dim);
     }
-    .agent-composer button {
-      align-self: flex-end;
-      padding: 10px 18px; border-radius: 9px;
-      background: var(--accent); color: white; border: none;
-      font-size: 13px; font-weight: 600; cursor: pointer;
-      min-width: 88px;
+    .agent-composer .hint {
+      position: absolute;
+      bottom: -18px; left: 4px;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.2px;
+      pointer-events: none;
     }
-    .agent-composer button:hover { background: var(--accent-bright); }
-    .agent-composer button[disabled] { opacity: 0.5; cursor: not-allowed; }
-    .agent-typing {
-      align-self: flex-start;
-      padding: 8px 12px; border-radius: 8px;
-      background: var(--panel); border: 1px dashed var(--border);
-      color: var(--muted); font-size: 12px; font-style: italic;
+    .agent-composer .send-btn {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      font-size: 16px;
+      transition: background 0.15s, transform 0.15s;
+      flex-shrink: 0;
     }
-    .agent-typing::after {
-      content: ""; display: inline-block; width: 28px;
-      animation: agent-dots 1.4s steps(4, end) infinite;
+    .agent-composer .send-btn:hover:not(:disabled) {
+      background: var(--accent-bright);
+      transform: scale(1.05);
     }
-    @keyframes agent-dots {
-      0% { content: ""; } 25% { content: "."; }
-      50% { content: ".."; } 75% { content: "..."; }
+    .agent-composer .send-btn:active { transform: scale(0.95); }
+    .agent-composer .send-btn:disabled {
+      background: var(--border-strong);
+      cursor: not-allowed;
+      transform: none;
+    }
+    .agent-composer .send-btn svg {
+      width: 18px; height: 18px;
     }
 
-    /* Settings drawer (engine config) */
+    /* ---- Settings drawer ---- */
     .agent-settings-modal {
       position: fixed; inset: 0;
-      background: rgba(0,2,12,0.65); backdrop-filter: blur(4px);
-      z-index: 200; display: none;
+      background: rgba(0,2,12,0.7);
+      backdrop-filter: blur(6px);
+      z-index: 200;
+      display: none;
       align-items: center; justify-content: center;
+      animation: agent-fade-in 0.2s ease;
     }
     .agent-settings-modal.open { display: flex; }
     .agent-settings-card {
-      width: min(560px, 96vw); max-height: 90vh; overflow-y: auto;
-      padding: 22px; border-radius: 12px;
-      background: var(--panel); border: 1px solid var(--border-strong);
-      box-shadow: 0 18px 48px rgba(0,0,0,0.6);
+      width: min(580px, 96vw); max-height: 90vh;
+      overflow-y: auto;
+      padding: 24px;
+      border-radius: 14px;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      box-shadow: 0 24px 60px rgba(0,0,0,0.6);
     }
     .agent-settings-card h2 {
-      margin: 0 0 16px; font-size: 16px; font-weight: 600;
+      margin: 0 0 6px;
+      font-size: 17px; font-weight: 600;
       display: flex; align-items: center; justify-content: space-between;
     }
-    .agent-settings-card h2 button {
+    .agent-settings-card .subtitle {
+      font-size: 12px; color: var(--muted);
+      margin-bottom: 18px;
+    }
+    .agent-settings-card .close-btn {
       background: transparent; color: var(--muted);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 5px 10px; font-size: 11px; cursor: pointer;
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 5px 11px; font-size: 11px; cursor: pointer;
     }
-    .agent-settings-card .field {
-      margin-bottom: 12px;
+    .agent-settings-card .close-btn:hover {
+      color: var(--text); border-color: var(--accent);
     }
+    .agent-settings-card .field { margin-bottom: 14px; }
     .agent-settings-card label {
-      display: block; margin-bottom: 5px; font-size: 11px;
-      color: var(--muted); font-weight: 600; letter-spacing: 0.4px;
-      text-transform: uppercase;
+      display: block; margin-bottom: 6px;
+      font-size: 11px;
+      color: var(--muted); font-weight: 600;
+      letter-spacing: 0.4px; text-transform: uppercase;
     }
     .agent-settings-card input,
     .agent-settings-card select,
     .agent-settings-card textarea {
-      width: 100%; padding: 8px 10px; font-size: 13px;
+      width: 100%;
+      padding: 9px 12px;
       background: var(--bg-2); color: var(--text);
-      border: 1px solid var(--border); border-radius: 7px;
-      font-family: inherit;
+      border: 1px solid var(--border); border-radius: 8px;
+      font-family: inherit; font-size: 13px;
       box-sizing: border-box;
+      transition: border-color 0.15s;
     }
     .agent-settings-card input:focus,
     .agent-settings-card select:focus,
     .agent-settings-card textarea:focus {
       outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
     }
     .agent-settings-card .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .agent-settings-card .actions {
-      display: flex; gap: 8px; margin-top: 16px;
+      display: flex; gap: 8px; margin-top: 18px;
       justify-content: flex-end;
     }
     .agent-settings-card .actions button {
-      padding: 8px 16px; border-radius: 7px;
-      border: none; cursor: pointer; font-size: 13px; font-weight: 600;
+      padding: 9px 18px; border-radius: 8px;
+      border: none; cursor: pointer;
+      font-size: 13px; font-weight: 600;
+      transition: background 0.15s;
     }
     .agent-settings-card .actions .save {
       background: var(--accent); color: white;
@@ -6515,33 +6865,62 @@ HTML = r"""<!doctype html>
       background: transparent; color: var(--muted);
       border: 1px solid var(--border);
     }
+    .agent-settings-card .actions .ghost:hover {
+      color: var(--text); border-color: var(--accent);
+    }
     .agent-settings-card .hint {
-      font-size: 11px; color: var(--muted); line-height: 1.5;
-      padding: 10px 12px; border-radius: 7px;
+      font-size: 12px; color: var(--muted); line-height: 1.55;
+      padding: 12px 14px; border-radius: 8px;
       background: var(--bg-2); border: 1px solid var(--border);
-      margin-bottom: 12px;
+      margin-bottom: 16px;
+    }
+    .agent-settings-card .hint code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      padding: 1px 5px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 3px;
+      color: var(--accent-bright);
     }
     .agent-engine-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border-radius: 7px;
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-radius: 8px;
       background: var(--bg-2); border: 1px solid var(--border);
-      margin-bottom: 10px;
+      margin-bottom: 12px;
+      font-size: 12px;
     }
     .agent-engine-row .pill {
-      font-size: 10px; padding: 2px 8px; border-radius: 999px;
+      font-size: 10px; padding: 3px 9px; border-radius: 999px;
       background: var(--panel-2); color: var(--muted);
       border: 1px solid var(--border);
+      font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
     }
-    .agent-engine-row .pill.live { color: #9be7a4; border-color: rgba(46,160,67,0.4); }
-    .agent-engine-row .pill.bad { color: #f49a9e; border-color: rgba(207,34,46,0.4); }
-
-    .agent-shot-summary {
-      margin-top: 6px; font-size: 11px; color: var(--muted);
-      padding: 6px 10px; border-radius: 6px;
-      background: rgba(47,129,247,0.06); border: 1px solid rgba(47,129,247,0.25);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    .agent-engine-row .pill.live {
+      color: #9be7a4; border-color: rgba(46,160,67,0.5);
+      background: rgba(46,160,67,0.08);
     }
-    .agent-shot-summary.ok { color: #9be7a4; background: rgba(46,160,67,0.06); border-color: rgba(46,160,67,0.3); }
+    .agent-engine-row .pill.bad {
+      color: #f49a9e; border-color: rgba(207,34,46,0.5);
+      background: rgba(207,34,46,0.08);
+    }
+    .agent-engine-row .row-detail {
+      flex: 1; color: var(--muted); min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-engine-row button {
+      padding: 6px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 11px; font-weight: 600;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .agent-engine-row button:hover {
+      border-color: var(--accent);
+      color: var(--accent-bright);
+    }
   </style>
 </head>
 <body>
@@ -6611,29 +6990,54 @@ HTML = r"""<!doctype html>
     </nav>
 
     <!-- ============== AGENTIC FLOWS PANE ============== -->
-    <!-- Hidden by default; shown when the agent workflow tab is active.
-         The actual agent loop lives in the panel's Python backend; this UI
-         just sends user messages and renders the message log + tool chips. -->
+    <!-- Chat-driven shot planner. The agent loop lives in the panel's
+         Python backend (agent/runtime.py); this UI just sends user
+         messages, renders the message log with markdown + expandable
+         tool cards, and exposes engine settings via a drawer. -->
     <section class="agent-pane" id="agentPane" hidden>
-      <div class="agent-statusbar">
-        <span class="dot" id="agentEngineDot"></span>
-        <span class="label">Engine</span>
-        <span class="engine" id="agentEngineLabel">…</span>
-        <button type="button" onclick="openAgentSettings()" title="Configure engine">⚙ Settings</button>
-      </div>
-
-      <div class="agent-session-head">
-        <span class="title" id="agentSessionTitle">New session</span>
-        <button type="button" onclick="agentNewSession()" title="Discard current and start fresh">+ New session</button>
-      </div>
+      <header class="agent-header" style="position:relative">
+        <button type="button" class="engine-pill" id="agentEnginePill"
+                onclick="openAgentSettings()" title="Click to configure the agent engine">
+          <span class="dot" id="agentEngineDot"></span>
+          <span id="agentEngineLabel">engine…</span>
+        </button>
+        <div class="session-title" id="agentSessionTitle"
+             onclick="agentToggleSessionsPop()"
+             style="cursor:pointer"
+             title="Click to switch sessions">
+          New chat
+        </div>
+        <button type="button" class="icon-btn" onclick="agentNewSession()"
+                title="Start a fresh session">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" onclick="openAgentSettings()" title="Settings">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+        <div class="agent-sessions-pop" id="agentSessionsPop"></div>
+      </header>
 
       <div class="agent-chat" id="agentChat"></div>
 
       <div class="agent-composer">
-        <textarea id="agentInput"
-                  placeholder="Paste a script, or describe one shot. The agent will plan and queue."
-                  autocomplete="off"></textarea>
-        <button type="button" id="agentSendBtn" onclick="agentSend()">Send</button>
+        <div class="agent-composer-wrap">
+          <textarea id="agentInput"
+                    placeholder="Paste a script, or describe a piece. The agent will plan, estimate the wall time, and queue overnight."
+                    rows="1"
+                    autocomplete="off"></textarea>
+          <span class="hint">Cmd/Ctrl + Enter to send</span>
+        </div>
+        <button type="button" id="agentSendBtn" class="send-btn" onclick="agentSend()" title="Send (Cmd/Ctrl+Enter)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5"/>
+            <polyline points="5 12 12 5 19 12"/>
+          </svg>
+        </button>
       </div>
     </section>
 
@@ -10438,24 +10842,32 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListene
 
 
 // ============================================================================
-// AGENTIC FLOWS — chat-driven shot planner
+// AGENTIC FLOWS — chat UI (rich version)
 // ============================================================================
 //
-// State on the page is held in window.AGENT for a few reasons:
-//   1. The user can switch the "Manual" / "Agentic Flows" tab any time, so
-//      the chat UI must keep its session in memory while hidden.
-//   2. The active session id is persisted in localStorage so a page reload
-//      doesn't lose the conversation (sessions also persist server-side).
+// Pieces:
+//   - Workflow tab switch (Manual / Agentic Flows).
+//   - Chat with avatar bubbles, markdown rendering, expandable tool cards.
+//   - Composer with auto-resize textarea + circular send button (disabled
+//     when empty, Cmd/Ctrl+Enter to fire).
+//   - Sessions dropdown (from the header session-title click).
+//   - Engine settings drawer (modal).
+//
+// Server-authoritative: after every user message we re-render the whole
+// thread from /agent/sessions/<id>'s `rendered_messages` payload. The
+// optimistic user bubble + typing row are inserted immediately for snap.
+
 window.AGENT = {
   sessionId: null,
-  config: null,         // last fetched /agent/config payload
-  busy: false,          // a turn is in flight; disables the Send button
-  models: [],           // discovered local models from /agent/local/status
+  config: null,
+  busy: false,
+  models: [],
+  sessions: [],         // cached list for the dropdown
 };
 
 function workflowSwitch(name) {
-  const tabs = document.querySelectorAll('#workflowTabs button[data-workflow]');
-  tabs.forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
+  document.querySelectorAll('#workflowTabs button[data-workflow]')
+    .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');
   const agent = document.getElementById('agentPane');
   if (name === 'agent') {
@@ -10464,19 +10876,15 @@ function workflowSwitch(name) {
     agentRefreshConfig();
     if (!window.AGENT.sessionId) {
       const stored = localStorage.getItem('phos_agent_session');
-      if (stored) {
-        agentLoadSession(stored);
-      } else {
-        // No session in this browser yet — but the panel may already
-        // have persisted sessions on disk (e.g. an overnight agentic
-        // run that completed before the user reopened the panel).
-        // Pick the most-recently-updated one so the user lands in
-        // the conversation they care about, not an empty pane.
-        agentLoadMostRecent();
-      }
+      if (stored) agentLoadSession(stored);
+      else agentLoadMostRecent();
     } else {
       agentLoadSession(window.AGENT.sessionId);
     }
+    setTimeout(() => {
+      const ta = document.getElementById('agentInput');
+      if (ta) { agentAutoResize(ta); ta.focus(); }
+    }, 50);
   } else {
     if (manual) manual.style.display = '';
     if (agent) agent.hidden = true;
@@ -10488,6 +10896,7 @@ document.querySelectorAll('#workflowTabs button[data-workflow]').forEach(b => {
   b.addEventListener('click', () => workflowSwitch(b.dataset.workflow));
 });
 
+// ---- Engine status (in the header pill) -----------------------------------
 async function agentRefreshConfig() {
   try {
     const r = await fetch('/agent/config');
@@ -10502,11 +10911,14 @@ async function agentRefreshConfig() {
     let summary = '';
     if (eng.kind === 'phosphene_local') {
       live = !!local.running;
-      summary = `Phosphene Local · ${eng.model || '(no model)'} · ${live ? 'running' : 'stopped'}`;
+      const modelName = (eng.model || '').replace('-it-4bit', '').replace(/^gemma-3-/, 'Gemma 3 ').replace(/(\d+)b/, '$1B');
+      summary = live
+        ? `${modelName || 'Local'} · live`
+        : `${modelName || 'Local'} · click to start`;
     } else {
-      // For custom engines we can't easily probe — just show config.
-      summary = `${eng.kind} · ${eng.model || ''} · ${eng.base_url || ''}`;
-      live = !!eng.has_api_key || !eng.api_key === '';   // best-effort
+      const u = (eng.base_url || '').replace(/^https?:\/\//, '').replace(/\/v1$/, '');
+      summary = `${eng.model || 'remote'} · ${u}`;
+      live = !!eng.has_api_key;
     }
     if (dot) {
       dot.classList.remove('live', 'warn', 'bad');
@@ -10515,12 +10927,13 @@ async function agentRefreshConfig() {
     if (label) label.textContent = summary;
   } catch (e) {
     const label = document.getElementById('agentEngineLabel');
-    if (label) label.textContent = 'engine config unavailable';
+    if (label) label.textContent = 'engine unavailable';
   }
 }
 
+// ---- Sessions -------------------------------------------------------------
 async function agentNewSession(initialMessage) {
-  const title = (initialMessage || '').slice(0, 60) || 'New session';
+  const title = (initialMessage || '').slice(0, 60) || 'New chat';
   const r = await fetch('/agent/sessions/new', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -10533,9 +10946,8 @@ async function agentNewSession(initialMessage) {
   }
   window.AGENT.sessionId = j.session.session_id;
   try { localStorage.setItem('phos_agent_session', j.session.session_id); } catch(e) {}
-  document.getElementById('agentSessionTitle').textContent =
-    `${j.session.title} · ${j.session.session_id}`;
-  document.getElementById('agentChat').innerHTML = '';
+  agentSetSessionTitle(j.session.title || 'New chat', j.session.session_id);
+  agentRender([]);
   return j.session;
 }
 
@@ -10544,76 +10956,177 @@ async function agentLoadMostRecent() {
     const r = await fetch('/agent/sessions');
     const j = await r.json();
     const sessions = j.sessions || [];
-    if (sessions.length === 0) return;        // empty pane is correct here
-    const mostRecent = sessions[0];           // server-side sorted by updated_at desc
+    window.AGENT.sessions = sessions;
+    if (sessions.length === 0) {
+      agentRender([]);
+      return;
+    }
+    const mostRecent = sessions[0];
     await agentLoadSession(mostRecent.session_id);
     try { localStorage.setItem('phos_agent_session', mostRecent.session_id); } catch(e) {}
-  } catch (e) {
-    console.warn('agentLoadMostRecent', e);
-  }
+  } catch (e) { console.warn('agentLoadMostRecent', e); }
 }
 
 async function agentLoadSession(sid) {
   try {
     const r = await fetch('/agent/sessions/' + encodeURIComponent(sid));
     if (!r.ok) {
-      // Session was deleted or panel restarted with no state — just clear.
       try { localStorage.removeItem('phos_agent_session'); } catch(e) {}
       window.AGENT.sessionId = null;
-      document.getElementById('agentSessionTitle').textContent = 'New session';
-      document.getElementById('agentChat').innerHTML = '';
+      agentSetSessionTitle('New chat', null);
+      agentRender([]);
       return;
     }
     const j = await r.json();
     window.AGENT.sessionId = sid;
     const sess = j.session || {};
-    document.getElementById('agentSessionTitle').textContent =
-      `${sess.title || 'Untitled'} · ${sid}`;
+    agentSetSessionTitle(sess.title || 'Untitled', sid);
     agentRender(j.rendered_messages || []);
-  } catch (e) {
-    console.error('agentLoadSession', e);
+  } catch (e) { console.error('agentLoadSession', e); }
+}
+
+function agentSetSessionTitle(title, sid) {
+  const el = document.getElementById('agentSessionTitle');
+  if (!el) return;
+  el.innerHTML = '';
+  const t = document.createElement('span');
+  t.textContent = title;
+  el.appendChild(t);
+  if (sid) {
+    const m = document.createElement('span');
+    m.className = 'meta';
+    m.textContent = '· ' + sid.slice(0, 8);
+    el.appendChild(m);
   }
 }
 
-function agentRender(messages) {
-  const chat = document.getElementById('agentChat');
-  if (!chat) return;
-  chat.innerHTML = '';
-  for (const m of messages) {
-    chat.appendChild(agentMakeBubble(m));
-  }
-  chat.scrollTop = chat.scrollHeight;
+async function agentToggleSessionsPop() {
+  const pop = document.getElementById('agentSessionsPop');
+  if (!pop) return;
+  if (pop.classList.contains('open')) { pop.classList.remove('open'); return; }
+  // Refresh list from server
+  try {
+    const r = await fetch('/agent/sessions');
+    const j = await r.json();
+    window.AGENT.sessions = j.sessions || [];
+  } catch(e) {}
+  agentRenderSessionsPop();
+  pop.classList.add('open');
+  // Click-away closes
+  setTimeout(() => {
+    const closer = (e) => {
+      if (!pop.contains(e.target) &&
+          !document.getElementById('agentSessionTitle').contains(e.target)) {
+        pop.classList.remove('open');
+        document.removeEventListener('click', closer);
+      }
+    };
+    document.addEventListener('click', closer);
+  }, 0);
 }
 
-function agentMakeBubble(m) {
-  if (m.kind === 'tool_result') {
-    const div = document.createElement('div');
-    const r = m.result || {};
-    const ok = r.ok !== false && !r.error;
-    div.className = 'agent-tool-result' + (ok ? '' : ' error');
-    let label = '';
-    if (r.tool) label = `<span class="tool-name">${r.tool}</span> → `;
-    let body = '';
-    try {
-      body = JSON.stringify(r.result ?? r, null, 2);
-    } catch(e) {
-      body = String(r);
-    }
-    if (body.length > 1500) body = body.slice(0, 1500) + '\n…';
-    div.innerHTML = label + escapeHtml(body);
-    return div;
+function agentRenderSessionsPop() {
+  const pop = document.getElementById('agentSessionsPop');
+  if (!pop) return;
+  pop.innerHTML = '';
+  const list = window.AGENT.sessions || [];
+  if (list.length === 0) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = 'No saved sessions yet.';
+    pop.appendChild(e);
+    return;
   }
-  const div = document.createElement('div');
-  div.className = 'agent-msg ' + (m.kind || 'assistant');
-  div.textContent = m.content || '';
-  if (m.tool_call) {
-    const chip = document.createElement('div');
-    chip.className = 'tool-chip';
-    chip.textContent = '➜ ' + (m.tool_call.tool || '?');
-    div.appendChild(document.createElement('br'));
-    div.appendChild(chip);
+  for (const s of list) {
+    const item = document.createElement('div');
+    item.className = 'item' + (s.session_id === window.AGENT.sessionId ? ' active' : '');
+    const title = document.createElement('div');
+    title.textContent = s.title || 'Untitled';
+    title.style.fontWeight = '500';
+    title.style.overflow = 'hidden';
+    title.style.textOverflow = 'ellipsis';
+    title.style.whiteSpace = 'nowrap';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const when = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString(undefined, {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
+    meta.innerHTML = `<span>${when}</span><span>${s.messages || 0} msg · ${s.shots_submitted || 0} shots</span>`;
+    item.appendChild(title);
+    item.appendChild(meta);
+    item.addEventListener('click', () => {
+      pop.classList.remove('open');
+      agentLoadSession(s.session_id);
+    });
+    pop.appendChild(item);
   }
-  return div;
+}
+
+// ---- Markdown rendering ---------------------------------------------------
+// Tight subset: headers, bold, italic, inline code, code blocks, lists,
+// tables, blockquotes, hr, paragraphs. Escapes HTML first; processes
+// markdown on already-safe text. Code blocks are pulled out of the way
+// before other regexes run, then restored.
+function mdToHtml(src) {
+  if (!src) return '';
+  let s = String(src);
+  // Strip the fenced ```action ...``` blocks we use for tool calls — they're
+  // already represented as tool-call cards, no need to show the JSON twice.
+  s = s.replace(/```(?:action|tool|json action|action_json)\s*\n[\s\S]*?\n```/gi, '').trim();
+  // Pull out code blocks first
+  const blocks = [];
+  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
+    return `CB${blocks.length - 1}`;
+  });
+  // Escape rest
+  s = escapeHtml(s);
+  // Inline code (must come before bold/italic so backticks don't get eaten)
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`);
+  // Headers (longest first)
+  s = s.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // Horizontal rule
+  s = s.replace(/^---+$/gm, '<hr>');
+  // Bold then italic
+  s = s.replace(/\*\*([^\n*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^\n*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  // Tables — block of lines starting with | ... |
+  s = s.replace(/((?:^\|[^\n]*\|\n?)+)/gm, (block) => {
+    const rows = block.trim().split('\n').filter(l => !/^\s*\|[\s\-:|]+\|\s*$/.test(l));
+    if (rows.length < 1) return block;
+    const html = rows.map((row, i) => {
+      const cells = row.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      const tag = i === 0 ? 'th' : 'td';
+      return '<tr>' + cells.map(c => `<${tag}>${c}</${tag}>`).join('') + '</tr>';
+    }).join('');
+    return `<table>${html}</table>`;
+  });
+  // Blockquotes
+  s = s.replace(/((?:^&gt; .+\n?)+)/gm, (block) => {
+    const inner = block.split('\n').map(l => l.replace(/^&gt; ?/, '')).join(' ').trim();
+    return `<blockquote>${inner}</blockquote>`;
+  });
+  // Unordered lists
+  s = s.replace(/((?:^[-*] .+\n?)+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^[-*] /, ''));
+    return '<ul>' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
+  });
+  // Ordered lists
+  s = s.replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^\d+\. /, ''));
+    return '<ol>' + items.map(i => `<li>${i}</li>`).join('') + '</ol>';
+  });
+  // Wrap remaining text into paragraphs (split on blank lines)
+  s = s.split(/\n\n+/).map(p => {
+    p = p.trim();
+    if (!p) return '';
+    if (/^<(h[1-6]|ul|ol|table|pre|blockquote|hr)/.test(p)) return p;
+    return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+  // Restore code blocks
+  s = s.replace(/CB(\d+)/g, (_, i) => blocks[parseInt(i, 10)] || '');
+  return s;
 }
 
 function escapeHtml(s) {
@@ -10622,6 +11135,220 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// ---- Chat rendering -------------------------------------------------------
+function agentRender(messages) {
+  const chat = document.getElementById('agentChat');
+  if (!chat) return;
+  chat.innerHTML = '';
+  if (!messages || messages.length === 0) {
+    chat.appendChild(renderEmpty());
+    return;
+  }
+  for (const m of messages) chat.appendChild(renderMessage(m));
+  // Hand-off the scroll on next animation frame so freshly-inserted nodes
+  // have measured heights.
+  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+}
+
+function renderEmpty() {
+  const wrap = document.createElement('div');
+  wrap.className = 'agent-empty';
+  wrap.innerHTML = `
+    <div class="badge">Beta · Phosphene Agentic Flows</div>
+    <h3>Plan a film overnight</h3>
+    <p>Paste a script or describe a piece. I'll plan the shots, estimate the wall time, and queue the renders.</p>
+    <p>You wake up to mp4s and a manifest.json.</p>
+    <div class="examples">
+      <div class="example" data-prompt="Plan a 6-second talking-head shot of a serious news anchor announcing a fake new condition called Coffee Cessation Syndrome. Use balanced quality.">
+        <span>News anchor reads a one-line story</span>
+        <span class="arrow">→</span>
+      </div>
+      <div class="example" data-prompt="Plan a documentary mockumentary scene: a doctor explains a fictional addiction in two sentences. 12 seconds, balanced quality.">
+        <span>Doctor explains a fictional condition</span>
+        <span class="arrow">→</span>
+      </div>
+      <div class="example" data-prompt="Plan a 3-shot interview piece about a developer who can't stop refactoring household appliances. Documentary feel. Suggest durations per shot.">
+        <span>Three-shot interview piece</span>
+        <span class="arrow">→</span>
+      </div>
+    </div>
+  `;
+  wrap.querySelectorAll('.example').forEach(b => {
+    b.addEventListener('click', () => {
+      const ta = document.getElementById('agentInput');
+      if (!ta) return;
+      ta.value = b.dataset.prompt;
+      agentAutoResize(ta);
+      agentUpdateSendState();
+      ta.focus();
+    });
+  });
+  return wrap;
+}
+
+function renderMessage(m) {
+  if (m.kind === 'tool_result') return renderToolResultCard(m.result || {});
+  if (m.kind === 'system_note') return renderSystemNote(m.content || '');
+
+  const row = document.createElement('div');
+  row.className = 'agent-msg-row';
+
+  const av = document.createElement('div');
+  av.className = `agent-avatar ${m.kind === 'user' ? 'user' : 'claude'}`;
+  av.textContent = m.kind === 'user' ? 'U' : 'C';
+
+  const body = document.createElement('div');
+  body.className = 'agent-msg-body';
+
+  const name = document.createElement('div');
+  name.className = 'agent-msg-name';
+  name.textContent = m.kind === 'user' ? 'You' : 'Claude';
+
+  const content = document.createElement('div');
+  content.className = 'agent-msg-content agent-md';
+  content.innerHTML = mdToHtml(m.content || '');
+
+  body.appendChild(name);
+  body.appendChild(content);
+
+  if (m.tool_call) body.appendChild(renderToolCallCard(m.tool_call));
+
+  row.appendChild(av);
+  row.appendChild(body);
+  return row;
+}
+
+function renderSystemNote(text) {
+  const div = document.createElement('div');
+  div.style.cssText = 'text-align:center; padding:8px; font-size:11px; color:var(--muted); font-style:italic;';
+  div.textContent = text;
+  return div;
+}
+
+function renderToolCallCard(call) {
+  const card = document.createElement('div');
+  card.className = 'agent-tool-card pending';
+  const head = document.createElement('div');
+  head.className = 'head';
+  const summary = summarizeToolCall(call);
+  head.innerHTML = `
+    <span class="icon">⚙</span>
+    <span class="name">${escapeHtml(call.tool || '?')}</span>
+    <span class="summary">${escapeHtml(summary)}</span>
+    <span class="chevron">›</span>
+  `;
+  const body = document.createElement('div');
+  body.className = 'body';
+  const pre = document.createElement('pre');
+  try { pre.textContent = JSON.stringify(call.args || {}, null, 2); }
+  catch(e) { pre.textContent = String(call.args); }
+  body.appendChild(pre);
+  card.appendChild(head);
+  card.appendChild(body);
+  head.addEventListener('click', () => card.classList.toggle('open'));
+  return card;
+}
+
+function renderToolResultCard(result) {
+  const card = document.createElement('div');
+  const ok = result.ok !== false && !result.error;
+  card.className = 'agent-tool-card ' + (ok ? 'success' : 'error');
+  const head = document.createElement('div');
+  head.className = 'head';
+  const inner = result.result;
+  const summary = ok ? summarizeToolResult(inner) : (result.error || 'failed');
+  head.innerHTML = `
+    <span class="icon ${ok ? 'success' : 'error'}">${ok ? '✓' : '✗'}</span>
+    <span class="name">${ok ? 'result' : 'error'}</span>
+    <span class="summary">${escapeHtml(summary)}</span>
+    <span class="chevron">›</span>
+  `;
+  const body = document.createElement('div');
+  body.className = 'body';
+  const pre = document.createElement('pre');
+  try { pre.textContent = JSON.stringify(ok ? inner : result, null, 2); }
+  catch(e) { pre.textContent = String(result); }
+  body.appendChild(pre);
+  card.appendChild(head);
+  card.appendChild(body);
+  head.addEventListener('click', () => card.classList.toggle('open'));
+  return card;
+}
+
+function summarizeToolCall(call) {
+  const t = call.tool || '';
+  const a = call.args || {};
+  if (t === 'submit_shot') {
+    return `${a.label || a.preset_label || 'unnamed'} — ${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'}`;
+  }
+  if (t === 'estimate_shot') {
+    return `${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'} ${a.accel || ''}`;
+  }
+  if (t === 'extract_frame') {
+    return `${a.which || 'last'} of ${(a.job_id || '').slice(0, 12)}…`;
+  }
+  if (t === 'wait_for_shot') {
+    return (a.job_id || '').slice(0, 14) + '…';
+  }
+  if (t === 'get_queue_status') return 'queue snapshot';
+  if (t === 'write_session_manifest') {
+    return a.title || 'manifest';
+  }
+  if (t === 'finish') return a.summary ? a.summary.slice(0, 80) : 'done';
+  if (t === 'upload_image') return (a.attachment_id || '').split('/').pop() || '';
+  return Object.keys(a).slice(0, 3).join(', ');
+}
+
+function summarizeToolResult(inner) {
+  if (typeof inner !== 'object' || inner === null) return String(inner ?? '').slice(0, 100);
+  if ('job_id' in inner && 'estimated_wall_human' in inner) {
+    return `queued ${inner.job_id} · ETA ${inner.estimated_wall_human}`;
+  }
+  if ('manifest_path' in inner) {
+    return `manifest written · ${inner.shot_count || '?'} shots`;
+  }
+  if ('estimate_wall_human' in inner) return `ETA ${inner.estimate_wall_human}`;
+  if ('png_path' in inner) {
+    return `frame ${inner.frame_index} → ${(inner.png_path || '').split('/').pop()}`;
+  }
+  if ('summary' in inner) return inner.summary.slice(0, 100);
+  if ('queue_depth' in inner) {
+    return `queue ${inner.queue_depth}, total ${inner.total_estimated_wall_human || '?'}`;
+  }
+  if ('status' in inner && 'output_path' in inner) {
+    return `${inner.status} · ${(inner.output_path || '').split('/').pop() || '-'}`;
+  }
+  if ('absolute_path' in inner) {
+    return (inner.name || inner.absolute_path);
+  }
+  // Fallback: show top 2 keys
+  return Object.entries(inner).slice(0, 2)
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? '...' : String(v).slice(0, 40)}`).join(', ');
+}
+
+function renderTypingRow(msg) {
+  const row = document.createElement('div');
+  row.className = 'agent-typing-row';
+  row.id = 'agentTypingRow';
+  const av = document.createElement('div');
+  av.className = 'agent-avatar claude';
+  av.textContent = 'C';
+  const bubble = document.createElement('div');
+  bubble.className = 'agent-typing-bubble';
+  bubble.innerHTML = `
+    <span class="agent-typing-dots">
+      <span class="agent-typing-dot"></span>
+      <span class="agent-typing-dot"></span>
+      <span class="agent-typing-dot"></span>
+    </span>
+    <span id="agentTypingText">${escapeHtml(msg || 'Thinking')}</span>
+  `;
+  row.appendChild(av);
+  row.appendChild(bubble);
+  return row;
+}
+
+// ---- Send -----------------------------------------------------------------
 async function agentSend() {
   if (window.AGENT.busy) return;
   const input = document.getElementById('agentInput');
@@ -10629,29 +11356,57 @@ async function agentSend() {
   const text = (input.value || '').trim();
   if (!text) return;
 
-  // No session yet → create one with the user's first message as title hint.
   if (!window.AGENT.sessionId) {
     const sess = await agentNewSession(text);
     if (!sess) return;
   }
 
-  // Optimistic render: append user bubble + typing indicator immediately.
   const chat = document.getElementById('agentChat');
-  chat.appendChild(agentMakeBubble({kind: 'user', content: text}));
-  const typing = document.createElement('div');
-  typing.className = 'agent-typing';
-  typing.textContent = 'Thinking';
-  chat.appendChild(typing);
+  // Clear empty-state if present, then append user bubble + typing
+  const empty = chat.querySelector('.agent-empty');
+  if (empty) empty.remove();
+  chat.appendChild(renderMessage({kind: 'user', content: text}));
+  chat.appendChild(renderTypingRow('Drafting plan'));
   chat.scrollTop = chat.scrollHeight;
 
   input.value = '';
+  agentAutoResize(input);
+  agentUpdateSendState();
   window.AGENT.busy = true;
   btn.disabled = true;
-  btn.textContent = '…';
+
+  // Streaming-feel: while the message round-trip is in flight (which can
+  // take minutes when the agent makes many tool calls on a local model),
+  // poll the server-side session every 2 s and re-render as new messages
+  // land. The typing indicator stays visible until the round-trip
+  // completes (since `busy` doesn't flip until then).
+  const sid = window.AGENT.sessionId;
+  let poller = setInterval(async () => {
+    if (!window.AGENT.busy) return;
+    try {
+      const sr = await fetch('/agent/sessions/' + encodeURIComponent(sid));
+      if (!sr.ok) return;
+      const sj = await sr.json();
+      const msgs = sj.rendered_messages || [];
+      // Only re-render if the message count actually grew — avoids
+      // flickery rebuilds during lulls.
+      const cur = chat.querySelectorAll('.agent-msg-row, .agent-tool-card').length;
+      if (msgs.length > cur) {
+        // Snapshot the typing row's text to preserve any contextual update,
+        // then rebuild and re-append it so the indicator stays at the
+        // bottom under the latest content.
+        const typingTextEl = document.getElementById('agentTypingText');
+        const phase = typingTextEl ? typingTextEl.textContent : 'Working';
+        agentRender(msgs);
+        chat.appendChild(renderTypingRow(_phaseFor(msgs, phase)));
+        chat.scrollTop = chat.scrollHeight;
+      }
+    } catch(e) {}
+  }, 2000);
 
   try {
     const r = await fetch(
-      '/agent/sessions/' + encodeURIComponent(window.AGENT.sessionId) + '/message',
+      '/agent/sessions/' + encodeURIComponent(sid) + '/message',
       {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -10660,36 +11415,80 @@ async function agentSend() {
     );
     const j = await r.json();
     if (!r.ok || j.error) {
-      typing.classList.add('error');
-      typing.textContent = 'Error: ' + (j.error || ('HTTP ' + r.status));
+      const typing = document.getElementById('agentTypingRow');
+      if (typing) {
+        typing.querySelector('.agent-typing-bubble').innerHTML =
+          `<span style="color:#f49a9e">⚠ Error: ${escapeHtml(j.error || ('HTTP ' + r.status))}</span>`;
+      }
     } else {
-      // Re-render the whole conversation from the authoritative server state.
       agentRender(j.rendered_messages || []);
     }
   } catch (e) {
-    typing.textContent = 'Network error: ' + e;
+    const typing = document.getElementById('agentTypingRow');
+    if (typing) {
+      typing.querySelector('.agent-typing-bubble').innerHTML =
+        `<span style="color:#f49a9e">⚠ Network error: ${escapeHtml(String(e))}</span>`;
+    }
   } finally {
+    clearInterval(poller);
     window.AGENT.busy = false;
     btn.disabled = false;
-    btn.textContent = 'Send';
-    chat.scrollTop = chat.scrollHeight;
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   }
 }
 
-// Send on Cmd/Ctrl+Enter from the textarea.
+// Pick a contextual typing-indicator phrase based on what just happened.
+function _phaseFor(messages, fallback) {
+  if (!messages || messages.length === 0) return fallback || 'Drafting plan';
+  const last = messages[messages.length - 1];
+  if (last.kind === 'tool_result') {
+    const r = last.result || {};
+    const inner = r.result || {};
+    if (typeof inner === 'object' && 'job_id' in inner) {
+      return `Queueing next shot…`;
+    }
+    return 'Reading tool result…';
+  }
+  if (last.kind === 'assistant') {
+    if (last.tool_call) return `Calling ${last.tool_call.tool}…`;
+    return 'Drafting next step…';
+  }
+  return fallback || 'Working';
+}
+
+// ---- Composer plumbing ----------------------------------------------------
+function agentAutoResize(ta) {
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(220, Math.max(48, ta.scrollHeight)) + 'px';
+}
+
+function agentUpdateSendState() {
+  const input = document.getElementById('agentInput');
+  const btn = document.getElementById('agentSendBtn');
+  if (!input || !btn) return;
+  btn.disabled = !input.value.trim() || window.AGENT.busy;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const ta = document.getElementById('agentInput');
   if (ta) {
+    ta.addEventListener('input', () => {
+      agentAutoResize(ta);
+      agentUpdateSendState();
+    });
     ta.addEventListener('keydown', e => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
         agentSend();
       }
     });
+    agentAutoResize(ta);
+    agentUpdateSendState();
   }
 });
 
-// ----- Engine settings drawer -----
+// ---- Engine settings drawer -----------------------------------------------
 function openAgentSettings() {
   agentRefreshConfig().then(() => {
     const modal = document.getElementById('agentSettingsModal');
@@ -10705,7 +11504,6 @@ function openAgentSettings() {
     document.getElementById('agentTemp').value = cfg.temperature ?? 0.4;
     document.getElementById('agentMaxTokens').value = cfg.max_tokens ?? 3072;
 
-    // Populate the local-model dropdown.
     const sel = document.getElementById('agentLocalModel');
     sel.innerHTML = '';
     const models = (window.AGENT.config && window.AGENT.config.available_models) || [];
@@ -10718,7 +11516,7 @@ function openAgentSettings() {
       for (const m of models) {
         const opt = document.createElement('option');
         opt.value = m.path;
-        opt.textContent = `${m.name} (${m.size_gb} GB)`;
+        opt.textContent = `${m.name} · ${m.size_gb} GB`;
         if ((cfg.local_model_path || '') === m.path) opt.selected = true;
         sel.appendChild(opt);
       }
@@ -10748,7 +11546,7 @@ function agentLocalRefreshRow(local) {
   const btn = document.getElementById('agentLocalToggleBtn');
   if (!pill || !detail || !btn) return;
   if (local.running) {
-    pill.textContent = 'running';
+    pill.textContent = 'live';
     pill.classList.add('live'); pill.classList.remove('bad');
     detail.textContent = `mlx-lm.server pid ${local.pid} on :${local.port}`;
     btn.textContent = 'Stop';
@@ -10756,13 +11554,12 @@ function agentLocalRefreshRow(local) {
     pill.textContent = 'stopped';
     pill.classList.remove('live');
     if (local.last_error) pill.classList.add('bad');
-    detail.textContent = local.last_error || 'mlx-lm.server';
+    detail.textContent = local.last_error || 'mlx-lm.server (will spawn on Start)';
     btn.textContent = 'Start';
   }
 }
 
 async function agentLocalToggle() {
-  const cfg = (window.AGENT.config && window.AGENT.config.engine) || {};
   const local = (window.AGENT.config && window.AGENT.config.local_server) || {};
   if (local.running) {
     await fetch('/agent/local/stop', {method: 'POST'});
@@ -10775,8 +11572,6 @@ async function agentLocalToggle() {
       body: JSON.stringify({model_path: modelPath || undefined}),
     });
   }
-  // Server side spawn-and-wait is fast (process forks return ~immediately;
-  // the model load happens lazily in the first /chat/completions call).
   await new Promise(r => setTimeout(r, 300));
   await agentRefreshConfig();
   const local2 = (window.AGENT.config && window.AGENT.config.local_server) || {};
@@ -10794,9 +11589,6 @@ async function agentSaveSettings() {
     const sel = document.getElementById('agentLocalModel');
     if (sel && sel.value) {
       payload.local_model_path = sel.value;
-      // The "model" field for local engines is just a label sent to mlx-lm
-      // (which doesn't actually filter on it — it serves whatever model it
-      // was launched with). Still, surface a sensible name.
       const parts = sel.value.split('/');
       payload.model = parts[parts.length - 1] || sel.value;
     }

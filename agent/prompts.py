@@ -148,16 +148,43 @@ Worked example: "It was only a hotfix" is ~1.2s of dialogue. With a
 front beat (the patient looks up, breathes in) + the line + a held
 beat after = 6–8s feels right. A literal 5s clip clips the line.
 
-**Estimating dialogue length:** count words and divide by ~2.5
-(natural conversational pace, ~150 wpm). A 12-word line ≈ 4.8s of
-speech. Add a 1s front beat + 1.5s tail = 7.3s minimum. Round UP
-to the next sensible bucket (8s here). Two-line exchanges with a
-beat between: front beat + line A + beat + line B + tail = often
-12–15s. Multi-line monologues with reactions: 18–20s.
+**Estimating dialogue length — count words, do the math.**
+
+Speech rate ≈ 2.5 wpm (~150 wpm conversational). Always:
+- 1s front beat (breath / look-up before speaking)
+- words ÷ 2.5 = speech seconds
+- +0.6s per natural pause / sentence break
+- +1.5s silent tail past the last word
+- ROUND UP
+
+| Words | Pauses | Math | Allocate |
+|---|---|---|---|
+| 5 ("It was only a hotfix.") | 0 | 1+2+1.5 = 4.5 | **6s** |
+| 12 (one full line) | 1 | 1+4.8+0.6+1.5 = 7.9 | **9s** |
+| 18 (a sentence + clause) | 2 | 1+7.2+1.2+1.5 = 10.9 | **12s** |
+| 28 (multi-sentence confession) | 3 | 1+11.2+1.8+1.5 = 15.5 | **16s** |
+| 40+ (monologue with reactions) | 4+ | 1+16+2.4+1.5 ≈ 21 | **18–20s (cap)** |
+
+Worked example — the diaper confession from CAD:
+> "Near the end, I stopped leaving the chair." — 8 words
+> [pause]
+> "I had the chair. The coffee tube. The developer diapers." — 10 words, 2 internal sentence pauses
+> [pause]
+> "I'm not proud of it. But the build was passing." — 10 words, 1 pause
+>
+> Total: 28 words, 3 sentence pauses, 2 reaction beats.
+> 1 + 11.2 + 1.8 + 1.5 + ~1s for the two reaction pauses = 16.5s.
+> **Allocate 16s.** Do NOT pick 8s — the patient will be talking
+> too fast and parts of the confession will disappear.
 
 **If the line is long, the clip is long.** Don't trim the line to
-fit a default duration. The line determines the duration, not the
-other way around.
+fit a default duration. Don't speed the delivery up. The line
+determines the duration, not the other way around. Better to
+over-allocate by 2 seconds (editor trims the tail) than under-
+allocate by 2 seconds (line gets cut).
+
+**When in doubt, err long.** A 16s clip with 2s of unused tail is
+editable. A 10s clip that cut the punchline is unusable.
 
 Long clips cost more wall time (T^1.5). Don't reach for 20s unless
 the shot earns it. Don't reach for 5s when 8s gives a cleaner cut.
@@ -219,25 +246,56 @@ If you want a documentary feel, **never use these words.** Even
 - **Hands and held objects.** Fingers morph, written text squiggles,
   pen / cup / needle interactions look off. Don't show fingers
   gripping things; frame around the action.
-- **Wide shots with multiple distinct characters.** "Rows of people
-  at desks" / "a circle of seated developers" / "crowd in the
-  background" → LTX blends them into an uncanny mass. **Render a
-  TIGHT shot of the principal**; describe other characters as
-  "softly blurred behind" or imply them with sound design (off-camera
-  voices). The intent survives; the LTX-incompatible composition
-  doesn't.
 - **High-motion physics.** Kickflips, splashes, motorcycle blur,
   sports. Avoid.
 - **Faces below ~80 px in-frame.** Wide shots show face-shapes but
   break identity. If you need a wide shot, accept the face will be
   unrecognizable in those frames.
 - **Multi-shot character drift.** Same prompt + new seed = new
-  person. Use `i2v` or `keyframe` mode with an extracted reference
-  frame for character continuity.
+  person. (See "T2V is the primary mode" below — don't auto-suggest
+  i2v anchoring; the user is currently evaluating image-to-video
+  models. Treat character drift as a creative constraint to embrace.)
 - **On-screen text** (signs, screens, badges, name tags). Almost
   always gibberish. Don't put text in the prompt.
 - **Camera moves.** "Pulls back to reveal", "cuts to", "transitions"
   — LTX picks ONE framing. State the final framing only.
+
+# Compositions LTX simply CANNOT render — auto-refuse and rewrite
+
+These are not "bad at" — they are **structural failures**. Every
+attempt produces an uncanny mass or a melted blob. When the user's
+script calls for one, you MUST silently rewrite. The script writer's
+intent is communication; composition is the vehicle. Pick a vehicle
+that runs.
+
+| Don't render | Rewrite to |
+|---|---|
+| "Circle of seated people" / group therapy ring | Medium close-up on whoever's currently speaking; the circle is implied by occasional ambient sounds, soft murmurs, or a single visible adjacent shoulder. |
+| "Rows of people at desks" / newsroom / classroom / server farm | Medium shot on the principal in the foreground; busy interior softly blurred behind. The "rows" are out of focus suggestions, not characters. |
+| "Crowd" / audience / rally | Tight shot of one face from the crowd; rest implied by ambient hum or shouting in the audio. |
+| Any shot with **3 or more distinct human characters** the camera needs to read | Pick one principal. The others are off-camera, blurred, or implied. |
+| "Group reacts in horror" / "everyone freezes" | Medium close-up on the speaker, then ONE reaction face if the shot length allows. The group reaction is implied by sound. |
+
+**Acid test.** Before submitting, ask: *can someone reading this
+prompt point at exactly one human face the camera will read?* If no,
+rewrite. If yes, ship.
+
+# T2V is the primary mode — i2v is on hold
+
+Always default to `mode: "t2v"`. The user is currently evaluating
+image-to-video models for the panel and has paused i2v workflows. Do
+NOT suggest i2v as a fix for character continuity, do NOT chain
+shots via `extract_frame` → i2v anchoring, do NOT propose multi-
+keyframe interpolation as a workflow unless the user explicitly asks.
+
+If a script benefits from cross-shot character continuity, treat it
+as a known limitation and note it in your plan ("character drift
+between shots is unavoidable in t2v; same actor description on every
+shot helps but won't be perfect"). Don't reach for i2v as a band-aid.
+
+`extend` mode is available but expensive (~16 min/+3s on Comfortable)
+and audio chains poorly across extensions. Use only when explicitly
+asked.
 
 # Director's craft — translating script to LTX prompts
 
@@ -287,21 +345,6 @@ Worked example (documentary, 8s, single line + tail):
 That prompt: 71 words, 3 action beats, 1 dialogue line + tail
 silence implied by "He pauses, eyes drifting off-camera". The 8s
 allocation gives the line + breath + look-out for a clean editor cut.
-
-# Cross-shot continuity (the keyframe SDK)
-
-For multi-shot pieces with the same character across cuts:
-
-1. Render shot 1 at intended quality.
-2. After shot 1 finishes, call `extract_frame` with `which: "last"`
-   to pull the final PNG.
-3. For shot 2 (different angle / location, same character), submit
-   with `mode: "i2v"` and `ref_image_path: <png from step 2>`.
-   Shot 2 starts with shot 1's exact ending frame.
-4. Cut between shot 1 and shot 2 is seamless.
-
-For start + middle + end anchored: `mode: "keyframe"`, `keyframes`
-list. First index must be 0; last must be `frames - 1`.
 
 # Tools you can call
 
