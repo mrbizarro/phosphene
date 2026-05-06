@@ -5214,6 +5214,34 @@ class Handler(BaseHTTPRequestHandler):
             # accommodates. Saves a trip to Settings → Start.
             if (sess.engine_config.kind == "phosphene_local"
                     and not agent_local_server.is_running()):
+                # Memory guard — refuse to spawn mlx-lm when the Mac is
+                # already in swap or close to OOM. Loading a 22 GB Qwen
+                # 35B on top of a 64 GB system that's at 90%+ pressure +
+                # swap is what put Salo in a force-quit dialog last time.
+                # Bail early with an actionable error rather than silently
+                # making the system thrash.
+                mem = get_memory()
+                pressure = mem.get("pressure_pct") or 0
+                swap_gb = mem.get("swap_gb") or 0.0
+                if pressure >= 92 or swap_gb >= 8:
+                    push(f"agent: refusing to auto-start local engine "
+                         f"(memory pressure {pressure}%, swap {swap_gb:.1f} GB)")
+                    self._json({
+                        "error": (
+                            f"Memory too high to start the local engine "
+                            f"({mem.get('used_gb', 0):.1f}/"
+                            f"{mem.get('total_gb', 0):.0f} GB used, "
+                            f"swap {swap_gb:.1f} GB). "
+                            "Loading a 22 GB chat model on top of this "
+                            "would force the Mac into heavy swap. "
+                            "Either: (a) wait for current renders to "
+                            "finish, (b) switch to a smaller model in "
+                            "Settings (Gemma 12B is ~7.5 GB), or (c) "
+                            "quit other heavy apps (Claude.app, Chrome) "
+                            "and try again."
+                        ),
+                    }, 503)
+                    return
                 push("agent: auto-starting local engine for first message")
                 _agent_local_start()
                 # Wait briefly for /v1/models to respond before we proceed —
@@ -5803,18 +5831,18 @@ HTML = r"""<!doctype html>
     }
     .panel-offline-banner .icon {
       flex-shrink: 0;
-      width: 16px; height: 16px;
+      width: 22px; height: 22px;
       display: inline-flex;
       align-items: center; justify-content: center;
-      color: var(--danger);
+      position: relative;
+      /* Desaturate the logo while the panel is offline so it reads
+         "asleep" — comes back to full color the moment we reconnect. */
+      filter: grayscale(0.45) brightness(0.85);
+      animation: pulse 2s ease-in-out infinite;
     }
-    .panel-offline-banner .icon::before {
-      content: '';
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: var(--danger);
-      box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.5);
-      animation: pulse 1.6s ease-in-out infinite;
+    .panel-offline-banner .icon img {
+      width: 100%; height: 100%;
+      display: block;
     }
     .panel-offline-banner .label {
       font-weight: 600;
@@ -11061,8 +11089,8 @@ function _setOfflineBanner(visible, msg) {
       bar.id = 'panelOfflineBanner';
       bar.className = 'panel-offline-banner';
       bar.innerHTML =
-        '<span class="icon"></span>' +
-        '<span class="label">Panel offline</span>' +
+        '<span class="icon"><img src="/assets/favicon-64.png" alt=""></span>' +
+        '<span class="label">Phosphene offline</span>' +
         '<span class="text"></span>' +
         '<span class="hint">restart from Pinokio</span>';
       document.body.appendChild(bar);
