@@ -1792,8 +1792,8 @@ def open_pinokio() -> None:
 #   T2V/I2V Q8 HQ        at 1280×704: ~50 GB peak, fits 64 GB cleanly
 #   FFLF (Q8 dev)        at 1280×704: > 64 GB peak, OOMs into swap
 #   FFLF (Q8 dev)        at  768×416: ~48 GB peak, fits 64 GB
-#   Extend (Q4 dev)      at 1280×704: ~50 GB peak + 12 GB swap (240s/step)
-#   Extend (Q4 dev)      at  768×416: ~46 GB peak, no swap (54s/step)
+#   Extend (Q8 dev)      at 1280×704: > 64 GB peak, OOMs into swap
+#   Extend (Q8 dev)      at  768×416: ~48 GB peak, fits 64 GB
 #
 # `t2v_max_dim` / `i2v_max_dim` clamp T2V/I2V resolution. `keyframe_max_dim`
 # and `extend_max_dim` clamp those modes' resolutions specifically (since

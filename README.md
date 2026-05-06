@@ -147,7 +147,7 @@ and step count change.
 | **Quick** | Q4 distilled | 640×480 · ~2 min | Fast sanity checks. 4:3 native output. |
 | **Balanced** | Q4 distilled + Lanczos export | 1024×576 → 1280×720 · ~4–5 min | Default. Standard 16:9 delivery without cropping; good first bet for faster HD-looking clips. |
 | **Standard** | Q4 distilled | 1280×704 · ~8 min | The daily driver. Q4 weights (~20 GB on disk). Boost/Turbo Speed shaves ~23 % / ~34 %. |
-| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~37 GB extra). Required for FFLF. |
+| **High** | Q8 two-stage + TeaCache | 1280×704 · ~12 min | Sharper detail, fewer artifacts on faces and text. Optional Q8 download (~37 GB extra). Required for FFLF and Extend. |
 
 The **Export** control can also run a lightweight ffmpeg Lanczos pass after
 generation:
@@ -404,17 +404,17 @@ ffmpeg -i in.mp4 \
 
 ## Performance reference
 
-Wall-clock times on an **M4 Mac Studio, 64 GB**:
+Wall-clock times on an **M4-class Mac, 64 GB**:
 
 | Mode | Resolution | Frames | Steps | ~Time |
 |---|---|---|---|---|
 | T2V Quick | 640×480 | 121 (5s) | 8 | ~2 min |
-| T2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
-| I2V Standard | 1280×704 | 121 (5s) | 8 | ~7 min |
-| Extend (Q4 dev, cfg=1.0) | 768×416 | +6 latents (~2s) | 12 | ~12 min |
-| Extend (Q4 dev, cfg=3.0 "Quality") | 1280×704 | +6 latents | 12 | ~30 min |
+| T2V Balanced | 1024×576 → 1280×720 | 121 (5s) | 8 | ~5 min |
+| T2V Standard | 1280×704 | 121 (5s) | 8 | ~8 min |
+| I2V Standard | 1280×704 | 121 (5s) | 8 | ~9 min |
 | High (Q8 two-stage) | 1280×704 | 121 | s1=15 + s2=3 | ~12 min |
-| FFLF (Q8) | 768×416 | 121 | s1=15 + s2=3 | ~5 min |
+| FFLF (Q8) | 768×416 | 121 | s1=15 + s2=3 | ~6 min |
+| Extend (Q8 dev, cfg=1.0) | 768×416 | +3s | 12 | ~16 min |
 
 Experimental Speed smoke test on the same 64 GB machine, I2V Standard,
 768×512, 121 frames, 8 steps:
