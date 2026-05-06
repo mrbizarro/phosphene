@@ -240,6 +240,63 @@ Ordered by what to try first:
 5. **Character anchoring via I2V keyframe** — quality unlock, not speed (but enables SDK).
 6. **Two parallel helpers on 64 GB** — 2× throughput on batch renders. Refactor risk.
 
+### Optimization experiments (May 5) — full lab session
+
+Ruled out on M4 Max + MLX 0.31.1 (with measurements):
+
+| Idea | Result |
+|---|---|
+| `mlx-mfa` SDPA drop-in | 1.00× — MLX SDPA already saturated |
+| `mlx-mfa` STEEL kernel forced | 2.4× SLOWER on our shapes |
+| `mx.compile` on block forward | 1.01× — kernels already saturated |
+| Cache RoPE freqs across steps | 0.16 s/render saved — not worth |
+| Sliding-window self-attn | kernel 1.9-4.3× faster but 58-280% numerical drift — model not trained for it |
+| Block-skip caching (DeepCache for DiT) | **see next sub-section** |
+
+**Block-skip caching — implemented, gated off by default:**
+
+Patch in `patch_block_skip.py`. Helper integration in `mlx_warm_helper.py`.
+Sampler integration in `ltx-2-mlx/.../utils/samplers.py`. Activation:
+`LTX_BLOCK_SKIP=1 ./run_panel.sh`. Full guide: `docs/BLOCK_SKIP_ACTIVATION.md`,
+results: `docs/PERF_RESULTS_2026-05-05.md`.
+
+Measured (5-sec 1024×576 Balanced+Turbo, deterministic same seed):
+- baseline-vs-baseline: SSIM 1.000000 (LTX is perfectly deterministic)
+- alternate edge=12: 1.22× speedup, SSIM 0.878 — **different identity**
+- 3of5 edge=12: 1.35× speedup, SSIM 0.879 — **different identity**
+- alternate edge=20 (most conservative): 1.07× speedup, SSIM 0.890 — still different
+
+Quality drop is fundamental, not parameter-tunable. The patched output is a
+**different render of the same prompt** (similar composition, different person).
+Useful for iteration / pre-viz mode; **NOT for final renders**. Reason: DiT
+lacks U-Net's skip-connection anchoring, so the residual-cache approximation
+drifts visibly at production scale (8 steps × 9k+ tokens).
+
+Tiny survival (320×240 / 4 steps / no Turbo) gave SSIM 0.998 — block-skip
+works at small scale, fails at production scale.
+
+**Recommended path: Track B (conv3d kernel port).** MLX conv3d on the LTX VAE
+upsampler runs at 1.7-2.8 GB/s effective vs M4 Max's 410 GB/s ceiling.
+Draw Things' BSD-3 `ccv_nnc_mfa_conv3d` is vendorable; estimated ~10-12% e2e
+speedup (~50-70 s on a 10-min render) with NO quality risk. Design doc:
+`docs/CONV3D_KERNEL_PORT_DESIGN.md`. Effort: 1-2 weeks.
+
+### Profile baseline (real LTX shapes, M4 Max bf16, May 5)
+
+Per-block forward at 5-sec 1024×576 (random-weights bench, 480 ms total):
+
+| Section | Time | % |
+|---|---|---|
+| Video self-attn | 197.6 ms | 41% |
+| Video FFN | 173.5 ms | 36% |
+| Video text x-attn | 49.3 ms | 10% |
+| A2V cross-modal | 27.4 ms | 6% |
+| V2A cross-modal | 26.2 ms | 5% |
+| Audio (all 4 ops) | ~6 ms | 1.5% |
+
+20-sec clips: video self-attn grows to **64% of compute** (O(N²)).
+Audio remains <1%.
+
 ### Marketing / launch (HAI-157, HAI-158)
 
 - Tweet thread + slides drafted in scrollback (5-6 tweets, copy-paste ready).

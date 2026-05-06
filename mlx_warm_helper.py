@@ -51,6 +51,34 @@ MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() i
 _USER_VAE_STREAMING_OVERRIDE = os.environ.get("LTX_VAE_STREAMING")
 
 
+# ---- Optional perf patch: block-skip caching (DeepCache for DiT) ----
+# Enabled by setting LTX_BLOCK_SKIP=1 at helper start.
+# Schedule (alternate / 3of5 / aggressive) and edge_blocks tunable via env vars.
+# When disabled, this is a no-op import. See patch_block_skip.py for details.
+_BLOCK_SKIP_CTRL = None
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import patch_block_skip  # noqa: E402
+    _BLOCK_SKIP_CTRL = patch_block_skip.auto_enable_from_env()
+    if _BLOCK_SKIP_CTRL is not None:
+        print(
+            f"[block-skip] enabled  schedule={os.environ.get('LTX_BLOCK_SKIP_SCHEDULE','3of5')}  "
+            f"edge={_BLOCK_SKIP_CTRL.edge_blocks}",
+            file=sys.stderr,
+            flush=True,
+        )
+except Exception as _e:
+    print(f"[block-skip] not loaded: {_e}", file=sys.stderr, flush=True)
+    _BLOCK_SKIP_CTRL = None
+
+
+def _block_skip_reset() -> None:
+    """Reset the block-skip controller's per-job state (residual cache, step counters).
+    No-op if the patch isn't active. Should be called at start of each job."""
+    if _BLOCK_SKIP_CTRL is not None:
+        _BLOCK_SKIP_CTRL.reset()
+
+
 def _apply_vae_streaming_decision(num_frames: int) -> None:
     """Set/unset os.environ['LTX_VAE_STREAMING'] for the upcoming decode.
     No-op if the user pinned a value at helper start time. Threshold reads
@@ -974,6 +1002,38 @@ for line in sys.__stdin__:
         emit({"event": "pong"})
         continue
 
+    if action == "set_block_skip":
+        # Runtime-toggle the block-skip controller without restarting the helper.
+        # Params: {schedule, edge_blocks, skip_stride, skip_blocks, verbose}
+        # schedule=None or "off" disables.
+        try:
+            import patch_block_skip as _pbs
+            p = msg.get("params", {}) or {}
+            sched = p.get("schedule")
+            if sched in (None, "off", "disable"):
+                _pbs.disable_block_skip()
+                _BLOCK_SKIP_CTRL = None
+                emit({"event": "block_skip_set", "active": False})
+            else:
+                _BLOCK_SKIP_CTRL = _pbs.set_config(
+                    schedule=sched,
+                    edge_blocks=int(p.get("edge_blocks", 12)),
+                    skip_stride=int(p.get("skip_stride", 1)),
+                    skip_blocks=p.get("skip_blocks"),
+                    verbose=bool(p.get("verbose", False)),
+                )
+                emit({
+                    "event": "block_skip_set",
+                    "active": True,
+                    "schedule": sched,
+                    "edge_blocks": int(p.get("edge_blocks", 12)),
+                    "skip_stride": int(p.get("skip_stride", 1)),
+                    "skip_set_size": len(_BLOCK_SKIP_CTRL.skip_set),
+                })
+        except Exception as exc:
+            emit({"event": "error", "error": f"set_block_skip failed: {exc}"})
+        continue
+
     if action == "generate":
         job_id = msg.get("id", "?")
         p = msg.get("params", {}) or {}
@@ -986,6 +1046,7 @@ for line in sys.__stdin__:
         if seed == -1:
             seed = random.randint(0, 2**31 - 1)
 
+        _block_skip_reset()  # fresh per-job state for the optional block-skip patch
         _is_busy = True
         try:
             t0 = time.time()
@@ -1134,6 +1195,7 @@ for line in sys.__stdin__:
         seed = int(p.get("seed", -1))
         if seed == -1:
             seed = random.randint(0, 2**31 - 1)
+        _block_skip_reset()
         _is_busy = True
         try:
             t0 = time.time()
@@ -1200,6 +1262,7 @@ for line in sys.__stdin__:
         seed = int(p.get("seed", -1))
         if seed == -1:
             seed = random.randint(0, 2**31 - 1)
+        _block_skip_reset()
         _is_busy = True
         try:
             t0 = time.time()
@@ -1257,6 +1320,7 @@ for line in sys.__stdin__:
         seed = int(p.get("seed", -1))
         if seed == -1:
             seed = random.randint(0, 2**31 - 1)
+        _block_skip_reset()
         _is_busy = True
         try:
             t0 = time.time()
@@ -1318,6 +1382,7 @@ for line in sys.__stdin__:
         if not user_prompt:
             emit({"event": "error", "id": job_id, "error": "empty prompt"})
             continue
+        _block_skip_reset()
         _is_busy = True
         try:
             t0 = time.time()
