@@ -61,7 +61,30 @@ OUTPUT = Path(os.environ.get("LTX_OUTPUT_DIR", str(ROOT / "mlx_outputs")))
 UPLOADS = Path(os.environ.get("LTX_UPLOADS_DIR", str(ROOT / "panel_uploads")))
 AUDIO_DEFAULT = Path(os.environ.get("LTX_DEFAULT_AUDIO", str(ROOT / "audio_inputs/default.wav")))
 REFERENCE = Path(os.environ.get("LTX_DEFAULT_IMAGE", str(ROOT / "examples/reference.png")))
-HELPER_PYTHON = Path(os.environ.get("LTX_HELPER_PYTHON", str(MLX / ".venv/bin/python3.11")))
+def _resolve_helper_python() -> Path:
+    """Find the helper-subprocess Python interpreter.
+
+    Order: explicit env var → manual-install convention (`.venv/`) →
+    Pinokio convention (`env/`) → last-resort fallback so the panel
+    boots even if neither exists (the helper will fail loudly when the
+    first job tries to spawn it). Auto-detection means non-Pinokio
+    launches (manual `python3.11 mlx_ltx_panel.py` for testing) work
+    without needing LTX_HELPER_PYTHON set.
+    """
+    explicit = os.environ.get("LTX_HELPER_PYTHON")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+    for sub in (".venv/bin/python3.11", "env/bin/python3.11"):
+        p = MLX / sub
+        if p.is_file():
+            return p
+    # No working interpreter found — return the manual-install default.
+    # Job submission will surface a clear error referring users to the
+    # install instructions.
+    return MLX / ".venv/bin/python3.11"
+
+
+HELPER_PYTHON = _resolve_helper_python()
 HELPER_SCRIPT = Path(os.environ.get("LTX_HELPER_SCRIPT", str(ROOT / "mlx_warm_helper.py")))
 # ffmpeg: env var → PATH → Pinokio bundled → Homebrew → /usr/local. First match wins.
 def _resolve_ffmpeg() -> Path:
@@ -3516,7 +3539,25 @@ def _agent_submit_job(form: dict) -> dict:
     Goes through the exact same path /run / /queue/add use, so jobs
     submitted by the agent are indistinguishable from manual ones once
     queued (same params, same worker, same history bucket).
+
+    Pre-flight: verify the helper subprocess can actually run before
+    queueing. Catches the 'agent says success, render fails 30 s later
+    with [Errno 2] No such file or directory' class of bug — the queue
+    accepts anything, but the worker hits a missing helper python and
+    the agent never knows.
     """
+    if not HELPER_PYTHON.is_file():
+        raise RuntimeError(
+            f"helper python not found at {HELPER_PYTHON}. "
+            f"Renders will fail. Set LTX_HELPER_PYTHON env var to a valid "
+            f"interpreter or reinstall via Pinokio (which sets it for you). "
+            f"Tried: {MLX}/.venv/bin/python3.11, {MLX}/env/bin/python3.11."
+        )
+    if not HELPER_SCRIPT.is_file():
+        raise RuntimeError(
+            f"helper script not found at {HELPER_SCRIPT}. "
+            f"The mlx_warm_helper.py file is missing — reinstall the panel."
+        )
     job = make_job(form)
     with QUEUE_COND:
         STATE["queue"].append(job)
@@ -5318,6 +5359,17 @@ HTML = r"""<!doctype html>
     .form-pane { padding: 16px; overflow-y: auto; }
     .stage-pane { padding: 0; }
 
+    /* Agentic Flows is a chat — it deserves more horizontal real estate
+       than the manual form. When data-workflow="agent" is on the body,
+       the form-pane grows to ~55% and the agent-stage-pane on the right
+       takes over for showing live queue / renders / outputs. */
+    body[data-workflow="agent"] .layout {
+      grid-template-columns: minmax(560px, 1.2fr) minmax(440px, 1fr);
+    }
+    body[data-workflow="agent"] .form-pane { padding: 0; }
+    body[data-workflow="agent"] .stage-pane { display: none; }
+    body[data-workflow="agent"] .agent-stage-pane { display: flex; }
+
     /* ===== FORM ===== */
     h2 {
       font-size: 10px; margin: 14px 0 8px; color: var(--muted);
@@ -6928,6 +6980,254 @@ HTML = r"""<!doctype html>
       max-height: 80px; overflow-y: auto;
     }
 
+    /* ============================================================
+       AGENT STAGE PANE — the right-side "live canvas" / code-interpreter
+       ============================================================
+       Shows what the agent is actually doing with the renderer in real
+       time: current job + progress, queue, generated anchors waiting on
+       a pick, finished mp4s playing inline. Polls /status every ~1.5s.
+
+       Hidden by default; appears when body[data-workflow="agent"] OR
+       body.agent-fullscreen. Cards are layered (top: now, middle:
+       activity feed, bottom: gallery of session outputs) and scroll
+       independently. */
+    .agent-stage-pane {
+      display: none;
+      flex-direction: column;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      min-height: 0;
+    }
+    .agent-stage-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex; align-items: center; gap: 10px;
+      flex-shrink: 0;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+    }
+    .agent-stage-head .label {
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--muted);
+    }
+    .agent-stage-head .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted);
+    }
+    .agent-stage-head .live-dot.live {
+      background: #2ea043;
+      box-shadow: 0 0 0 3px rgba(46,160,67,0.18);
+      animation: stage-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes stage-pulse {
+      0%, 100% { box-shadow: 0 0 0 3px rgba(46,160,67,0.18); }
+      50% { box-shadow: 0 0 0 6px rgba(46,160,67,0.05); }
+    }
+    .agent-stage-head .session-pill {
+      font-size: 10px; padding: 3px 8px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: 999px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      flex: 0 0 auto;
+    }
+    .agent-stage-head .spacer { flex: 1; }
+    .agent-stage-head .stage-tab {
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: 7px;
+      padding: 5px 10px; font-size: 11px; cursor: pointer;
+      width: auto;
+    }
+    .agent-stage-head .stage-tab.active {
+      background: var(--accent-dim); color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    .agent-stage-head .stage-tab:hover:not(.active) {
+      color: var(--text);
+    }
+    .agent-stage-body {
+      flex: 1 1 auto;
+      overflow-y: auto; overflow-x: hidden;
+      padding: 14px 16px 18px;
+      display: flex; flex-direction: column; gap: 14px;
+      min-height: 0;
+    }
+    .agent-stage-body::-webkit-scrollbar { width: 8px; }
+    .agent-stage-body::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.06); border-radius: 4px;
+    }
+    .agent-stage-body::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.14);
+    }
+    .agent-stage-section {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .agent-stage-section h4 {
+      margin: 0 0 8px; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--muted); font-weight: 700;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .agent-stage-section h4 .count {
+      padding: 1px 7px; border-radius: 999px;
+      background: var(--accent-dim); color: var(--accent-bright);
+      font-weight: 700;
+    }
+
+    /* "Now rendering" card */
+    .stage-now-card {
+      padding: 14px 14px 12px;
+    }
+    .stage-now-card.idle {
+      text-align: center; color: var(--muted);
+      font-size: 12px; padding: 24px 14px;
+      font-style: italic;
+    }
+    .stage-now-label {
+      font-size: 13px; font-weight: 600;
+      color: var(--text); margin-bottom: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-now-meta {
+      font-size: 11px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin-bottom: 10px;
+    }
+    .stage-progress-bar {
+      height: 6px; border-radius: 3px;
+      background: rgba(255,255,255,0.06);
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .stage-progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+      transition: width 600ms ease;
+      box-shadow: 0 0 12px rgba(47,129,247,0.4);
+    }
+    .stage-progress-text {
+      font-size: 10px; color: var(--muted);
+      display: flex; justify-content: space-between;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    /* Session outputs gallery */
+    .stage-outputs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 8px;
+    }
+    .stage-output-cell {
+      position: relative;
+      aspect-ratio: 16/9;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .stage-output-cell:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .stage-output-cell.failed {
+      border-color: rgba(207,34,46,0.5);
+      background: rgba(207,34,46,0.04);
+    }
+    .stage-output-cell .vid {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+    }
+    .stage-output-cell .label {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      padding: 4px 8px;
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,0.7));
+      color: white;
+      font-size: 10px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-output-cell .badge {
+      position: absolute; top: 4px; left: 4px;
+      font-size: 9px; padding: 2px 6px;
+      background: rgba(0,0,0,0.6); color: white;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0.3px;
+    }
+    .stage-output-cell.failed .badge {
+      background: rgba(207,34,46,0.85);
+    }
+    .stage-empty {
+      text-align: center; color: var(--muted);
+      font-size: 12px; padding: 16px;
+      font-style: italic;
+    }
+
+    /* Activity feed (recent agent actions) */
+    .stage-activity {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 220px; overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+    }
+    .stage-activity-row {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .stage-activity-row:last-child { border-bottom: none; }
+    .stage-activity-row .icon {
+      width: 14px; flex-shrink: 0;
+      font-size: 11px;
+    }
+    .stage-activity-row.ok .icon { color: #2ea043; }
+    .stage-activity-row.fail .icon { color: #cf222e; }
+    .stage-activity-row.run .icon { color: var(--accent-bright); }
+    .stage-activity-row .text {
+      flex: 1; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .stage-activity-row .when {
+      color: var(--muted); font-size: 10px;
+      flex-shrink: 0;
+    }
+
+    /* Lightbox: clicking a stage-output-cell plays the video full-size */
+    .stage-lightbox {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.85);
+      backdrop-filter: blur(8px);
+      z-index: 250;
+      display: none;
+      align-items: center; justify-content: center;
+      padding: 40px;
+    }
+    .stage-lightbox.open { display: flex; }
+    .stage-lightbox video {
+      max-width: 90vw; max-height: 80vh;
+      border-radius: 12px;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    }
+    .stage-lightbox .close-btn {
+      position: absolute;
+      top: 16px; right: 20px;
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 12px;
+      cursor: pointer;
+      width: auto;
+    }
+    .stage-lightbox .close-btn:hover {
+      background: rgba(255,255,255,0.14);
+    }
+
     /* =========================================================
        FULLSCREEN / FOCUS MODE — pro-app polish
        =========================================================
@@ -6942,21 +7242,38 @@ HTML = r"""<!doctype html>
        NOTE: `body.agent-fullscreen > header` (direct child only) — without
        the > combinator the rule also matches the agent's own
        <header class="agent-header"> inside the chat, which is exactly
-       what we DON'T want to hide. */
+       what we DON'T want to hide.
+       Stage pane (right column) STAYS visible — it becomes the agent's
+       live canvas / code-interpreter view. */
     body.agent-fullscreen > header,
     body.agent-fullscreen .bottom-pane,
     body.agent-fullscreen .form-pane > :not(.agent-pane),
-    body.agent-fullscreen .workflow-tabs {
+    body.agent-fullscreen .workflow-tabs,
+    body.agent-fullscreen .stage-pane {
       display: none !important;
     }
     body.agent-fullscreen { overflow: hidden; }
+    /* Fullscreen layout: chat on the left, stage pane on the right.
+       Like Claude.ai with Artifacts open — conversation + live canvas. */
     body.agent-fullscreen .layout {
-      max-width: none; padding: 0; margin: 0;
-      height: 100vh; display: block;
+      max-width: none; padding: 0; margin: 0; gap: 0;
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 1fr minmax(420px, 480px);
     }
     body.agent-fullscreen .form-pane {
       max-width: none; padding: 0;
-      width: 100vw; height: 100vh;
+      width: 100%; height: 100vh;
+      border: none; border-radius: 0;
+      background: transparent;
+    }
+    body.agent-fullscreen .agent-stage-pane {
+      display: flex !important;
+      border: none; border-radius: 0;
+      border-left: 1px solid rgba(255,255,255,0.05);
+      background: rgba(0, 6, 26, 0.3);
+      backdrop-filter: blur(8px);
+      height: 100vh; width: 100%;
     }
 
     /* Soft body backdrop — subtle radial wash gives depth without
@@ -8093,6 +8410,50 @@ HTML = r"""<!doctype html>
       <div class="carousel" id="carousel"></div>
     </div>
   </section>
+
+  <!-- ============== AGENT STAGE PANE ============== -->
+  <!-- Right-side live canvas for the agent: code-interpreter feel.
+       Hidden by default; shown via CSS when body[data-workflow="agent"]
+       OR body.agent-fullscreen. Polls /status every ~1.5 s and re-renders
+       the current job, queue depth, and recent session outputs. Click an
+       output to play it inline (lightbox). -->
+  <aside class="agent-stage-pane">
+    <header class="agent-stage-head">
+      <span class="live-dot" id="agentStageDot"></span>
+      <span class="label">Stage</span>
+      <span class="session-pill" id="agentStageSession">no session</span>
+      <span class="spacer"></span>
+    </header>
+    <div class="agent-stage-body" id="agentStageBody">
+      <!-- Now Rendering section -->
+      <div class="agent-stage-section">
+        <h4>Now rendering</h4>
+        <div class="stage-now-card idle" id="agentStageNow">
+          <div>Idle — submit a shot to see it render here.</div>
+        </div>
+      </div>
+      <!-- Activity feed -->
+      <div class="agent-stage-section">
+        <h4>Recent activity <span class="count" id="agentStageActivityCount">0</span></h4>
+        <div class="stage-activity" id="agentStageActivity">
+          <div class="stage-empty">No tool calls yet.</div>
+        </div>
+      </div>
+      <!-- Session outputs -->
+      <div class="agent-stage-section">
+        <h4>Session outputs <span class="count" id="agentStageOutputsCount">0</span></h4>
+        <div class="stage-outputs" id="agentStageOutputs">
+          <div class="stage-empty">No mp4s rendered yet.</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Lightbox for stage outputs — plays a finished mp4 full-size on click. -->
+  <div class="stage-lightbox" id="agentStageLightbox" onclick="if(event.target===this)agentStageLightboxClose()">
+    <button class="close-btn" onclick="agentStageLightboxClose()">Close · Esc</button>
+    <video id="agentStageLightboxVideo" controls preload="metadata"></video>
+  </div>
 </main>
 
 <!-- ============== CIVITAI MODAL ============== -->
@@ -11544,6 +11905,9 @@ function workflowSwitch(name) {
     .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');
   const agent = document.getElementById('agentPane');
+  // Set body data attribute so CSS can switch the layout (wider form-pane,
+  // show agent-stage-pane on the right).
+  document.body.setAttribute('data-workflow', name);
   if (name === 'agent') {
     if (manual) manual.style.display = 'none';
     if (agent) agent.hidden = false;
@@ -11555,6 +11919,7 @@ function workflowSwitch(name) {
     } else {
       agentLoadSession(window.AGENT.sessionId);
     }
+    agentStageStart();
     setTimeout(() => {
       const ta = document.getElementById('agentInput');
       if (ta) { agentAutoResize(ta); ta.focus(); }
@@ -11562,6 +11927,7 @@ function workflowSwitch(name) {
   } else {
     if (manual) manual.style.display = '';
     if (agent) agent.hidden = true;
+    agentStageStop();
   }
   try { localStorage.setItem('phos_workflow', name); } catch(e) {}
 }
@@ -12514,6 +12880,247 @@ async function agentSaveSettings() {
   await agentRefreshConfig();
   await agentRefreshImageConfig();
 }
+
+// ============================================================================
+// AGENT STAGE PANE — live canvas on the right side
+// ============================================================================
+// Shows the agent's video work as it happens: currently rendering job,
+// session outputs (with click-to-play lightbox), and a recent-activity
+// feed of tool calls. Polls /status + the active session every ~1.5 s
+// while the agent workflow is selected.
+
+window.AGENT_STAGE = {
+  pollerId: null,
+  lastSessionShotIds: [],   // submitted_shots from session.tool_state, ordered
+  lastEventCount: 0,        // for animating new entries in the activity feed
+};
+
+function agentStageStart() {
+  agentStageStop();
+  // Tick once immediately, then every 1500 ms.
+  agentStageTick();
+  window.AGENT_STAGE.pollerId = setInterval(agentStageTick, 1500);
+}
+
+function agentStageStop() {
+  if (window.AGENT_STAGE.pollerId) {
+    clearInterval(window.AGENT_STAGE.pollerId);
+    window.AGENT_STAGE.pollerId = null;
+  }
+}
+
+async function agentStageTick() {
+  const pane = document.querySelector('.agent-stage-pane');
+  // Don't bother polling when the pane is hidden.
+  if (!pane || getComputedStyle(pane).display === 'none') return;
+  try {
+    const [statusResp, sessResp] = await Promise.all([
+      fetch('/status').then(r => r.ok ? r.json() : null).catch(() => null),
+      window.AGENT.sessionId
+        ? fetch('/agent/sessions/' + encodeURIComponent(window.AGENT.sessionId))
+            .then(r => r.ok ? r.json() : null).catch(() => null)
+        : null,
+    ]);
+    agentStageRender(statusResp, sessResp);
+  } catch(e) {
+    /* swallow — next tick retries */
+  }
+}
+
+function agentStageRender(status, sess) {
+  const dot = document.getElementById('agentStageDot');
+  const sessionPill = document.getElementById('agentStageSession');
+  const nowEl = document.getElementById('agentStageNow');
+  const outputsEl = document.getElementById('agentStageOutputs');
+  const outputsCountEl = document.getElementById('agentStageOutputsCount');
+  const activityEl = document.getElementById('agentStageActivity');
+  const activityCountEl = document.getElementById('agentStageActivityCount');
+  if (!dot || !nowEl || !outputsEl || !activityEl) return;
+
+  const running = !!(status && status.running);
+  dot.classList.toggle('live', running);
+  if (sessionPill) {
+    if (window.AGENT.sessionId) {
+      sessionPill.textContent = window.AGENT.sessionId.slice(0, 10);
+    } else {
+      sessionPill.textContent = 'no session';
+    }
+  }
+
+  // Now rendering
+  const cur = status && status.current;
+  if (running && cur) {
+    const p = cur.params || {};
+    const label = p.label || (p.preset_label || cur.id || 'render');
+    const progress = (cur.progress != null ? cur.progress : (status.progress || 0));
+    const pct = Math.max(0, Math.min(1, Number(progress) || 0)) * 100;
+    const eta = cur.eta_seconds || cur.eta || null;
+    const phase = cur.phase || (cur.status === 'running' ? 'rendering' : '');
+    nowEl.classList.remove('idle');
+    nowEl.innerHTML = `
+      <div class="stage-now-label">${escapeHtml(label)}</div>
+      <div class="stage-now-meta">${escapeHtml(p.mode || 't2v')} · ${escapeHtml(p.quality || 'balanced')} · ${escapeHtml(p.frames || '?')}f</div>
+      <div class="stage-progress-bar">
+        <div class="stage-progress-fill" style="width:${pct.toFixed(1)}%"></div>
+      </div>
+      <div class="stage-progress-text">
+        <span>${escapeHtml(phase || 'rendering')}</span>
+        <span>${pct.toFixed(0)}%${eta ? ' · ETA ' + agentFmtDur(eta) : ''}</span>
+      </div>
+    `;
+  } else {
+    nowEl.className = 'stage-now-card idle';
+    nowEl.innerHTML = `<div>Idle. Ask the agent to plan a shot to see it render here.</div>`;
+  }
+
+  // Session outputs — pull from session.tool_state.submitted_shots (ordered)
+  // and look up each in /status.history for current state + output_path.
+  const tool = (sess && sess.session && sess.session.tool_state) || {};
+  const submitted = tool.submitted_shots || [];
+  const allJobs = []
+    .concat(status && status.queue ? status.queue : [])
+    .concat(cur ? [cur] : [])
+    .concat(status && status.history ? status.history : []);
+  const byId = new Map(allJobs.map(j => [j.id, j]));
+  const outputs = submitted.map(s => {
+    const j = byId.get(s.job_id) || s;
+    const p = (j.params || {});
+    return {
+      id: s.job_id,
+      label: s.label || p.label || s.job_id,
+      status: j.status || 'unknown',
+      output_path: j.output_path || null,
+      mode: p.mode || s.mode || 't2v',
+      duration: s.duration_seconds || null,
+    };
+  });
+  outputsCountEl.textContent = outputs.length;
+  if (outputs.length === 0) {
+    outputsEl.innerHTML = `<div class="stage-empty">No mp4s rendered yet. Submit a shot from the chat.</div>`;
+  } else {
+    outputsEl.innerHTML = '';
+    for (const o of outputs.slice(0, 24)) {
+      const cell = document.createElement('div');
+      const failed = o.status === 'error' || o.status === 'failed' || o.status === 'cancelled';
+      cell.className = 'stage-output-cell' + (failed ? ' failed' : '');
+      cell.title = o.label + ' · ' + o.status;
+      // If we have a finished output_path, show the video as a thumbnail.
+      // Otherwise show a status badge.
+      if (o.output_path && o.status === 'done') {
+        const v = document.createElement('video');
+        v.className = 'vid';
+        v.src = '/file?path=' + encodeURIComponent(o.output_path);
+        v.preload = 'metadata';
+        v.muted = true;
+        cell.appendChild(v);
+        cell.addEventListener('click', () => agentStageLightboxOpen(o.output_path, o.label));
+      } else {
+        cell.style.display = 'flex';
+        cell.style.alignItems = 'center';
+        cell.style.justifyContent = 'center';
+        const span = document.createElement('span');
+        span.style.cssText = 'color:var(--muted); font-size:11px; font-style:italic;';
+        span.textContent = failed ? 'failed' : (o.status === 'running' ? 'rendering…' : 'queued');
+        cell.appendChild(span);
+      }
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = failed ? 'fail' : (o.status === 'done' ? '✓' : o.status.slice(0, 4));
+      cell.appendChild(badge);
+      const lbl = document.createElement('span');
+      lbl.className = 'label';
+      lbl.textContent = o.label;
+      cell.appendChild(lbl);
+      outputsEl.appendChild(cell);
+    }
+  }
+
+  // Activity feed — derive from rendered_messages: each tool_call/tool_result
+  // becomes one row with an icon. Newest at the top.
+  const rendered = (sess && sess.rendered_messages) || [];
+  const events = [];
+  for (let i = rendered.length - 1; i >= 0 && events.length < 40; i--) {
+    const m = rendered[i];
+    if (m.kind === 'tool_result') {
+      const r = m.result || {};
+      const ok = r.ok !== false && !r.error;
+      const inner = r.result || {};
+      let txt;
+      if (typeof inner === 'object' && 'job_id' in inner) {
+        txt = `→ queued ${inner.job_id} · ${inner.estimated_wall_human || '?'}`;
+      } else if (typeof inner === 'object' && 'manifest_path' in inner) {
+        txt = `→ manifest written (${inner.shot_count} shots)`;
+      } else if (typeof inner === 'object' && 'png_path' in inner) {
+        txt = `→ frame extracted (${inner.frame_index})`;
+      } else if (typeof inner === 'object' && 'candidates' in inner) {
+        txt = `→ ${inner.candidates.length} candidates ready`;
+      } else if (!ok) {
+        txt = `✗ ${(r.error || 'failed').slice(0, 80)}`;
+      } else {
+        txt = '→ result';
+      }
+      events.push({ kind: ok ? 'ok' : 'fail', text: txt });
+    } else if (m.kind === 'assistant' && m.tool_call) {
+      events.push({ kind: 'run', text: '⚙ ' + m.tool_call.tool });
+    }
+  }
+  activityCountEl.textContent = events.length;
+  if (events.length === 0) {
+    activityEl.innerHTML = `<div class="stage-empty">No tool calls yet.</div>`;
+  } else {
+    activityEl.innerHTML = '';
+    for (const ev of events) {
+      const row = document.createElement('div');
+      row.className = 'stage-activity-row ' + ev.kind;
+      const icon = (ev.kind === 'ok') ? '✓' : (ev.kind === 'fail') ? '✗' : '⚙';
+      row.innerHTML = `
+        <span class="icon">${icon}</span>
+        <span class="text">${escapeHtml(ev.text)}</span>
+      `;
+      activityEl.appendChild(row);
+    }
+  }
+}
+
+function agentFmtDur(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), rem = s % 60;
+  if (m < 60) return m + 'm ' + (rem < 10 ? '0' : '') + rem + 's';
+  const h = Math.floor(m / 60), mr = m % 60;
+  return h + 'h ' + (mr < 10 ? '0' : '') + mr + 'm';
+}
+
+function agentStageLightboxOpen(path, label) {
+  const lb = document.getElementById('agentStageLightbox');
+  const v = document.getElementById('agentStageLightboxVideo');
+  if (!lb || !v) return;
+  v.src = '/file?path=' + encodeURIComponent(path);
+  v.title = label || '';
+  lb.classList.add('open');
+  v.play().catch(() => {});
+}
+
+function agentStageLightboxClose() {
+  const lb = document.getElementById('agentStageLightbox');
+  const v = document.getElementById('agentStageLightboxVideo');
+  if (!lb || !v) return;
+  v.pause();
+  v.src = '';
+  lb.classList.remove('open');
+}
+
+// Esc closes the stage lightbox first (before falling through to the
+// settings modal / fullscreen exit handlers).
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const lb = document.getElementById('agentStageLightbox');
+    if (lb && lb.classList.contains('open')) {
+      agentStageLightboxClose();
+      e.stopPropagation();
+    }
+  }
+}, true);
 
 // ---- Pop out to system browser -------------------------------------------
 // The pop-out is a real <a target="_blank"> link (set up during boot via
