@@ -17,10 +17,13 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 
 
-# 5 minutes. Local models can take 30+ s to first token on a cold cache;
-# the first request after spawning mlx-lm.server is the slowest. Keep
-# this generous so an under-warmed model doesn't fail the first turn.
-DEFAULT_TIMEOUT_S = 300
+# 15 minutes. Local reasoning-class models (Qwen 3.6, DeepSeek R1) on
+# long contexts can easily take 5-10 minutes per turn — they emit
+# 1500-3000 tokens of chain-of-thought BEFORE the answer. Combined with
+# a multi-shot session that has 50+ messages of history, inference is
+# slow. The earlier 5-min cap was hitting in the middle of legitimate
+# turns; user saw "engine error: timed out" mid-batch.
+DEFAULT_TIMEOUT_S = 900
 
 
 @dataclass
