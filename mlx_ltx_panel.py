@@ -6958,40 +6958,228 @@ HTML = r"""<!doctype html>
       color: var(--accent-bright); border-color: var(--accent);
     }
 
-    /* ---- Sessions dropdown ---- */
-    .agent-sessions-pop {
-      position: absolute;
-      top: 52px; right: 16px;
-      width: min(380px, calc(100% - 32px));
-      max-height: 320px; overflow-y: auto;
+    /* ---- Sessions sidebar (Cmd+K, slides in from left) ---- */
+    /* Replaces the old absolute-positioned popover. Slides in from the
+       left edge as an overlay (default) or pin-pushes the form-pane
+       (when body.asp-pinned is set). Lives at z-index 60 so it covers
+       the workflow tabs / engine pill / settings modal trigger but
+       sits below the settings modal itself (z-200) and the model
+       browser (z-220). */
+    .agent-sessions-panel {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: 290px;
       background: var(--panel);
-      border: 1px solid var(--border-strong);
-      border-radius: 12px;
-      box-shadow: 0 14px 40px rgba(0,0,0,0.5);
-      z-index: 50;
-      display: none;
-      padding: 6px;
+      border-right: 1px solid var(--border-strong);
+      box-shadow: 14px 0 40px rgba(0, 0, 0, 0.5);
+      display: flex; flex-direction: column;
+      transform: translateX(-100%);
+      transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.2, 1);
+      z-index: 60;
+      will-change: transform;
     }
-    .agent-sessions-pop.open { display: block; }
-    .agent-sessions-pop .item {
-      display: block; padding: 9px 12px;
+    .agent-sessions-panel[data-state="open"] { transform: translateX(0); }
+    body.asp-pinned .agent-sessions-panel { box-shadow: none; }
+    body.asp-pinned .form-pane { padding-left: 290px; transition: padding 0.22s; }
+    body.asp-pinned .agent-stage-pane,
+    body.asp-pinned .stage-pane { /* untouched in regular mode */ }
+    body.agent-fullscreen.asp-pinned .layout {
+      grid-template-columns: 290px 1fr minmax(420px, 480px);
+    }
+    body.agent-fullscreen.asp-pinned .agent-sessions-panel {
+      position: fixed; /* still fixed, but column makes content reflow */
+    }
+    body.asp-pinned .asp-backdrop { display: none !important; }
+
+    .asp-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 14px 14px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .asp-head .asp-title {
+      flex: 1;
+      font-size: 13px; font-weight: 600;
+      letter-spacing: -0.1px; color: var(--text);
+      text-transform: none;       /* override the panel-wide h2/title rules */
+    }
+    .asp-head .asp-icon {
+      width: 26px; height: 26px;
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 7px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0;
+    }
+    .asp-head .asp-icon:hover {
+      color: var(--text);
+      background: var(--bg-2); border-color: var(--border);
+    }
+    body.asp-pinned #aspPinBtn { color: var(--accent-bright); border-color: var(--accent); background: var(--accent-dim); }
+
+    .asp-search {
+      position: relative;
+      padding: 10px 12px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+    .asp-search-icon {
+      position: absolute; left: 22px; top: 18px;
+      color: var(--muted);
+    }
+    .asp-search input {
+      width: 100%;
+      padding: 7px 36px 7px 32px;
+      background: var(--bg-2);
+      color: var(--text);
+      border: 1px solid var(--border);
       border-radius: 8px;
-      cursor: pointer; color: var(--text);
-      font-size: 13px;
-      transition: background 0.12s;
+      font-size: 12px;
+      box-sizing: border-box;
+      transition: border-color 0.15s, background 0.15s;
     }
-    .agent-sessions-pop .item:hover { background: var(--bg-2); }
-    .agent-sessions-pop .item.active {
-      background: var(--accent-dim); color: var(--accent-bright);
+    .asp-search input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: var(--bg);
     }
-    .agent-sessions-pop .item .meta {
+    .asp-search input::placeholder { color: var(--muted); opacity: 0.7; }
+    .asp-kbd {
+      position: absolute; right: 20px; top: 16px;
+      font-size: 10px; padding: 1px 6px;
+      border: 1px solid var(--border); border-radius: 4px;
+      color: var(--muted); background: var(--panel-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .asp-list {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 4px 8px 12px;
+      min-height: 0;
+    }
+    .asp-list::-webkit-scrollbar { width: 8px; }
+    .asp-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.06); border-radius: 4px; }
+    .asp-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.14); }
+    .asp-section-label {
+      padding: 10px 12px 4px;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.6px;
+      color: var(--muted);
+    }
+    .asp-item {
+      display: block; position: relative;
+      padding: 9px 12px;
+      margin: 2px 0;
+      border-radius: 8px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .asp-item:hover { background: var(--bg-2); }
+    .asp-item.is-active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    .asp-item.is-active .asp-item-title { color: var(--accent-bright); }
+    .asp-item.is-focused {
+      background: var(--bg-2); border-color: var(--border-strong);
+    }
+    .asp-row {
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .asp-item-title {
+      flex: 1; font-size: 13px; font-weight: 500;
+      color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .asp-item-time {
+      font-size: 10px; color: var(--muted); flex-shrink: 0;
+    }
+    .asp-item-preview {
       font-size: 11px; color: var(--muted);
-      margin-top: 3px;
-      display: flex; gap: 10px;
+      margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      line-height: 1.4;
     }
-    .agent-sessions-pop .empty {
-      padding: 14px; text-align: center;
-      font-size: 12px; color: var(--muted); font-style: italic;
+    .asp-item-meta {
+      display: flex; gap: 6px; align-items: center;
+      margin-top: 5px;
+    }
+    .asp-chip {
+      font-size: 10px;
+      padding: 1px 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .asp-chip-shots { color: var(--accent-bright); border-color: var(--accent); }
+    .asp-status-running {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #3fb950;
+      box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+      animation: stage-pulse 1.6s ease-in-out infinite;
+    }
+    .asp-empty {
+      padding: 32px 18px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .asp-empty-title {
+      font-size: 13px; font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .asp-empty-hint { font-size: 11px; }
+
+    .asp-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0, 2, 12, 0.32);
+      backdrop-filter: blur(2px);
+      z-index: 55;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.22s;
+    }
+    .asp-backdrop.is-shown {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* Sessions trigger pill in the agent header */
+    .asp-trigger {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 5px 10px 5px 9px;
+      height: 30px;
+      background: var(--bg-2); color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      width: auto;
+    }
+    .asp-trigger:hover {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: rgba(47, 129, 247, 0.06);
+    }
+    .asp-trigger svg { color: inherit; }
+    .asp-trigger-count {
+      font-size: 10px;
+      padding: 1px 6px;
+      background: var(--panel-2); color: var(--text);
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    /* Fullscreen overrides — sidebar lives in front of the page,
+       darker translucent panel for contrast against the gradient backdrop */
+    body.agent-fullscreen .agent-sessions-panel {
+      background: rgba(12, 19, 48, 0.96);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-right-color: rgba(255, 255, 255, 0.06);
     }
 
     /* ---- Chat scroll area ---- */
@@ -8108,11 +8296,8 @@ HTML = r"""<!doctype html>
     }
 
     /* Sessions popover anchored to the header — keep it usable in fullscreen */
-    body.agent-fullscreen .agent-sessions-pop {
-      top: 60px;
-      right: 28px;
-      box-shadow: 0 16px 48px rgba(0,0,0,0.55);
-    }
+    /* (Old .agent-sessions-pop fullscreen override removed — sidebar
+       handles its own fullscreen positioning now.) */
 
     /* Fullscreen entrance */
     body.agent-fullscreen .agent-pane {
@@ -8479,6 +8664,46 @@ HTML = r"""<!doctype html>
       <button data-workflow="agent">Agentic Flows<span class="new-badge">NEW</span></button>
     </nav>
 
+    <!-- ============== AGENT SESSIONS SIDEBAR ============== -->
+    <!-- Slides in from the left. Overlay by default (dims chat); pin
+         button turns it inline (chat reflows, padding-left: 280px).
+         Cmd/Ctrl+K toggles, Esc closes (when not pinned). All
+         interaction goes through aspToggle / aspOpen / aspClose / aspLoad.
+         Lives outside .agent-pane so its transform can't smear chat. -->
+    <aside class="agent-sessions-panel" id="agentSessionsPanel"
+           data-state="closed" aria-hidden="true">
+      <header class="asp-head">
+        <div class="asp-title">Sessions</div>
+        <button class="asp-icon" id="aspPinBtn" onclick="aspTogglePin()" title="Pin sidebar (keeps it open)">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="2" x2="12" y2="9"/>
+            <line x1="12" y1="20" x2="12" y2="22"/>
+            <path d="M7 9h10v3a5 5 0 0 1-5 5 5 5 0 0 1-5-5z"/>
+          </svg>
+        </button>
+        <button class="asp-icon" onclick="aspClose()" title="Close (Esc)">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <div class="asp-search">
+        <svg class="asp-search-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="aspSearchInput" placeholder="Search sessions…" autocomplete="off" />
+        <kbd class="asp-kbd">/</kbd>
+      </div>
+      <div class="asp-list" id="aspList" tabindex="0"></div>
+      <div class="asp-empty" id="aspEmpty" hidden>
+        <div class="asp-empty-title">No sessions yet</div>
+        <div class="asp-empty-hint">Type a prompt to start your first one.</div>
+      </div>
+    </aside>
+    <div class="asp-backdrop" id="aspBackdrop" hidden onclick="aspClose()"></div>
+
     <!-- ============== AGENTIC FLOWS PANE ============== -->
     <!-- Chat-driven shot planner. The agent loop lives in the panel's
          Python backend (agent/runtime.py); this UI just sends user
@@ -8486,15 +8711,28 @@ HTML = r"""<!doctype html>
          tool cards, and exposes engine settings via a drawer. -->
     <section class="agent-pane" id="agentPane" hidden>
       <header class="agent-header" style="position:relative">
+        <!-- Sessions trigger — explicit, labelled, with a count chip.
+             Replaces the old "click-the-title-to-open-popover" pattern
+             which was undiscoverable. Also bound to Cmd+K / Ctrl+K
+             from anywhere on the page. -->
+        <button type="button" class="asp-trigger" id="aspTriggerBtn"
+                onclick="aspToggle()"
+                title="Sessions (Cmd+K)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="14" y2="18"/>
+          </svg>
+          <span>Sessions</span>
+          <span class="asp-trigger-count" id="aspTriggerCount" hidden>0</span>
+        </button>
         <button type="button" class="engine-pill" id="agentEnginePill"
                 onclick="openAgentSettings()" title="Click to configure the agent engine">
           <span class="dot" id="agentEngineDot"></span>
           <span id="agentEngineLabel">engine…</span>
         </button>
         <div class="session-title" id="agentSessionTitle"
-             onclick="agentToggleSessionsPop()"
-             style="cursor:pointer"
-             title="Click to switch sessions">
+             title="Current session">
           New chat
         </div>
         <button type="button" class="icon-btn" onclick="agentNewSession()"
@@ -8534,7 +8772,6 @@ HTML = r"""<!doctype html>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>
         </button>
-        <div class="agent-sessions-pop" id="agentSessionsPop"></div>
       </header>
 
       <div class="agent-chat" id="agentChat"></div>
@@ -12713,65 +12950,302 @@ function agentSetSessionTitle(title, sid) {
   }
 }
 
-async function agentToggleSessionsPop() {
-  const pop = document.getElementById('agentSessionsPop');
-  if (!pop) return;
-  if (pop.classList.contains('open')) { pop.classList.remove('open'); return; }
-  // Refresh list from server
+// ============================================================================
+// AGENT SESSIONS SIDEBAR (Cmd+K)
+// ============================================================================
+// Replaces the old absolute-positioned popover with a slide-in sidebar.
+// Searchable, keyboard-navigable, time-bucketed. Pinning persists in
+// localStorage and reflows the form-pane when active.
+window.ASP = {
+  open: false,
+  pinned: false,
+  query: '',
+  all: [],          // raw /agent/sessions response
+  filtered: [],     // bucketed for render
+  focusIndex: -1,   // arrow-key cursor
+};
+
+function aspInit() {
+  // Restore pinned state.
+  try {
+    if (localStorage.getItem('phos_asp_pinned') === '1') {
+      document.body.classList.add('asp-pinned');
+      window.ASP.pinned = true;
+    }
+  } catch (e) {}
+  // Update the trigger count badge from any cached list.
+  aspUpdateTriggerCount();
+  // Search input.
+  const inp = document.getElementById('aspSearchInput');
+  if (inp) {
+    let to = null;
+    inp.addEventListener('input', () => {
+      window.ASP.query = inp.value;
+      window.ASP.focusIndex = -1;
+      clearTimeout(to);
+      to = setTimeout(aspRefilterAndRender, 80);
+    });
+  }
+  // Global keyboard shortcuts.
+  document.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+K toggles the sidebar.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      aspToggle();
+      return;
+    }
+    if (window.ASP.open) {
+      // "/" focuses the search input.
+      if (e.key === '/' && document.activeElement !== inp) {
+        e.preventDefault();
+        inp && inp.focus();
+        return;
+      }
+      // Esc closes (only when not pinned).
+      if (e.key === 'Escape' && !window.ASP.pinned) {
+        const modal = document.getElementById('agentSettingsModal');
+        const browser = document.getElementById('modelBrowserModal');
+        const lb = document.getElementById('agentStageLightbox');
+        // Don't steal Esc from layered modals.
+        if ((modal && modal.classList.contains('open')) ||
+            (browser && browser.classList.contains('open')) ||
+            (lb && lb.classList.contains('open'))) return;
+        aspClose();
+        return;
+      }
+      // Arrow nav + Enter on the list.
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        aspMoveFocus(1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        aspMoveFocus(-1);
+      } else if (e.key === 'Enter') {
+        const items = window.ASP.filtered;
+        if (window.ASP.focusIndex >= 0 && window.ASP.focusIndex < items.length) {
+          e.preventDefault();
+          aspLoad(items[window.ASP.focusIndex].session_id);
+        }
+      }
+    }
+  });
+}
+
+async function aspToggle() {
+  if (window.ASP.open) aspClose();
+  else await aspOpen();
+}
+
+async function aspOpen() {
+  const panel = document.getElementById('agentSessionsPanel');
+  const backdrop = document.getElementById('aspBackdrop');
+  if (!panel) return;
+  // Refresh list before opening.
   try {
     const r = await fetch('/agent/sessions');
     const j = await r.json();
-    window.AGENT.sessions = j.sessions || [];
-  } catch(e) {}
-  agentRenderSessionsPop();
-  pop.classList.add('open');
-  // Click-away closes
+    window.ASP.all = j.sessions || [];
+    window.AGENT.sessions = window.ASP.all;  // keep legacy var in sync
+  } catch (e) { /* swallow — show whatever's cached */ }
+  aspRefilterAndRender();
+  panel.dataset.state = 'open';
+  panel.setAttribute('aria-hidden', 'false');
+  if (backdrop && !window.ASP.pinned) backdrop.classList.add('is-shown');
+  if (backdrop) backdrop.hidden = false;
+  window.ASP.open = true;
+  aspUpdateTriggerCount();
+  // Focus search after slide-in animation.
   setTimeout(() => {
-    const closer = (e) => {
-      if (!pop.contains(e.target) &&
-          !document.getElementById('agentSessionTitle').contains(e.target)) {
-        pop.classList.remove('open');
-        document.removeEventListener('click', closer);
-      }
-    };
-    document.addEventListener('click', closer);
-  }, 0);
+    const inp = document.getElementById('aspSearchInput');
+    if (inp) inp.focus();
+  }, 120);
 }
 
-function agentRenderSessionsPop() {
-  const pop = document.getElementById('agentSessionsPop');
-  if (!pop) return;
-  pop.innerHTML = '';
-  const list = window.AGENT.sessions || [];
-  if (list.length === 0) {
-    const e = document.createElement('div');
-    e.className = 'empty';
-    e.textContent = 'No saved sessions yet.';
-    pop.appendChild(e);
+function aspClose() {
+  if (window.ASP.pinned) return;   // pin overrides close
+  const panel = document.getElementById('agentSessionsPanel');
+  const backdrop = document.getElementById('aspBackdrop');
+  if (!panel) return;
+  panel.dataset.state = 'closed';
+  panel.setAttribute('aria-hidden', 'true');
+  if (backdrop) backdrop.classList.remove('is-shown');
+  window.ASP.open = false;
+  window.ASP.focusIndex = -1;
+}
+
+function aspTogglePin() {
+  const next = !window.ASP.pinned;
+  window.ASP.pinned = next;
+  document.body.classList.toggle('asp-pinned', next);
+  const backdrop = document.getElementById('aspBackdrop');
+  if (backdrop) {
+    if (next) backdrop.classList.remove('is-shown');
+    else if (window.ASP.open) backdrop.classList.add('is-shown');
+  }
+  try { localStorage.setItem('phos_asp_pinned', next ? '1' : ''); } catch (e) {}
+  // When pinning, ensure the panel is open (otherwise pinning a closed
+  // panel does nothing visible).
+  if (next && !window.ASP.open) aspOpen();
+}
+
+function aspRelTime(ts) {
+  if (!ts) return '';
+  const now = Date.now() / 1000;
+  const d = now - ts;
+  if (d < 60) return 'just now';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  if (d < 86400 * 2) return 'Yesterday';
+  if (d < 86400 * 7) return Math.floor(d / 86400) + 'd ago';
+  const dt = new Date(ts * 1000);
+  return dt.toLocaleString(undefined, {month: 'short', day: 'numeric'});
+}
+
+function aspBucket(ts) {
+  if (!ts) return 'Earlier';
+  const now = Date.now() / 1000;
+  const d = now - ts;
+  if (d < 86400) return 'Today';
+  if (d < 86400 * 2) return 'Yesterday';
+  if (d < 86400 * 7) return 'This week';
+  return 'Earlier';
+}
+
+function aspRefilterAndRender() {
+  const q = (window.ASP.query || '').toLowerCase().trim();
+  const all = (window.ASP.all || []).slice();
+  // Sort newest first.
+  all.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  // Filter on title + session id prefix (preview from messages would
+  // require a full session fetch per row — defer to v2).
+  const filtered = q
+    ? all.filter(s => (s.title || '').toLowerCase().includes(q) ||
+                      (s.session_id || '').toLowerCase().includes(q))
+    : all;
+  window.ASP.filtered = filtered;
+  aspRender();
+  aspUpdateTriggerCount();
+}
+
+function aspRender() {
+  const list = document.getElementById('aspList');
+  const empty = document.getElementById('aspEmpty');
+  if (!list || !empty) return;
+  list.innerHTML = '';
+  const items = window.ASP.filtered || [];
+  if (items.length === 0) {
+    empty.hidden = false;
+    if (window.ASP.query) {
+      empty.querySelector('.asp-empty-title').textContent = 'No matches';
+      empty.querySelector('.asp-empty-hint').textContent = 'Try a different query, or clear the search.';
+    } else {
+      empty.querySelector('.asp-empty-title').textContent = 'No sessions yet';
+      empty.querySelector('.asp-empty-hint').textContent = 'Type a prompt to start your first one.';
+    }
     return;
   }
-  for (const s of list) {
-    const item = document.createElement('div');
-    item.className = 'item' + (s.session_id === window.AGENT.sessionId ? ' active' : '');
-    const title = document.createElement('div');
-    title.textContent = s.title || 'Untitled';
-    title.style.fontWeight = '500';
-    title.style.overflow = 'hidden';
-    title.style.textOverflow = 'ellipsis';
-    title.style.whiteSpace = 'nowrap';
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const when = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString(undefined, {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
-    meta.innerHTML = `<span>${when}</span><span>${s.messages || 0} msg · ${s.shots_submitted || 0} shots</span>`;
-    item.appendChild(title);
-    item.appendChild(meta);
-    item.addEventListener('click', () => {
-      pop.classList.remove('open');
-      agentLoadSession(s.session_id);
-    });
-    pop.appendChild(item);
+  empty.hidden = true;
+
+  // Group into time buckets, render with sticky labels.
+  const buckets = {Today: [], Yesterday: [], 'This week': [], Earlier: []};
+  for (const s of items) {
+    const b = aspBucket(s.updated_at);
+    if (!buckets[b]) buckets[b] = [];
+    buckets[b].push(s);
+  }
+  let flatIdx = 0;
+  for (const label of ['Today', 'Yesterday', 'This week', 'Earlier']) {
+    const bucket = buckets[label];
+    if (!bucket || bucket.length === 0) continue;
+    const head = document.createElement('div');
+    head.className = 'asp-section-label';
+    head.textContent = label;
+    list.appendChild(head);
+    for (const s of bucket) {
+      list.appendChild(aspMakeItem(s, flatIdx));
+      flatIdx++;
+    }
   }
 }
+
+function aspMakeItem(s, flatIdx) {
+  const item = document.createElement('div');
+  item.className = 'asp-item';
+  if (s.session_id === window.AGENT.sessionId) item.classList.add('is-active');
+  if (window.ASP.focusIndex === flatIdx) item.classList.add('is-focused');
+  item.dataset.sid = s.session_id;
+  // Cross-reference live queue: if any of this session's submitted shots
+  // are currently in the panel queue or running, show a live dot.
+  const queueIds = (window.AGENT && window.AGENT.lastStatus
+                    ? (((window.AGENT.lastStatus.queue || [])
+                       .concat(window.AGENT.lastStatus.current ? [window.AGENT.lastStatus.current] : [])).map(j => j.id))
+                    : []);
+  const sessionShotIds = (s.submitted_shot_ids || []);   // optional field
+  const isRunning = sessionShotIds.some(id => queueIds.includes(id));
+  const time = aspRelTime(s.updated_at);
+  item.innerHTML = `
+    <div class="asp-row">
+      <div class="asp-item-title">${escapeHtml(s.title || 'Untitled')}</div>
+      <div class="asp-item-time">${escapeHtml(time)}</div>
+    </div>
+    <div class="asp-item-meta">
+      <span class="asp-chip">${s.messages || 0} msg</span>
+      <span class="asp-chip asp-chip-shots">${s.shots_submitted || 0} shots</span>
+      ${isRunning ? '<span class="asp-status-running" title="Active in queue"></span>' : ''}
+    </div>
+  `;
+  item.addEventListener('click', () => aspLoad(s.session_id));
+  return item;
+}
+
+function aspMoveFocus(delta) {
+  const items = window.ASP.filtered || [];
+  if (items.length === 0) return;
+  const next = Math.max(0, Math.min(items.length - 1, window.ASP.focusIndex + delta));
+  window.ASP.focusIndex = next;
+  aspRender();
+  // Scroll into view.
+  const list = document.getElementById('aspList');
+  if (list) {
+    const focused = list.querySelector('.asp-item.is-focused');
+    if (focused) focused.scrollIntoView({block: 'nearest'});
+  }
+}
+
+async function aspLoad(sid) {
+  if (!window.ASP.pinned) aspClose();
+  await agentLoadSession(sid);
+  // Re-render to update the active state styling.
+  aspRender();
+}
+
+function aspUpdateTriggerCount() {
+  const el = document.getElementById('aspTriggerCount');
+  if (!el) return;
+  const n = (window.ASP.all || []).length;
+  if (n > 0) {
+    el.textContent = String(n);
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
+// Refresh the cached list periodically while the agent tab is active —
+// keeps the trigger count and "running" dots honest without forcing
+// re-fetches on every keystroke.
+setInterval(() => {
+  if (document.body.getAttribute('data-workflow') !== 'agent') return;
+  fetch('/agent/sessions').then(r => r.json()).then(j => {
+    window.ASP.all = j.sessions || [];
+    aspUpdateTriggerCount();
+    if (window.ASP.open) aspRefilterAndRender();
+  }).catch(() => {});
+}, 10000);
+
+// Boot.
+document.addEventListener('DOMContentLoaded', aspInit);
+if (document.readyState !== 'loading') aspInit();
 
 // ---- Markdown rendering ---------------------------------------------------
 // Tight subset: headers, bold, italic, inline code, code blocks, lists,
