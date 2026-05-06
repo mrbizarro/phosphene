@@ -5766,6 +5766,68 @@ HTML = r"""<!doctype html>
     .pill-good { color: var(--success); border-color: rgba(63,185,80,0.4); }
     .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.5); }
     .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.5); }
+
+    /* ---- Panel-offline banner ----
+       Floating pill at the top-center, NOT a full-bleed bar. Reads as
+       "alert" via the danger color but stays off the chrome's eyelines.
+       Slides down + fades on first show; stays put while visible.
+       The banner is created lazily by _setOfflineBanner() — class names
+       must match what that helper emits. */
+    @keyframes panel-offline-in {
+      from { transform: translate(-50%, -16px); opacity: 0; }
+      to   { transform: translate(-50%, 0);     opacity: 1; }
+    }
+    .panel-offline-banner {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translate(-50%, 0);
+      z-index: 9999;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      max-width: min(560px, calc(100vw - 32px));
+      padding: 10px 16px;
+      background: rgba(31, 12, 14, 0.92);
+      border: 1px solid rgba(248, 81, 73, 0.55);
+      border-radius: 999px;
+      box-shadow:
+        0 0 0 4px rgba(248, 81, 73, 0.06),
+        0 12px 32px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: #ffd9d6;
+      font: 12.5px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      letter-spacing: 0.1px;
+      animation: panel-offline-in 0.28s cubic-bezier(.2,.8,.2,1);
+    }
+    .panel-offline-banner .icon {
+      flex-shrink: 0;
+      width: 16px; height: 16px;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      color: var(--danger);
+    }
+    .panel-offline-banner .icon::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.5);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    .panel-offline-banner .label {
+      font-weight: 600;
+      color: var(--danger);
+    }
+    .panel-offline-banner .text {
+      color: rgba(255, 220, 220, 0.82);
+    }
+    .panel-offline-banner .hint {
+      color: var(--muted);
+      font-size: 11px;
+      margin-left: 4px;
+    }
     .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
     /* Version pill states. Always rendered so the spot is part of the
        user's mental map — when state changes, the colour shift draws
@@ -10993,24 +11055,22 @@ let _POLL_FAILS = 0;
 
 function _setOfflineBanner(visible, msg) {
   let bar = document.getElementById('panelOfflineBanner');
-  if (!bar) {
-    bar = document.createElement('div');
-    bar.id = 'panelOfflineBanner';
-    bar.style.cssText =
-      'position:fixed; top:0; left:0; right:0; z-index:9999; ' +
-      'padding:8px 14px; background:#cf222e; color:#fff; ' +
-      'font:13px/1.4 ui-sans-serif,system-ui,sans-serif; ' +
-      'text-align:center; box-shadow:0 2px 12px rgba(0,0,0,0.35); ' +
-      'display:none;';
-    document.body.appendChild(bar);
-  }
   if (visible) {
-    bar.textContent = msg || "Phosphene panel offline — uploads, chat, and renders will fail until it's back. Restart from Pinokio.";
-    bar.style.display = 'block';
-    document.body.style.paddingTop = '34px';
-  } else {
-    bar.style.display = 'none';
-    document.body.style.paddingTop = '';
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'panelOfflineBanner';
+      bar.className = 'panel-offline-banner';
+      bar.innerHTML =
+        '<span class="icon"></span>' +
+        '<span class="label">Panel offline</span>' +
+        '<span class="text"></span>' +
+        '<span class="hint">restart from Pinokio</span>';
+      document.body.appendChild(bar);
+    }
+    bar.querySelector('.text').textContent =
+      msg || "uploads, chat & renders are paused";
+  } else if (bar) {
+    bar.remove();
   }
 }
 
@@ -14446,7 +14506,7 @@ async function agentSend() {
     content: outgoing,
     attachments: ready.map(a => ({path: a.path, name: a.name, mime: a.mime, size: a.size})),
   }));
-  chat.appendChild(renderTypingRow('Drafting plan'));
+  chat.appendChild(renderTypingRow('Thinking'));
   chat.scrollTop = chat.scrollHeight;
 
   input.value = '';
@@ -14465,6 +14525,11 @@ async function agentSend() {
   // land. The typing indicator stays visible until the round-trip
   // completes (since `busy` doesn't flip until then).
   const sid = window.AGENT.sessionId;
+  // Track when we started the current LLM "thinking" wait so the typing
+  // indicator can surface "Thinking · 18s" rather than a static phrase
+  // during long Qwen 35B inferences. Reset every time a new message lands.
+  let lastMsgLen = 0;
+  let waitingSince = Date.now();
   let poller = setInterval(async () => {
     if (!window.AGENT.busy) return;
     try {
@@ -14472,21 +14537,29 @@ async function agentSend() {
       if (!sr.ok) return;
       const sj = await sr.json();
       const msgs = sj.rendered_messages || [];
-      // Only re-render if the message count actually grew — avoids
-      // flickery rebuilds during lulls.
       const cur = chat.querySelectorAll('.agent-msg-row, .agent-tool-card').length;
       if (msgs.length > cur) {
-        // Snapshot the typing row's text to preserve any contextual update,
-        // then rebuild and re-append it so the indicator stays at the
-        // bottom under the latest content.
+        // Re-render only when the message count actually grew — avoids
+        // flickery rebuilds during lulls.
         const typingTextEl = document.getElementById('agentTypingText');
         const phase = typingTextEl ? typingTextEl.textContent : 'Working';
         agentRender(msgs);
-        chat.appendChild(renderTypingRow(_phaseFor(msgs, phase)));
+        chat.appendChild(renderTypingRow(_phaseFor(msgs, phase, 0)));
         chat.scrollTop = chat.scrollHeight;
+        lastMsgLen = msgs.length;
+        waitingSince = Date.now();
+      } else {
+        // No growth — still refresh the typing label so the user sees
+        // "Thinking · 12s" instead of a frozen "Drafting plan". Rewriting
+        // just the text node avoids re-rendering the whole chat.
+        const typingTextEl = document.getElementById('agentTypingText');
+        if (typingTextEl) {
+          const elapsed = Math.round((Date.now() - waitingSince) / 1000);
+          typingTextEl.textContent = _phaseFor(msgs, 'Thinking', elapsed);
+        }
       }
     } catch(e) {}
-  }, 2000);
+  }, 1500);
 
   try {
     const r = await fetch(
@@ -14527,22 +14600,30 @@ async function agentSend() {
 }
 
 // Pick a contextual typing-indicator phrase based on what just happened.
-function _phaseFor(messages, fallback) {
-  if (!messages || messages.length === 0) return fallback || 'Drafting plan';
+// `elapsedSec` is how long we've been waiting since the last message landed
+// — surface it once the wait runs long enough that a frozen label feels
+// stuck (Qwen 35B easily takes 30s for a complex turn).
+function _phaseFor(messages, fallback, elapsedSec) {
+  const tail = (s) => (elapsedSec && elapsedSec >= 6) ? `${s} · ${elapsedSec}s` : s;
+  if (!messages || messages.length === 0) return tail(fallback || 'Thinking');
   const last = messages[messages.length - 1];
+  if (last.kind === 'user') {
+    // We just sent the user's message; the model is composing its reply.
+    return tail('Thinking');
+  }
   if (last.kind === 'tool_result') {
     const r = last.result || {};
     const inner = r.result || {};
-    if (typeof inner === 'object' && 'job_id' in inner) {
-      return `Queueing next shot…`;
+    if (typeof inner === 'object' && inner && 'job_id' in inner) {
+      return tail(`Queued ${String(inner.job_id || '').slice(-3) || ''}, planning next`);
     }
-    return 'Reading tool result…';
+    return tail('Reading result, drafting next step');
   }
   if (last.kind === 'assistant') {
-    if (last.tool_call) return `Calling ${last.tool_call.tool}…`;
-    return 'Drafting next step…';
+    if (last.tool_call) return tail(`Calling ${last.tool_call.tool}`);
+    return tail('Drafting next step');
   }
-  return fallback || 'Working';
+  return tail(fallback || 'Working');
 }
 
 // ---- Composer plumbing ----------------------------------------------------
