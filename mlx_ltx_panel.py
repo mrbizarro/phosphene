@@ -7710,13 +7710,48 @@ HTML = r"""<!doctype html>
     }
 
     /* ---- Chat scroll area ---- */
-    .agent-chat {
+    /* Wrapper carries the flex:1 + relative positioning so the
+       "↓ new messages" pill can absolute-position over the chat. */
+    .agent-chat-wrap {
       flex: 1;
       min-height: 360px; max-height: 60vh;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+    .agent-chat {
+      flex: 1;
       overflow-y: auto; overflow-x: hidden;
       padding: 24px 20px 8px;
       scroll-behavior: smooth;
     }
+    /* "↓ New messages" pill — sits at bottom-center of the chat surface,
+       only visible when content has landed while the user is scrolled up.
+       Clicking jumps to the bottom and re-arms autoscroll. */
+    .agent-newmsgs-pill {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      transform: translateX(-50%);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 6px 18px rgba(47,129,247,0.45);
+      animation: agent-fade-in 0.18s ease;
+      z-index: 5;
+      width: auto;
+      flex: 0 0 auto;
+    }
+    .agent-newmsgs-pill[hidden] { display: none; }
+    .agent-newmsgs-pill:hover { filter: brightness(1.08); }
     .agent-chat::-webkit-scrollbar { width: 8px; }
     .agent-chat::-webkit-scrollbar-track { background: transparent; }
     .agent-chat::-webkit-scrollbar-thumb {
@@ -7889,40 +7924,46 @@ HTML = r"""<!doctype html>
       margin: 14px 0;
     }
 
-    /* ---- Tool cards (calls + results, expandable) ---- */
+    /* ---- Tool cards (calls + results, expandable) ----
+       Visually quieter than they used to be: 2px left accent (was 3px),
+       subtle background, smaller font, less vertical padding. The point
+       is to read as "side metadata" not "primary content" — the
+       assistant's planning text is the protagonist. */
     .agent-tool-card {
-      margin: 10px 0;
-      background: var(--bg-2);
+      margin: 6px 0;
+      background: rgba(255,255,255,0.025);
       border: 1px solid var(--border);
-      border-left: 3px solid var(--accent);
-      border-radius: 10px;
+      border-left: 2px solid var(--border);
+      border-radius: 8px;
       overflow: hidden;
-      transition: border-color 0.15s;
-      animation: agent-fade-in 0.25s ease;
+      transition: border-color 0.15s, background 0.15s;
+      animation: agent-fade-in 0.2s ease;
     }
-    .agent-tool-card:hover { border-color: var(--accent); }
-    .agent-tool-card.success { border-left-color: #2ea043; }
-    .agent-tool-card.error { border-left-color: #cf222e; }
+    .agent-tool-card:hover { background: var(--bg-2); }
+    .agent-tool-card.success { border-left-color: rgba(46,160,67,0.55); }
+    .agent-tool-card.error { border-left-color: rgba(207,34,46,0.55); }
     .agent-tool-card.pending { border-left-color: var(--accent); }
     .agent-tool-card .head {
-      padding: 10px 14px;
-      display: flex; align-items: center; gap: 10px;
+      padding: 7px 12px;
+      display: flex; align-items: center; gap: 9px;
       cursor: pointer;
       user-select: none;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 12px;
+      font-size: 11.5px;
     }
-    .agent-tool-card .head:hover { background: var(--panel); }
+    .agent-tool-card .head:hover { background: rgba(255,255,255,0.04); }
     .agent-tool-card .head .icon {
-      font-size: 13px; flex-shrink: 0; line-height: 1;
+      font-size: 11px; flex-shrink: 0; line-height: 1;
+      color: var(--muted);
     }
     .agent-tool-card .head .icon.success { color: #2ea043; }
     .agent-tool-card .head .icon.error { color: #cf222e; }
     .agent-tool-card .head .name {
-      font-weight: 700; color: var(--accent-bright);
+      font-weight: 600; color: var(--muted);
       flex-shrink: 0;
+      font-size: 11px;
     }
-    .agent-tool-card.success .head .name { color: #9be7a4; }
+    .agent-tool-card.success .head .name { color: var(--text); }
     .agent-tool-card.error .head .name { color: #f49a9e; }
     .agent-tool-card .head .summary {
       color: var(--muted); flex: 1; min-width: 0;
@@ -8899,6 +8940,26 @@ HTML = r"""<!doctype html>
       color: var(--muted);
       display: flex; align-items: center; gap: 10px;
     }
+    .agent-typing-abort {
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      width: 18px; height: 18px;
+      margin-left: 4px;
+      border-radius: 50%;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+      padding: 0;
+      width: auto;
+      flex: 0 0 auto;
+    }
+    .agent-typing-abort:hover {
+      color: var(--danger, #f85149);
+      border-color: rgba(248,81,73,0.5);
+      background: rgba(248,81,73,0.10);
+    }
     .agent-typing-dots {
       display: inline-flex; gap: 4px;
     }
@@ -9553,7 +9614,20 @@ HTML = r"""<!doctype html>
         </button>
       </header>
 
-      <div class="agent-chat" id="agentChat"></div>
+      <div class="agent-chat-wrap">
+        <div class="agent-chat" id="agentChat"></div>
+        <!-- "↓ new messages" pill — appears when content lands while the
+             user has scrolled up to read something. Clicking jumps to
+             bottom and re-arms auto-scroll. -->
+        <button type="button" class="agent-newmsgs-pill" id="agentNewMsgsPill"
+                onclick="agentScrollChatToBottom()" hidden>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <polyline points="19 12 12 19 5 12"/>
+          </svg>
+          <span>New messages</span>
+        </button>
+      </div>
 
       <div class="agent-composer">
         <!-- Batch-now bar: surfaces when the user has picked anchors that
@@ -14479,8 +14553,51 @@ function agentRender(messages) {
   for (const m of messages) chat.appendChild(renderMessage(m));
   // Hand-off the scroll on next animation frame so freshly-inserted nodes
   // have measured heights.
-  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  requestAnimationFrame(() => agentChatScrollIfPinned(chat));
 }
+
+// Scroll-pinning: only auto-scroll when the user is already at (or near)
+// the bottom. If they've scrolled up to read something, leave them alone
+// and surface a "↓ New messages" pill they can click to catch up. The
+// pill goes away once they're back at the bottom (any scroll restores
+// the pin).
+const _AGENT_CHAT_NEAR_BOTTOM_PX = 80;
+function _isChatNearBottom(chat) {
+  if (!chat) return true;
+  return (chat.scrollHeight - chat.scrollTop - chat.clientHeight)
+         <= _AGENT_CHAT_NEAR_BOTTOM_PX;
+}
+function _setNewMsgsPill(visible) {
+  const p = document.getElementById('agentNewMsgsPill');
+  if (!p) return;
+  p.hidden = !visible;
+}
+function agentChatScrollIfPinned(chat) {
+  if (!chat) chat = document.getElementById('agentChat');
+  if (!chat) return;
+  if (_isChatNearBottom(chat)) {
+    chat.scrollTop = chat.scrollHeight;
+    _setNewMsgsPill(false);
+  } else {
+    _setNewMsgsPill(true);
+  }
+}
+// Force-scroll for explicit user actions (Send pressed, pill clicked).
+function agentScrollChatToBottom() {
+  const chat = document.getElementById('agentChat');
+  if (!chat) return;
+  chat.scrollTop = chat.scrollHeight;
+  _setNewMsgsPill(false);
+}
+// Wire scroll listener once at boot to clear the pill when the user
+// catches up to the bottom on their own.
+document.addEventListener('DOMContentLoaded', () => {
+  const chat = document.getElementById('agentChat');
+  if (!chat) return;
+  chat.addEventListener('scroll', () => {
+    if (_isChatNearBottom(chat)) _setNewMsgsPill(false);
+  }, {passive: true});
+});
 
 function renderEmpty() {
   const wrap = document.createElement('div');
@@ -14869,6 +14986,13 @@ function renderTypingRow(msg) {
       <span class="agent-typing-dot"></span>
     </span>
     <span id="agentTypingText">${escapeHtml(msg || 'Thinking')}</span>
+    <button type="button" class="agent-typing-abort" id="agentTypingAbort"
+            onclick="agentAbortTurn()" title="Stop this turn">
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
   `;
   row.appendChild(av);
   row.appendChild(bubble);
@@ -14925,7 +15049,8 @@ async function agentSend() {
     attachments: ready.map(a => ({path: a.path, name: a.name, mime: a.mime, size: a.size})),
   }));
   chat.appendChild(renderTypingRow('Thinking'));
-  chat.scrollTop = chat.scrollHeight;
+  // User just hit Send — explicit action, force-scroll to bottom.
+  agentScrollChatToBottom();
 
   input.value = '';
   agentAutoResize(input);
@@ -14963,7 +15088,8 @@ async function agentSend() {
         const phase = typingTextEl ? typingTextEl.textContent : 'Working';
         agentRender(msgs);
         chat.appendChild(renderTypingRow(_phaseFor(msgs, phase, 0)));
-        chat.scrollTop = chat.scrollHeight;
+        // Async content (poller) — only auto-scroll if user is following.
+        agentChatScrollIfPinned(chat);
         lastMsgLen = msgs.length;
         waitingSince = Date.now();
       } else {
@@ -14979,6 +15105,13 @@ async function agentSend() {
     } catch(e) {}
   }, 1500);
 
+  // AbortController so the user can cancel a runaway turn from the
+  // typing-row × button. Cancels the in-flight fetch + clears the poller.
+  // The server-side run_turn keeps going until it exits (no kill-switch
+  // in the runtime today), but the user is unstuck immediately and the
+  // state will reconcile on the next session load.
+  window.AGENT.abortController = new AbortController();
+
   try {
     const r = await fetch(
       '/agent/sessions/' + encodeURIComponent(sid) + '/message',
@@ -14986,6 +15119,7 @@ async function agentSend() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({message: outgoing, attachments: sentAttachments}),
+        signal: window.AGENT.abortController.signal,
       }
     );
     const j = await r.json();
@@ -15013,7 +15147,24 @@ async function agentSend() {
     // when the user hit Send. Now it should read 'live'. Refresh
     // the config view so the pill catches up.
     agentRefreshConfig();
-    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    requestAnimationFrame(() => agentChatScrollIfPinned(chat));
+  }
+}
+
+// Stop the current turn — clicked from the × on the typing row.
+// Aborts the in-flight fetch (the catch block in agentSend treats the
+// AbortError as a network error and surfaces it). The server-side
+// run_turn loop is NOT killed (no kill-switch in the runtime today);
+// it'll continue until it finishes and the next session-load will pull
+// the final state. This is purely a "unstick the UI" affordance.
+function agentAbortTurn() {
+  if (window.AGENT && window.AGENT.abortController) {
+    try { window.AGENT.abortController.abort(); } catch(e) {}
+  }
+  const typing = document.getElementById('agentTypingRow');
+  if (typing) {
+    typing.querySelector('.agent-typing-bubble').innerHTML =
+      '<span style="color:var(--muted)">Aborted — server may still be finishing the current turn.</span>';
   }
 }
 
