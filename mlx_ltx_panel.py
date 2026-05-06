@@ -4615,6 +4615,40 @@ class Handler(BaseHTTPRequestHandler):
             # for record-keeping but we honor the live config for actual calls.
             sess.engine_config = _load_agent_config()
 
+            # Auto-start the local engine on first message so the user
+            # doesn't dead-end on a connection-refused error. mlx_lm.server
+            # boots in ~1-2s; weights load lazily on the first
+            # /chat/completions call, which our run_turn timeout (300 s)
+            # accommodates. Saves a trip to Settings → Start.
+            if (sess.engine_config.kind == "phosphene_local"
+                    and not agent_local_server.is_running()):
+                push("agent: auto-starting local engine for first message")
+                _agent_local_start()
+                # Wait briefly for /v1/models to respond before we proceed —
+                # avoids the very first chat call seeing a half-bound port.
+                import urllib.error
+                base = sess.engine_config.base_url.rstrip("/") + "/models"
+                deadline = time.time() + 30
+                ready = False
+                while time.time() < deadline:
+                    try:
+                        with urllib.request.urlopen(base, timeout=2):
+                            ready = True
+                            break
+                    except (urllib.error.URLError, OSError):
+                        time.sleep(0.4)
+                if not ready:
+                    push("agent: local engine spawn timed out; surfacing error")
+                    last = agent_local_server.status().get("last_error") or ""
+                    self._json({
+                        "error": (
+                            "Local engine spawned but isn't responding on "
+                            f"{base}. Check the Logs tab for mlx-lm output. "
+                            + (f" Last status: {last}" if last else "")
+                        ),
+                    }, 500)
+                    return
+
             ops = _build_panel_ops()
             tools_doc = agent_runtime.render_tools_doc()
             events: list[dict] = []
@@ -7495,6 +7529,15 @@ HTML = r"""<!doctype html>
                 title="Start a fresh session">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+        <button type="button" class="icon-btn" id="agentPopOutBtn"
+                onclick="agentPopOut()"
+                title="Open in your default browser (true OS fullscreen — escapes Pinokio's sidebar)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
           </svg>
         </button>
         <button type="button" class="icon-btn" id="agentFullscreenBtn"
@@ -12417,6 +12460,34 @@ async function agentSaveSettings() {
   closeAgentSettings();
   await agentRefreshConfig();
   await agentRefreshImageConfig();
+}
+
+// ---- Pop out to system browser -------------------------------------------
+// Pinokio shows the panel inside a webview with its own sidebar + top bar.
+// Clicking pop-out opens the same panel URL in the user's default browser
+// (no Pinokio chrome → real OS-level fullscreen via Cmd+Ctrl+F or browser
+// fullscreen). The new tab boots straight into Agentic Flows fullscreen
+// because we set the localStorage flags before opening.
+function agentPopOut() {
+  try {
+    localStorage.setItem('phos_workflow', 'agent');
+    localStorage.setItem('phos_agent_fullscreen', '1');
+  } catch(e) {}
+  const url = window.location.origin || ('http://127.0.0.1:' + window.location.port);
+  // window.open with _blank usually triggers the OS default browser when
+  // running inside Electron-style webviews (Pinokio honors target=_blank).
+  // If the host doesn't, fall back to copying the URL to clipboard with a
+  // toast — the user can paste it into any browser.
+  const w = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!w) {
+    // Popup blocked or webview didn't honor _blank — fall back to clipboard.
+    try {
+      navigator.clipboard.writeText(url);
+      alert('URL copied to clipboard:\\n' + url + '\\n\\nPaste it into any browser for a clean fullscreen experience.');
+    } catch(e) {
+      alert('Open this URL in your browser for a clean fullscreen:\\n' + url);
+    }
+  }
 }
 
 // ---- Fullscreen / focus mode ---------------------------------------------
