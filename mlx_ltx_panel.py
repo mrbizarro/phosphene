@@ -15784,9 +15784,37 @@ function agentRenderBatchBar() {
     return;
   }
   const total = pickLabels.length;
+
+  // Phase 0 #0.10 — estimated wall total across PENDING picks. Each pick
+  // carries its candidate's duration / mode / quality / accel — sum the
+  // wall estimate so the user knows what they're committing to before
+  // clicking "Queue them". For a 12-shot overnight batch this is the
+  // difference between "looks easy" and "that's 2 hours."
+  let walls = 0;
+  let computed = 0;
+  for (const lbl of pendingLabels) {
+    const c = picks[lbl] || {};
+    const dur = Number(c.duration_seconds);
+    if (!(dur > 0)) continue;
+    try {
+      walls += _agentEstimateWallSeconds({
+        duration: dur,
+        quality: c.quality || 'balanced',
+        accel: c.accel || 'turbo',
+        // Picks are i2v in the canonical batch flow (the agent
+        // animates a chosen anchor); fallback to t2v if the candidate
+        // explicitly carries a non-i2v mode.
+        mode: c.mode || 'i2v',
+        sharp: (c.sharp !== false),
+      });
+      computed += 1;
+    } catch (e) {}
+  }
+  const totalEta = (computed > 0) ? ` · ~${_agentFmtDur(walls)} total` : '';
+
   text.textContent = pendingLabels.length === total
-    ? `${total} anchor${total === 1 ? '' : 's'} picked · ready to render`
-    : `${pendingLabels.length} of ${total} picks not yet queued`;
+    ? `${total} anchor${total === 1 ? '' : 's'} picked · ready to render${totalEta}`
+    : `${pendingLabels.length} of ${total} picks not yet queued${totalEta}`;
   bar.hidden = false;
 }
 
@@ -15815,14 +15843,85 @@ function agentBatchQueue() {
   agentSend();
 }
 
+// Phase 0 #0.10 — inline wall-time predictor.
+//
+// Mirror of agent/tools.py::_estimate_wall_seconds. Feeds the
+// submit_shot / estimate_shot call summaries below so users see the
+// expected wall-time AT THE MOMENT THE TOOL CALL LANDS — not after the
+// queue confirms. On a 12-shot overnight batch this lets you see
+// instant feedback per shot and the running rough total without
+// expanding cards.
+//
+// Numbers anchor to STATE.md §3 + CLAUDE.md §0; same source of truth as
+// the server. If the table drifts, update both.
+const _AGENT_WALL_BASE_5S = {
+  't2v|quick':    134, 't2v|balanced': 210, 't2v|standard': 460, 't2v|high': 711,
+  'i2v|quick':    150, 'i2v|balanced': 217, 'i2v|standard': 471, 'i2v|high': 750,
+  'keyframe|balanced': 329, 'keyframe|standard': 329, 'keyframe|high': 390,
+  'extend|balanced':   950, 'extend|standard':   950, 'extend|high':   1100,
+};
+function _agentEstimateWallSeconds(opts) {
+  const duration = (opts.duration != null) ? Number(opts.duration) : 5;
+  const quality = opts.quality || 'balanced';
+  const accel = opts.accel || 'turbo';
+  const mode = opts.mode || 't2v';
+  const sharp = (opts.sharp !== false);
+  const key = `${mode}|${quality}`;
+  let base = _AGENT_WALL_BASE_5S[key];
+  if (base == null) base = _AGENT_WALL_BASE_5S['t2v|standard'];
+  if ((mode === 't2v' || mode === 'i2v') && quality === 'standard') {
+    if (accel === 'boost') base *= 0.83;
+    else if (accel === 'turbo') base *= 0.71;
+  }
+  if (duration > 0 && duration !== 5) {
+    base *= Math.pow(duration / 5.0, 1.5);
+  }
+  if (sharp && (mode === 't2v' || mode === 'i2v') && (quality === 'balanced' || quality === 'quick')) {
+    if (quality !== 'balanced') base += 26;
+  }
+  return Math.round(base);
+}
+function _agentFmtDur(seconds) {
+  const s = Math.round(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${String(m).padStart(2,'0')}m`;
+  if (m) return `${m}m ${String(sec).padStart(2,'0')}s`;
+  return `${sec}s`;
+}
+
 function summarizeToolCall(call) {
   const t = call.tool || '';
   const a = call.args || {};
   if (t === 'submit_shot') {
-    return `${a.label || a.preset_label || 'unnamed'} — ${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'}`;
+    // Inline wall predictor — shows ETA BEFORE the queue confirms.
+    let eta = '';
+    try {
+      const sec = _agentEstimateWallSeconds({
+        duration: a.duration_seconds || 5,
+        quality: a.quality || 'balanced',
+        accel: a.accel || 'turbo',
+        mode: a.mode || 't2v',
+        sharp: (a.sharp !== false),
+      });
+      eta = ` · ~${_agentFmtDur(sec)}`;
+    } catch (e) {}
+    return `${a.label || a.preset_label || 'unnamed'} — ${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'}${eta}`;
   }
   if (t === 'estimate_shot') {
-    return `${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'} ${a.accel || ''}`;
+    let eta = '';
+    try {
+      const sec = _agentEstimateWallSeconds({
+        duration: a.duration_seconds || 5,
+        quality: a.quality || 'balanced',
+        accel: a.accel || 'turbo',
+        mode: a.mode || 't2v',
+        sharp: (a.sharp !== false),
+      });
+      eta = ` · ~${_agentFmtDur(sec)}`;
+    } catch (e) {}
+    return `${a.duration_seconds || '?'}s ${a.mode || 't2v'} ${a.quality || 'balanced'} ${a.accel || ''}${eta}`;
   }
   if (t === 'extract_frame') {
     return `${a.which || 'last'} of ${(a.job_id || '').slice(0, 12)}…`;
