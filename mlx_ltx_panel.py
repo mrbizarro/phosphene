@@ -9935,15 +9935,18 @@ HTML = r"""<!doctype html>
     }
 
     /* === TOP HEADER ============================================
-       44px tall, blurred backdrop, hairline bottom border. The
-       wordmark sits on the left as a brand pill (logo + gradient
-       text + version + DEV badge). Status chips cluster on the
-       right with a vertical divider before the user actions. */
+       54px tall (bumped from 44px per Salo's feedback — the 44px
+       version compressed the logo too tight; the radiating-circle
+       glyph needed room to breathe). Blurred backdrop, hairline
+       bottom border. The wordmark sits on the left as a brand pill
+       (logo + gradient text + version + DEV badge). Status chips
+       cluster on the right with a vertical divider before the user
+       actions. */
     body > header {
-      height: 44px;
+      height: 54px;
       flex: 0 0 auto;
-      padding: 0 14px;
-      gap: 10px;
+      padding: 0 16px;
+      gap: 12px;
       flex-wrap: nowrap;
       align-items: center;
       border-bottom: 1px solid var(--ph-border-soft);
@@ -9953,20 +9956,26 @@ HTML = r"""<!doctype html>
       overflow: hidden;
     }
     /* Replace the legacy 104px banner image with the circular logo +
-       gradient wordmark. The brand <a> wraps both as one click target. */
+       gradient wordmark. The brand <a> wraps both as one click target.
+       Logo bumped from 22→34px so the radiating concentric-circle
+       glyph reads clearly (the "circle" Salo couldn't see at 22px). */
     body > header .brand {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       flex-shrink: 0;
       text-decoration: none;
     }
     body > header .brand img {
       content: url('/assets/favicon-64.png');
-      height: 22px;
-      width: 22px;
+      height: 34px;
+      width: 34px;
       display: block;
-      filter: drop-shadow(0 0 6px rgba(79, 214, 255, 0.18));
+      /* Lighter drop-shadow so the inner concentric circles aren't
+         washed out — the original 0 0 6px / 0.18 made the dot read as
+         a fuzzy blob at 22px. Now a tight halo that lifts the glyph
+         off the dark navy without obscuring its detail. */
+      filter: drop-shadow(0 0 3px rgba(79, 214, 255, 0.35));
     }
     body > header .brand::after {
       content: 'Phosphene';
@@ -9975,7 +9984,7 @@ HTML = r"""<!doctype html>
       background-clip: text;
       color: transparent;
       font-weight: 600;
-      font-size: 13px;
+      font-size: 15px;
       letter-spacing: -0.01em;
     }
     /* Hide the existing version-badge styling and re-render it Linear-style
