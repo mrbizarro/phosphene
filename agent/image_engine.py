@@ -387,6 +387,11 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
         results.append({
             "png_path": str(out_path), "seed": seed, "engine": "mock",
             "width": width, "height": height,
+            # Mock doesn't compose refs into the output. Surface this
+            # explicitly so callers (panel /image/generate, agent
+            # generate_shot_images) can warn the user that picking a
+            # ref didn't influence the result.
+            "refs_ignored": bool(refs),
         })
     return results
 

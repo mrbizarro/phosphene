@@ -4880,10 +4880,21 @@ class Handler(BaseHTTPRequestHandler):
         # engine override so the user can pick a backend in the UI
         # without first going through Settings.
         if path == "/image/generate" and ctype.startswith("application/json"):
-            length = int(self.headers.get("Content-Length", "0"))
+            # Content-Length validation — reject unbounded bodies (a misbehaving
+            # client could otherwise spool gigabytes into memory). The request
+            # is just text + paths so 1 MB is more than enough.
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._json({"error": "invalid Content-Length"}, 400); return
+            if length <= 0:
+                self._json({"error": "Content-Length required for JSON body"}, 411); return
+            MAX_IMAGE_GEN_JSON = 1 * 1024 * 1024
+            if length > MAX_IMAGE_GEN_JSON:
+                self._json({"error": f"body too large (max {MAX_IMAGE_GEN_JSON} bytes)"}, 413); return
             try:
                 payload = json.loads(self.rfile.read(length).decode() or "{}")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 self._json({"error": "invalid JSON body"}, 400); return
 
             prompt = (payload.get("prompt") or "").strip()
@@ -4962,11 +4973,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": f"unknown engine_override: {engine_override!r}"}, 400); return
 
-            # Output dir: panel_uploads/library/manual/<YYYYMMDD>/ — date
-            # bucketed so the directory doesn't grow unbounded in one
-            # subdir. The library reader and the agent's list_library_images
-            # both walk recursively so depth doesn't matter for retrieval.
-            out_dir = UPLOADS / "library" / "manual" / time.strftime("%Y%m%d")
+            # Output dir: panel_uploads/library/manual/<YYYYMMDD>/<unix_ms>/
+            # — date-bucketed for directory hygiene PLUS a per-request
+            # millisecond subdir so two generations in the same day don't
+            # collide on `cand_NN_<family>.png` filenames (the engine
+            # picks deterministic names; without the per-request subdir
+            # a 10am n=4 batch would be overwritten by an 11am n=2 batch
+            # on indices 0-1). The library reader walks recursively so
+            # the extra depth is invisible to consumers.
+            out_dir = (UPLOADS / "library" / "manual"
+                       / time.strftime("%Y%m%d")
+                       / str(int(time.time() * 1000)))
             out_dir.mkdir(parents=True, exist_ok=True)
 
             # Acquire the gen lock — fail fast (429) if another generation
@@ -13196,8 +13213,17 @@ async function imgStudioGenerate() {
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     const cands = j.candidates || [];
+    // refs_ignored: surface a warning when the user passed refs but the
+    // selected engine silently dropped them (anything other than qwen_edit).
+    // Without this, the user sees plausible-looking T2I output and assumes
+    // their character ref worked.
+    const refsIgnored = (refs.length > 0) && cands.some(c => c.refs_ignored === true);
+    let warn = '';
+    if (refsIgnored) {
+      warn = ' · ⚠ refs IGNORED — switch to Qwen-Image-Edit-2509 for character composition';
+    }
     document.getElementById('imgStudioStatus').textContent =
-      `${cands.length} image${cands.length === 1 ? '' : 's'} in ${j.elapsed_seconds || '?'} s · engine: ${j.engine || '?'}`;
+      `${cands.length} image${cands.length === 1 ? '' : 's'} in ${j.elapsed_seconds || '?'} s · engine: ${j.engine || '?'}` + warn;
     const html = cands.map((c, i) => `
       <div class="lib-tile" onclick="imgStudioCopyPath('${(c.png_path || '').replace(/'/g, "\\'")}')" title="Click to copy path">
         <img src="/image?path=${encodeURIComponent(c.png_path)}&t=${Date.now()}" alt="">
@@ -13242,14 +13268,34 @@ async function imgStudioRefreshLibrary() {
 
 function imgStudioCopyPath(path) {
   if (!path) return;
-  navigator.clipboard.writeText(path).then(() => {
-    const s = document.getElementById('imgStudioStatus');
-    if (s) {
-      const prev = s.textContent;
-      s.textContent = 'Path copied to clipboard.';
-      setTimeout(() => { if (s.textContent === 'Path copied to clipboard.') s.textContent = prev; }, 1500);
+  const s = document.getElementById('imgStudioStatus');
+  const flash = (msg) => {
+    if (!s) return;
+    const prev = s.textContent;
+    s.textContent = msg;
+    setTimeout(() => { if (s.textContent === msg) s.textContent = prev; }, 1500);
+  };
+  // navigator.clipboard isn't available in non-secure contexts (HTTP origins
+  // other than localhost) and may reject if the page lacks focus. Fall back
+  // to the legacy execCommand path so the user still gets the path on their
+  // clipboard.
+  const legacy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = path;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      flash(ok ? 'Path copied.' : 'Copy failed — select the path manually.');
+    } catch (e) {
+      flash('Copy failed: ' + (e.message || 'unknown'));
     }
-  });
+  };
+  if (!navigator.clipboard || !navigator.clipboard.writeText) { legacy(); return; }
+  navigator.clipboard.writeText(path).then(() => flash('Path copied.')).catch(() => legacy());
 }
 
 // Quality presets (Y1.013) — each one bundles the backend quality value
