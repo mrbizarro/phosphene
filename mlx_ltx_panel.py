@@ -9315,30 +9315,45 @@ HTML = r"""<!doctype html>
         var(--bg) 100%
       );
     }
+    /* Composer chrome — Claude.ai / Gemini-grade glass card.
+       The wrap is a relative container; textarea fills it and the
+       attach (paperclip) + send buttons absolute-position over the
+       bottom edge inside the same rounded box. Padding on the textarea
+       reserves room for both buttons so typed text never collides with
+       them. Attach button on the LEFT (40px reservation), send on the
+       RIGHT (50px reservation). */
     body.agent-fullscreen .agent-composer-wrap {
       max-width: none; width: 100%;
       margin: 0;
       position: relative; z-index: 1;
+      background: transparent;          /* the textarea owns the glass look */
+      border: none;
+      padding: 0;
     }
     body.agent-fullscreen .agent-composer textarea {
-      background: rgba(20, 26, 58, 0.85);
+      background: rgba(20, 26, 58, 0.92);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.07);
+      border: 1px solid rgba(120, 140, 220, 0.16);
       border-radius: 18px;
-      padding: 14px 60px 14px 18px;          /* room for the inline send button */
+      /* top right bottom left — left 56 makes room for attach button (44+12),
+         right 56 makes room for send button. Bottom 14 sits the textarea
+         off the bottom edge so buttons don't collide with descenders. */
+      padding: 16px 56px 16px 56px;
       box-shadow:
-        0 12px 36px rgba(0,0,0,0.45),
+        0 14px 40px rgba(0,0,0,0.55),
         0 0 0 1px rgba(47,129,247,0.0);
-      font-size: 14.5px;
+      font-size: 15px;
+      line-height: 1.5;
+      min-height: 56px;
       transition: border-color var(--t-base), box-shadow var(--t-base), background var(--t-base);
     }
     body.agent-fullscreen .agent-composer textarea:focus {
-      background: rgba(28, 36, 72, 0.92);
-      border-color: rgba(47,129,247,0.5);
+      background: rgba(28, 36, 72, 0.95);
+      border-color: rgba(47,129,247,0.55);
       box-shadow:
-        0 12px 36px rgba(0,0,0,0.5),
-        0 0 0 4px rgba(47,129,247,0.12);
+        0 14px 40px rgba(0,0,0,0.55),
+        0 0 0 4px rgba(47,129,247,0.14);
     }
     body.agent-fullscreen .agent-composer .hint {
       bottom: -22px; left: 0;
@@ -9346,23 +9361,54 @@ HTML = r"""<!doctype html>
       opacity: 0.5;
     }
 
-    /* Send button polish for fullscreen — slightly larger, deeper shadow */
+    /* Attach (paperclip) button — visible by default, brighter on hover.
+       Earlier was muted-on-dark and effectively invisible per Salo's
+       screenshot ("we lost the ability to upload files and images"). */
+    body.agent-fullscreen .agent-composer .attach-btn {
+      width: 40px; height: 40px;
+      left: 8px; bottom: 8px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.10);
+      z-index: 2;
+      transition: background var(--t-base), color var(--t-base),
+                  border-color var(--t-base), transform var(--t-base);
+    }
+    body.agent-fullscreen .agent-composer .attach-btn:hover {
+      background: rgba(47,129,247,0.12);
+      color: var(--accent-bright);
+      border-color: rgba(47,129,247,0.35);
+      transform: translateY(-1px);
+    }
+    body.agent-fullscreen .agent-composer .attach-btn svg {
+      width: 18px; height: 18px;
+    }
+    body.agent-fullscreen .agent-composer .attach-btn.has-attach {
+      background: rgba(47,129,247,0.18);
+      color: var(--accent-bright);
+      border-color: rgba(47,129,247,0.45);
+    }
+
+    /* Send button — distinctive accent fill, slightly larger, deeper
+       shadow. Sits inside the same rounded box at the right edge. */
     body.agent-fullscreen .agent-composer .send-btn {
-      width: 38px; height: 38px;
+      width: 40px; height: 40px;
       right: 8px; bottom: 8px;
-      border-radius: var(--r-md);
+      border-radius: 12px;
       z-index: 2;
       box-shadow: 0 6px 20px rgba(47,129,247,0.45);
     }
     body.agent-fullscreen .agent-composer .send-btn:hover:not(:disabled) {
       box-shadow: 0 8px 28px rgba(47,129,247,0.55);
+      transform: translateY(-1px);
     }
     body.agent-fullscreen .agent-composer .send-btn:disabled {
       background: rgba(255,255,255,0.05);
       box-shadow: none;
     }
     body.agent-fullscreen .agent-composer .send-btn svg {
-      width: 17px; height: 17px;
+      width: 18px; height: 18px;
     }
 
     /* Tool cards: tighten + soften in fullscreen */
@@ -9547,11 +9593,14 @@ HTML = r"""<!doctype html>
     /* Header spans the full form-pane content width so the chips
        (Sessions / engine / mode / RAM / title / icons) all fit on one
        row regardless of how many chips light up. Salo's first-pass
-       screenshot showed them wrapping to 2 rows under max-width:800. */
+       screenshot showed them wrapping to 2 rows under max-width:800.
+       Top padding 22px gives the chips comfortable breathing room
+       from the viewport / browser-chrome edge — earlier 14px was
+       too tight; chips visually crammed against the URL bar. */
     body.agent-fullscreen .agent-pane > .agent-header {
       max-width: none;
       margin: 0;
-      padding: 14px 0;
+      padding: 22px 0 14px;
     }
     /* Engine-readiness banner aligns with the chat column. */
     body.agent-fullscreen #agentEngineBanner {
