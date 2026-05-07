@@ -2194,7 +2194,16 @@ def list_uploads(limit: int = 40) -> list[dict]:
 
 
 def list_outputs(include_hidden: bool = False) -> list[dict]:
-    files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
+    # Sort OLDEST first (mtime ascending) so the gallery reads
+    # left→right as time-forward — older clips on the left, newer
+    # clips appear on the right end as they finish. The horizontal
+    # carousel's overflow-x scroll combined with the right-side scroll
+    # nudge in renderCarousel() keeps the latest visible. The 120-cap
+    # is over the WHOLE history; we slice from the tail (newest) so
+    # the rightmost position always holds the newest clips even when
+    # there are 200+ renders on disk.
+    all_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+    files = all_files[-120:]                # keep last 120, oldest→newest order
     # Y1.039 — skip files that ffmpeg is still writing.
     #
     # Pre-Y1.039 a fresh render appeared in the gallery the moment its mp4
@@ -2204,14 +2213,20 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
     # under the file URL — so the card stayed black for 2–3 minutes until
     # the HTTP cache expired and a refresh re-pulled the now-complete file.
     #
-    # Two layers of protection:
+    # Three layers of protection:
     #   1. If a job is running, skip its known target paths (raw_path /
     #      output_path / native_path / upscaled_path tracked on the job
     #      dict). This catches the common case cleanly.
     #   2. As a belt-and-braces, also skip any file whose mtime is within
     #      the last 2 seconds — covers cancelled jobs that left a partial,
     #      and any path the worker forgot to record on the job dict.
+    #   3. Skip any path that belongs to a FAILED or CANCELLED job in the
+    #      history. Failed renders sometimes leave a partial mp4 on disk
+    #      (the helper crashed mid-encode) and they were polluting the
+    #      gallery with broken/black thumbnails the user couldn't tell
+    #      apart from real outputs.
     in_flight_paths: set[str] = set()
+    failed_paths: set[str] = set()
     with LOCK:
         hidden_snap = set(HIDDEN_PATHS)
         cur = STATE.get("current")
@@ -2220,6 +2235,12 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
                 v = cur.get(k)
                 if v:
                     in_flight_paths.add(str(v))
+        for h in (STATE.get("history") or []):
+            if (h.get("status") or "") in ("failed", "cancelled", "error"):
+                for k in ("raw_path", "output_path", "native_path", "upscaled_path"):
+                    v = h.get(k)
+                    if v:
+                        failed_paths.add(str(v))
     inflight_mtime_cutoff = time.time() - 2.0
     out = []
     for p in files:
@@ -2229,6 +2250,10 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
             continue
         # In-flight protection — see the comment block above.
         if path_s in in_flight_paths:
+            continue
+        # Failed-render protection — partial mp4s from crashed renders
+        # were showing as black/short cards in the gallery.
+        if path_s in failed_paths:
             continue
         try:
             mt = p.stat().st_mtime
@@ -11814,6 +11839,12 @@ function _outputDurationLabel(o) {
 function renderCarousel() {
   const el = document.getElementById('carousel');
   if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
+  // Track whether the user is at-or-near the rightmost position BEFORE
+  // re-render. If they are, scroll back to the right after render so a
+  // newly-arrived clip stays visible. If they've scrolled LEFT to inspect
+  // older clips, leave their scroll position alone — don't yank them.
+  const wasNearRight = !el.scrollWidth ||
+    (el.scrollWidth - el.scrollLeft - el.clientWidth) <= 80;
   el.innerHTML = currentOutputs.map(o => {
     const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
     // Thumbnail seek point: 2.5s is the midpoint of an LTX 5s clip (121
@@ -11841,6 +11872,12 @@ function renderCarousel() {
       </div>
     </div>`;
   }).join('');
+  // After re-render, restore scroll-pin: if the user was at the right end
+  // (newest), keep them there so a freshly-finished clip is visible. If
+  // they were scrolled left to examine older clips, leave them be.
+  if (wasNearRight) {
+    requestAnimationFrame(() => { el.scrollLeft = el.scrollWidth; });
+  }
 }
 
 function selectOutput(path) {
