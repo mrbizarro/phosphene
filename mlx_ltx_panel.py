@@ -16411,7 +16411,11 @@ function agentStageRender(status, sess) {
     outputsEl.innerHTML = `<div class="stage-empty">No mp4s rendered yet. Submit a shot from the chat.</div>`;
   } else {
     outputsEl.innerHTML = '';
-    for (const o of outputs.slice(0, 24)) {
+    // No display cap — the count and the rendered cells must agree.
+    // The grid is auto-fill so it wraps; the parent stage pane scrolls.
+    // Earlier code sliced at 24 "for performance" but the user (rightly)
+    // saw count=45 with 25 cards visible and asked where the rest went.
+    for (const o of outputs) {
       const cell = document.createElement('div');
       const failed = o.status === 'error' || o.status === 'failed' || o.status === 'cancelled';
       cell.className = 'stage-output-cell' + (failed ? ' failed' : '');
