@@ -253,7 +253,11 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
       source_clip: str              — for extend mode: absolute path to source mp4.
       extend_seconds: float = 2     — for extend: how much to add. Maps to extend_frames.
       label: str                    — human-readable label visible in queue/history.
-      no_music: bool = False        — append no-music constraint to prompt.
+      no_music: bool = True         — when true (default), suppresses background
+                                      music. Documentary work, dialogue scenes,
+                                      and most agent batches don't want music
+                                      under them. Pass `no_music: false` only
+                                      when the user explicitly asks for music.
       upscale_method: str           — "lanczos" (default) | "pipersr" (Sharp ANE).
       session_tag: str              — copied to params for later filtering. The runtime
                                       passes the active agent session id automatically.
@@ -314,12 +318,19 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
         width = min(width, max_dim_kf)
         height = min(height, max_dim_kf)
 
+    # No-music defaults to TRUE for agent shots — the user's standing
+    # preference. They expressed it explicitly: "by default no music".
+    # Override per-shot when the user asks for music ("make this scene
+    # with a piano track" → no_music: false).
+    no_music = args.get("no_music")
+    if no_music is None:
+        no_music = True
     # Build the form dict that make_job() consumes.
     form: dict[str, str] = {
         "mode": mode,
         "prompt": prompt + (
-            ". Audio: no music, dialogue and ambient room tone only."
-            if args.get("no_music") else ""
+            ". Audio: no music whatsoever, dialogue and ambient room tone only, no soundtrack."
+            if no_music else ""
         ),
         "quality": quality,
         "accel": accel,
@@ -1021,6 +1032,70 @@ def _read_document(args: dict, ops: PanelOps, session: dict) -> dict:
     if page_count is not None:
         out["page_count"] = page_count
     return out
+
+
+@tool("get_master_style")
+def _get_master_style(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Look up the master style suffix to lock in for the current project.
+
+    Use this at the start of EVERY turn that will submit shots in a
+    session that already has prior shots. It returns the locked-in
+    style fragment so you can paste it verbatim onto every new prompt.
+    Without this, the gallery looks like a horror movie + a vlog + a
+    documentary stitched together — exactly what the user complained
+    about ("the style of the shots is really uneven").
+
+    Resolution order:
+      1. Project notes — most recent `[style ·` entry from
+         `read_project_notes()`. This is the canonical source; it
+         survives panel restart.
+      2. Most recent `submitted_shot` in the session — extract the
+         tail of the prompt as a heuristic fallback if the agent
+         forgot to call append_project_notes earlier.
+      3. None — return an empty string. The caller should DECLARE
+         the master style + immediately call append_project_notes
+         before submitting the first shot.
+
+    Returns: { found: bool, source: "notes"|"prior_shot"|"none",
+               style: str, hint: str }.
+    """
+    from agent import project as _project
+    notes = _project.read_notes(ops.state_dir) or ""
+    # Walk the notes from the END looking for the most recent style entry.
+    # Style entries look like "## 2026-05-07 03:14  [style · agent]\n<text>"
+    if notes:
+        marker = "[style ·"
+        idx = notes.rfind(marker)
+        if idx != -1:
+            tail = notes[idx:]
+            # The text follows the header line.
+            nl = tail.find("\n")
+            body_start = nl + 1 if nl != -1 else 0
+            # Body ends at the next "## " (next entry) or end-of-file.
+            next_entry = tail.find("\n## ", body_start)
+            body_end = next_entry if next_entry != -1 else len(tail)
+            style = tail[body_start:body_end].strip()
+            if style:
+                return {"found": True, "source": "notes", "style": style,
+                        "hint": "Use this verbatim as the prompt suffix on every shot."}
+    # Fallback: grab the most recent submitted_shot's prompt tail.
+    submitted = session.get("submitted_shots") or []
+    if submitted:
+        last = submitted[-1] or {}
+        last_prompt = last.get("prompt") or ""
+        # Heuristic: the master style is usually the last sentence(s) of
+        # the prompt — "Documentary realism, full-frame 16:9, ..."
+        # Take everything after the last period that ends a content beat.
+        if last_prompt:
+            tail = last_prompt[-300:]
+            return {"found": True, "source": "prior_shot",
+                    "style": tail,
+                    "hint": ("Heuristic — the tail of the most recent shot's "
+                             "prompt. Re-use the look words; ignore the dialogue.")}
+    return {"found": False, "source": "none", "style": "",
+            "hint": ("No master style locked yet. DECLARE it on the next "
+                     "shot AND call append_project_notes(kind='style', text=...) "
+                     "so future turns can read it back.")}
 
 
 @tool("list_loras")
