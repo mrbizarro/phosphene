@@ -90,6 +90,14 @@ module.exports = {
     const sharp_ready =
       info.exists("ltx-2-mlx/env/lib/python3.11/site-packages/pipersr") ||
       info.exists("ltx-2-mlx/env/lib/python3.11/site-packages/pipersr-1.0.0.dist-info")
+    // Qwen-Image-Edit-2509 readiness — the mflux package on PATH is the
+    // canonical signal that the user opted into multi-reference image
+    // generation. Weights live lazily in ~/.cache/huggingface (outside
+    // install dir, so they survive Reset). Probing for the per-family CLI
+    // covers the case where mflux was upgraded but the new
+    // `mflux-generate-qwen-edit` binary didn't land (mflux <0.17.5).
+    const qwen_ready =
+      info.exists("ltx-2-mlx/env/bin/mflux-generate-qwen-edit")
 
     // User-content folders persist across Reset (which only removes the venv).
     // Keep their shortcuts visible whenever they exist on disk so users can
@@ -105,6 +113,7 @@ module.exports = {
       reset:      info.running("reset.js"),
       q8download: info.running("download_q8.js"),
       sharp:      info.running("install_sharp.js"),
+      qwen:       info.running("install_qwen.js"),
     }
 
     // Running states first — show what's in progress, hide everything else.
@@ -113,6 +122,7 @@ module.exports = {
     if (running.reset)      return [{ default: true, icon: "fa-solid fa-eraser",   text: "Resetting",                    href: "reset.js" }]
     if (running.q8download) return [{ default: true, icon: "fa-solid fa-download", text: "Downloading Q8 (~37 GB)",      href: "download_q8.js" }]
     if (running.sharp)      return [{ default: true, icon: "fa-solid fa-wand-magic-sparkles", text: "Installing Sharp upscaler", href: "install_sharp.js" }]
+    if (running.qwen)       return [{ default: true, icon: "fa-solid fa-images", text: "Installing Qwen-Image-Edit (multi-ref)", href: "install_qwen.js" }]
 
     // No env at all → fresh install path. Recovery shortcuts to user content
     // folders if a previous install left files behind.
@@ -165,6 +175,9 @@ module.exports = {
     }
     if (!sharp_ready) {
       baseMenu.push({ icon: "fa-solid fa-wand-magic-sparkles", text: "Install Sharp upscaler (PiperSR, optional)", href: "install_sharp.js" })
+    }
+    if (!qwen_ready) {
+      baseMenu.push({ icon: "fa-solid fa-images", text: "Install Qwen-Image-Edit (multi-ref keyframes, optional)", href: "install_qwen.js" })
     }
     baseMenu.push(
       { icon: "fa-solid fa-rotate", text: "Update", href: "update.js" },

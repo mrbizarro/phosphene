@@ -4735,10 +4735,22 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/agent/image/config":
             cfg = _load_agent_image_config()
             ok, msg = agent_image_engine.health_check(cfg)
+            # Per-family install status — exposes which mflux-generate-*
+            # binaries are present so the browser can show install hints
+            # next to options the user hasn't installed yet (e.g.
+            # Qwen-Image-Edit-2509). Probing all families on every config
+            # fetch is cheap (a few stat() calls).
+            family_status = {}
+            for fam in agent_image_engine.MFLUX_FAMILY_BIN.keys():
+                probe_cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux", mflux_family=fam,
+                )
+                family_status[fam] = bool(agent_image_engine._resolve_mflux_bin(probe_cfg))
             self._json({
                 "image_engine": cfg.to_public_dict(),
                 "ok": ok,
                 "message": msg,
+                "family_status": family_status,
             })
             return
 
@@ -12490,8 +12502,11 @@ HTML = r"""<!doctype html>
     <div class="field" id="agentMfluxModelField" style="display:none">
       <label>mflux model</label>
       <select id="agentMfluxModel" onchange="agentMfluxModelChanged()">
-        <optgroup label="FLUX.2 (Apache 2.0 · 4-step) — 2026 default">
-          <option value="Runpod/FLUX.2-klein-4B-mflux-4bit" selected>FLUX.2 [klein] 4B — 4-bit, 4 steps · ~4.3 GB · recommended</option>
+        <optgroup label="Qwen-Image-Edit-2509 (Apache 2.0 · multi-reference) — character + place composition">
+          <option value="Qwen/Qwen-Image-Edit-2509">Qwen-Image-Edit-2509 — 1-3 ref images + prompt → composed still · ~22-34 GB lazy download (Q4 / Q8 picked via the quant slider below)</option>
+        </optgroup>
+        <optgroup label="FLUX.2 (Apache 2.0 · 4-step) — fast text-to-image default">
+          <option value="Runpod/FLUX.2-klein-4B-mflux-4bit" selected>FLUX.2 [klein] 4B — 4-bit, 4 steps · ~4.3 GB · recommended for plain T2I anchors</option>
         </optgroup>
         <optgroup label="Z-Image (Apache 2.0 · Tongyi/Alibaba)">
           <option value="filipstrand/Z-Image-Turbo-mflux-4bit">Z-Image-Turbo — 4-bit, 9 steps · ~5.9 GB · Compact-tier default</option>
@@ -12503,6 +12518,9 @@ HTML = r"""<!doctype html>
         </optgroup>
         <option value="__custom__">Custom HF id / local path…</option>
       </select>
+      <div id="agentQwenInstallHint" class="field-help" style="display:none;margin-top:6px;padding:8px;background:rgba(207,150,34,0.08);border:1px solid rgba(207,150,34,0.4);border-radius:6px;color:var(--text);font-size:12px;line-height:1.4">
+        <b>Qwen-Image-Edit-2509 needs a one-click install</b> — open Pinokio's launcher menu and click <b>"Install Qwen-Image-Edit (multi-ref keyframes)"</b>. ~30 s for the package; weights (~22-34 GB) download lazily on first use.
+      </div>
     </div>
     <div class="field" id="agentMfluxCustomField" style="display:none">
       <label>Custom model (HF repo id or local path)</label>
@@ -18088,6 +18106,18 @@ function agentMfluxModelChanged() {
   document.getElementById('agentMfluxCustomField').style.display = isCustom ? '' : 'none';
   document.getElementById('agentMfluxBaseField').style.display = isCustom ? '' : 'none';
 
+  // Show the Qwen install hint when the user picks a Qwen-Edit option
+  // AND `mflux-generate-qwen-edit` isn't on PATH yet. family_status comes
+  // from /agent/image/config (cached in window.AGENT.imageConfig). The
+  // hint is silent for installed families and for non-Qwen picks.
+  const hint = document.getElementById('agentQwenInstallHint');
+  if (hint) {
+    const isQwenEdit = /qwen-image-edit|qwen_image_edit|qwen-edit/i.test(v);
+    const fs = (window.AGENT.imageConfig || {}).family_status || {};
+    const installed = fs.qwen_edit === true;
+    hint.style.display = (isQwenEdit && !installed) ? '' : 'none';
+  }
+
   // Per-family default step count — mirrors agent/image_engine.py
   // MFLUX_FAMILY_DEFAULTS. The user can override; we only auto-fill
   // when they haven't manually edited the field this session
@@ -18097,7 +18127,8 @@ function agentMfluxModelChanged() {
     // Family-aware step picks (must stay in sync with image_engine.py
     // MFLUX_FAMILY_DEFAULTS — flagged at the source).
     let steps = null;
-    if (/flux\.?2.*klein/i.test(v) || /flux2-klein/i.test(v))     steps = 4;
+    if (/qwen-image-edit|qwen_image_edit|qwen-edit/i.test(v))      steps = 30;
+    else if (/flux\.?2.*klein/i.test(v) || /flux2-klein/i.test(v)) steps = 4;
     else if (/z-image-turbo|z_image_turbo/i.test(v))               steps = 9;
     else if (/^schnell$/i.test(v))                                 steps = 4;
     else if (/^(krea-dev|dev)$/i.test(v))                          steps = 25;
