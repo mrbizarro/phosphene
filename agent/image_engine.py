@@ -13,7 +13,7 @@ The director-collaboration loop:
      i2v shots with each anchor as `ref_image_path`. The video model
      fills the motion between known frames; the look is locked.
 
-This module is the dispatch layer. Two backends ship in v1:
+This module is the dispatch layer. Three backends ship today:
 
   - **mock** — flat-colored PNGs drawn with PIL. Zero deps beyond what
     LTX already needs. Used for testing the UX without spending API
@@ -21,10 +21,25 @@ This module is the dispatch layer. Two backends ship in v1:
   - **bfl**  — Black Forest Labs (api.bfl.ml). Async submit + poll.
     Requires `bfl_api_key`. Models: flux-dev (cheap, 25 steps),
     flux-pro (better, slower), flux-schnell (4 steps, fastest).
+  - **mflux** — fully-local Mac generation via filipstrand/mflux. Now
+    multi-family: mflux 0.17.x ships per-family CLI commands
+    (`mflux-generate-flux2`, `mflux-generate-z-image-turbo`,
+    `mflux-generate-fibo`, `mflux-generate-qwen`, `mflux-generate-kontext`)
+    in addition to the legacy `mflux-generate` (flux1-only). We auto-detect
+    the family from the model id and call the right binary, with
+    per-family step / guidance defaults so users who just pick a model
+    don't have to know it needs 4 steps vs 25.
 
-Future backends (v2): mflux for fully-local Mac generation; Replicate;
-fal.ai. Slot in by adding a `_generate_<kind>()` function and a clause
-in `generate()`.
+  Recommended defaults (May 2026):
+    - **Comfortable+ (32 GB+)**  → `Runpod/FLUX.2-klein-4B-mflux-4bit`
+      via `mflux-generate-flux2`, 4 steps, guidance 1.0. Apache 2.0,
+      ~4.3 GB on disk, 4 candidates per shot in 50-75 s.
+    - **Compact (16-32 GB)**     → `filipstrand/Z-Image-Turbo-mflux-4bit`
+      via `mflux-generate-z-image-turbo`, 9 steps, guidance 0.0.
+      Apache 2.0, ~5.9 GB on disk.
+
+See `docs/IMAGE_GEN_RESEARCH_2026-05.md` for the full landscape and
+tier-aware default table.
 """
 
 from __future__ import annotations
@@ -52,17 +67,32 @@ class ImageEngineConfig:
     bfl_model: str = "flux-dev"                     # flux-dev | flux-pro | flux-pro-1.1 | flux-schnell
     bfl_base_url: str = "https://api.bfl.ml/v1"
 
-    # mflux (local, MLX-native — `pip install mflux`)
+    # mflux (local, MLX-native — `pip install mflux`).
+    # Default updated 2026-05 to FLUX.2 [klein] 4B 4-bit — Apache 2.0,
+    # 4-step inference, ~4.3 GB on disk, ~12-18 s/image on Comfortable
+    # (M-series 32 GB+). Picks superseded the previous `krea-dev`
+    # default which is non-commercial and 12 GB.
+    #
     # `mflux_model` accepts either a named shorthand the CLI understands
-    # ("krea-dev", "dev", "schnell", "dev-fill") OR a HF repo id / local
-    # path (e.g. "filipstrand/FLUX.1-Krea-dev-mflux-4bit"). When the value
-    # is a path, `mflux_base_model` MUST be set (krea-dev / dev / schnell)
-    # so mflux knows the architecture to instantiate.
-    mflux_model: str = "krea-dev"
-    mflux_base_model: str = ""                      # only needed when mflux_model is a path/HF id
-    mflux_steps: int = 25                           # 25 for dev/krea, 4 for schnell
+    # ("krea-dev", "dev", "schnell", "dev-fill", "flux2-klein-4b") OR an
+    # HF repo id / local path (e.g. "Runpod/FLUX.2-klein-4B-mflux-4bit").
+    # `mflux_family` is "auto" by default — `_infer_mflux_family` reads
+    # the model string and dispatches to the right CLI:
+    #   flux1            → mflux-generate           (krea-dev, dev, schnell)
+    #   flux2            → mflux-generate-flux2     (klein-4B/9B, dev)
+    #   z_image_turbo    → mflux-generate-z-image-turbo
+    #   z_image          → mflux-generate-z-image
+    #   fibo             → mflux-generate-fibo
+    #   qwen             → mflux-generate-qwen
+    #   kontext          → mflux-generate-kontext
+    # Override only when the inference fails for a custom model name.
+    mflux_model: str = "Runpod/FLUX.2-klein-4B-mflux-4bit"
+    mflux_family: str = "auto"                      # "auto" or one of the family ids above
+    mflux_base_model: str = ""                      # only needed when mflux_model is a path/HF id and family inference can't tell the architecture
+    mflux_steps: int = 0                            # 0 = use family default (4/9/25 per family)
     mflux_quantize: int = 4                         # 4 | 8 | 16 — 4-bit fits comfortably on 64 GB
-    mflux_python_path: str = ""                     # optional override for `mflux-generate` location
+    mflux_guidance: float | None = None             # None = use family default (1.0 / 0.0 / 4.5 / 5.0 per family)
+    mflux_python_path: str = ""                     # optional override for the mflux CLI location
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -128,17 +158,99 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
     return False, f"unknown engine kind: {config.kind!r}"
 
 
+# Per-family CLI command. mflux 0.17.x splits FLUX.1, FLUX.2, Z-Image,
+# FIBO, Qwen, and Kontext into separate `mflux-generate-*` binaries —
+# each one knows its architecture, expected step count, guidance scale,
+# etc. We dispatch by family. The legacy `mflux-generate` remains for
+# FLUX.1 (krea-dev / dev / schnell / kontext) backward-compat.
+MFLUX_FAMILY_BIN = {
+    "flux1":          "mflux-generate",
+    "flux2":          "mflux-generate-flux2",
+    "z_image":        "mflux-generate-z-image",
+    "z_image_turbo":  "mflux-generate-z-image-turbo",
+    "fibo":           "mflux-generate-fibo",
+    "qwen":           "mflux-generate-qwen",
+    "kontext":        "mflux-generate-kontext",
+}
+
+# Sensible per-family defaults so a user who picks a model from the
+# dropdown gets the right step count + guidance without having to
+# read the model card. `steps` and `guidance` apply to `_generate_mflux`
+# when `config.mflux_steps == 0` or `mflux_guidance` is unset (the
+# server only overrides when the user explicitly picks a custom value).
+MFLUX_FAMILY_DEFAULTS = {
+    "flux1":         {"steps": 25, "guidance": 4.5,  "base_model": "dev"},
+    "flux2":         {"steps": 4,  "guidance": 1.0,  "base_model": "flux2-klein-4b"},
+    "z_image":       {"steps": 25, "guidance": 5.0,  "base_model": ""},
+    "z_image_turbo": {"steps": 9,  "guidance": 0.0,  "base_model": ""},
+    "fibo":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
+    "qwen":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
+    "kontext":       {"steps": 30, "guidance": 4.5,  "base_model": ""},
+}
+
+
+def _infer_mflux_family(model: str) -> str:
+    """Map a model id / shorthand to its mflux family.
+
+    Examples:
+      "Runpod/FLUX.2-klein-4B-mflux-4bit"             → "flux2"
+      "filipstrand/Z-Image-Turbo-mflux-4bit"          → "z_image_turbo"
+      "Tongyi-MAI/Z-Image"                            → "z_image"
+      "filipstrand/FLUX.1-Krea-dev-mflux-4bit"        → "flux1"
+      "krea-dev" / "dev" / "schnell"                  → "flux1"
+      "flux2-klein-4b" / "flux2-klein-9b"             → "flux2"
+      "briaai/FIBO" / "fibo"                          → "fibo"
+      "filipstrand/Qwen-Image-mflux-6bit" / "qwen-*"  → "qwen"
+      "*kontext*"                                     → "kontext"
+
+    Falls back to "flux1" so legacy configs keep working.
+    """
+    s = (model or "").lower()
+    if "z-image-turbo" in s or "z_image_turbo" in s or "zimage-turbo" in s:
+        return "z_image_turbo"
+    if "z-image" in s or "z_image" in s or "tongyi-mai/z-image" in s:
+        return "z_image"
+    if "flux2" in s or "flux.2" in s or "flux-2" in s:
+        return "flux2"
+    if "kontext" in s:
+        return "kontext"
+    if "fibo" in s or "briaai/fibo" in s:
+        return "fibo"
+    if "qwen" in s and "image" in s:
+        return "qwen"
+    # Default: flux1 (krea-dev / dev / schnell, plus filipstrand/FLUX.1-*)
+    return "flux1"
+
+
+def _resolve_mflux_family(config: ImageEngineConfig) -> str:
+    """Resolve config.mflux_family, falling back to inference."""
+    fam = (config.mflux_family or "auto").strip().lower()
+    if fam == "auto" or fam not in MFLUX_FAMILY_BIN:
+        return _infer_mflux_family(config.mflux_model)
+    return fam
+
+
 def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
-    """Find the `mflux-generate` executable.
+    """Find the `mflux-generate-*` executable for the configured family.
 
     Order:
       1. config.mflux_python_path (explicit override — useful when mflux
-         is installed in a venv outside the panel's standard location)
-      2. The Phosphene panel's bundled venv (ltx-2-mlx/env/bin/mflux-generate)
-      3. shutil.which("mflux-generate") — system PATH fallback
+         is installed in a venv outside the panel's standard location).
+         The override is taken as-is; user is responsible for pointing
+         at the right per-family binary.
+      2. The Phosphene panel's bundled venv (ltx-2-mlx/env/bin/<bin>).
+      3. The sibling image-gen venv (image-gen/env/bin/<bin>) — reserved
+         for a future split where mflux's transformers/mlx pins differ
+         from LTX's. Doesn't exist today; safe to probe.
+      4. shutil.which(<bin>) — system PATH fallback.
+
+    Returns the absolute path to the binary, or None if not installed.
     """
     import os
     import shutil
+
+    fam = _resolve_mflux_family(config)
+    bin_name = MFLUX_FAMILY_BIN.get(fam, "mflux-generate")
 
     if config.mflux_python_path:
         cand = Path(config.mflux_python_path)
@@ -146,12 +258,15 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
             return str(cand)
 
     repo_root = Path(__file__).resolve().parent.parent
-    panel_venv_bin = repo_root / "ltx-2-mlx" / "env" / "bin" / "mflux-generate"
-    if panel_venv_bin.is_file() and os.access(panel_venv_bin, os.X_OK):
-        return str(panel_venv_bin)
+    candidates = [
+        repo_root / "ltx-2-mlx" / "env" / "bin" / bin_name,
+        repo_root / "image-gen" / "env" / "bin" / bin_name,
+    ]
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
 
-    found = shutil.which("mflux-generate")
-    return found
+    return shutil.which(bin_name)
 
 
 # ---- Backends ---------------------------------------------------------------
@@ -229,7 +344,12 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
 def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
                     config: ImageEngineConfig) -> list[dict]:
-    """Subprocess `mflux-generate` once per candidate.
+    """Subprocess the right `mflux-generate-*` binary once per candidate.
+
+    Family is inferred from `config.mflux_model` (or taken from
+    `config.mflux_family` when set). The legacy `mflux-generate` is
+    used for FLUX.1 (krea-dev / dev / schnell); FLUX.2 / Z-Image / FIBO /
+    Qwen / Kontext each get their dedicated CLI from mflux 0.17.x.
 
     Loads the model fresh on every call (mflux's CLI doesn't keep it
     warm), so first call eats ~10-30 s of model-load time per
@@ -237,24 +357,46 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     becomes a real bottleneck, swap in a long-lived `mflux_warm_helper.py`
     subprocess that mirrors `mlx_warm_helper.py`.
 
-    Recommended model: **Flux Krea Dev** (`krea-dev`) — Krea AI's
-    fine-tune of Flux.1 Dev, generally regarded as the best
-    photorealistic Flux variant. Particularly strong for documentary /
-    interview / sterile-clinic looks the agent gravitates toward. The
-    mflux 4-bit weights ship at filipstrand/FLUX.1-Krea-dev-mflux-4bit.
-    First run downloads ~6 GB to ~/.cache/huggingface.
+    Recommended defaults (May 2026):
+      - **FLUX.2 [klein] 4B 4-bit** — Apache 2.0, 4 steps, ~4.3 GB. The
+        new default; Comfortable+ tiers.
+      - **Z-Image-Turbo 4-bit** — Apache 2.0, 9 steps, ~5.9 GB. Compact
+        tier.
+      - **FLUX.1 Krea Dev 4-bit** — non-commercial gated, 25 steps,
+        ~9.6 GB. Kept for users on the legacy default.
+
+    First run downloads ~4-10 GB to ~/.cache/huggingface depending on
+    the family.
     """
     import os
     import subprocess
 
     bin_path = _resolve_mflux_bin(config)
+    fam = _resolve_mflux_family(config)
+    bin_name = MFLUX_FAMILY_BIN.get(fam, "mflux-generate")
+    fam_defaults = MFLUX_FAMILY_DEFAULTS.get(fam, MFLUX_FAMILY_DEFAULTS["flux1"])
+
     if not bin_path:
+        # Surface a family-specific install hint — mflux 0.17.x ships
+        # all families via one `pip install mflux`; older mflux pins
+        # may be missing the new binaries.
         raise RuntimeError(
-            "mflux-generate not found. Install mflux into the panel's "
-            "venv: `ltx-2-mlx/env/bin/pip install mflux` "
-            "(see docs/AGENTIC_FLOWS.md § Image generation backends). "
-            "First-run model download is ~6 GB."
+            f"{bin_name} not found (family: {fam}). Install or upgrade "
+            f"mflux into the panel's venv: "
+            f"`ltx-2-mlx/env/bin/pip install -U mflux>=0.17` "
+            f"(see docs/AGENTIC_FLOWS.md § Image generation backends + "
+            f"docs/IMAGE_GEN_RESEARCH_2026-05.md). First-run model "
+            f"download is ~4-10 GB to ~/.cache/huggingface."
         )
+
+    # Effective steps + guidance: prefer user-set values if non-zero,
+    # otherwise fall back to the family default. This way a user who
+    # just picks "FLUX.2 [klein]" from the dropdown without adjusting
+    # other knobs gets the right step count for free.
+    eff_steps = config.mflux_steps if config.mflux_steps > 0 else fam_defaults["steps"]
+    eff_guidance = (config.mflux_guidance
+                    if config.mflux_guidance is not None
+                    else fam_defaults["guidance"])
 
     results: list[dict] = []
     for i in range(n):
@@ -265,32 +407,40 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "--model", config.mflux_model,
             "--prompt", prompt,
             "--output", str(out_path),
-            "--steps", str(config.mflux_steps),
+            "--steps", str(eff_steps),
             "--width", str(width),
             "--height", str(height),
             "-q", str(config.mflux_quantize),
+            "--guidance", str(eff_guidance),
         ]
         if seed is not None:
             cmd.extend(["--seed", str(seed)])
-        # When `--model` is a HuggingFace id or local path (i.e. contains
-        # a slash or starts with `~` or `/`), mflux needs `--base-model`
-        # to know which Flux architecture to instantiate.
+        # When `--model` is a HuggingFace id or local path (contains a
+        # slash or starts with `~` or `/`), mflux needs `--base-model`
+        # to know which architecture to instantiate. Fall through to
+        # the per-family default if the user hasn't set one.
         looks_like_path = ("/" in config.mflux_model
                            or config.mflux_model.startswith("~"))
-        if looks_like_path and config.mflux_base_model:
-            cmd.extend(["--base-model", config.mflux_base_model])
+        if looks_like_path:
+            base = (config.mflux_base_model
+                    or fam_defaults.get("base_model") or "")
+            if base:
+                cmd.extend(["--base-model", base])
 
         # Inherit env so HF_HOME / HF_TOKEN are honored for the
         # one-time weight download. Capture stderr so the user gets a
-        # readable error if anything explodes.
+        # readable error if anything explodes. Family-aware timeout —
+        # 4-bit klein-4B and Z-Image-Turbo finish in 60-90 s; flux1-dev
+        # / krea-dev / fibo / qwen take much longer at high resolution.
         env = os.environ.copy()
+        timeout_s = 240 if fam in ("flux2", "z_image_turbo") else 600
         try:
             result = subprocess.run(
-                cmd, capture_output=True, env=env, timeout=420,
+                cmd, capture_output=True, env=env, timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(
-                f"mflux-generate timed out after 420s on candidate {i}. "
+                f"{bin_name} timed out after {timeout_s}s on candidate {i}. "
                 f"First run downloads weights — give it longer for the "
                 f"first candidate, or pre-download with: "
                 f"`{bin_path} --model {config.mflux_model} "
@@ -299,18 +449,19 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         if result.returncode != 0:
             err = result.stderr.decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"mflux-generate failed (exit {result.returncode}) "
+                f"{bin_name} failed (exit {result.returncode}) "
                 f"on candidate {i}: {err[:600]}"
             )
         if not out_path.is_file():
             raise RuntimeError(
-                f"mflux-generate exited 0 but produced no file at {out_path}"
+                f"{bin_name} exited 0 but produced no file at {out_path}"
             )
 
         results.append({
             "png_path": str(out_path),
             "seed": seed if seed is not None else 0,
             "engine": "mflux",
+            "family": fam,
             "model": config.mflux_model,
             "width": width, "height": height,
         })

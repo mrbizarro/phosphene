@@ -12387,13 +12387,24 @@ HTML = r"""<!doctype html>
       </select>
     </div>
 
-    <!-- mflux fields -->
+    <!-- mflux fields. Grouped by family — mflux 0.17.x ships per-family
+         CLIs (mflux-generate-flux2, mflux-generate-z-image-turbo, etc.)
+         and the panel auto-dispatches based on model name. Apache-2.0
+         options pinned to the top — non-commercial / gated below. -->
     <div class="field" id="agentMfluxModelField" style="display:none">
       <label>mflux model</label>
       <select id="agentMfluxModel" onchange="agentMfluxModelChanged()">
-        <option value="krea-dev">Flux Krea Dev — recommended (best photorealism)</option>
-        <option value="dev">Flux.1 Dev — vanilla 28-step</option>
-        <option value="schnell">Flux.1 Schnell — 4-step, fastest</option>
+        <optgroup label="FLUX.2 (Apache 2.0 · 4-step) — 2026 default">
+          <option value="Runpod/FLUX.2-klein-4B-mflux-4bit" selected>FLUX.2 [klein] 4B — 4-bit, 4 steps · ~4.3 GB · recommended</option>
+        </optgroup>
+        <optgroup label="Z-Image (Apache 2.0 · Tongyi/Alibaba)">
+          <option value="filipstrand/Z-Image-Turbo-mflux-4bit">Z-Image-Turbo — 4-bit, 9 steps · ~5.9 GB · Compact-tier default</option>
+        </optgroup>
+        <optgroup label="FLUX.1 (legacy, non-commercial except Schnell)">
+          <option value="krea-dev">Flux Krea Dev — best FLUX.1 photorealism (gated, ~9.6 GB)</option>
+          <option value="dev">Flux.1 Dev — vanilla 25-step (gated)</option>
+          <option value="schnell">Flux.1 Schnell — Apache 2.0, 4-step</option>
+        </optgroup>
         <option value="__custom__">Custom HF id / local path…</option>
       </select>
     </div>
@@ -17646,18 +17657,35 @@ function openAgentSettings() {
 
     // Image-engine fields
     document.getElementById('agentImageKind').value = imgCfg.kind || 'mock';
-    // mflux
-    const namedMfluxModels = ['krea-dev', 'dev', 'schnell'];
-    const mfModel = imgCfg.mflux_model || 'krea-dev';
-    if (namedMfluxModels.includes(mfModel)) {
-      document.getElementById('agentMfluxModel').value = mfModel;
+    // mflux. The dropdown now includes named shorthands (krea-dev, dev,
+    // schnell) AND HF repo ids (Runpod/FLUX.2-klein-4B-mflux-4bit,
+    // filipstrand/Z-Image-Turbo-mflux-4bit). To know which path to take
+    // (built-in option vs __custom__), we check if the saved value is
+    // present as a real <option> in the select rather than maintaining
+    // a parallel list.
+    const mfSelect = document.getElementById('agentMfluxModel');
+    const mfModel = imgCfg.mflux_model || 'Runpod/FLUX.2-klein-4B-mflux-4bit';
+    const mfHasOption = Array.from(mfSelect.options || []).some(o => o.value === mfModel);
+    if (mfHasOption) {
+      mfSelect.value = mfModel;
       document.getElementById('agentMfluxCustomPath').value = '';
     } else {
-      document.getElementById('agentMfluxModel').value = '__custom__';
+      mfSelect.value = '__custom__';
       document.getElementById('agentMfluxCustomPath').value = mfModel;
     }
-    document.getElementById('agentMfluxBaseModel').value = imgCfg.mflux_base_model || 'krea-dev';
-    document.getElementById('agentMfluxSteps').value = imgCfg.mflux_steps || 25;
+    document.getElementById('agentMfluxBaseModel').value = imgCfg.mflux_base_model || 'flux2-klein-4b';
+    // Steps: 0 means "use family default". Fill in the right per-family
+    // value for display so the user sees what will actually be used,
+    // mirroring agent/image_engine.py MFLUX_FAMILY_DEFAULTS.
+    let stepsForDisplay = imgCfg.mflux_steps;
+    if (!stepsForDisplay) {
+      if (/flux\.?2|flux2-klein/i.test(mfModel)) stepsForDisplay = 4;
+      else if (/z-image-turbo|z_image_turbo/i.test(mfModel)) stepsForDisplay = 9;
+      else if (/schnell/i.test(mfModel)) stepsForDisplay = 4;
+      else if (/fibo/i.test(mfModel)) stepsForDisplay = 30;
+      else stepsForDisplay = 25;                 // flux1-dev/krea, z-image base
+    }
+    document.getElementById('agentMfluxSteps').value = stepsForDisplay;
     document.getElementById('agentMfluxQuantize').value = String(imgCfg.mflux_quantize || 4);
     // BFL
     document.getElementById('agentBflModel').value = imgCfg.bfl_model || 'flux-dev';
@@ -17963,11 +17991,23 @@ function agentMfluxModelChanged() {
   const isCustom = v === '__custom__';
   document.getElementById('agentMfluxCustomField').style.display = isCustom ? '' : 'none';
   document.getElementById('agentMfluxBaseField').style.display = isCustom ? '' : 'none';
-  // For schnell, drop the recommended steps to 4
+
+  // Per-family default step count — mirrors agent/image_engine.py
+  // MFLUX_FAMILY_DEFAULTS. The user can override; we only auto-fill
+  // when they haven't manually edited the field this session
+  // (dataset.userTouched is set when the input fires `input`).
   const stepsInput = document.getElementById('agentMfluxSteps');
   if (stepsInput && !stepsInput.dataset.userTouched) {
-    if (v === 'schnell') stepsInput.value = 4;
-    else if (v === 'krea-dev' || v === 'dev') stepsInput.value = 25;
+    // Family-aware step picks (must stay in sync with image_engine.py
+    // MFLUX_FAMILY_DEFAULTS — flagged at the source).
+    let steps = null;
+    if (/flux\.?2.*klein/i.test(v) || /flux2-klein/i.test(v))     steps = 4;
+    else if (/z-image-turbo|z_image_turbo/i.test(v))               steps = 9;
+    else if (/^schnell$/i.test(v))                                 steps = 4;
+    else if (/^(krea-dev|dev)$/i.test(v))                          steps = 25;
+    else if (/z-image$|z_image$/i.test(v))                         steps = 25;
+    else if (/fibo/i.test(v))                                      steps = 30;
+    if (steps !== null) stepsInput.value = steps;
   }
 }
 
