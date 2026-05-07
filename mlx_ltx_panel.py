@@ -4627,6 +4627,45 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/agent/engine/check":
+            # Phase 0 #0.11 — engine readiness probe at session start.
+            # Today users upload attachments + write a long prompt before the
+            # first chat call surfaces an unreachable engine / 401 / wrong
+            # base URL. This endpoint pings the configured engine with the
+            # cheapest reachable call (`/v1/models` for OpenAI-compat, same
+            # for Anthropic) and returns a structured verdict the UI surfaces
+            # as a banner above the chat.
+            cfg = _load_agent_config()
+            try:
+                import time as _time
+                _t0 = _time.time()
+                ok, message = agent_engine.health_check(cfg, timeout=5)
+                latency_ms = int((_time.time() - _t0) * 1000)
+            except Exception as e:                  # noqa: BLE001
+                ok = False; message = f"probe error: {e}"; latency_ms = 0
+            extra: dict = {}
+            if cfg.kind == "phosphene_local":
+                local = agent_local_server.status()
+                extra["local_server_running"] = bool(local.get("running"))
+                # For the bundled local engine: a 401-on-models response is
+                # nonsense (no auth there) — surface the real cause, which is
+                # almost always "helper not started yet".
+                if not ok and not extra["local_server_running"]:
+                    message = ("Local engine not started. Click the engine "
+                               "pill in the top header, then 'Start' — or "
+                               "the agent will start it on first message.")
+                    # Treat as a soft warning, not a hard fail.
+                    ok = None  # tri-state: True / False / None=warn
+            self._json({
+                "ok": ok,
+                "message": message,
+                "kind": cfg.kind,
+                "model": cfg.model,
+                "latency_ms": latency_ms,
+                **extra,
+            })
+            return
+
         if parsed.path == "/agent/sessions":
             self._json({"sessions": agent_runtime.list_sessions(STATE_DIR)})
             return
@@ -8958,6 +8997,93 @@ HTML = r"""<!doctype html>
     .agent-batch-bar-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
     .agent-batch-bar-btn:active { transform: translateY(0); }
     .agent-batch-bar-btn svg { flex-shrink: 0; }
+
+    /* Phase 0 #0.11 — Engine readiness banner.
+       Sits between the agent header and the chat. Shows tri-state:
+       success (green, auto-fades after 4s), warn (amber, sticky),
+       error (red, sticky). Fires on session-surface init and after
+       settings save so users discover 401 / unreachable BEFORE they
+       invest in writing a long prompt. */
+    .agent-engine-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px 8px 14px;
+      margin: 0 14px 8px 14px;
+      border-radius: 10px;
+      font-size: 12.5px;
+      animation: agent-fade-in 0.22s ease;
+      transition: opacity 0.4s ease;
+    }
+    .agent-engine-banner[hidden] { display: none; }
+    .agent-engine-banner.dismissing { opacity: 0; }
+    .agent-engine-banner.ok {
+      background: rgba(63,185,80,0.10);
+      border: 1px solid rgba(63,185,80,0.30);
+      color: #b8e9c4;
+    }
+    .agent-engine-banner.warn {
+      background: rgba(245,180,49,0.10);
+      border: 1px solid rgba(245,180,49,0.30);
+      color: #f3d28a;
+    }
+    .agent-engine-banner.err {
+      background: rgba(248,81,73,0.10);
+      border: 1px solid rgba(248,81,73,0.40);
+      color: #f5b3ae;
+    }
+    .agent-engine-banner-text {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .agent-engine-banner-icon {
+      flex: 0 0 auto;
+      width: 14px; height: 14px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .agent-engine-banner-title { font-weight: 600; }
+    .agent-engine-banner-detail {
+      opacity: 0.85;
+      font-size: 11.5px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .agent-engine-banner-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+    .agent-engine-banner-btn {
+      padding: 4px 9px;
+      background: transparent;
+      border: 1px solid currentColor;
+      color: inherit;
+      border-radius: 7px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      opacity: 0.85;
+      transition: opacity var(--t-base), background var(--t-base);
+    }
+    .agent-engine-banner-btn:hover { opacity: 1; background: rgba(255,255,255,0.06); }
+    .agent-engine-banner-close {
+      width: 22px; height: 22px;
+      background: transparent;
+      border: none;
+      color: inherit;
+      cursor: pointer;
+      opacity: 0.6;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .agent-engine-banner-close:hover { opacity: 1; background: rgba(255,255,255,0.06); }
+
     .agent-ref-chip.visible { display: inline-flex; }
     .agent-ref-chip .ref-icon {
       font-size: 11px;
@@ -9963,6 +10089,27 @@ HTML = r"""<!doctype html>
           </svg>
         </button>
       </header>
+
+      <!-- Phase 0 #0.11 — engine readiness banner. Filled in by
+           agentCheckEngine() on init + after settings save. Sticky on
+           warn/err; auto-dismisses on green ok. -->
+      <div id="agentEngineBanner" class="agent-engine-banner" hidden role="status" aria-live="polite">
+        <div class="agent-engine-banner-text">
+          <span class="agent-engine-banner-icon" id="agentEngineBannerIcon">●</span>
+          <span class="agent-engine-banner-title" id="agentEngineBannerTitle">Engine</span>
+          <span class="agent-engine-banner-detail" id="agentEngineBannerDetail">…</span>
+        </div>
+        <div class="agent-engine-banner-actions">
+          <button type="button" class="agent-engine-banner-btn" id="agentEngineBannerAction"
+                  onclick="openAgentSettings()">Open Settings</button>
+          <button type="button" class="agent-engine-banner-close" onclick="agentEngineBannerHide(true)" aria-label="Dismiss">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
 
       <div class="agent-chat-wrap">
         <div class="agent-chat" id="agentChat" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent chat thread"></div>
@@ -14231,6 +14378,132 @@ function formatModelName(raw) {
   return s.length > 22 ? s.slice(0, 20) + '…' : s;
 }
 
+// ---- Phase 0 #0.11 — Engine readiness banner ------------------------------
+//
+// `agentCheckEngine` hits /agent/engine/check (which calls
+// engine.health_check on the configured engine) and routes the verdict
+// into a banner above the chat. Banner is tri-state:
+//   ok  (200 + auth fine) → green, auto-dismiss after 4s unless `forceShow`
+//   warn (local helper not started; recoverable) → amber, sticky
+//   err (401 / unreachable / probe error) → red, sticky
+//
+// Called from aspInit (so it runs once on page load) and from the tail
+// of agentSaveSettings (so the user gets immediate confirmation that a
+// new API key works).
+window.AGENT_ENGINE_BANNER = {
+  hideTimer: null,
+  // session-scoped dismiss memory: if the user X'd a green/warn banner,
+  // don't pop it back up on the next refresh. Errors always re-show
+  // because they really are blocking.
+  dismissed: false,
+};
+
+function agentEngineBannerHide(userClick) {
+  const el = document.getElementById('agentEngineBanner');
+  if (!el) return;
+  if (window.AGENT_ENGINE_BANNER.hideTimer) {
+    clearTimeout(window.AGENT_ENGINE_BANNER.hideTimer);
+    window.AGENT_ENGINE_BANNER.hideTimer = null;
+  }
+  el.classList.add('dismissing');
+  setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove('dismissing');
+  }, 380);
+  if (userClick) window.AGENT_ENGINE_BANNER.dismissed = true;
+}
+
+function agentEngineBannerShow(j, opts) {
+  opts = opts || {};
+  const el = document.getElementById('agentEngineBanner');
+  if (!el) return;
+  const titleEl = document.getElementById('agentEngineBannerTitle');
+  const detailEl = document.getElementById('agentEngineBannerDetail');
+  const iconEl = document.getElementById('agentEngineBannerIcon');
+  const actionEl = document.getElementById('agentEngineBannerAction');
+
+  // Map engine kind to a friendly label.
+  const kindLabel = ({
+    phosphene_local: 'Phosphene Local',
+    anthropic: 'Claude',
+    ollama: 'Ollama',
+    custom: 'Custom OpenAI-compat',
+  }[j.kind] || j.kind || 'Engine');
+
+  // Tri-state: true = ok, null = warn, false = err.
+  let state = 'err';
+  if (j.ok === true) state = 'ok';
+  else if (j.ok === null || j.ok === undefined) state = 'warn';
+
+  // Don't re-pop a green banner the user already dismissed unless
+  // explicitly forceShow'd (e.g., right after settings save).
+  if (state === 'ok' && window.AGENT_ENGINE_BANNER.dismissed && !opts.forceShow) return;
+
+  el.classList.remove('ok', 'warn', 'err', 'dismissing');
+  el.classList.add(state);
+
+  let title, detail, actionLabel = 'Open Settings', showAction = true;
+  if (state === 'ok') {
+    title = `${kindLabel} ready`;
+    const lat = (j.latency_ms != null) ? ` · ${j.latency_ms} ms` : '';
+    const model = j.model ? ` · ${j.model}` : '';
+    detail = `${model.replace(/^\s·\s/, '')}${lat}`;
+    showAction = false;
+  } else if (state === 'warn') {
+    title = `${kindLabel} not started`;
+    detail = j.message || 'Will auto-start on first message.';
+    actionLabel = 'Start engine';
+    actionEl && (actionEl.onclick = function() {
+      // Reuse the existing one-click engine-start path.
+      fetch('/agent/local/start', {method: 'POST'})
+        .then(() => agentRefreshConfig())
+        .then(() => setTimeout(() => agentCheckEngine({forceShow: true}), 1500));
+    });
+  } else {
+    title = `${kindLabel} unreachable`;
+    detail = j.message || 'Probe failed.';
+    actionLabel = 'Open Settings';
+    actionEl && (actionEl.onclick = function() { openAgentSettings(); });
+  }
+
+  if (titleEl) titleEl.textContent = title;
+  if (detailEl) detailEl.textContent = detail;
+  if (iconEl) iconEl.textContent = state === 'ok' ? '●' : (state === 'warn' ? '◐' : '◯');
+  if (actionEl) {
+    actionEl.textContent = actionLabel;
+    actionEl.style.display = showAction ? '' : 'none';
+  }
+  el.hidden = false;
+
+  // Auto-fade green after 4s unless forceShow.
+  if (window.AGENT_ENGINE_BANNER.hideTimer) {
+    clearTimeout(window.AGENT_ENGINE_BANNER.hideTimer);
+    window.AGENT_ENGINE_BANNER.hideTimer = null;
+  }
+  if (state === 'ok' && !opts.persist) {
+    window.AGENT_ENGINE_BANNER.hideTimer = setTimeout(
+      () => agentEngineBannerHide(false),
+      opts.forceShow ? 4500 : 3500
+    );
+  }
+}
+
+async function agentCheckEngine(opts) {
+  opts = opts || {};
+  try {
+    const r = await fetch('/agent/engine/check');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    agentEngineBannerShow(j, opts);
+  } catch (e) {
+    agentEngineBannerShow({
+      ok: false,
+      message: 'Could not reach panel: ' + (e.message || e),
+      kind: '?', model: '',
+    }, {persist: true, ...opts});
+  }
+}
+
 async function agentRefreshConfig() {
   try {
     const r = await fetch('/agent/config');
@@ -14443,6 +14716,12 @@ function aspInit() {
       window.ASP.pinned = true;
     }
   } catch (e) {}
+  // Phase 0 #0.11 — engine readiness probe. Run once at session start so
+  // 401 / unreachable / wrong-base-URL surfaces BEFORE the user invests
+  // in attaching a script + writing a long prompt. Delay 600ms so the
+  // initial config fetch has settled and the user isn't blinded by a
+  // fresh-page banner.
+  setTimeout(() => { try { agentCheckEngine(); } catch (e) {} }, 600);
   // Update the trigger count badge from any cached list.
   aspUpdateTriggerCount();
   // Search input.
@@ -16410,6 +16689,11 @@ async function agentSaveSettings() {
   closeAgentSettings();
   await agentRefreshConfig();
   await agentRefreshImageConfig();
+  // Phase 0 #0.11 — re-probe so the user sees instant confirmation that
+  // the new key / base URL / model actually works. Reset the dismiss flag
+  // so a green banner pops even if they X'd a previous one.
+  window.AGENT_ENGINE_BANNER.dismissed = false;
+  setTimeout(() => { try { agentCheckEngine({forceShow: true, persist: false}); } catch (e) {} }, 200);
 }
 
 // ============================================================================
