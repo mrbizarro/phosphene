@@ -118,20 +118,54 @@ ASPECT_DIMS = {
 def generate(*, prompt: str, n: int, output_dir: Path,
              aspect: str = "16:9",
              base_seed: int | None = None,
+             refs: list[str] | None = None,
              config: ImageEngineConfig) -> list[dict]:
     """Generate `n` candidate images for one shot. Saves under `output_dir`.
 
-    Returns a list of `{png_path, seed, engine, width, height}` dicts in
-    submission order.
+    Args:
+        prompt: text prompt
+        n: number of candidates
+        output_dir: where PNGs land
+        aspect: aspect-ratio key from ASPECT_DIMS
+        base_seed: when given, candidate i uses base_seed + i (reproducible)
+        refs: optional list of reference image paths (1-3 supported by
+              Qwen-Image-Edit-2509 via mflux-generate-qwen-edit). Refs are
+              the way to lock character + place / character + product
+              composition without training a LoRA. The agent's path:
+              user uploads or library-picks 1-3 reference images, the
+              engine composes them per the prompt, the resulting still
+              becomes an LTX keyframe. Backends without multi-ref support
+              (mock, plain qwen, flux1/2, z_image, fibo, BFL) currently
+              ignore refs — they fall back to text-only generation. The
+              caller is responsible for picking a config.kind/family
+              that respects refs (today: qwen_edit). If refs are passed
+              to a non-supporting family, a warning shows in the result
+              dict but the call still succeeds with text-only output.
+        config: backend selection + per-backend params
+
+    Returns a list of `{png_path, seed, engine, width, height, ...}`
+    dicts in submission order.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     width, height = ASPECT_DIMS.get(aspect, ASPECT_DIMS["16:9"])
 
+    refs = list(refs or [])
+    # Validate ref paths up-front so we fail fast — Qwen-Edit-2509 supports
+    # 1-3 input images; more than 3 is unsupported by the model.
+    if refs:
+        if len(refs) > 3:
+            raise ValueError(
+                f"refs: Qwen-Image-Edit-2509 supports 1-3 input images, got {len(refs)}"
+            )
+        for r in refs:
+            if not Path(r).is_file():
+                raise FileNotFoundError(f"ref image not found: {r}")
+
     if config.kind == "mock":
-        return _generate_mock(prompt, n, width, height, output_dir, base_seed)
+        return _generate_mock(prompt, n, width, height, output_dir, base_seed, refs=refs)
     if config.kind == "mflux":
-        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config)
+        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs)
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
@@ -170,6 +204,12 @@ MFLUX_FAMILY_BIN = {
     "z_image_turbo":  "mflux-generate-z-image-turbo",
     "fibo":           "mflux-generate-fibo",
     "qwen":           "mflux-generate-qwen",
+    # Qwen-Image-Edit-2509 (multi-reference, 1-3 input images via --image-paths).
+    # Apache 2.0. Default model: Qwen/Qwen-Image-Edit-2509.
+    # Trained for "person + person", "person + product", "person + scene"
+    # combinations — exactly the place + character composition the agent
+    # needs for keyframe stills. mflux 0.11.1+.
+    "qwen_edit":      "mflux-generate-qwen-edit",
     "kontext":        "mflux-generate-kontext",
 }
 
@@ -185,6 +225,11 @@ MFLUX_FAMILY_DEFAULTS = {
     "z_image_turbo": {"steps": 9,  "guidance": 0.0,  "base_model": ""},
     "fibo":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
     "qwen":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
+    # qwen_edit defaults match the Qwen team's recommended 40 steps + true_cfg
+    # at guidance 4.0 from the model card. 30/4.0 trades ~25% wall-time for
+    # only marginally lower quality on 1-3 ref jobs and is a better default
+    # for the agent's iterate-fast loop. Bump steps to 40 for final keyframes.
+    "qwen_edit":     {"steps": 30, "guidance": 4.0,  "base_model": ""},
     "kontext":       {"steps": 30, "guidance": 4.5,  "base_model": ""},
 }
 
@@ -216,6 +261,10 @@ def _infer_mflux_family(model: str) -> str:
         return "kontext"
     if "fibo" in s or "briaai/fibo" in s:
         return "fibo"
+    # qwen_edit must be matched BEFORE plain qwen — "qwen-image-edit-2509"
+    # contains "qwen" + "image" so the plain qwen branch would steal it.
+    if "qwen" in s and ("image-edit" in s or "image_edit" in s or "qwen-edit" in s):
+        return "qwen_edit"
     if "qwen" in s and "image" in s:
         return "qwen"
     # Default: flux1 (krea-dev / dev / schnell, plus filipstrand/FLUX.1-*)
@@ -271,7 +320,8 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
 
 # ---- Backends ---------------------------------------------------------------
 def _generate_mock(prompt: str, n: int, width: int, height: int,
-                   output_dir: Path, base_seed: int | None) -> list[dict]:
+                   output_dir: Path, base_seed: int | None,
+                   refs: list[str] | None = None) -> list[dict]:
     """Draw `n` distinguishable colored PNGs locally. Each carries a label
     with the candidate index + first ~60 chars of the prompt so the user
     can verify the UX flow without confusing identical images.
@@ -343,7 +393,8 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
 
 def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
-                    config: ImageEngineConfig) -> list[dict]:
+                    config: ImageEngineConfig,
+                    refs: list[str] | None = None) -> list[dict]:
     """Subprocess the right `mflux-generate-*` binary once per candidate.
 
     Family is inferred from `config.mflux_model` (or taken from
@@ -415,6 +466,15 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         ]
         if seed is not None:
             cmd.extend(["--seed", str(seed)])
+        # Multi-reference input — only the qwen_edit family consumes
+        # --image-paths today (mflux v0.11.1+). For other families we
+        # silently drop refs but tag the result so the caller can detect
+        # the no-op. This lets the agent pass refs unconditionally and
+        # the engine choice decides whether they're honored.
+        refs_used: list[str] = []
+        if refs and fam == "qwen_edit":
+            refs_used = [str(Path(r).resolve()) for r in refs]
+            cmd.extend(["--image-paths", *refs_used])
         # When `--model` is a HuggingFace id or local path (contains a
         # slash or starts with `~` or `/`), mflux needs `--base-model`
         # to know which architecture to instantiate. Fall through to
@@ -464,6 +524,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "family": fam,
             "model": config.mflux_model,
             "width": width, "height": height,
+            "refs": refs_used,
+            "refs_ignored": (bool(refs) and fam != "qwen_edit"),
         })
     return results
 

@@ -366,49 +366,103 @@ target width × height.
 (~16 min/+3s on Comfortable) and audio chains poorly across
 extensions. Use only when explicitly asked.
 
-# Character lock via LoRA
+# Character lock via Qwen-Image-Edit-2509 references
 
 The cleanest fix for "same prompt, different seed = different person"
-is a character-identity LoRA applied to **every shot** in the scene.
-The agent owns this lock across the whole session.
+is to **anchor identity at the still stage** by composing the
+character into every shot's keyframe via Qwen-Image-Edit-2509. No
+training step, no LoRA file — just 1-3 reference images per shot.
+
+The image engine's `qwen_edit` family wraps `mflux-generate-qwen-edit`
+(Apache 2.0, runs natively on Apple Silicon). Trained for "person +
+person", "person + place", "person + product" composition — exactly
+the agent's use case.
 
 Workflow:
 
-1. **Discover what's installed.** First mention of a recurring named
-   character → call `list_loras()`. If the user has a character LoRA
-   for someone matching the description (named character, recognizable
-   trigger words), suggest it. Don't try to install LoRAs — that
-   requires the user (Settings → LoRAs → Browse).
-2. **Lock it in project notes.** When the user agrees to use a LoRA
-   for a character, write the lock to durable memory:
+1. **Get one good reference image of the character.** Either the user
+   uploads a photo (it lands in `panel_uploads/`), or you ran
+   `generate_shot_images` for shot S1 and the user picked a candidate
+   (you can find that pick later via `list_library_images` filtered
+   by `shot_label`).
+2. **Lock the character ref in project notes.** First time the
+   character appears, write the path to durable memory:
    ```
-   append_project_notes(content="Character LoRA — Emma: emma_v2.safetensors @ 0.85")
+   append_project_notes(content="Character ref — Emma: /abs/path/to/emma_S1_pick.png")
    ```
-   Read project notes at the start of every session (or on every shot
-   for paranoia) to recover the lock across helper restarts and tab
-   reloads.
-3. **Apply on every render.** Pass the same LoRA on every
-   `submit_shot` for that character:
+   Read project notes at session start to recover the lock across
+   panel restarts and tab reloads.
+3. **Pass the ref on every shot generation.** When generating new
+   anchor stills, include the locked ref:
    ```
-   "loras": [{{"name": "emma_v2.safetensors", "strength": 0.85}}]
+   generate_shot_images(
+     shot_label="S2",
+     prompt="Emma sits at a kitchen table, soft morning light",
+     refs=["/abs/path/to/emma_S1_pick.png"],
+     n=4,
+   )
    ```
-   AND on every `generate_shot_images` call where Emma is in frame
-   (when the image engine supports it; today only some backends do —
-   if not supported, the still is still useful as composition input
-   but identity will lean on the video LoRA at render time).
+   The model composes Emma's identity into the new prompt + setting.
+   The candidates you get back have the same character at different
+   moments / framings.
+4. **Multi-character or character + place:** pass both refs (max 3):
+   ```
+   refs=["/abs/path/emma.png", "/abs/path/marcus.png", "/abs/path/kitchen.png"]
+   ```
+   Qwen-Edit-2509 will compose all three. Order doesn't strictly
+   matter but the prompt should mention each by descriptor matching
+   the ref order roughly ("a young woman, a man in his fifties, in a
+   sunlit kitchen") so the model knows which ref is which.
+5. **The video render does NOT need refs** — by the time you call
+   `submit_shot`, the locked character is already baked into the
+   keyframe still. Use `mode: "i2v"` with the chosen still as
+   `ref_image_path`, OR `mode: "keyframe"` with multiple stills (each
+   already character-locked) for cross-shot continuity.
 
-Two characters in one scene: pass BOTH LoRAs in the `loras` array,
-each at its own strength. Caveat — LoRA stacking quality drops above
-~2 stacked, and trigger-word collisions can blend identities. Surface
-the risk when the user asks for >2 character LoRAs at once.
+The image-engine's family must be `qwen_edit` for refs to take effect.
+Other families (flux1, flux2, z_image, fibo) silently drop refs and
+the candidate dict's `refs_ignored: true` flags the no-op.
 
-Strength tuning:
-- 0.85-1.0 — identity is locked, style of LoRA leaks slightly into
-  costume / lighting. Default for character ID LoRAs.
-- 0.6-0.8 — identity present but model has more freedom on costume /
-  framing. Good when the LoRA was trained on a narrow setting.
-- 0.5 or below — visible influence but easily overridden by the prompt.
-  Mostly useful for style LoRAs, not identity.
+# Library workflow
+
+Every still the engine produces — agent-side via `generate_shot_images`
+and manually via the panel's Image tab — lives in the panel's image
+library. **`list_library_images()`** is your read access.
+
+Common uses:
+
+- **Find a previously-picked anchor.** "Use the Emma still we picked
+  earlier in S1" → `list_library_images(shot_label="S1", session_id="current")`
+  returns the candidate paths; pick the one with the user's selection.
+- **Find user-prepared refs.** The user might generate a few character
+  stills manually before starting the agent flow ("here's a few looks
+  for Emma, pick what works"). Those stills land in
+  `panel_uploads/library/manual/`. `list_library_images(include_agent=false, contains="Emma")`
+  surfaces them.
+- **Reuse a great still across sessions.** If the user wants to
+  "make another scene with the same character from yesterday's
+  project," `list_library_images(contains="emma", limit=8)` finds the
+  candidates with sidecar metadata so you can pass the picked path
+  as a `ref` on new shots.
+
+Library entries carry full metadata (prompt, refs used, engine,
+seed, dimensions, generated_at, session_id, shot_label) so you can
+match the user's intent precisely without guessing.
+
+# When LoRAs DO help (vs character-via-Qwen-refs)
+
+LoRAs are still the right tool for **style** and for trained
+character looks the user installed via the CivitAI browser. Pass
+them via the `loras` arg of `submit_shot`. Examples:
+
+- Style LoRAs (noir, sketch, painterly, anime): apply on every shot
+  for a coherent look.
+- Pre-trained character LoRAs (e.g., a CivitAI face LoRA the user
+  prefers over a Qwen-Edit ref): same submit_shot loras shape.
+
+For one-off characters, multi-character scenes, or place + character
+composition where no LoRA exists — **the Qwen-Edit references path is
+faster, more flexible, and requires no training**.
 
 # Writing prompts FOR ANCHOR STILLS (Phase B)
 
