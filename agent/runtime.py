@@ -374,6 +374,47 @@ def _escape(s: str) -> str:
 
 
 # ---- Tools doc renderer ----------------------------------------------------
+def list_tool_catalog() -> list[dict]:
+    """Structured catalog of every registered tool — for the UI's
+    capabilities sheet (Phase 0 #0.5 from the roadmap). One row per
+    tool with `name`, `summary` (first non-empty line of the docstring),
+    and `body` (rest, trimmed). Stable order matches `render_tools_doc`.
+    """
+    order = [
+        "estimate_shot", "submit_shot", "get_queue_status",
+        "wait_for_shot", "extract_frame", "inspect_clip",
+        "generate_shot_images", "get_selected_anchors", "upload_image",
+        "read_document", "list_loras", "get_master_style",
+        "read_project_notes", "append_project_notes",
+        "write_session_manifest", "finish",
+    ]
+    seen = set()
+    out: list[dict] = []
+    def _row(name: str) -> dict | None:
+        fn = tools.TOOL_HANDLERS.get(name)
+        if fn is None:
+            return None
+        doc = (fn.__doc__ or "").strip()
+        if not doc:
+            return {"name": name, "summary": "", "body": ""}
+        lines = doc.split("\n")
+        summary = lines[0].strip()
+        body = "\n".join(lines[1:]).strip()
+        return {"name": name, "summary": summary, "body": body}
+    for name in order:
+        row = _row(name)
+        if row is not None:
+            out.append(row)
+            seen.add(name)
+    for name in sorted(tools.TOOL_HANDLERS.keys()):
+        if name in seen:
+            continue
+        row = _row(name)
+        if row is not None:
+            out.append(row)
+    return out
+
+
 def render_tools_doc() -> str:
     """Format the registered tools' docstrings for the system prompt.
 

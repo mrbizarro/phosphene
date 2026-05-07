@@ -80,6 +80,96 @@ def read_notes_excerpt(state_dir: Path,
     return tail[cut + 1:].decode("utf-8", errors="replace")
 
 
+_RING_SLOTS = 7                                    # 7-version history → ~1 day on a chatty session
+
+
+def _rotate_ring(p: Path) -> None:
+    """Rotate one slot in the .bak ring buffer before write.
+
+    Slot N becomes N+1 (oldest, slot 6, drops). Then current file copies
+    to slot 0. Lets the user (or the agent's `restore_project_notes`
+    affordance) undo a runaway append. Phase 0 #0.12 from the roadmap —
+    project memory survives across sessions but a misclick or runaway
+    agent can corrupt context. Cheap insurance.
+    """
+    try:
+        if not p.is_file():
+            return
+        # Move existing slots up: 5 → 6, 4 → 5, …, 0 → 1.
+        for i in range(_RING_SLOTS - 1, 0, -1):
+            src = p.with_suffix(p.suffix + f".{i - 1}.bak")
+            dst = p.with_suffix(p.suffix + f".{i}.bak")
+            if src.exists():
+                try:
+                    os.replace(str(src), str(dst))
+                except OSError:
+                    pass
+        # Copy current file to slot 0.
+        slot0 = p.with_suffix(p.suffix + ".0.bak")
+        try:
+            data = p.read_bytes()
+            slot0.write_bytes(data)
+            try:
+                os.chmod(slot0, 0o600)
+            except OSError:
+                pass
+        except OSError:
+            pass
+    except Exception:                              # noqa: BLE001 — never block the append
+        pass
+
+
+def list_note_versions(state_dir: Path) -> list[dict]:
+    """Return metadata for the available .bak slots — newest first."""
+    p = notes_path(state_dir)
+    out: list[dict] = []
+    for i in range(_RING_SLOTS):
+        slot = p.with_suffix(p.suffix + f".{i}.bak")
+        if slot.is_file():
+            try:
+                stat = slot.stat()
+                out.append({
+                    "slot": i,
+                    "path": str(slot),
+                    "bytes": stat.st_size,
+                    "mtime": stat.st_mtime,
+                })
+            except OSError:
+                pass
+    return out
+
+
+def restore_note_version(state_dir: Path, slot: int) -> bool:
+    """Replace the live notes file with the contents of `slot`.
+
+    The restore is itself undoable on the next append — append_note
+    rotates the current (post-restore) file into slot 0 then.
+
+    Important: read the source bytes BEFORE we rotate, otherwise the
+    rotation overwrites the requested slot with the current file's
+    bytes and we'd "restore" the same thing we were trying to undo.
+    """
+    if slot < 0 or slot >= _RING_SLOTS:
+        return False
+    p = notes_path(state_dir)
+    src = p.with_suffix(p.suffix + f".{slot}.bak")
+    if not src.is_file():
+        return False
+    try:
+        # Snapshot source contents first.
+        data = src.read_bytes()
+        tmp = p.with_suffix(p.suffix + ".restoretmp")
+        tmp.write_bytes(data)
+        os.replace(str(tmp), str(p))
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
 def append_note(state_dir: Path, text: str, *,
                 kind: str = "note", author: str = "agent") -> dict:
     """Append a timestamped entry to the notes file.
@@ -92,7 +182,9 @@ def append_note(state_dir: Path, text: str, *,
         the agreed master style is "documentary, kodak portra 400, …"
 
     The header on a fresh file describes what the file is for — written
-    once on first append.
+    once on first append. Before each append the previous state is
+    rotated into a 7-slot ring buffer (`.0.bak` … `.6.bak`) so a runaway
+    agent or misclick can be undone.
     """
     p = notes_path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +192,8 @@ def append_note(state_dir: Path, text: str, *,
     text = (text or "").strip()
     if not text:
         raise ValueError("note text is empty")
+    if not fresh:
+        _rotate_ring(p)                            # snapshot before mutating
     ts = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M")
     block = f"\n## {ts}  [{kind} · {author}]\n{text}\n"
     if fresh:

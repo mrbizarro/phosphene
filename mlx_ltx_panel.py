@@ -4598,6 +4598,35 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/agent/capabilities":
+            # Structured tool catalog — drives the in-app /help sheet so
+            # users discover what the agent can actually do (Phase 0 #0.5).
+            try:
+                catalog = agent_runtime.list_tool_catalog()
+            except Exception as e:                  # noqa: BLE001
+                self._json({"error": str(e)}, 500); return
+            self._json({
+                "tools": catalog,
+                "engine_kinds": [
+                    {"id": "phosphene_local", "label": "Phosphene Local", "cost": "free · on-device"},
+                    {"id": "anthropic", "label": "Claude (Anthropic)", "cost": "paid · per token"},
+                    {"id": "ollama", "label": "Ollama bridge", "cost": "free · on-device"},
+                    {"id": "custom", "label": "Custom (OpenAI-compat)", "cost": "depends"},
+                ],
+                "image_kinds": [
+                    {"id": "mock", "label": "Mock", "cost": "free · placeholders"},
+                    {"id": "mflux", "label": "Local Flux (mflux)", "cost": "free · uses RAM + disk"},
+                    {"id": "bfl", "label": "Black Forest Labs API", "cost": "paid · per image"},
+                ],
+                "modes": [
+                    {"id": "plan_sleep", "label": "Plan & sleep", "desc": "Auto-stop engine on finish; frees RAM for renders"},
+                    {"id": "interactive", "label": "Interactive", "desc": "Engine stays resident across finishes"},
+                ],
+                "shot_modes": ["t2v", "i2v", "keyframe", "extend"],
+                "quality_tiers": ["quick", "balanced", "standard", "high"],
+            })
+            return
+
         if parsed.path == "/agent/sessions":
             self._json({"sessions": agent_runtime.list_sessions(STATE_DIR)})
             return
@@ -5815,6 +5844,27 @@ HTML = r"""<!doctype html>
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
+
+    /* Phase 0 a11y floor —
+       (a) Visible focus ring on every interactive element when reached
+           via keyboard (mouse-click clears via :focus-visible). Today's
+           inputs had ad-hoc focus styling but buttons/links had none.
+       (b) Honor reduced-motion. Animations / transitions across the app
+           use ms-scale durations; this collapses them to ~zero so motion-
+           sensitive users don't get pulse / slide / fade. */
+    :focus-visible {
+      outline: 2px solid var(--accent-bright);
+      outline-offset: 2px;
+      border-radius: var(--r-xs);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
     body {
       background: var(--bg); color: var(--text);
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -8050,6 +8100,99 @@ HTML = r"""<!doctype html>
       margin: 14px 0;
     }
 
+    /* ---- Capabilities sheet (Phase 0 #0.5) ----
+       Drives the /help slash-command output. Each tool is one row:
+       monospaced name + first-line summary; click to expand the full
+       docstring. Quiet typography — this is reference material. */
+    .caps-section {
+      margin: 14px 0;
+    }
+    .caps-section h3 {
+      margin: 0 0 8px 0;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .caps-row {
+      display: flex;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      margin-bottom: 6px;
+      background: rgba(255,255,255,0.025);
+    }
+    .caps-row .caps-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      color: var(--accent-bright);
+      white-space: nowrap;
+      flex-shrink: 0;
+      align-self: flex-start;
+      padding-top: 1px;
+    }
+    .caps-row .caps-text {
+      flex: 1; min-width: 0;
+      font-size: 12px;
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .caps-row .caps-text .summary {
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .caps-row details {
+      margin-top: 4px;
+    }
+    .caps-row details summary {
+      cursor: pointer;
+      font-size: 11px;
+      color: var(--accent-bright);
+      list-style: none;
+      user-select: none;
+    }
+    .caps-row details summary::-webkit-details-marker { display: none; }
+    .caps-row details[open] summary { color: var(--muted); }
+    .caps-row pre {
+      margin: 6px 0 0 0;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-xs);
+      font-size: 11px;
+      line-height: 1.55;
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: rgba(255,255,255,0.8);
+    }
+    .caps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 8px;
+    }
+    .caps-grid .caps-cell {
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      background: rgba(255,255,255,0.025);
+    }
+    .caps-grid .caps-cell .label {
+      font-weight: 600; font-size: 12px; color: var(--text);
+    }
+    .caps-grid .caps-cell .meta {
+      color: var(--muted); font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0.2px;
+    }
+    .caps-grid .caps-cell .desc {
+      color: var(--muted); font-size: 11.5px;
+      margin-top: 2px;
+    }
+
     /* ---- Reasoning disclosure (chain-of-thought) ----
        Shown above the assistant content as a collapsed details block.
        Quiet by default so the answer stays the focus; expanding reveals
@@ -9798,6 +9941,13 @@ HTML = r"""<!doctype html>
             <line x1="3" y1="21" x2="10" y2="14"/>
           </svg>
         </button>
+        <button type="button" class="icon-btn" onclick="openAgentCaps()" title="What can the agent do? · type /help in chat" aria-label="Show agent capabilities">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+        </button>
         <button type="button" class="icon-btn" onclick="openProjectNotes()" title="Project notes — persistent memory across sessions">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
@@ -9815,7 +9965,7 @@ HTML = r"""<!doctype html>
       </header>
 
       <div class="agent-chat-wrap">
-        <div class="agent-chat" id="agentChat"></div>
+        <div class="agent-chat" id="agentChat" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent chat thread"></div>
         <!-- "↓ new messages" pill — appears when content lands while the
              user has scrolled up to read something. Clicking jumps to
              bottom and re-arms auto-scroll. -->
@@ -9886,7 +10036,7 @@ HTML = r"""<!doctype html>
               <polyline points="5 12 12 5 19 12"/>
             </svg>
           </button>
-          <span class="hint">Cmd/Ctrl + Enter to send · ⌘V to paste · drag files to attach</span>
+          <span class="hint">⌘ Enter to send · ⌘V to paste · drag files to attach · type /help to see what the agent can do</span>
         </div>
         <!-- Drag-drop overlay shown only while a drag is over the chat surface. -->
         <div class="agent-drop-overlay" id="agentDropOverlay">
@@ -10720,6 +10870,28 @@ HTML = r"""<!doctype html>
       <div><span class="label" id="modelBrowserStatusLabel">…</span><span id="modelBrowserStatusSummary"></span></div>
       <div class="last-line" id="modelBrowserStatusLine"></div>
     </div>
+  </div>
+</div>
+
+<!-- ============== CAPABILITIES SHEET ==============
+     Triggered by typing /help in the composer or clicking the ? button.
+     Driven by /agent/capabilities (server-side enumeration of all
+     registered tools + engine kinds + image kinds + modes). Lets users
+     discover what the agent can do without grepping the system prompt. -->
+<div class="agent-settings-modal" id="agentCapsModal"
+     role="dialog" aria-modal="true" aria-labelledby="agentCapsTitle"
+     onclick="if(event.target===this)closeAgentCaps()">
+  <div class="agent-settings-card" style="max-width:780px">
+    <h2 id="agentCapsTitle">What the agent can do
+      <button type="button" onclick="closeAgentCaps()">Close</button>
+    </h2>
+    <div class="hint">
+      Phosphene's agent is a director's assistant. It plans shots,
+      generates anchor stills, queues LTX renders, writes a manifest.
+      Below: every tool it has, plus the engine and image-backend
+      options. Use this as a reference; you don't need to memorize it.
+    </div>
+    <div id="agentCapsBody" style="padding-top:8px"></div>
   </div>
 </div>
 
@@ -15300,6 +15472,18 @@ async function agentSend() {
   const btn = document.getElementById('agentSendBtn');
   const text = (input.value || '').trim();
 
+  // Slash commands handled client-side BEFORE engaging the engine.
+  // /help opens the capabilities sheet; /notes opens project notes;
+  // /queue triggers the batch; /clear starts a new session; etc.
+  if (text && text.startsWith('/') &&
+      typeof agentMaybeHandleSlashCommand === 'function' &&
+      agentMaybeHandleSlashCommand(text)) {
+    input.value = '';
+    if (typeof agentAutoResize === 'function') agentAutoResize(input);
+    if (typeof agentUpdateSendState === 'function') agentUpdateSendState();
+    return;
+  }
+
   // Wait for any in-flight uploads so the message arrives WITH its
   // attachments. UX: don't block the user — if uploads error we surface
   // them in the chip row and the user can remove/retry.
@@ -15827,6 +16011,134 @@ function closeAgentSettings() {
 }
 
 // ---- Project notes modal --------------------------------------------------
+// Capabilities sheet — driven by /agent/capabilities. Surfaces every
+// tool the agent has, plus engine/image/mode options, so users
+// discover what they can ask for. (Phase 0 #0.5)
+async function openAgentCaps() {
+  const modal = document.getElementById('agentCapsModal');
+  const body = document.getElementById('agentCapsBody');
+  if (!modal || !body) return;
+  body.innerHTML = '<div style="padding:24px; color:var(--muted); text-align:center">Loading…</div>';
+  modal.classList.add('open');
+  try {
+    const r = await fetch('/agent/capabilities');
+    const j = await r.json();
+    body.innerHTML = '';
+    // Tools
+    if (Array.isArray(j.tools) && j.tools.length) {
+      const sec = document.createElement('div');
+      sec.className = 'caps-section';
+      const h = document.createElement('h3');
+      h.textContent = `Tools the agent can call · ${j.tools.length}`;
+      sec.appendChild(h);
+      for (const t of j.tools) {
+        const row = document.createElement('div');
+        row.className = 'caps-row';
+        const name = document.createElement('div');
+        name.className = 'caps-name';
+        name.textContent = t.name;
+        const txt = document.createElement('div');
+        txt.className = 'caps-text';
+        const sum = document.createElement('div');
+        sum.className = 'summary';
+        sum.textContent = t.summary || '(no summary)';
+        txt.appendChild(sum);
+        if (t.body) {
+          const det = document.createElement('details');
+          const dsum = document.createElement('summary');
+          dsum.textContent = 'Show full doc';
+          det.appendChild(dsum);
+          const pre = document.createElement('pre');
+          pre.textContent = t.body;
+          det.appendChild(pre);
+          txt.appendChild(det);
+        }
+        row.appendChild(name); row.appendChild(txt);
+        sec.appendChild(row);
+      }
+      body.appendChild(sec);
+    }
+    // Engine kinds
+    const _gridSection = (title, items, render) => {
+      if (!Array.isArray(items) || !items.length) return;
+      const sec = document.createElement('div');
+      sec.className = 'caps-section';
+      const h = document.createElement('h3'); h.textContent = title;
+      sec.appendChild(h);
+      const grid = document.createElement('div');
+      grid.className = 'caps-grid';
+      for (const it of items) grid.appendChild(render(it));
+      sec.appendChild(grid);
+      body.appendChild(sec);
+    };
+    _gridSection('Chat engine kinds', j.engine_kinds || [], (e) => {
+      const c = document.createElement('div'); c.className = 'caps-cell';
+      c.innerHTML = `<div class="label">${escapeHtml(e.label)}</div>` +
+                    `<div class="meta">${escapeHtml(e.id)}</div>` +
+                    `<div class="desc">${escapeHtml(e.cost)}</div>`;
+      return c;
+    });
+    _gridSection('Image-engine backends', j.image_kinds || [], (e) => {
+      const c = document.createElement('div'); c.className = 'caps-cell';
+      c.innerHTML = `<div class="label">${escapeHtml(e.label)}</div>` +
+                    `<div class="meta">${escapeHtml(e.id)}</div>` +
+                    `<div class="desc">${escapeHtml(e.cost)}</div>`;
+      return c;
+    });
+    _gridSection('Operating modes', j.modes || [], (e) => {
+      const c = document.createElement('div'); c.className = 'caps-cell';
+      c.innerHTML = `<div class="label">${escapeHtml(e.label)}</div>` +
+                    `<div class="meta">${escapeHtml(e.id)}</div>` +
+                    `<div class="desc">${escapeHtml(e.desc)}</div>`;
+      return c;
+    });
+  } catch (e) {
+    body.innerHTML = `<div style="padding:18px;color:#f49a9e">Couldn't load capabilities: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function closeAgentCaps() {
+  const m = document.getElementById('agentCapsModal');
+  if (m) m.classList.remove('open');
+}
+
+// Slash-command pre-handler. Called from agentSend BEFORE the send fires.
+// Returns true if the slash command was handled (don't continue with
+// the normal send), false otherwise.
+function agentMaybeHandleSlashCommand(text) {
+  const t = (text || '').trim();
+  if (!t.startsWith('/')) return false;
+  const cmd = t.split(/\s+/)[0].toLowerCase();
+  switch (cmd) {
+    case '/help':
+    case '/?':
+      openAgentCaps();
+      return true;
+    case '/notes':
+      openProjectNotes();
+      return true;
+    case '/queue':
+    case '/picks':
+      // If anchor picks are pending, fire the existing batch flow.
+      if (typeof agentBatchQueue === 'function') {
+        agentBatchQueue();
+      } else {
+        alert('No anchors picked yet — generate some first.');
+      }
+      return true;
+    case '/clear':
+    case '/new':
+      if (typeof agentNewSession === 'function') agentNewSession();
+      return true;
+    case '/settings':
+    case '/engine':
+      if (typeof openAgentSettings === 'function') openAgentSettings();
+      return true;
+    default:
+      return false;                   // unknown slash — let it through
+  }
+}
+
 async function openProjectNotes() {
   const modal = document.getElementById('agentNotesModal');
   const ta = document.getElementById('agentNotesTextarea');
