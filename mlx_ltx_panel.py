@@ -3447,6 +3447,14 @@ AGENT_CONFIG_PATH = STATE_DIR / "agent_config.json"
 AGENT_IMAGE_CONFIG_PATH = STATE_DIR / "agent_image_config.json"
 AGENT_LOCK = threading.RLock()
 _AGENT_CONFIG_CACHE: agent_engine.EngineConfig | None = None
+# Image-Studio generation lock — serializes /image/generate so two
+# concurrent panel tabs (or a fast-double-clicking user) don't spawn
+# two mflux subprocesses fighting for the GPU. The lock is acquired in
+# non-blocking mode; a second concurrent request returns 429 instantly
+# instead of queueing up. The JS-side busy flag handles the common case;
+# this lock is the server-side safety net.
+_IMG_STUDIO_LOCK = threading.Lock()
+
 _AGENT_IMAGE_CONFIG_CACHE: agent_image_engine.ImageEngineConfig | None = None
 
 
@@ -4754,6 +4762,72 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/library/images":
+            # Drives the Image Studio's right-pane gallery (and any other
+            # client that wants the same view as the agent's
+            # list_library_images tool). Mirrors that tool's filter set
+            # exactly so behavior is consistent across UI + agent.
+            qs = parse_qs(parsed.query)
+            try:
+                limit = max(1, min(200, int((qs.get("limit", ["48"])[0] or "48"))))
+            except ValueError:
+                limit = 48
+            contains = (qs.get("contains", [""])[0] or "").strip().lower()
+            include_manual = (qs.get("include_manual", ["1"])[0] or "1") not in ("0", "false")
+            include_agent = (qs.get("include_agent", ["1"])[0] or "1") not in ("0", "false")
+
+            roots: list[Path] = []
+            if include_agent:
+                roots.append(UPLOADS / "agentflow")
+            if include_manual:
+                roots.append(UPLOADS / "library" / "manual")
+
+            items: list[dict] = []
+            for root in roots:
+                if not root.exists():
+                    continue
+                for png in root.rglob("*.png"):
+                    sidecar = png.with_suffix(png.suffix + ".json")
+                    meta: dict = {}
+                    if sidecar.is_file():
+                        try:
+                            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError):
+                            meta = {}
+                    if "png_path" not in meta:
+                        meta["png_path"] = str(png)
+                    if "generated_at" not in meta:
+                        try:
+                            meta["generated_at"] = png.stat().st_mtime
+                        except OSError:
+                            meta["generated_at"] = 0
+                    if contains:
+                        p = (meta.get("prompt") or "").lower()
+                        if contains not in p:
+                            continue
+                    items.append(meta)
+
+            items.sort(key=lambda m: m.get("generated_at", 0), reverse=True)
+            items = items[:limit]
+            self._json({
+                "count": len(items),
+                "images": [{
+                    "png_path": m.get("png_path"),
+                    "prompt": m.get("prompt"),
+                    "refs": m.get("refs") or [],
+                    "engine": m.get("engine"),
+                    "family": m.get("family"),
+                    "model": m.get("model"),
+                    "seed": m.get("seed"),
+                    "width": m.get("width"),
+                    "height": m.get("height"),
+                    "generated_at": m.get("generated_at"),
+                    "shot_label": m.get("shot_label"),
+                    "session_id": m.get("session_id"),
+                } for m in items],
+            })
+            return
+
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -4797,6 +4871,176 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "path": str(dest)})
             except Exception as exc:
                 self._json({"error": f"upload failed: {exc}"}, 500)
+            return
+
+        # JSON-body endpoint for the manual Image Studio. Lives BEFORE
+        # the urlencoded body parsing because the body is JSON, not form
+        # data. Drives `/image/generate` — the panel-side counterpart to
+        # the agent's `generate_shot_images` tool, but with explicit
+        # engine override so the user can pick a backend in the UI
+        # without first going through Settings.
+        if path == "/image/generate" and ctype.startswith("application/json"):
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length).decode() or "{}")
+            except json.JSONDecodeError:
+                self._json({"error": "invalid JSON body"}, 400); return
+
+            prompt = (payload.get("prompt") or "").strip()
+            if not prompt:
+                self._json({"error": "prompt is required"}, 400); return
+
+            try:
+                n = max(1, min(8, int(payload.get("n", 4))))
+            except (TypeError, ValueError):
+                n = 4
+            aspect = (payload.get("aspect") or "16:9").strip()
+            try:
+                seed = int(payload.get("seed", -1))
+            except (TypeError, ValueError):
+                seed = -1
+            base_seed = seed if seed >= 0 else None
+
+            # Refs: 0-3 absolute paths. Resolve via UPLOADS for safety
+            # (path traversal protection — `_ensure_under` matches the
+            # agent-tools convention).
+            refs_in = payload.get("refs") or []
+            if not isinstance(refs_in, list):
+                self._json({"error": "refs must be a list of paths"}, 400); return
+            if len(refs_in) > 3:
+                self._json({"error": "refs supports at most 3 images (Qwen-Edit-2509 limit)"}, 400); return
+            refs_resolved: list[str] = []
+            for r in refs_in:
+                if not isinstance(r, str) or not r.strip():
+                    self._json({"error": "each ref must be a non-empty path"}, 400); return
+                rp = Path(r)
+                if not rp.is_absolute():
+                    rp = (UPLOADS / r).resolve()
+                else:
+                    rp = rp.resolve()
+                # Security: refs must live under UPLOADS or the public
+                # outputs dir. Prevents the JSON body from naming /etc/...
+                allowed_roots = [UPLOADS.resolve(), OUTPUT.resolve()]
+                if not any(str(rp).startswith(str(root)) for root in allowed_roots):
+                    self._json({"error": f"ref path not under uploads/outputs: {r}"}, 403); return
+                if not rp.is_file():
+                    self._json({"error": f"ref image not found: {r}"}, 404); return
+                refs_resolved.append(str(rp))
+
+            # Engine override: "auto" (use saved Settings config), or
+            # one of the inline shorthands the modal exposes. The inline
+            # shorthands construct a transient ImageEngineConfig WITHOUT
+            # touching the persisted user setting (so the panel doesn't
+            # lose their chosen default just because they tried Qwen
+            # once).
+            engine_override = (payload.get("engine_override") or "auto").lower()
+            if engine_override == "auto":
+                cfg = _load_agent_image_config()
+            elif engine_override == "qwen_edit_inline":
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="Qwen/Qwen-Image-Edit-2509",
+                    mflux_family="qwen_edit",
+                    mflux_quantize=8,
+                )
+            elif engine_override == "flux2_inline":
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
+                    mflux_family="flux2",
+                    mflux_quantize=4,
+                )
+            elif engine_override == "z_image_turbo_inline":
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
+                    mflux_family="z_image_turbo",
+                    mflux_quantize=4,
+                )
+            elif engine_override == "mock_inline":
+                cfg = agent_image_engine.ImageEngineConfig(kind="mock")
+            else:
+                self._json({"error": f"unknown engine_override: {engine_override!r}"}, 400); return
+
+            # Output dir: panel_uploads/library/manual/<YYYYMMDD>/ — date
+            # bucketed so the directory doesn't grow unbounded in one
+            # subdir. The library reader and the agent's list_library_images
+            # both walk recursively so depth doesn't matter for retrieval.
+            out_dir = UPLOADS / "library" / "manual" / time.strftime("%Y%m%d")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # Acquire the gen lock — fail fast (429) if another generation
+            # is already running so the user doesn't queue up minutes of
+            # GPU contention by accident.
+            if not _IMG_STUDIO_LOCK.acquire(blocking=False):
+                self._json({
+                    "error": "another image generation is already in progress",
+                }, 429); return
+            t0 = time.time()
+            try:
+                try:
+                    candidates = agent_image_engine.generate(
+                        prompt=prompt, n=n, aspect=aspect,
+                        output_dir=out_dir,
+                        base_seed=base_seed,
+                        refs=refs_resolved or None,
+                        config=cfg,
+                    )
+                except FileNotFoundError as e:
+                    self._json({"error": str(e)}, 404); return
+                except RuntimeError as e:
+                    # Engine-side failures (missing binary, etc.) → 500 with
+                    # the engine's own message so the UI surfaces the install
+                    # hint or whatever else the engine knows about.
+                    self._json({"error": str(e)}, 500); return
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400); return
+            finally:
+                _IMG_STUDIO_LOCK.release()
+            elapsed = round(time.time() - t0, 2)
+
+            # Sidecar JSON next to each candidate so list_library_images
+            # surfaces full metadata. Same schema as
+            # agent.tools._generate_shot_images writes — keeps the library
+            # reader consistent regardless of the source.
+            generated_at = time.time()
+            for c in candidates:
+                png = c.get("png_path")
+                if not png:
+                    continue
+                sidecar_path = Path(png).with_suffix(Path(png).suffix + ".json")
+                sidecar = {
+                    "schema": "phosphene/library/image@1",
+                    "png_path": png,
+                    "prompt": prompt,
+                    "refs": list(refs_resolved),
+                    "engine": c.get("engine"),
+                    "family": c.get("family"),
+                    "model": c.get("model"),
+                    "seed": c.get("seed"),
+                    "width": c.get("width"),
+                    "height": c.get("height"),
+                    "aspect": aspect,
+                    "session_id": None,
+                    "shot_label": None,
+                    "take_index": None,
+                    "generated_at": generated_at,
+                    "refs_ignored": c.get("refs_ignored", False),
+                    "source": "panel.image_studio",
+                }
+                try:
+                    sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+                except OSError:
+                    pass  # best-effort
+
+            self._json({
+                "ok": True,
+                "candidates": candidates,
+                "elapsed_seconds": elapsed,
+                "engine": cfg.kind + (f"/{cfg.mflux_family}" if cfg.kind == "mflux" else ""),
+                "model": getattr(cfg, "mflux_model", None) or cfg.kind,
+                "output_dir": str(out_dir),
+            })
             return
 
         # All other POST endpoints expect urlencoded body
@@ -6319,6 +6563,56 @@ HTML = r"""<!doctype html>
     }
     .pill-btn .ico { font-size: 16px; line-height: 1; }
     .pill-btn .sub { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    /* Image Studio reference-image drop slots — same accent + dashed
+       border idiom as the existing reference upload zones, but compact
+       enough to fit three across in the modal. */
+    .img-ref-slot {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      background: var(--bg-card);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+      transition: border-color 120ms;
+    }
+    .img-ref-slot:hover { border-color: var(--accent); }
+    .img-ref-slot.has-image { border-style: solid; border-color: var(--accent); }
+    .img-ref-slot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .img-ref-slot .clear-x {
+      position: absolute; top: 4px; right: 4px;
+      width: 20px; height: 20px;
+      background: rgba(0,0,0,0.7); color: white;
+      border: 0; border-radius: 50%;
+      font-size: 12px; line-height: 18px; cursor: pointer;
+      display: none;
+    }
+    .img-ref-slot.has-image .clear-x { display: block; }
+    .img-ref-slot .placeholder { padding: 8px; pointer-events: none; }
+
+    /* Library tile — used in the Image Studio's right pane. */
+    .lib-tile {
+      position: relative; cursor: pointer;
+      border: 1px solid var(--border); border-radius: 6px;
+      overflow: hidden;
+      transition: border-color 120ms, transform 120ms;
+    }
+    .lib-tile:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .lib-tile img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; display: block; }
+    .lib-tile .lib-meta {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0));
+      color: white; padding: 16px 6px 4px;
+      font-size: 10px; line-height: 1.2;
+      pointer-events: none;
+    }
+
     .pill-btn:disabled, .pill-btn.disabled {
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
@@ -11536,6 +11830,7 @@ HTML = r"""<!doctype html>
         <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
         <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
         <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
+        <button type="button" class="pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)"><span>Studio</span><span class="sub">stills + library</span></button>
       </div>
       <input type="hidden" name="mode" id="mode" value="t2v">
 
@@ -12582,6 +12877,94 @@ HTML = r"""<!doctype html>
   </div>
 </div>
 
+<!-- ============== IMAGE STUDIO MODAL ============== -->
+<!-- Manual still generation. Opens via the "Studio" pill in the mode row.
+     Backed by the same image_engine the agent uses (mflux family, BFL, mock),
+     defaults to Qwen-Image-Edit-2509 multi-reference when installed.
+     Output lands in panel_uploads/library/manual/ where the agent can
+     pick it up via list_library_images. -->
+<div class="modal-bg" id="imageStudioModal" onclick="if(event.target===this)closeImageStudio()" style="display:none;align-items:flex-start;padding-top:40px">
+  <div class="modal" style="max-width:1100px;width:96%;max-height:88vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div>
+        <h3 style="margin:0">Image Studio</h3>
+        <div class="hint" style="margin-top:2px">Generate reference stills. They land in your library and the agent can pick them up automatically.</div>
+      </div>
+      <button class="small" onclick="closeImageStudio()" title="Close">✕</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:18px;margin-top:16px">
+      <!-- LEFT: form -->
+      <div>
+        <div class="field">
+          <label>Prompt</label>
+          <textarea id="imgStudioPrompt" rows="4" style="width:100%" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
+        </div>
+
+        <div class="field">
+          <label>Reference images <span class="hint">(0-3, used by Qwen-Image-Edit-2509 to compose character + place; ignored by other engines)</span></label>
+          <div id="imgStudioRefs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+            <div class="img-ref-slot" data-slot="0"></div>
+            <div class="img-ref-slot" data-slot="1"></div>
+            <div class="img-ref-slot" data-slot="2"></div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+          <div class="field">
+            <label>Engine</label>
+            <select id="imgStudioEngine">
+              <option value="auto" selected>Auto (use Settings)</option>
+              <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref)</option>
+              <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
+              <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
+              <option value="mock_inline">Mock (testing)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Aspect</label>
+            <select id="imgStudioAspect">
+              <option value="16:9" selected>16:9 — 1024×576</option>
+              <option value="4:3">4:3 — 1024×768</option>
+              <option value="1:1">1:1 — 768×768</option>
+              <option value="9:16">9:16 — 576×1024</option>
+              <option value="3:4">3:4 — 768×1024</option>
+              <option value="21:9">21:9 — 1280×544</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Candidates (n)</label>
+            <input type="number" id="imgStudioN" min="1" max="8" value="4">
+          </div>
+          <div class="field">
+            <label>Seed (-1 random)</label>
+            <input type="number" id="imgStudioSeed" value="-1">
+          </div>
+        </div>
+
+        <div class="modal-actions" style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="small primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">Generate</button>
+          <span id="imgStudioStatus" class="hint" style="flex:1"></span>
+          <button class="small" onclick="imgStudioRefreshLibrary()">Refresh library</button>
+        </div>
+
+        <!-- Generation results inline -->
+        <div id="imgStudioResults" style="margin-top:14px"></div>
+      </div>
+
+      <!-- RIGHT: library -->
+      <div style="border-left:1px solid var(--border);padding-left:14px">
+        <h4 style="margin:0 0 6px 0">Library</h4>
+        <div class="hint" style="margin-bottom:8px">Recent stills from this panel. Click any image to copy its path for use as a reference.</div>
+        <input type="search" id="imgStudioLibrarySearch" placeholder="Filter by prompt…" oninput="imgStudioRefreshLibrary()" style="width:100%;margin-bottom:10px">
+        <div id="imgStudioLibrary" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;max-height:60vh;overflow-y:auto;padding-right:4px">
+          <div class="hint">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ============== BATCH MODAL ============== -->
 <div class="modal-bg" id="batchModal" onclick="if(event.target===this)closeBatch()">
   <div class="modal">
@@ -12656,6 +13039,15 @@ document.getElementById('audio').value = BOOT.default_audio;
 
 // ====== Pill-button group helpers ======
 function setMode(mode) {
+  // Studio mode is a launcher — open the Image Studio modal but keep the
+  // last video mode active (so the user comes back to t2v/i2v/keyframe/extend
+  // exactly where they were). The pill row briefly highlights "Studio" via
+  // CSS while the modal is open; closing the modal restores the previous
+  // active pill.
+  if (mode === 'image') {
+    openImageStudio();
+    return;
+  }
   currentMode = mode;
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
@@ -12677,6 +13069,189 @@ function setMode(mode) {
   // the next 1.5s poll tick.
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
+// ====== Image Studio (manual still gen) ======================================
+// State: 3 reference slots. Each slot holds {path, name} when populated.
+const IMG_STUDIO = {
+  refs: [null, null, null],
+  busy: false,
+};
+
+function openImageStudio() {
+  const m = document.getElementById('imageStudioModal');
+  if (!m) return;
+  m.style.display = 'flex';
+  m.classList.add('open');
+  // Wire up the ref slots once
+  imgStudioWireRefSlots();
+  // Refresh library on every open so the user sees recent gens
+  imgStudioRefreshLibrary();
+  // Focus prompt textarea
+  setTimeout(() => {
+    const t = document.getElementById('imgStudioPrompt');
+    if (t) t.focus();
+  }, 50);
+}
+
+function closeImageStudio() {
+  const m = document.getElementById('imageStudioModal');
+  if (!m) return;
+  m.style.display = 'none';
+  m.classList.remove('open');
+}
+
+function imgStudioWireRefSlots() {
+  document.querySelectorAll('.img-ref-slot').forEach(slot => {
+    if (slot.dataset.wired === '1') return;
+    slot.dataset.wired = '1';
+    const idx = parseInt(slot.dataset.slot, 10);
+    // Click → file picker
+    slot.addEventListener('click', (e) => {
+      if (e.target.classList && e.target.classList.contains('clear-x')) return;
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/png,image/jpeg,image/webp';
+      input.onchange = () => {
+        if (input.files && input.files[0]) imgStudioUploadRef(idx, input.files[0]);
+      };
+      input.click();
+    });
+    // Drag + drop
+    slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.style.borderColor = 'var(--accent)'; });
+    slot.addEventListener('dragleave', () => { slot.style.borderColor = ''; });
+    slot.addEventListener('drop', (e) => {
+      e.preventDefault();
+      slot.style.borderColor = '';
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) imgStudioUploadRef(idx, f);
+    });
+    imgStudioRenderSlot(idx);
+  });
+}
+
+function imgStudioRenderSlot(idx) {
+  const slot = document.querySelector(`.img-ref-slot[data-slot="${idx}"]`);
+  if (!slot) return;
+  const ref = IMG_STUDIO.refs[idx];
+  if (ref && ref.path) {
+    slot.classList.add('has-image');
+    slot.innerHTML = `
+      <img src="/image?path=${encodeURIComponent(ref.path)}" alt="">
+      <button class="clear-x" type="button" onclick="imgStudioClearRef(${idx});event.stopPropagation()" title="Remove">×</button>
+    `;
+  } else {
+    slot.classList.remove('has-image');
+    slot.innerHTML = `<div class="placeholder">Drop or click<br>ref ${idx + 1}</div>`;
+  }
+}
+
+function imgStudioClearRef(idx) {
+  IMG_STUDIO.refs[idx] = null;
+  imgStudioRenderSlot(idx);
+}
+
+async function imgStudioUploadRef(idx, file) {
+  const fd = new FormData();
+  // The panel's /upload endpoint expects the multipart field to be named
+  // "image" (cgi.FieldStorage lookup); using "file" silently 400s.
+  fd.append('image', file);
+  try {
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(`upload ${r.status}`);
+    const j = await r.json();
+    if (!j.path) throw new Error('upload returned no path');
+    IMG_STUDIO.refs[idx] = { path: j.path, name: file.name };
+    imgStudioRenderSlot(idx);
+  } catch (e) {
+    const s = document.getElementById('imgStudioStatus');
+    if (s) s.textContent = 'Upload failed: ' + e.message;
+  }
+}
+
+async function imgStudioGenerate() {
+  if (IMG_STUDIO.busy) return;
+  const prompt = (document.getElementById('imgStudioPrompt').value || '').trim();
+  if (!prompt) {
+    document.getElementById('imgStudioStatus').textContent = 'Prompt is required.';
+    return;
+  }
+  const refs = IMG_STUDIO.refs.filter(r => r && r.path).map(r => r.path);
+  const body = {
+    prompt,
+    n: parseInt(document.getElementById('imgStudioN').value || '4', 10),
+    aspect: document.getElementById('imgStudioAspect').value || '16:9',
+    seed: parseInt(document.getElementById('imgStudioSeed').value || '-1', 10),
+    engine_override: document.getElementById('imgStudioEngine').value,
+    refs,
+  };
+  IMG_STUDIO.busy = true;
+  document.getElementById('imgStudioGenBtn').disabled = true;
+  document.getElementById('imgStudioStatus').textContent = 'Generating…';
+  document.getElementById('imgStudioResults').innerHTML = '';
+  try {
+    const r = await fetch('/image/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+    const cands = j.candidates || [];
+    document.getElementById('imgStudioStatus').textContent =
+      `${cands.length} image${cands.length === 1 ? '' : 's'} in ${j.elapsed_seconds || '?'} s · engine: ${j.engine || '?'}`;
+    const html = cands.map((c, i) => `
+      <div class="lib-tile" onclick="imgStudioCopyPath('${(c.png_path || '').replace(/'/g, "\\'")}')" title="Click to copy path">
+        <img src="/image?path=${encodeURIComponent(c.png_path)}&t=${Date.now()}" alt="">
+        <div class="lib-meta">cand ${i + 1} · seed ${c.seed}</div>
+      </div>
+    `).join('');
+    document.getElementById('imgStudioResults').innerHTML =
+      `<div style="display:grid;grid-template-columns:repeat(${Math.min(4, cands.length || 1)},1fr);gap:8px">${html}</div>`;
+    imgStudioRefreshLibrary();
+  } catch (e) {
+    document.getElementById('imgStudioStatus').textContent = 'Failed: ' + e.message;
+  } finally {
+    IMG_STUDIO.busy = false;
+    document.getElementById('imgStudioGenBtn').disabled = false;
+  }
+}
+
+async function imgStudioRefreshLibrary() {
+  const grid = document.getElementById('imgStudioLibrary');
+  if (!grid) return;
+  const q = (document.getElementById('imgStudioLibrarySearch').value || '').trim();
+  try {
+    const url = '/library/images?limit=48' + (q ? '&contains=' + encodeURIComponent(q) : '');
+    const r = await fetch(url);
+    const j = await r.json();
+    const items = (j.images || []);
+    if (items.length === 0) {
+      grid.innerHTML = '<div class="hint">No images yet. Generate one to fill the library.</div>';
+      return;
+    }
+    grid.innerHTML = items.map(it => {
+      const p = (it.prompt || '').slice(0, 80).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+      return `<div class="lib-tile" onclick="imgStudioCopyPath('${(it.png_path || '').replace(/'/g, "\\'")}')" title="${p}">
+        <img src="/image?path=${encodeURIComponent(it.png_path)}" alt="" loading="lazy">
+        <div class="lib-meta">${p}</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    grid.innerHTML = '<div class="hint">Library load failed: ' + (e.message || 'unknown') + '</div>';
+  }
+}
+
+function imgStudioCopyPath(path) {
+  if (!path) return;
+  navigator.clipboard.writeText(path).then(() => {
+    const s = document.getElementById('imgStudioStatus');
+    if (s) {
+      const prev = s.textContent;
+      s.textContent = 'Path copied to clipboard.';
+      setTimeout(() => { if (s.textContent === 'Path copied to clipboard.') s.textContent = prev; }, 1500);
+    }
+  });
+}
+
 // Quality presets (Y1.013) — each one bundles the backend quality value
 // (which selects the model + sampler) with the canonical dimensions.
 // Backend still routes only on `quality == 'high'` vs anything else, so
