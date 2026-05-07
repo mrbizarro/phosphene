@@ -318,9 +318,16 @@ def run_turn(session: Session, user_message: str | None,
             return
 
         assistant_content = result.content or ""
-        session.messages.append({"role": "assistant", "content": assistant_content})
+        # Persist reasoning alongside content so it survives panel restart
+        # and the UI can re-render it on session load. Most chat models
+        # don't return reasoning; the field is empty in that case.
+        msg_dict: dict = {"role": "assistant", "content": assistant_content}
+        if getattr(result, "reasoning", None):
+            msg_dict["reasoning"] = result.reasoning
+        session.messages.append(msg_dict)
         yield emit(TurnEvent("assistant", {
             "content": assistant_content,
+            "reasoning": getattr(result, "reasoning", "") or "",
             "step": step_i,
             "model": result.model,
             "usage": result.usage,

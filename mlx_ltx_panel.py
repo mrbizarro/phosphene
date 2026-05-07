@@ -3824,6 +3824,13 @@ def _render_session_messages(sess: agent_runtime.Session) -> list[dict]:
                     "tool": action.get("tool"),
                     "args": action.get("args", {}),
                 }
+            # Surface model reasoning to the UI as a separate field so
+            # the renderer can show it as a collapsible "Thinking" block.
+            # Reasoning is what makes the agent feel "stuck" when it
+            # isn't — the user sees no content and assumes nothing's
+            # happening, but the model is reasoning.
+            if m.get("reasoning"):
+                entry["reasoning"] = m["reasoning"]
             out.append(entry)
             continue
         out.append({"kind": role, "content": content})
@@ -7972,6 +7979,54 @@ HTML = r"""<!doctype html>
     .agent-md hr {
       border: none; border-top: 1px solid var(--border);
       margin: 14px 0;
+    }
+
+    /* ---- Reasoning disclosure (chain-of-thought) ----
+       Shown above the assistant content as a collapsed details block.
+       Quiet by default so the answer stays the focus; expanding reveals
+       the model's thought process. Reasoning often runs 1–4k chars on
+       a planning turn — scroll caps prevent runaway height. */
+    .agent-reasoning {
+      margin: 0 0 8px 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+    }
+    .agent-reasoning > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 7px 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      color: var(--muted);
+      user-select: none;
+    }
+    .agent-reasoning > summary::-webkit-details-marker { display: none; }
+    .agent-reasoning > summary svg {
+      transition: transform 0.18s ease;
+      flex-shrink: 0;
+    }
+    .agent-reasoning[open] > summary svg { transform: rotate(90deg); }
+    .agent-reasoning > summary .label {
+      font-weight: 600;
+      color: var(--text);
+    }
+    .agent-reasoning > summary .meta {
+      color: var(--muted);
+      font-weight: 400;
+    }
+    .agent-reasoning .agent-reasoning-body {
+      padding: 0 14px 12px 26px;
+      font-size: 11.5px;
+      line-height: 1.6;
+      color: rgba(255,255,255,0.62);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow-y: auto;
     }
 
     /* ---- Tool cards (calls + results, expandable) ----
@@ -14738,6 +14793,13 @@ function renderMessage(m) {
     body.appendChild(renderAttachmentChips(m.attachments));
   }
 
+  // Reasoning disclosure — surfaces the model's chain-of-thought as a
+  // collapsible "Thinking" block above the content. Closed by default
+  // so the chat reads as the answer; expand to see the model's work.
+  // The #1 fix for "agent appears stuck" — reasoning models spend most
+  // of their time here and the user couldn't see it.
+  if (m.reasoning) body.appendChild(renderReasoningBlock(m.reasoning));
+
   const content = document.createElement('div');
   content.className = 'agent-msg-content agent-md';
   content.innerHTML = mdToHtml(m.content || '');
@@ -14748,6 +14810,29 @@ function renderMessage(m) {
   row.appendChild(av);
   row.appendChild(body);
   return row;
+}
+
+// Reasoning block — shows the model's chain-of-thought (Qwen 3.6 / R1 /
+// any mlx-lm reasoning model). Collapsed by default; click to expand.
+// Reads as a quiet bracket of italic text above the answer so users
+// see SOMETHING happened during the long inference even if the final
+// content was short. Crucial for reasoning models where the model
+// spends 80% of its tokens here.
+function renderReasoningBlock(text) {
+  const wrap = document.createElement('details');
+  wrap.className = 'agent-reasoning';
+  const sum = document.createElement('summary');
+  const len = (text || '').length;
+  sum.innerHTML =
+    '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>' +
+    '<span class="label">Thinking</span>' +
+    `<span class="meta">${len.toLocaleString()} chars</span>`;
+  wrap.appendChild(sum);
+  const body = document.createElement('div');
+  body.className = 'agent-reasoning-body';
+  body.textContent = text;
+  wrap.appendChild(body);
+  return wrap;
 }
 
 function renderAttachmentChips(attachments) {

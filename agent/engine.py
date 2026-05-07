@@ -81,6 +81,13 @@ class ChatResult:
     finish_reason: str = "stop"
     usage: dict = field(default_factory=dict)
     model: str = ""
+    # Some chat servers (mlx-lm with reasoning models like Qwen 3.6,
+    # DeepSeek R1) return the model's chain-of-thought in a separate
+    # `reasoning` field on the response message. We surface it so the
+    # UI can show "what the model was thinking" — invisible reasoning
+    # is the #1 cause of "agent appears stuck" reports. Empty for
+    # non-reasoning models / non-supporting servers.
+    reasoning: str = ""
 
 
 def _normalize_for_wire(messages: list[dict]) -> list[dict]:
@@ -199,13 +206,9 @@ def chat(messages: list[dict], config: EngineConfig,
     # and `message.content` (final answer). When max_tokens is too small,
     # reasoning consumes the budget and content comes back empty with
     # finish_reason="length" — the agent gets nothing and the chat
-    # appears "stuck". Two recovery paths:
-    #   1. Empty content + non-empty reasoning + finish="length" → raise
-    #      a clear error so the user knows to bump max_tokens.
-    #   2. Empty content + non-empty reasoning + finish="stop" → use
-    #      the reasoning as content. This is unusual (the model
-    #      decided to put its answer in the thinking block) but better
-    #      than silently dropping output.
+    # appears "stuck". We surface reasoning ALWAYS (so the UI can show
+    # "what the model was thinking") and fall back to using it as
+    # content only when content is empty.
     reasoning = msg.get("reasoning") or ""
     if not content and reasoning:
         if finish == "length":
@@ -218,8 +221,10 @@ def chat(messages: list[dict], config: EngineConfig,
         # No length issue but content is empty — fall back to reasoning
         # so SOMETHING surfaces in the chat.
         content = reasoning
+        reasoning = ""               # already promoted to content; don't double-show
 
     return ChatResult(content=content, finish_reason=finish, usage=usage,
+                      reasoning=reasoning,
                       model=data.get("model", config.model))
 
 
