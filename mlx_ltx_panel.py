@@ -9084,6 +9084,37 @@ HTML = r"""<!doctype html>
     }
     .agent-engine-banner-close:hover { opacity: 1; background: rgba(255,255,255,0.06); }
 
+    /* Phase 0 #0.9 — turn summary chip.
+       Sits below the LAST assistant message of a completed turn. Reads
+       like "4 anchors · 2 shots queued · ✓ finished" — one-glance answer
+       to "what just happened in this turn" without scrolling 30 cards. */
+    .agent-turn-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0 0 0;
+      padding: 5px 10px;
+      background: rgba(120, 140, 160, 0.06);
+      border: 1px solid rgba(120, 140, 160, 0.18);
+      border-radius: 8px;
+      font-size: 11.5px;
+      color: var(--muted);
+      max-width: fit-content;
+      animation: agent-fade-in 0.18s ease;
+    }
+    .agent-turn-summary-icon {
+      width: 10px; height: 10px;
+      flex: 0 0 auto;
+      opacity: 0.6;
+    }
+    .agent-turn-summary-text {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      letter-spacing: 0.01em;
+    }
+    .agent-turn-summary-text .sep { opacity: 0.4; padding: 0 1px; }
+    .agent-turn-summary-text .ok { color: var(--success, #3fb950); }
+
     .agent-ref-chip.visible { display: inline-flex; }
     .agent-ref-chip .ref-icon {
       font-size: 11px;
@@ -15203,6 +15234,114 @@ function escapeHtml(s) {
 }
 
 // ---- Chat rendering -------------------------------------------------------
+
+// Phase 0 #0.9 — turn summaries.
+//
+// A "turn" is the run of messages from one user message up to (but not
+// including) the next. The interesting span for the user reading back
+// is "what tools did the agent invoke + what came of them", so we aggregate
+// tool_result counts per turn and attach a one-line chip to the LAST
+// assistant message in that turn. Empty for turns with no tool actions
+// (pure conversation).
+const _AGENT_TOOL_LABELS = {
+  generate_shot_images: 'anchors',
+  submit_shot: 'shots queued',
+  estimate_shot: 'shots estimated',
+  inspect_clip: 'clips inspected',
+  read_document: 'docs read',
+  list_loras: 'LoRA scans',
+  get_master_style: 'style fetched',
+  extract_frame: 'frames pulled',
+  upload_image: 'uploads',
+  wait_for_shot: 'shots awaited',
+  get_queue_status: 'queue checks',
+  write_session_manifest: 'manifest writes',
+  append_project_notes: 'notes added',
+  read_project_notes: 'notes read',
+  get_selected_anchors: 'pick reads',
+  finish: 'finished',
+};
+
+function _turnSummaryByIdx(messages) {
+  // Walk the array. Each user message starts a turn. The LAST assistant
+  // message before the next user (or end of array) is where the summary
+  // attaches. Counts come from tool_result entries within the turn.
+  const out = {};                                      // {idx: {counts, lastAssistantIdx}}
+  let turnStart = -1;                                  // -1 = no user msg yet
+  let counts = {};
+  let lastAssistantIdx = -1;
+  const flush = () => {
+    if (turnStart < 0 || lastAssistantIdx < 0) return;
+    const has = Object.keys(counts).length > 0;
+    if (!has) return;
+    out[lastAssistantIdx] = {counts: counts};
+  };
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.kind === 'user') {
+      flush();
+      turnStart = i;
+      counts = {};
+      lastAssistantIdx = -1;
+    } else if (m.kind === 'tool_result') {
+      // Tool name lives on the PRECEDING assistant message's tool_call —
+      // see Stage activity-feed code which uses the same pairing pattern.
+      // This is a quirk of the rendered_messages shape: tool_result has
+      // {ok, result, error} but not the tool name.
+      const prev = messages[i - 1];
+      const tool = prev && prev.tool_call && prev.tool_call.tool;
+      if (tool) counts[tool] = (counts[tool] || 0) + 1;
+    } else if (m.kind === 'assistant' || !m.kind) {
+      lastAssistantIdx = i;
+    }
+  }
+  flush();
+  return out;
+}
+
+function _renderTurnSummaryChip(info) {
+  const c = info.counts || {};
+  const wrap = document.createElement('div');
+  wrap.className = 'agent-turn-summary';
+  wrap.title = 'What this turn accomplished';
+  // Sparkle icon. SVG so it looks crisp.
+  wrap.innerHTML =
+    '<svg class="agent-turn-summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+    '<polygon points="12 2 14.5 9.5 22 12 14.5 14.5 12 22 9.5 14.5 2 12 9.5 9.5"/></svg>' +
+    '<span class="agent-turn-summary-text"></span>';
+  const txt = wrap.querySelector('.agent-turn-summary-text');
+  // Stable order: queued shots and anchors come first so glance-readers
+  // see the high-leverage actions (rendering work) before diagnostics.
+  const order = [
+    'submit_shot', 'generate_shot_images', 'estimate_shot', 'inspect_clip',
+    'read_document', 'extract_frame', 'upload_image', 'wait_for_shot',
+    'get_queue_status', 'list_loras', 'get_master_style',
+    'write_session_manifest', 'append_project_notes', 'read_project_notes',
+    'get_selected_anchors', 'finish',
+  ];
+  const parts = [];
+  for (const tool of order) {
+    if (!c[tool]) continue;
+    const lbl = _AGENT_TOOL_LABELS[tool] || tool;
+    if (tool === 'finish') {
+      parts.push(`<span class="ok">✓ finished</span>`);
+    } else if (tool === 'generate_shot_images') {
+      // each call generates ≥1 anchor; the count IS calls, not anchors.
+      // Still meaningful enough for a one-liner.
+      parts.push(`${c[tool]} ${lbl}`);
+    } else {
+      parts.push(`${c[tool]} ${lbl}`);
+    }
+  }
+  // Any tool we didn't know about — still show its raw name.
+  for (const tool in c) {
+    if (order.includes(tool)) continue;
+    parts.push(`${c[tool]} ${tool}`);
+  }
+  txt.innerHTML = parts.join('<span class="sep"> · </span>');
+  return wrap;
+}
+
 function agentRender(messages) {
   const chat = document.getElementById('agentChat');
   if (!chat) return;
@@ -15211,7 +15350,19 @@ function agentRender(messages) {
     chat.appendChild(renderEmpty());
     return;
   }
-  for (const m of messages) chat.appendChild(renderMessage(m));
+  // Pre-compute per-turn summaries so renderMessage can attach the chip
+  // to the LAST assistant message of each turn without a second pass.
+  const summaryByIdx = _turnSummaryByIdx(messages);
+  for (let i = 0; i < messages.length; i++) {
+    const node = renderMessage(messages[i]);
+    chat.appendChild(node);
+    if (summaryByIdx[i]) {
+      // Attach inside the assistant message body so it visually lives
+      // with that message rather than floating below it.
+      const body = node.querySelector('.agent-msg-body');
+      if (body) body.appendChild(_renderTurnSummaryChip(summaryByIdx[i]));
+    }
+  }
   // Hand-off the scroll on next animation frame so freshly-inserted nodes
   // have measured heights.
   requestAnimationFrame(() => agentChatScrollIfPinned(chat));
