@@ -237,6 +237,45 @@ phosphene-dev.git/
 - **S2 noir dialogue attribution swap**: "Same thing, honey" delivered by wrong character. Root cause: prompt format diverged from LTX docs. Documented in Linear HAI-152.
 - **v2.0.2 install sanity check broken by em-dash**: Pinokio shells mangled the unicode em-dash, triggering Python SyntaxError, falsely failing every install. Fixed in v2.0.4 (ASCII colon).
 
+### Shipped in v2.0.6 (May 7 2026, autonomous overnight Phase 0 polish)
+
+Roadmap reference: `docs/AGENTIC_FLOWS_ROADMAP.md`. Three Phase 0 items
+shipped autonomously while the user was running:
+
+- **#0.11 — Engine readiness banner** (commit `7334836`): tri-state
+  banner above the chat that probes the configured engine on session
+  init + after settings save. Catches 401 / unreachable / wrong-base-URL
+  BEFORE the user invests in attaching a script and writing a long
+  prompt. Tri-state: `ok` (green, fade-after-4s), `warn` (amber, sticky;
+  local helper not started — one-click "Start engine"), `err` (red,
+  sticky; "Open Settings" shortcut). Endpoint `/agent/engine/check`
+  wraps the existing `engine.health_check`.
+- **#0.9 — Turn summary chip** (commit `134b5b1`): one-line "what this
+  turn accomplished" chip below the LAST assistant message of each
+  completed turn. Reads at a glance: `✦ 21 shots queued · 1 manifest
+  writes · ✓ finished`. Walks `rendered_messages` once, pairs each
+  `tool_result` with the preceding `assistant.tool_call.tool` (same
+  pattern as the Stage activity feed). Verified against the CAD
+  session (8 turns, 47 submit_shots).
+- **#0.10 — Inline wall-time predictor** (commit `43a7c3b`): two
+  surfaces. Tool-call cards for `submit_shot` / `estimate_shot` now
+  render the predicted wall inline with the args
+  (`submit_shot · S5 motorhome — 6s i2v balanced · ~4m 45s`); batch-bar
+  above the composer sums predicted wall across PENDING picks
+  (`12 anchors picked · ready to render · ~57m 24s total`). JS predictor
+  mirrors `agent/tools.py::_estimate_wall_seconds` byte-for-byte (T^1.5
+  length scaling, accel discounts, mode/quality table, sharp upgrade);
+  verified across 6 cases — both implementations match exactly.
+
+Cumulative Phase 0 ships in this rolling polish session (v2.0.5 →
+v2.0.6): items #0.5 (`/help` slash + capabilities sheet), #0.6
+(a11y floor: `:focus-visible` + `prefers-reduced-motion` +
+`role="log"` + `aria-live`), #0.12 (atomic project-notes ring buffer),
+#0.11, #0.9, #0.10 — six of twelve Phase 0 rows shipped. Remaining:
+#0.1 SSE streaming (L), #0.2 server-side cancel (M), #0.3 recoverable
+error cards (M), #0.4 first-run tour (M), #0.7 session restore on
+panel restart (M), #0.8 default-engine recommendation banner (S).
+
 ### Fixed in v2.0.5 (May 6–7 2026, agentic-flows polish session)
 - **Stage NOW RENDERING stuck at 0%**: `current.progress` schema went from flat float to structured object (`{phase, phase_label, pct, elapsed_sec, eta_sec, denoise_step}`). Stage pane was calling `Number(progressObj)` → NaN → 0%. Fixed by reading `.pct` directly with backward-compat fallback to flat float.
 - **Offline banner was a 1990s solid-red bar**: floating Phosphene-pill at top-center, pulsing logo icon, three-part text, slide-in animation.

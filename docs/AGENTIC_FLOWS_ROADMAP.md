@@ -18,14 +18,14 @@ The recommended order of operations: **Phase 0** lands table-stakes professional
 | 0.2 | Stop button that actually stops (server-side cancel) | M | Today's × only aborts the client; server keeps spending tokens |
 | 0.3 | Recoverable error cards with one-click remediations | M | Errors as paths forward (Retry / Switch model / Stop engine) |
 | 0.4 | In-app capability tour on first run | M | Three-phase loop, anchor-pick UX, overnight-batch model |
-| 0.5 | `/help` slash command + capabilities sheet | S | Surfaces every tool's docstring as a structured catalog |
-| 0.6 | Keyboard accessibility floor (focus-visible, aria-live, reduced-motion) | M | WCAG AA fail today |
+| 0.5 | `/help` slash command + capabilities sheet | S | _Shipped 2026-05-06 in `bc102b1`_ |
+| 0.6 | Keyboard accessibility floor (focus-visible, aria-live, reduced-motion) | M | _Shipped 2026-05-06 in `bc102b1`_ |
 | 0.7 | Session restore on panel restart | M | Half-rendered batches feel orphaned; resume / discard banner |
 | 0.8 | Default-engine recommendation banner | S | New users run bundled Gemma forever; surface Qwen / Anthropic when appropriate |
-| 0.9 | "What just happened?" turn summary | S | 30-card-deep turns lose context; one-line summary at the bottom |
-| 0.10 | Cost / wall-time predictor before submit | S | Total wall + $ before saying "Confirm batch" |
-| 0.11 | Engine readiness check at session start | S | Surface 401 / unreachable BEFORE user uploads attachments |
-| 0.12 | Atomic project-notes history + undo | S | 7-version ring buffer; restore previous version |
+| 0.9 | "What just happened?" turn summary | S | _Shipped 2026-05-07 in `134b5b1`_ |
+| 0.10 | Cost / wall-time predictor before submit | S | _Shipped 2026-05-07 in `43a7c3b`_ |
+| 0.11 | Engine readiness check at session start | S | _Shipped 2026-05-07 in `7334836`_ |
+| 0.12 | Atomic project-notes history + undo | S | _Shipped 2026-05-06 in `bc102b1`_ |
 
 ## Phase 1 — high-impact polish (4–6 weeks)
 
