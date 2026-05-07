@@ -3746,6 +3746,11 @@ def _build_panel_ops() -> agent_tools.PanelOps:
         uploads_dir=UPLOADS,
         capabilities=_agent_capabilities(include_secrets=True),
         state_dir=STATE_DIR,
+        # Wire the LoRA listing so the agent's `list_loras` tool can read
+        # installed LoRAs. The agent can then recommend them on shots
+        # via submit_shot's `loras` arg. INSTALL stays user-driven (the
+        # CivitAI browser has a consent gate).
+        list_loras_fn=list_user_loras,
     )
 
 

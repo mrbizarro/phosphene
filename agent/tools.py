@@ -69,6 +69,11 @@ class PanelOps:
     # plan to what this Mac can actually render.
     capabilities: dict
 
+    # Optional callback returning the list of installed user LoRAs.
+    # Wired by the panel; tests pass a lambda. None means "no LoRA
+    # browser available in this host" — list_loras returns empty.
+    list_loras_fn: Callable[[], list[dict]] | None = None
+
     # Persistent state root (for project notes, sessions, configs). The
     # agent's project-memory tools write under here so notes survive
     # across sessions and panel restarts.
@@ -1016,6 +1021,51 @@ def _read_document(args: dict, ops: PanelOps, session: dict) -> dict:
     if page_count is not None:
         out["page_count"] = page_count
     return out
+
+
+@tool("list_loras")
+def _list_loras(args: dict, ops: PanelOps, session: dict) -> dict:
+    """List the LoRAs installed in this Phosphene panel.
+
+    Returns the user's installed LoRAs from `mlx_models/loras/` —
+    each with name, trigger words, recommended strength, base model,
+    and the absolute file path. Use this BEFORE recommending a LoRA
+    on a shot so you only suggest ones the user actually has.
+
+    To USE a LoRA on a shot, pass its filename (e.g. "noir_style.safetensors")
+    in the `loras` arg of `submit_shot`:
+        loras: [{"name": "noir_style.safetensors", "strength": 0.8}]
+    The panel matches by filename and applies the weights.
+
+    INSTALLING a new LoRA requires the user — the CivitAI browser is
+    behind a consent gate (NSFW LoRAs in particular). If the user
+    asks for a look you don't have a LoRA for, point them at
+    Settings → LoRAs → Browse rather than trying to install it.
+
+    Returns: { count, loras: [ {filename, name, description, base_model,
+              trigger_words, recommended_strength, path}, ... ] }.
+    """
+    fn = getattr(ops, "list_loras_fn", None)
+    if fn is None:
+        return {"count": 0, "loras": [], "note": "No LoRA picker available."}
+    try:
+        raw = fn() or []
+    except Exception as e:                          # noqa: BLE001
+        raise _ToolValidationError(f"list_loras failed: {e}") from e
+    # Slim to what the agent needs — strip preview URLs etc. that
+    # bloat the response.
+    out = []
+    for l in raw:
+        out.append({
+            "filename": l.get("filename"),
+            "name": l.get("name"),
+            "description": (l.get("description") or "")[:240],
+            "base_model": l.get("base_model"),
+            "trigger_words": l.get("trigger_words") or [],
+            "recommended_strength": l.get("recommended_strength") or 1.0,
+            "path": l.get("path"),
+        })
+    return {"count": len(out), "loras": out}
 
 
 @tool("read_project_notes")

@@ -385,7 +385,7 @@ def render_tools_doc() -> str:
     order = [
         "estimate_shot", "submit_shot", "get_queue_status",
         "wait_for_shot", "extract_frame", "upload_image",
-        "read_document",
+        "read_document", "list_loras",
         "read_project_notes", "append_project_notes",
         "write_session_manifest", "finish",
     ]
