@@ -9207,39 +9207,42 @@ HTML = r"""<!doctype html>
       display: flex; flex-direction: column;
     }
 
-    /* Header: minimal, transparent, generous padding, no bottom rule */
+    /* Header in fullscreen: same chip language as the regular agent
+       header (Linear pass — see ~line 10466). We only override the
+       LAYOUT bits (centered, max-width, generous breathing room) and
+       drop the bottom hairline so the chat below blends. The chip
+       styles for engine-pill / mode-pill / RAM chip / icon-btn cascade
+       from the Linear pass, so fullscreen and regular look identical
+       except for the dimensions. */
     body.agent-fullscreen .agent-header {
       background: transparent;
       border-bottom: none;
-      padding: 16px 28px;
+      padding: 12px 28px;
       max-width: 1080px; width: 100%;
       margin: 0 auto;
       box-sizing: border-box;
-    }
-    body.agent-fullscreen .agent-header .engine-pill {
-      background: rgba(255,255,255,0.04);
-      border-color: rgba(255,255,255,0.06);
-    }
-    body.agent-fullscreen .agent-header .engine-pill:hover {
-      background: rgba(47,129,247,0.08);
-      border-color: var(--accent);
-    }
-    body.agent-fullscreen .agent-header .icon-btn {
-      background: transparent;
-      border: 1px solid transparent;
-    }
-    body.agent-fullscreen .agent-header .icon-btn:hover {
-      background: rgba(255,255,255,0.05);
-      border-color: rgba(255,255,255,0.08);
-      color: var(--accent-bright);
+      height: auto;
     }
     body.agent-fullscreen .agent-header .session-title {
-      font-size: 14px;
-      letter-spacing: -0.1px;
+      font-size: 13px;
+      letter-spacing: -0.01em;
     }
     body.agent-fullscreen .agent-header .session-title .meta {
       font-size: 11px;
       opacity: 0.55;
+    }
+    /* Add the Phosphene wordmark + logo back into the fullscreen
+       header so the brand stays visible even when the main top
+       header is hidden. Inserted via ::before on .agent-header so we
+       don't need to touch the HTML structure. */
+    body.agent-fullscreen .agent-pane > .agent-header::before {
+      content: '';
+      flex: 0 0 auto;
+      display: inline-block;
+      width: 28px; height: 28px;
+      background: url('/assets/favicon-64.png') center/contain no-repeat;
+      filter: drop-shadow(0 0 3px rgba(79, 214, 255, 0.35));
+      margin-right: 6px;
     }
 
     /* Chat: takes the rest, content column centered at reading width */
@@ -18683,11 +18686,16 @@ document.addEventListener('keydown', (e) => {
 try {
   const saved = localStorage.getItem('phos_workflow');
   if (saved === 'agent') workflowSwitch('agent');
-  // Restore fullscreen state, but ONLY when the agent tab is the
-  // active workflow — otherwise we'd hide the manual form too.
-  if (localStorage.getItem('phos_agent_fullscreen') && saved === 'agent') {
-    agentToggleFullscreen(true);
-  }
+  // NOTE: fullscreen is NOT auto-restored from localStorage. The
+  // earlier behaviour ("remember it across reloads") was confusing —
+  // users opening the panel from Pinokio saw an unexpected
+  // chat-only layout with the regular chrome hidden, and didn't know
+  // why or how to get back to the split view (Manual + Agentic Flows
+  // tabs are hidden in fullscreen, so the toggle is hard to find).
+  // Fullscreen is now strictly opt-in per session via the icon button
+  // in the agent header. We DO clear any stale flag so users who
+  // toggled it on once before this change get a clean slate.
+  try { localStorage.removeItem('phos_agent_fullscreen'); } catch(e) {}
 } catch(e) {}
 </script>
 </body>
