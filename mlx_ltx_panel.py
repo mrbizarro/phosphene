@@ -4775,6 +4775,15 @@ class Handler(BaseHTTPRequestHandler):
             contains = (qs.get("contains", [""])[0] or "").strip().lower()
             include_manual = (qs.get("include_manual", ["1"])[0] or "1") not in ("0", "false")
             include_agent = (qs.get("include_agent", ["1"])[0] or "1") not in ("0", "false")
+            # `since` lets the modal cheaply poll for new gens after
+            # generation finishes (instead of re-scanning every PNG on
+            # disk). After months of agent use this dir is tens of
+            # thousands of files; a since-filter knocks the per-call
+            # cost down to whatever's been generated since the cursor.
+            try:
+                since = float((qs.get("since", ["0"])[0] or "0"))
+            except ValueError:
+                since = 0.0
 
             roots: list[Path] = []
             if include_agent:
@@ -4787,6 +4796,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not root.exists():
                     continue
                 for png in root.rglob("*.png"):
+                    # Cheap pre-filter: skip files whose mtime falls
+                    # before `since` BEFORE doing the sidecar JSON read.
+                    # On a 10K-file library this turns a 3-second walk
+                    # into a sub-100ms one for incremental polls.
+                    if since:
+                        try:
+                            mtime = png.stat().st_mtime
+                        except OSError:
+                            continue
+                        if mtime <= since:
+                            continue
                     sidecar = png.with_suffix(png.suffix + ".json")
                     meta: dict = {}
                     if sidecar.is_file():
@@ -4801,6 +4821,12 @@ class Handler(BaseHTTPRequestHandler):
                             meta["generated_at"] = png.stat().st_mtime
                         except OSError:
                             meta["generated_at"] = 0
+                    # Apply since to the sidecar's logical generated_at
+                    # too (sidecar may carry a slightly different ts than
+                    # the file mtime — the explicit since check above
+                    # used mtime, this honors the canonical sidecar ts).
+                    if since and meta.get("generated_at", 0) <= since:
+                        continue
                     if contains:
                         p = (meta.get("prompt") or "").lower()
                         if contains not in p:
@@ -4931,8 +4957,14 @@ class Handler(BaseHTTPRequestHandler):
                     rp = rp.resolve()
                 # Security: refs must live under UPLOADS or the public
                 # outputs dir. Prevents the JSON body from naming /etc/...
+                # Use Path.is_relative_to (3.9+) — string startswith() lets
+                # `panel_uploads_evil/` slip through because it shares the
+                # `panel_uploads` prefix without being under it. Both ends
+                # are already .resolved() so symlink/.. tricks are
+                # neutralized. Mirrors the agent-side _ensure_under
+                # convention in agent/tools.py.
                 allowed_roots = [UPLOADS.resolve(), OUTPUT.resolve()]
-                if not any(str(rp).startswith(str(root)) for root in allowed_roots):
+                if not any(rp.is_relative_to(root) for root in allowed_roots):
                     self._json({"error": f"ref path not under uploads/outputs: {r}"}, 403); return
                 if not rp.is_file():
                     self._json({"error": f"ref image not found: {r}"}, 404); return

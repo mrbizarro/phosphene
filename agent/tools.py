@@ -812,8 +812,14 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
 
     # Reference images for multi-ref engines (Qwen-Image-Edit-2509). Each
     # ref is resolved relative to ops.uploads_dir if not absolute, then
-    # validated. Engines that don't support refs ignore them; the result
-    # dict carries refs_ignored=True in that case.
+    # path-traversal-validated to live under uploads_dir or outputs_dir.
+    # _resolve_path alone joins-but-doesn't-validate — without
+    # _ensure_under a prompt-injected `../../etc/...` could reach the
+    # engine, which would then fail confusingly at PIL-decode time;
+    # rejecting up-front gives a clean validation message and matches
+    # the security stance extract_frame / inspect_clip already use.
+    # Engines that don't support refs ignore them; the result dict
+    # carries refs_ignored=True in that case.
     refs_in = args.get("refs") or []
     if not isinstance(refs_in, list):
         raise _ToolValidationError("refs must be a list of image paths")
@@ -825,10 +831,16 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     for r in refs_in:
         if not isinstance(r, str) or not r.strip():
             raise _ToolValidationError("each ref must be a non-empty string path")
-        rp = _resolve_path(r, ops.uploads_dir)
-        if not Path(rp).is_file():
+        rp_str = _resolve_path(r, ops.uploads_dir)
+        try:
+            rp = _ensure_under(Path(rp_str), [ops.uploads_dir, ops.outputs_dir])
+        except _ToolValidationError as e:
+            raise _ToolValidationError(
+                f"ref path must live under uploads/outputs: {r!r} ({e})"
+            ) from e
+        if not rp.is_file():
             raise _ToolValidationError(f"ref image not found: {rp}")
-        refs_resolved.append(rp)
+        refs_resolved.append(str(rp))
 
     # Image engine config travels in PanelOps.capabilities so tools.py
     # stays free of panel imports.
