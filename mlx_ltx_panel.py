@@ -7818,6 +7818,7 @@ HTML = r"""<!doctype html>
     .asp-item-meta {
       display: flex; gap: 6px; align-items: center;
       margin-top: 5px;
+      justify-content: flex-end;        /* pills hug the right edge of the card */
     }
     .asp-chip {
       font-size: 10px;
@@ -9201,13 +9202,16 @@ HTML = r"""<!doctype html>
       background-attachment: fixed;
     }
 
-    /* The pane fills the screen, no borders, no card */
+    /* The pane fills the form-pane column (NOT 100vw — that ignores
+       the parent grid layout and makes the chat overlap the stage at
+       wider viewports). Salo's 1920px screen exposed this bug. */
     body.agent-fullscreen .agent-pane {
-      width: 100vw; height: 100vh; max-height: 100vh;
+      width: 100%; height: 100vh; max-height: 100vh;
       border: none; border-radius: 0;
       background: transparent;
       overflow: hidden;
       display: flex; flex-direction: column;
+      box-sizing: border-box;
     }
 
     /* Header in fullscreen: same chip language as the regular agent
@@ -9289,11 +9293,13 @@ HTML = r"""<!doctype html>
     }
 
     /* Composer: floating glass card with soft shadow + fading
-       gradient above so chat appears to dissolve under it. */
+       gradient above so chat appears to dissolve under it.
+       Width unified with chat reading column (800px) so the textarea
+       aligns vertically with the chat above. */
     body.agent-fullscreen .agent-composer {
       background: transparent;
       border-top: none;
-      padding: 0 28px 24px;
+      padding: 0;
       position: relative;
       z-index: 5;
     }
@@ -9310,8 +9316,8 @@ HTML = r"""<!doctype html>
       );
     }
     body.agent-fullscreen .agent-composer-wrap {
-      max-width: 720px; width: 100%;
-      margin: 0 auto;
+      max-width: none; width: 100%;
+      margin: 0;
       position: relative; z-index: 1;
     }
     body.agent-fullscreen .agent-composer textarea {
@@ -9519,16 +9525,23 @@ HTML = r"""<!doctype html>
       box-sizing: border-box;
     }
     body.agent-fullscreen.asp-pinned .form-pane { padding: 0 32px 0 312px; }
+    /* Chat reading column — centered within the form-pane content
+       area. At 1600px viewport, content area = 796px; chat 800px is
+       clamped to 796 with no centering slack (sits left-anchored to
+       sidebar). At wider viewports (1920px+), chat stays at 800px and
+       centers between sidebar and stage with comfortable gutters on
+       both sides. Salo's screen is wider; this fixes "central window
+       not properly centered". */
     body.agent-fullscreen .agent-chat {
       max-width: 800px;
       width: 100%;
-      margin: 0;                         /* left-anchored, not auto-centered */
+      margin: 0 auto;
       padding: 12px 0 20px;
     }
     body.agent-fullscreen .agent-composer {
       max-width: 800px;
       width: 100%;
-      margin: 0 0 18px;
+      margin: 0 auto 18px;
       padding: 0;
     }
     /* Header spans the full form-pane content width so the chips
@@ -9543,7 +9556,7 @@ HTML = r"""<!doctype html>
     /* Engine-readiness banner aligns with the chat column. */
     body.agent-fullscreen #agentEngineBanner {
       max-width: 800px;
-      margin: 8px 0;
+      margin: 8px auto;
     }
 
     /* User bubble in fullscreen — a touch wider so dialogue beats
