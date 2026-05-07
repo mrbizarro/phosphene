@@ -9390,24 +9390,35 @@ HTML = r"""<!doctype html>
       border-color: rgba(47,129,247,0.45);
     }
 
-    /* Send button — distinctive accent fill, slightly larger, deeper
-       shadow. Sits inside the same rounded box at the right edge. */
-    body.agent-fullscreen .agent-composer .send-btn {
+    /* Send button — accent fill, matched 40x40 with attach (so the
+       composer reads as a balanced triplet). The Linear pass uses an
+       ID selector (#agentSendBtn) for its 30x30 override; we match
+       that specificity here so the fullscreen size wins.
+       Also brightens the disabled state — earlier rgba(255,255,255,
+       0.3) on dark glass made the button effectively invisible per
+       Salo's screenshot ("send button is not even centered" — it
+       was, but barely visible at 30x30 with 0.3 opacity). */
+    body.agent-fullscreen .agent-composer .send-btn,
+    body.agent-fullscreen #agentSendBtn {
       width: 40px; height: 40px;
       right: 8px; bottom: 8px;
       border-radius: 12px;
       z-index: 2;
       box-shadow: 0 6px 20px rgba(47,129,247,0.45);
     }
-    body.agent-fullscreen .agent-composer .send-btn:hover:not(:disabled) {
+    body.agent-fullscreen .agent-composer .send-btn:hover:not(:disabled),
+    body.agent-fullscreen #agentSendBtn:hover:not(:disabled) {
       box-shadow: 0 8px 28px rgba(47,129,247,0.55);
       transform: translateY(-1px);
     }
-    body.agent-fullscreen .agent-composer .send-btn:disabled {
-      background: rgba(255,255,255,0.05);
+    body.agent-fullscreen .agent-composer .send-btn:disabled,
+    body.agent-fullscreen #agentSendBtn:disabled {
+      background: rgba(120, 140, 200, 0.10);
+      color: rgba(220, 230, 250, 0.55);     /* visible "ready to send" affordance even when empty */
       box-shadow: none;
     }
-    body.agent-fullscreen .agent-composer .send-btn svg {
+    body.agent-fullscreen .agent-composer .send-btn svg,
+    body.agent-fullscreen #agentSendBtn svg {
       width: 18px; height: 18px;
     }
 
