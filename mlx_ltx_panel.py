@@ -9897,6 +9897,1018 @@ HTML = r"""<!doctype html>
       border-color: var(--accent);
       color: var(--accent-bright);
     }
+
+    /* =========================================================
+       LINEAR DESIGN PASS — final layer
+       =========================================================
+       Direction picked by Salo on 2026-05-07. This block layers a
+       Linear-style refinement on top of the working panel: hairline
+       borders, dense type, monospaced numerics, very subtle
+       elevation, and a unified "chip" language across every header.
+       Lives at the END of the style block so it wins specificity.
+       NO class renames — every existing JS handler still finds its
+       targets.
+
+       Per Salo's feedback: workflow tabs are repositioned to the
+       top-left of the form-pane (instead of full-width centered),
+       which keeps the existing user habit but reads cleaner. */
+
+    :root {
+      --ph-bg: #00061a;
+      --ph-elev-1: #0c1330;
+      --ph-elev-2: #141a3a;
+      --ph-border-soft: rgba(140, 160, 220, 0.08);
+      --ph-border-strong: rgba(140, 160, 220, 0.16);
+      --ph-text-faint: #5b6478;
+      --ph-grad-pink: #ff3d8a;
+      --ph-grad-magenta: #ff5fa8;
+      --ph-grad-cyan: #4fd6ff;
+      --ph-font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+    }
+
+    /* Subtle radial wash above the void so the dark navy lifts at the
+       top — matches the Linear artboard. */
+    body {
+      background: var(--ph-bg);
+      background-image: radial-gradient(ellipse 1200px 600px at 50% -10%, rgba(47,129,247,0.06), transparent 60%);
+      font-size: 13px;
+    }
+
+    /* === TOP HEADER ============================================
+       44px tall, blurred backdrop, hairline bottom border. The
+       wordmark sits on the left as a brand pill (logo + gradient
+       text + version + DEV badge). Status chips cluster on the
+       right with a vertical divider before the user actions. */
+    body > header {
+      height: 44px;
+      flex: 0 0 auto;
+      padding: 0 14px;
+      gap: 10px;
+      flex-wrap: nowrap;
+      align-items: center;
+      border-bottom: 1px solid var(--ph-border-soft);
+      background: rgba(0, 6, 26, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      overflow: hidden;
+    }
+    /* Replace the legacy 104px banner image with the circular logo +
+       gradient wordmark. The brand <a> wraps both as one click target. */
+    body > header .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      text-decoration: none;
+    }
+    body > header .brand img {
+      content: url('/assets/favicon-64.png');
+      height: 22px;
+      width: 22px;
+      display: block;
+      filter: drop-shadow(0 0 6px rgba(79, 214, 255, 0.18));
+    }
+    body > header .brand::after {
+      content: 'Phosphene';
+      background: linear-gradient(92deg, var(--ph-grad-pink) 0%, var(--ph-grad-magenta) 45%, var(--ph-grad-cyan) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+    }
+    /* Hide the existing version-badge styling and re-render it Linear-style
+       (mono "v2.0" in a chip). Keep the element so the JS doesn't break. */
+    body > header .version-badge {
+      margin: 0;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-family: var(--ph-font-mono);
+      color: var(--muted);
+      background: rgba(140, 160, 220, 0.06);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 5px;
+      letter-spacing: 0.02em;
+      font-weight: 500;
+      text-transform: none;
+    }
+    body > header .profile-badge {
+      margin: 0 0 0 4px;
+      padding: 2px 6px;
+      font-size: 9px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      font-weight: 600;
+      border-radius: 5px;
+    }
+    body > header .spacer { flex: 1 1 auto; }
+
+    /* Unified chip language for every header pill — Tier, RAM, Helper,
+       Models, Queue, current job, version, etc. */
+    body > header > .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 6px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      transition: border-color var(--t-base), color var(--t-base);
+    }
+    body > header > .pill:hover {
+      border-color: var(--ph-border-strong);
+      color: var(--text);
+    }
+    body > header > .pill .dot {
+      width: 6px; height: 6px;
+      border-radius: 999px;
+      margin-right: 0;
+      box-shadow: none;
+    }
+    body > header > .pill-good { color: var(--success); border-color: rgba(63,185,80,0.30); }
+    body > header > .pill-good .dot { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    body > header > .pill-warn { color: var(--warning); border-color: rgba(210,153,34,0.35); }
+    body > header > .pill-danger { color: var(--danger); border-color: rgba(248,81,73,0.35); }
+    body > header > .pill-running {
+      color: var(--accent-bright);
+      border-color: rgba(47,129,247,0.30);
+      background: rgba(47,129,247,0.06);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    body > header > .pill-current { color: var(--success); border-color: rgba(63,185,80,0.25); }
+    body > header > .pill-update { color: var(--warning); border-color: rgba(240,185,64,0.40); background: rgba(240,185,64,0.06); }
+    body > header > .pill-restart { color: var(--accent-bright); border-color: rgba(126,152,255,0.40); background: rgba(126,152,255,0.06); }
+
+    /* Settings cog — same height as chips, ghost styling. */
+    body > header #settingsBtn,
+    body > header .icon-btn {
+      width: 26px; height: 26px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      cursor: pointer;
+      transition: color var(--t-base), background var(--t-base);
+    }
+    body > header #settingsBtn:hover,
+    body > header .icon-btn:hover {
+      color: var(--text);
+      background: rgba(140, 160, 220, 0.06);
+    }
+    body > header #stopComfyBtn {
+      height: 24px; padding: 0 10px;
+      font-size: 11px; font-weight: 500;
+      border-radius: 6px;
+      width: auto; flex: 0 0 auto;
+    }
+    /* Creator chip — square avatar, mono "by Bizarro" label, no underline. */
+    body > header .creator-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 8px 0 3px;
+      border-radius: 6px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: border-color var(--t-base), color var(--t-base);
+    }
+    body > header .creator-link:hover { color: var(--text); border-color: var(--ph-border-strong); }
+    body > header .creator-link .creator-avatar,
+    body > header .creator-link img {
+      width: 18px; height: 18px;
+      border-radius: 4px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    body > header .creator-link .x-icon {
+      font-size: 10px;
+      color: var(--ph-text-faint);
+      letter-spacing: 0.04em;
+    }
+
+    /* === MAIN LAYOUT ===========================================
+       Hairline-bordered panes, no internal radius — Linear's edge
+       feel is "everything is one continuous surface". */
+    main.layout {
+      gap: 0;
+      padding: 0;
+      grid-template-columns: 440px 1fr;
+    }
+    .form-pane,
+    .stage-pane,
+    .agent-stage-pane {
+      background: transparent;
+      border: none;
+      border-right: 1px solid var(--ph-border-soft);
+      border-radius: 0;
+    }
+    .stage-pane,
+    .agent-stage-pane { border-right: none; }
+    .form-pane { padding: 0 0 18px 0; }
+    body[data-workflow="agent"] main.layout {
+      grid-template-columns: minmax(560px, 1fr) minmax(420px, 460px);
+    }
+
+    /* === WORKFLOW TABS =========================================
+       Salo asked for these to be moved away from the centered top
+       slot. Now they live at the top-left of the form-pane as a
+       small segmented control — same place users have always seen
+       them, just visually re-tuned. */
+    .workflow-tabs {
+      display: inline-flex;
+      gap: 0;
+      padding: 2px;
+      margin: 14px 0 18px 18px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 7px;
+      width: auto;
+      max-width: max-content;
+    }
+    .workflow-tabs button {
+      flex: 0 0 auto;
+      padding: 5px 14px;
+      font-size: 12px; font-weight: 500;
+      letter-spacing: 0;
+      background: transparent;
+      color: var(--muted);
+      border: none;
+      border-radius: 5px;
+      box-shadow: none;
+      transition: background var(--t-base), color var(--t-base);
+    }
+    .workflow-tabs button:hover {
+      background: rgba(140, 160, 220, 0.06);
+      color: var(--text);
+    }
+    .workflow-tabs button.active {
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.22);
+      border: none;
+    }
+    .workflow-tabs .new-badge {
+      margin-left: 6px;
+      padding: 1px 5px;
+      font-size: 9px; font-weight: 600;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.06em;
+      background: rgba(47, 129, 247, 0.12);
+      color: var(--accent-bright);
+      border: 1px solid rgba(47, 129, 247, 0.24);
+      border-radius: 3px;
+      vertical-align: baseline;
+    }
+
+    /* === FORM PANE INNER ===
+       Contents inside the form (other than workflow tabs and the agent
+       pane) get padding, but the workflow tabs themselves now hug the
+       top-left corner, set by their own margin above. */
+    .form-pane > #genForm { padding: 0 18px; }
+    .form-pane > #modelsInline { margin: 0 18px 14px; }
+    /* h2 section labels — mono uppercase, Linear's signature. */
+    #genForm h2 {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      color: var(--ph-text-faint);
+      text-transform: uppercase;
+      margin: 22px 0 8px;
+      font-weight: 500;
+    }
+    #genForm h2:first-of-type { margin-top: 0; }
+
+    /* Mode + Quality pickers as Linear's grouped panel: a subtle inset
+       container with hairline border, then 4 buttons inside. */
+    .pill-group.cols-2,
+    .pill-group.cols-4 {
+      gap: 6px;
+      padding: 3px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+    }
+    .pill-btn {
+      padding: 8px 10px;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      box-shadow: none;
+      border-radius: 6px;
+      transition: background var(--t-base), color var(--t-base);
+    }
+    .pill-btn:hover {
+      background: rgba(140, 160, 220, 0.05);
+      color: var(--text);
+      border: none;
+    }
+    .pill-btn.active {
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.22);
+      border: none;
+    }
+    .pill-btn .sub {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      color: var(--ph-text-faint);
+      letter-spacing: 0;
+    }
+    .pill-btn.active .sub { color: var(--accent-bright); opacity: 0.8; }
+
+    /* Quality cards — 2x2 with looser padding + RECOMMENDED badge style.
+       Override the .pill-group inset bg so each card reads as standalone. */
+    .pill-group.cols-2.quality-row {
+      padding: 0;
+      background: transparent;
+      border: none;
+      gap: 8px;
+    }
+    .pill-quality {
+      padding: 10px 12px !important;
+      align-items: flex-start !important;
+      text-align: left !important;
+      min-height: 76px;
+      background: rgba(20, 26, 58, 0.4) !important;
+      border: 1px solid var(--ph-border-soft) !important;
+      border-radius: 8px !important;
+      box-shadow: none !important;
+      position: relative;
+    }
+    .pill-quality:hover { background: rgba(20, 26, 58, 0.6) !important; border-color: var(--ph-border-strong) !important; }
+    .pill-quality.active {
+      background: rgba(47, 129, 247, 0.06) !important;
+      border-color: rgba(47, 129, 247, 0.45) !important;
+      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.18) !important;
+    }
+    .pill-quality.active::after {
+      content: 'RECOMMENDED';
+      position: absolute;
+      top: 9px; right: 10px;
+      font-size: 9px;
+      font-family: var(--ph-font-mono);
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(47, 129, 247, 0.16);
+      color: var(--accent-bright);
+      letter-spacing: 0.06em;
+    }
+    .pill-quality .ql-name { font-size: 13px; font-weight: 600; color: var(--text); }
+    .pill-quality.active .ql-name { color: var(--text); }
+    .pill-quality .ql-spec {
+      font-size: 11px;
+      font-family: var(--ph-font-mono);
+      color: var(--muted);
+    }
+    .pill-quality .ql-tier {
+      font-size: 9.5px;
+      font-family: var(--ph-font-mono);
+      color: var(--ph-text-faint);
+      margin-top: 6px;
+    }
+
+    /* Prompt + Avoid textareas — denser, hairline border, monospaced
+       placeholder hint. */
+    #genForm textarea,
+    #genForm input[type="text"],
+    #genForm input[type="number"],
+    #genForm select {
+      background: rgba(12, 19, 48, 0.5);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+    #genForm textarea:focus,
+    #genForm input:focus,
+    #genForm select:focus {
+      border-color: var(--accent);
+      background: rgba(12, 19, 48, 0.7);
+      box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.18);
+    }
+
+    /* Inline buttons (Enhance / HDR / No-music) styled as Linear ghost pills */
+    .row-actions .ghost-btn,
+    .toggle-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--ph-border-soft);
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      width: auto;
+      cursor: pointer;
+      transition: border-color var(--t-base), color var(--t-base), background var(--t-base);
+    }
+    .row-actions .ghost-btn:hover,
+    .toggle-pill:hover {
+      border-color: var(--ph-border-strong);
+      color: var(--text);
+    }
+    .toggle-pill.is-on {
+      border-color: rgba(47, 129, 247, 0.28);
+      background: var(--accent-dim);
+      color: var(--accent-bright);
+    }
+
+    /* Generate / Stop primary action — Linear blue with subtle blue
+       glow. */
+    button.primary,
+    #genBtn,
+    button[type="submit"].primary {
+      padding: 10px 14px;
+      font-size: 13px; font-weight: 600;
+      border-radius: 6px;
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 4px 14px rgba(47, 129, 247, 0.25);
+    }
+    button.primary:hover { background: var(--accent-bright); }
+    .actions { gap: 8px; margin-top: 18px; }
+
+    /* === STAGE / PLAYER PANE (Manual mode) ===================== */
+    .stage-pane {
+      background: transparent;
+      padding: 18px;
+    }
+    .player-wrap {
+      border-radius: 10px;
+      border: 1px solid var(--ph-border-soft);
+      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
+      flex: 0 0 auto;
+      aspect-ratio: 16/9;
+      max-height: 50vh;
+    }
+    .player-wrap.empty {
+      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
+      color: var(--ph-text-faint);
+      font-size: 12px;
+    }
+    .player-meta {
+      background: transparent;
+      border: none;
+      padding: 12px 0 0;
+      font-size: 12px;
+    }
+    .player-meta .name {
+      font-family: var(--ph-font-mono);
+      font-size: 13px;
+      color: var(--text);
+    }
+    .player-meta .actions-bar button {
+      padding: 6px 10px;
+      font-size: 11.5px;
+      border-radius: 6px;
+      border: 1px solid var(--ph-border-soft);
+      background: transparent;
+      color: var(--muted);
+    }
+    .player-meta .actions-bar button:hover {
+      border-color: var(--ph-border-strong);
+      color: var(--text);
+    }
+
+    /* Carousel — hairline cards with mono filenames. */
+    .carousel-wrap {
+      padding: 18px 0 0;
+      background: transparent;
+      border-top: 1px solid var(--ph-border-soft);
+      margin-top: 18px;
+    }
+    .carousel-head h3 {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      color: var(--ph-text-faint);
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+    .carousel-head .seg {
+      padding: 2px;
+      gap: 0;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 7px;
+      overflow: visible;
+    }
+    .carousel-head .seg button {
+      padding: 4px 10px;
+      font-size: 11.5px;
+      border: none;
+      border-radius: 5px;
+      color: var(--muted);
+    }
+    .carousel-head .seg button.active {
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.22);
+    }
+    .car-card {
+      flex: 0 0 220px;
+      border-radius: 10px;
+      border: 1px solid var(--ph-border-soft);
+      background: rgba(20, 26, 58, 0.4);
+      box-shadow: none;
+    }
+    .car-card:hover {
+      border-color: var(--ph-border-strong);
+      transform: none;
+      box-shadow: none;
+    }
+    .car-card.active {
+      border-color: rgba(47, 129, 247, 0.55);
+      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.30);
+    }
+    .car-card .name {
+      font-family: var(--ph-font-mono);
+      font-size: 11.5px;
+    }
+    .car-card .sub {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      color: var(--ph-text-faint);
+    }
+
+    /* === AGENT PANE (Agentic Flows) ============================ */
+    .agent-pane {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+    }
+    .agent-pane > .agent-header {
+      height: 40px;
+      padding: 0 14px;
+      gap: 8px;
+      background: transparent;
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+    /* Sessions trigger — chip-style, mono "0" count */
+    .agent-header .asp-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 9px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 12px; font-weight: 500;
+      width: auto; flex: 0 0 auto;
+      cursor: pointer;
+      transition: border-color var(--t-base), color var(--t-base);
+    }
+    .agent-header .asp-trigger:hover { border-color: var(--ph-border-strong); color: var(--text); }
+    .agent-header .asp-trigger-count {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      color: var(--ph-text-faint);
+    }
+    /* Engine pill / mode pill / RAM chip — all unified to chip language */
+    .agent-header .engine-pill {
+      height: 24px;
+      padding: 0 9px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: var(--ph-font-mono);
+    }
+    .agent-header .engine-pill .dot {
+      width: 6px; height: 6px;
+      box-shadow: none;
+    }
+    .agent-header .engine-pill .dot.live {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+    .agent-header .agent-mode-pill {
+      height: 24px;
+      padding: 0 9px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .agent-header .agent-mode-pill.is-interactive {
+      background: rgba(47, 129, 247, 0.10);
+      border-color: rgba(47, 129, 247, 0.22);
+      color: var(--accent-bright);
+    }
+    .agent-header .agent-engine-stop {
+      height: 24px;
+      padding: 0 9px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      font-size: 12px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .agent-header .agent-engine-stop:hover {
+      color: var(--danger);
+      border-color: rgba(248, 81, 73, 0.30);
+      background: rgba(248, 81, 73, 0.06);
+    }
+    .agent-header .agent-ram-chip {
+      height: 24px;
+      padding: 0 9px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: var(--ph-font-mono);
+    }
+    .agent-header .agent-ram-chip .agent-ram-dot {
+      width: 6px; height: 6px;
+      box-shadow: none;
+    }
+    .agent-header .session-title {
+      font-size: 13px;
+      font-weight: 500;
+      padding-left: 8px;
+      text-align: right;
+    }
+    .agent-header .icon-btn {
+      width: 26px; height: 26px;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      color: var(--muted);
+    }
+    .agent-header .icon-btn:hover {
+      color: var(--text);
+      background: rgba(140, 160, 220, 0.06);
+      border: none;
+    }
+
+    /* === CHAT THREAD ===========================================
+       Tighter padding, smaller bubbles, the user bubble is a soft
+       blue tint with hairline border — the assistant stays naked
+       on the void. Flex-column on the chat so user rows can
+       right-align with align-self. */
+    .agent-chat {
+      padding: 20px 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+    .agent-msg-row { margin-bottom: 16px; gap: 10px; max-width: 92%; }
+    .agent-msg-row.user {
+      align-self: flex-end;
+      flex-direction: row-reverse;
+      max-width: 75%;
+    }
+    .agent-msg-row.user .agent-msg-body { flex: 0 1 auto; min-width: 0; }
+    .agent-msg-row.user .agent-msg-name { display: none; }
+    .agent-avatar {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      font-size: 10px;
+      border: 1px solid var(--ph-border-soft);
+      background: var(--ph-elev-2);
+    }
+    .agent-avatar.user {
+      background: linear-gradient(135deg, var(--ph-grad-magenta), var(--ph-grad-cyan));
+      color: var(--ph-bg);
+      border: none;
+    }
+    .agent-msg-row.user .agent-msg-content {
+      background: rgba(47, 129, 247, 0.12);
+      border: 1px solid rgba(47, 129, 247, 0.22);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+    .agent-msg-content { font-size: 13px; line-height: 1.55; }
+
+    /* Tool result inline cards — quieter than prose */
+    .agent-tool-card {
+      margin-top: 8px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(20, 26, 58, 0.4);
+      font-size: 12px;
+      border-left: 1px solid var(--ph-border-soft);
+    }
+    .agent-tool-card.success { border-left-color: rgba(63, 185, 80, 0.45); }
+    .agent-tool-card.error { border-left-color: rgba(248, 81, 73, 0.45); }
+    .agent-tool-card.pending { border-left-color: rgba(47, 129, 247, 0.45); }
+    .agent-tool-card .head {
+      font-family: var(--ph-font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      padding: 6px 10px;
+      background: rgba(140, 160, 220, 0.025);
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+
+    /* === COMPOSER ==============================================
+       Hairline-bordered card with paperclip + textarea + send.
+       Batch-now bar above it uses the accent-blue ghost styling
+       per Linear (replaces the green gradient). */
+    .agent-composer {
+      background: transparent;
+      border-top: 1px solid var(--ph-border-soft);
+      padding: 0 24px 16px;
+    }
+    .agent-batch-bar {
+      height: 30px;
+      padding: 0 10px;
+      margin: 12px 0 8px;
+      background: rgba(47, 129, 247, 0.10);
+      border: 1px solid rgba(47, 129, 247, 0.24);
+      border-radius: 7px;
+      box-shadow: none;
+      font-size: 12px;
+      color: var(--accent-bright);
+    }
+    .agent-batch-bar-icon { color: var(--accent-bright); }
+    .agent-batch-bar-text { color: var(--accent-bright); }
+    .agent-batch-bar-btn {
+      padding: 4px 10px;
+      font-size: 11.5px;
+      font-weight: 500;
+      border-radius: 5px;
+      background: var(--accent);
+      color: white;
+    }
+    .agent-composer-wrap {
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 10px;
+      background: rgba(12, 19, 48, 0.6);
+      padding: 4px 4px 4px 4px;
+    }
+    .agent-composer textarea {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 10px 56px 10px 50px;
+      font-size: 13px;
+      min-height: 44px;
+    }
+    .agent-composer textarea:focus { box-shadow: none; border: none; background: transparent; }
+    .agent-composer .attach-btn {
+      bottom: 4px; left: 4px;
+      width: 30px; height: 30px;
+      border-radius: 7px;
+    }
+    .agent-composer .send-btn,
+    #agentSendBtn {
+      width: 30px; height: 30px;
+      border-radius: 7px;
+      bottom: 4px; right: 4px;
+    }
+
+    /* === AGENT STAGE PANE ====================================== */
+    .agent-stage-pane {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      border-left: 1px solid var(--ph-border-soft);
+    }
+    .agent-stage-head {
+      height: 40px;
+      padding: 0 18px;
+      background: transparent;
+      border-bottom: 1px solid var(--ph-border-soft);
+      gap: 8px;
+    }
+    .agent-stage-head .label {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      color: var(--ph-text-faint);
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+    .agent-stage-head .session-pill {
+      font-family: var(--ph-font-mono);
+      font-size: 11px;
+      padding: 2px 8px;
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      color: var(--muted);
+    }
+    .agent-stage-body {
+      padding: 0;
+      gap: 0;
+    }
+    .agent-stage-section {
+      padding: 14px 18px;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--ph-border-soft);
+      border-radius: 0;
+    }
+    .agent-stage-section:last-child { border-bottom: none; }
+    .agent-stage-section h4 {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      color: var(--ph-text-faint);
+      text-transform: uppercase;
+      font-weight: 500;
+      margin-bottom: 10px;
+    }
+    .agent-stage-section h4 .count {
+      font-family: var(--ph-font-mono);
+      font-size: 10px;
+      padding: 1px 6px;
+      background: rgba(47, 129, 247, 0.10);
+      color: var(--accent-bright);
+      border-radius: 4px;
+      font-weight: 500;
+    }
+    .stage-now-card {
+      padding: 0;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
+      aspect-ratio: 16/9;
+      position: relative;
+      overflow: hidden;
+    }
+    .stage-now-card.idle {
+      aspect-ratio: auto;
+      padding: 24px 14px;
+      background: rgba(20, 26, 58, 0.4);
+      color: var(--ph-text-faint);
+      font-style: normal;
+      font-size: 12px;
+      font-family: var(--ph-font-mono);
+    }
+    .stage-progress-fill {
+      box-shadow: none;
+      background: var(--accent-bright);
+    }
+    .stage-progress-text {
+      font-size: 11px;
+      font-family: var(--ph-font-mono);
+    }
+    .stage-outputs {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .stage-output-cell {
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(20, 26, 58, 0.4);
+    }
+    .stage-output-cell:hover {
+      border-color: var(--ph-border-strong);
+      transform: none;
+    }
+    .stage-output-cell .label {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      padding: 4px 6px;
+      background: rgba(0, 0, 0, 0.5);
+    }
+
+    /* === BOTTOM PANEL ========================================== */
+    .bottom-pane {
+      max-height: 280px;
+      background: rgba(0, 6, 26, 0.6);
+      border-top: 1px solid var(--ph-border-soft);
+    }
+    .bottom-pane.collapsed { max-height: 32px; }
+    .bottom-pane .tabs {
+      padding: 0 14px;
+      gap: 4px;
+      height: 32px;
+      flex: 0 0 32px;
+      border-bottom: 1px solid var(--ph-border-soft);
+      font-size: 11.5px;
+      color: var(--muted);
+      font-family: var(--ph-font-mono);
+    }
+    .bottom-pane .tabs button {
+      height: 22px; padding: 0 8px;
+      font-size: 11.5px;
+      border-radius: 5px;
+      border-bottom: none;
+      color: var(--ph-text-faint);
+      gap: 5px;
+      background: transparent;
+    }
+    .bottom-pane .tabs button:hover { color: var(--text); background: rgba(140, 160, 220, 0.06); }
+    .bottom-pane .tabs button.active {
+      color: var(--text);
+      background: rgba(140, 160, 220, 0.06);
+      border-bottom: none;
+    }
+    .bottom-pane .tabs button .badge {
+      font-family: var(--ph-font-mono);
+      font-size: 10px;
+      padding: 0 5px;
+      background: rgba(47, 129, 247, 0.12);
+      color: var(--accent-bright);
+      border-radius: 3px;
+    }
+    .bottom-pane .tabs .tab-collapse {
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 5px;
+      border: 1px solid var(--ph-border-soft);
+      color: var(--muted);
+      height: 22px;
+    }
+    .bottom-pane .tabs .tab-collapse:hover { color: var(--text); border-color: var(--ph-border-strong); }
+    .bottom-pane .tabs .model-credit {
+      font-size: 11px;
+      color: var(--ph-text-faint);
+      border-right: 1px solid var(--ph-border-soft);
+      padding: 0 12px;
+    }
+
+    /* Now-card inside bottom pane — flat hairline */
+    .bottom-pane .now-card {
+      background: rgba(20, 26, 58, 0.4);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .bottom-pane .now-card .ttl { font-size: 13px; font-weight: 500; }
+    .bottom-pane .now-card .meta {
+      font-family: var(--ph-font-mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .bottom-pane .progress-bar { background: rgba(140, 160, 220, 0.08); }
+    .bottom-pane .progress-bar .fill {
+      background: var(--accent-bright);
+      box-shadow: none;
+    }
+
+    /* row-list rows — flatter, hairline */
+    .bottom-pane .row-list li {
+      background: rgba(20, 26, 58, 0.4);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+    }
+    .bottom-pane .row-list li .ttl { font-size: 12px; }
+    .bottom-pane .row-list li .params {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+    }
+
+    /* Logs — match the void background */
+    .bottom-pane pre.log {
+      background: var(--ph-bg);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      font-family: var(--ph-font-mono);
+      font-size: 11px;
+      color: #b0b8c4;
+    }
+
+    /* === MODELS-INLINE CARD =================================== */
+    .models-inline {
+      background: rgba(20, 26, 58, 0.4);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 10px;
+    }
+
+    /* === LoRAs section + Customize disclosure ================== */
+    .form-divider {
+      border-top: 1px solid var(--ph-border-soft);
+      margin: 18px 0;
+    }
+    .loras-section, .customize-section {
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(20, 26, 58, 0.25);
+    }
+
+    /* === Sub-header strip BELOW the workflow tabs (Manual mode)
+       — empty intentionally; the workflow tabs already act as the
+       leading row, the form sections start right under them. */
+
+    /* === FALLBACK: Hide unwanted inline icons in version pill === */
+    body > header > .pill svg { width: 12px; height: 12px; }
   </style>
 </head>
 <body>
