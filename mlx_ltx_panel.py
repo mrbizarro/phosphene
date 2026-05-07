@@ -2194,16 +2194,14 @@ def list_uploads(limit: int = 40) -> list[dict]:
 
 
 def list_outputs(include_hidden: bool = False) -> list[dict]:
-    # Sort OLDEST first (mtime ascending) so the gallery reads
-    # left→right as time-forward — older clips on the left, newer
-    # clips appear on the right end as they finish. The horizontal
-    # carousel's overflow-x scroll combined with the right-side scroll
-    # nudge in renderCarousel() keeps the latest visible. The 120-cap
-    # is over the WHOLE history; we slice from the tail (newest) so
-    # the rightmost position always holds the newest clips even when
-    # there are 200+ renders on disk.
-    all_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
-    files = all_files[-120:]                # keep last 120, oldest→newest order
+    # Newest-first ordering (mtime DESC): the horizontal carousel reads
+    # left→right as "most recent → older", which is the convention the
+    # user expects (matches the manual gallery's prior behavior + the
+    # camera-roll model). An earlier commit briefly flipped this to
+    # ascending; users immediately reported it as a regression. The
+    # in-chat Stage Outputs grid is reversed in agentStageRender() to
+    # match the same "newest first" rule across both surfaces.
+    files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
     # Y1.039 — skip files that ffmpeg is still writing.
     #
     # Pre-Y1.039 a fresh render appeared in the gallery the moment its mp4
@@ -11839,12 +11837,6 @@ function _outputDurationLabel(o) {
 function renderCarousel() {
   const el = document.getElementById('carousel');
   if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
-  // Track whether the user is at-or-near the rightmost position BEFORE
-  // re-render. If they are, scroll back to the right after render so a
-  // newly-arrived clip stays visible. If they've scrolled LEFT to inspect
-  // older clips, leave their scroll position alone — don't yank them.
-  const wasNearRight = !el.scrollWidth ||
-    (el.scrollWidth - el.scrollLeft - el.clientWidth) <= 80;
   el.innerHTML = currentOutputs.map(o => {
     const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
     // Thumbnail seek point: 2.5s is the midpoint of an LTX 5s clip (121
@@ -11872,12 +11864,6 @@ function renderCarousel() {
       </div>
     </div>`;
   }).join('');
-  // After re-render, restore scroll-pin: if the user was at the right end
-  // (newest), keep them there so a freshly-finished clip is visible. If
-  // they were scrolled left to examine older clips, leave them be.
-  if (wasNearRight) {
-    requestAnimationFrame(() => { el.scrollLeft = el.scrollWidth; });
-  }
 }
 
 function selectOutput(path) {
@@ -16406,6 +16392,12 @@ function agentStageRender(status, sess) {
     if (rank(o.status) >= rank(cur.status)) byLabel.set(o.label, o);
   }
   outputs = Array.from(byLabel.values());
+  // Newest-first display — the agent appends to submitted_shots in
+  // submission order, so the END of the array is the most recent.
+  // Reverse so the top-left of the grid holds the newest clip the
+  // user just got, with older flowing right and down. Matches the
+  // main gallery's "newest first" convention.
+  outputs.reverse();
   outputsCountEl.textContent = outputs.length;
   if (outputs.length === 0) {
     outputsEl.innerHTML = `<div class="stage-empty">No mp4s rendered yet. Submit a shot from the chat.</div>`;
