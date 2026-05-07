@@ -331,13 +331,84 @@ chose.
 workflow ("just t2v, skip the picker"), or the shot is so abstract
 that no still serves as a useful anchor (a generic ambient cutaway).
 
-`mode: "keyframe"` (FFLF) — multi-frame anchored interpolation. Useful
-when the user wants both start AND end frames pinned. Tier-clamped to
-{max_dim_kf}px on Comfortable. Requires Q8 weights.
+`mode: "keyframe"` — anchored interpolation. The helper accepts
+**arbitrary N keyframes** (≥2), each with a `frame_index` placement.
+Tier-clamped to {max_dim_kf}px on Comfortable. Requires Q8 weights.
+
+Use 2 keyframes (FFLF) when the user pins start + end. Use **3 or
+more** when:
+
+- The shot has a clear middle beat (turn, sit-down, look, gesture).
+  Pin a still at the beat; the model interpolates approach + departure
+  motion around it.
+- You're chaining shots and need composition control beyond "first
+  frame anchored." Cross-shot continuity is achieved by reusing
+  shot N's last frame as shot N+1's keyframe-0.
+- The character is moving across screen and faces small-in-frame
+  trouble (sub-80 px). Pin keyframes where the face is at viable size;
+  let the small-face frames happen as interpolated motion blur.
+
+`keyframes` array shape (passed to submit_shot):
+
+```
+[
+  {{"image_path": "/abs/path/k0.png", "frame_index": 0}},
+  {{"image_path": "/abs/path/k1.png", "frame_index": 60}},
+  {{"image_path": "/abs/path/k2.png", "frame_index": 120}}
+]
+```
+
+Indices are pixel-frame, 0-based, strictly ascending, all in
+[0, frames-1]. The pipeline cover-crops every keyframe to the
+target width × height.
 
 `mode: "extend"` — append seconds to an existing clip. Slow
 (~16 min/+3s on Comfortable) and audio chains poorly across
 extensions. Use only when explicitly asked.
+
+# Character lock via LoRA
+
+The cleanest fix for "same prompt, different seed = different person"
+is a character-identity LoRA applied to **every shot** in the scene.
+The agent owns this lock across the whole session.
+
+Workflow:
+
+1. **Discover what's installed.** First mention of a recurring named
+   character → call `list_loras()`. If the user has a character LoRA
+   for someone matching the description (named character, recognizable
+   trigger words), suggest it. Don't try to install LoRAs — that
+   requires the user (Settings → LoRAs → Browse).
+2. **Lock it in project notes.** When the user agrees to use a LoRA
+   for a character, write the lock to durable memory:
+   ```
+   append_project_notes(content="Character LoRA — Emma: emma_v2.safetensors @ 0.85")
+   ```
+   Read project notes at the start of every session (or on every shot
+   for paranoia) to recover the lock across helper restarts and tab
+   reloads.
+3. **Apply on every render.** Pass the same LoRA on every
+   `submit_shot` for that character:
+   ```
+   "loras": [{{"name": "emma_v2.safetensors", "strength": 0.85}}]
+   ```
+   AND on every `generate_shot_images` call where Emma is in frame
+   (when the image engine supports it; today only some backends do —
+   if not supported, the still is still useful as composition input
+   but identity will lean on the video LoRA at render time).
+
+Two characters in one scene: pass BOTH LoRAs in the `loras` array,
+each at its own strength. Caveat — LoRA stacking quality drops above
+~2 stacked, and trigger-word collisions can blend identities. Surface
+the risk when the user asks for >2 character LoRAs at once.
+
+Strength tuning:
+- 0.85-1.0 — identity is locked, style of LoRA leaks slightly into
+  costume / lighting. Default for character ID LoRAs.
+- 0.6-0.8 — identity present but model has more freedom on costume /
+  framing. Good when the LoRA was trained on a narrow setting.
+- 0.5 or below — visible influence but easily overridden by the prompt.
+  Mostly useful for style LoRAs, not identity.
 
 # Writing prompts FOR ANCHOR STILLS (Phase B)
 

@@ -250,6 +250,15 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
       ref_image_path: str           — for i2v: absolute path to a previously-uploaded reference.
       keyframes: list[dict]         — for keyframe mode: [{image_path: str, frame_index: int}, ...]
                                       ≥2 items. Indices must be in [0, frames-1] and strictly increasing.
+                                      THREE OR MORE keyframes is the path to multi-shot character
+                                      continuity — see the system prompt's Character lock section.
+      loras: list[dict]             — optional, works across ALL modes:
+                                      [{name: "filename.safetensors", strength: 0.8}, ...]
+                                      `name` must match a filename returned by list_loras().
+                                      Strength clamped to [-2.0, 2.0]. Common values: 0.7-1.0
+                                      for character-identity LoRAs; 0.5-0.8 for style LoRAs.
+                                      For character lock across a multi-shot scene, pass the
+                                      same LoRA on every submit_shot call (see system prompt).
       source_clip: str              — for extend mode: absolute path to source mp4.
       extend_seconds: float = 2     — for extend: how much to add. Maps to extend_frames.
       label: str                    — human-readable label visible in queue/history.
@@ -401,6 +410,67 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
         if len(normalized) > 2:
             form["keyframes_json"] = json.dumps(normalized)
             form["keyframes_total_frames"] = str(target_frames)
+
+    # ---- Optional LoRAs (works across all modes) ------------------------
+    # Resolves filenames against installed LoRAs (so the agent can't apply
+    # something that isn't on disk), then emits the JSON shape the panel's
+    # parse_loras_from_form() consumes: [{path, strength}, ...].
+    #
+    # Character-lock workflow: agent reads the locked character LoRA from
+    # project notes on every shot and passes it here. See the system prompt's
+    # "Character lock via LoRA" section.
+    loras_in = args.get("loras")
+    if loras_in:
+        if not isinstance(loras_in, list):
+            raise _ToolValidationError(
+                "loras must be a list of {name, strength} dicts"
+            )
+        installed: dict[str, str] = {}
+        fn = getattr(ops, "list_loras_fn", None)
+        if fn is not None:
+            try:
+                for entry in (fn() or []):
+                    fname = entry.get("filename")
+                    fpath = entry.get("path")
+                    if fname and fpath:
+                        installed[fname] = fpath
+            except Exception as e:                          # noqa: BLE001
+                raise _ToolValidationError(
+                    f"could not enumerate installed LoRAs: {e}"
+                ) from e
+        if not installed:
+            raise _ToolValidationError(
+                "loras requested but no LoRAs are installed in this panel. "
+                "Call list_loras() to confirm, or ask the user to install one "
+                "via Settings → LoRAs → Browse."
+            )
+        resolved: list[dict] = []
+        for item in loras_in:
+            if not isinstance(item, dict):
+                raise _ToolValidationError(
+                    "each lora entry must be a dict {name, strength}"
+                )
+            name = (item.get("name") or "").strip()
+            if not name:
+                raise _ToolValidationError(
+                    "each lora entry needs a 'name' (the filename returned by list_loras)"
+                )
+            if name not in installed:
+                avail = sorted(installed)[:5]
+                more = ", ..." if len(installed) > 5 else ""
+                raise _ToolValidationError(
+                    f"LoRA {name!r} not installed. Available: {avail}{more}"
+                )
+            try:
+                strength = float(item.get("strength", 1.0))
+            except (TypeError, ValueError):
+                raise _ToolValidationError(
+                    f"strength must be a number, got {item.get('strength')!r}"
+                )
+            strength = max(-2.0, min(2.0, strength))
+            resolved.append({"path": installed[name], "strength": strength})
+        if resolved:
+            form["loras"] = json.dumps(resolved)
 
     # Sharp upscale path. Default: pipersr ON for balanced, off otherwise.
     method = (args.get("upscale_method") or "").lower()
