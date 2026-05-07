@@ -9427,6 +9427,144 @@ HTML = r"""<!doctype html>
       to   { opacity: 1; transform: scale(1); }
     }
 
+    /* =========================================================
+       FULLSCREEN POLISH PASS — Salo 2026-05-07
+       =========================================================
+       Per Salo: "improve the design of the full page for the chat,
+       it's not looking good. Put the history on the left to be
+       steady there. Make the full screen button stand out so people
+       know there is such an option."
+
+       Three pieces:
+         A. Sessions sidebar is ALWAYS pinned on the left in
+            fullscreen — no toggle needed, no slide-in animation;
+            it sits as a third grid column.
+         B. Three-column layout: 268px sessions | flexible chat |
+            440px stage. The chat reads as a centered reading column.
+         C. Fullscreen toggle button gets a brand-gradient accent in
+            regular mode so users discover the affordance; in
+            fullscreen it inverts to a subdued "exit" treatment. */
+
+    /* ---- A. Sessions sidebar pinned in fullscreen ------------- */
+    body.agent-fullscreen .agent-sessions-panel {
+      position: relative !important;     /* take grid space, not fixed overlay */
+      width: 100%;
+      height: 100vh;
+      transform: none !important;        /* always shown — no slide-in */
+      box-shadow: none !important;
+      border-right: 1px solid var(--ph-border-soft);
+      background: rgba(8, 13, 36, 0.55);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-sizing: border-box;
+    }
+    body.agent-fullscreen .asp-backdrop { display: none !important; }
+    body.agent-fullscreen #aspPinBtn { display: none !important; }   /* irrelevant — always pinned */
+    /* Sessions panel head/search inherit Linear chrome but lose the
+       hairlines that made sense as an overlay; here they read as
+       internal sections of the integrated sidebar. */
+    body.agent-fullscreen .asp-head {
+      border-bottom: 1px solid var(--ph-border-soft);
+      padding: 14px 16px 12px;
+    }
+    body.agent-fullscreen .asp-head .asp-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint);
+    }
+    body.agent-fullscreen .asp-search {
+      border-bottom: none;
+      padding: 10px 16px;
+    }
+    body.agent-fullscreen .asp-list {
+      padding: 4px 10px 16px;
+    }
+
+    /* ---- B. Three-column grid ---------------------------------- */
+    body.agent-fullscreen .layout {
+      grid-template-columns: 268px 1fr minmax(440px, 480px);
+    }
+    body.agent-fullscreen.asp-pinned .layout {
+      /* same grid in fullscreen regardless of asp-pinned — sessions
+         are always inline, ignore the (now redundant) pin class. */
+      grid-template-columns: 268px 1fr minmax(440px, 480px);
+    }
+    /* Form-pane padding-left override that asp-pinned added is
+       irrelevant in fullscreen (sessions are a separate column),
+       reset it so the chat doesn't get pushed twice. */
+    body.agent-fullscreen.asp-pinned .form-pane { padding-left: 0; }
+
+    /* Chat column: comfortable reading width, generous gutter, the
+       composer (which sticks at the bottom) inherits the same column
+       so the eye doesn't have to track wide-narrow-wide. */
+    body.agent-fullscreen .form-pane {
+      display: flex; flex-direction: column;
+      align-items: stretch;
+    }
+    body.agent-fullscreen .agent-chat {
+      max-width: 760px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 16px 32px 20px;
+    }
+    body.agent-fullscreen .agent-composer {
+      max-width: 800px;
+      width: 100%;
+      margin: 0 auto 18px;
+      padding: 0 24px;
+    }
+    /* The header in fullscreen also centers in the column so it lines
+       up with the chat below. */
+    body.agent-fullscreen .agent-pane > .agent-header {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 14px 24px;
+    }
+
+    /* User bubble in fullscreen — a touch wider so dialogue beats
+       don't wrap awkwardly at this reading width. */
+    body.agent-fullscreen .agent-msg-row { max-width: 100%; }
+    body.agent-fullscreen .agent-msg-row.user .agent-msg-body {
+      max-width: 78%;
+    }
+
+    /* ---- C. Fullscreen toggle button stands out --------------- */
+    /* In regular (non-fullscreen) mode: subtle brand-gradient accent
+       so users SEE the affordance. The other icon-buttons are quiet
+       greyscale; this one announces itself. */
+    body:not(.agent-fullscreen) .agent-header #agentFullscreenBtn {
+      background: linear-gradient(135deg,
+        rgba(255, 61, 138, 0.10) 0%,
+        rgba(79, 214, 255, 0.10) 100%);
+      border: 1px solid rgba(79, 214, 255, 0.28);
+      color: #c8e9ff;
+      box-shadow: 0 0 0 0 rgba(79, 214, 255, 0);
+      transition: box-shadow var(--t-base), background var(--t-base),
+                  border-color var(--t-base), color var(--t-base);
+    }
+    body:not(.agent-fullscreen) .agent-header #agentFullscreenBtn:hover {
+      background: linear-gradient(135deg,
+        rgba(255, 61, 138, 0.20) 0%,
+        rgba(79, 214, 255, 0.20) 100%);
+      border-color: rgba(79, 214, 255, 0.55);
+      color: #fff;
+      box-shadow: 0 0 14px rgba(79, 214, 255, 0.20);
+    }
+    /* In fullscreen: the button reverts to a quiet "exit" affordance
+       so it doesn't fight the chat for attention. */
+    body.agent-fullscreen .agent-header #agentFullscreenBtn {
+      background: rgba(140, 160, 220, 0.06);
+      border: 1px solid var(--ph-border-strong);
+      color: var(--muted);
+    }
+    body.agent-fullscreen .agent-header #agentFullscreenBtn:hover {
+      color: var(--text);
+      border-color: var(--ph-border-strong);
+      background: rgba(140, 160, 220, 0.10);
+    }
+
     /* ---- Typing indicator ---- */
     .agent-typing-row {
       display: flex; gap: 12px;
