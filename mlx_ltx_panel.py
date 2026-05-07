@@ -5801,6 +5801,17 @@ HTML = r"""<!doctype html>
       --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
       --success: #3fb950; --warning: #d29922; --danger: #f85149;
       --radius: 10px;
+      /* Polish tokens — adopted across the app for one consistent
+         elevation + radius + motion language. Pre-token, every component
+         hand-rolled its own shadow / radius / transition so the chrome
+         drifted into "Pythonic" territory. */
+      --shadow-1: 0 1px 2px rgba(0,0,0,0.30), 0 1px 0 rgba(255,255,255,0.02) inset;
+      --shadow-2: 0 8px 24px rgba(0,0,0,0.40);
+      --ring: 0 0 0 3px var(--accent-dim);
+      --r-xs: 6px; --r-sm: 8px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+      --t-fast: 120ms cubic-bezier(.2,.8,.2,1);
+      --t-base: 180ms cubic-bezier(.2,.8,.2,1);
+      --t-slow: 240ms cubic-bezier(.2,.8,.2,1);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
@@ -6169,7 +6180,12 @@ HTML = r"""<!doctype html>
       width: 100%; padding: 8px 11px; font: inherit; color: inherit;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
     }
-    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); background: var(--bg-2); }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: var(--bg-2);
+      box-shadow: var(--ring);
+    }
     textarea { min-height: 84px; resize: vertical; font-family: inherit; }
     textarea.avoid-textarea { min-height: 54px; }
 
@@ -7316,8 +7332,9 @@ HTML = r"""<!doctype html>
     .workflow-tabs .new-badge {
       display: inline-block; margin-left: 6px;
       font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
-      padding: 2px 6px; border-radius: 999px;
-      background: var(--accent); color: white;
+      padding: 2px 6px; border-radius: var(--r-pill);
+      background: var(--accent-dim); color: var(--accent-bright);
+      border: 1px solid var(--accent);
       vertical-align: middle;
     }
 
@@ -7388,8 +7405,10 @@ HTML = r"""<!doctype html>
       background: var(--accent-dim, rgba(47,129,247,0.12));
     }
     .agent-mode-icon {
-      font-size: 13px; line-height: 1;
-      filter: saturate(0.85);
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      line-height: 0;
+      flex-shrink: 0;
     }
     /* Stop-engine quick action — same height as the pills, danger color
        on hover so it reads as "this kills something". Only shown when
@@ -7912,6 +7931,21 @@ HTML = r"""<!doctype html>
       line-height: var(--agent-line);
       color: var(--text);
       word-wrap: break-word; overflow-wrap: break-word;
+    }
+    /* Distinguish user vs assistant bubbles. Pre-this commit both sides
+       rendered as naked text on the void, so the chat read like one
+       wall of dev-tool output. User now gets a tinted bubble with the
+       chat-app tail-truncated radius (Claude.ai style); assistant
+       stays naked text on the void so longer planning replies don't
+       feel boxed-in. */
+    .agent-msg-row.user .agent-msg-content {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+      padding: 9px 14px;
+    }
+    .agent-msg-row.user .agent-msg-attachments {
+      margin-top: 2px;
     }
 
     /* ---- Markdown rendering inside .agent-md ---- */
@@ -9675,7 +9709,7 @@ HTML = r"""<!doctype html>
         <button type="button" class="agent-mode-pill" id="agentModePill"
                 onclick="agentToggleMode()"
                 title="Plan & sleep: auto-stop the chat model after the agent finishes (frees RAM for renders).&#10;Click to switch to Interactive mode.">
-          <span class="agent-mode-icon" id="agentModeIcon">🌙</span>
+          <span class="agent-mode-icon" id="agentModeIcon"></span>
           <span id="agentModeLabel">Plan & sleep</span>
         </button>
         <!-- Quick "stop engine" — only shown when the local engine is
@@ -14054,14 +14088,24 @@ function agentRenderModePill() {
   if (!pill) return;
   const mode = ((window.AGENT.config && window.AGENT.config.engine
                  && window.AGENT.config.engine.mode) || 'plan_sleep');
+  // Monochrome stroked SVGs — pro-app feel. Color emoji glyphs read
+  // as Pythonic in chrome that's otherwise stroke-icon based.
+  const ICON_INTERACTIVE =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>' +
+    '</svg>';
+  const ICON_PLAN_SLEEP =
+    '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>' +
+    '</svg>';
   if (mode === 'interactive') {
     pill.classList.add('is-interactive');
-    if (icon) icon.textContent = '💬';
+    if (icon) icon.innerHTML = ICON_INTERACTIVE;
     if (label) label.textContent = 'Interactive';
     pill.title = 'Interactive: chat model stays resident across finishes (uses ~22 GB for Qwen 35B).\nClick to switch to Plan & sleep mode.';
   } else {
     pill.classList.remove('is-interactive');
-    if (icon) icon.textContent = '🌙';
+    if (icon) icon.innerHTML = ICON_PLAN_SLEEP;
     if (label) label.textContent = 'Plan & sleep';
     pill.title = 'Plan & sleep: auto-stop the chat model after the agent finishes (frees RAM for renders).\nClick to switch to Interactive mode.';
   }
@@ -14776,7 +14820,7 @@ function renderMessage(m) {
   if (m.kind === 'system_note') return renderSystemNote(m.content || '');
 
   const row = document.createElement('div');
-  row.className = 'agent-msg-row';
+  row.className = 'agent-msg-row ' + (m.kind === 'user' ? 'user' : 'assistant');
 
   const av = document.createElement('div');
   av.className = `agent-avatar ${m.kind === 'user' ? 'user' : 'claude'}`;
