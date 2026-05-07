@@ -5843,7 +5843,7 @@ HTML = r"""<!doctype html>
       display: inline-flex; align-items: center;
       margin-left: 12px;
       padding: 3px 9px;
-      border-radius: 5px;
+      border-radius: var(--r-xs);
       background: rgba(240,185,64,0.18);
       color: var(--warning, #f0b940);
       border: 1px solid rgba(240,185,64,0.55);
@@ -5859,7 +5859,7 @@ HTML = r"""<!doctype html>
       display: inline-flex; align-items: center;
       margin-left: 10px;
       padding: 3px 10px;
-      border-radius: 5px;
+      border-radius: var(--r-xs);
       background: rgba(140,120,255,0.16);
       color: #b6a4ff;
       border: 1px solid rgba(140,120,255,0.45);
@@ -6001,12 +6001,20 @@ HTML = r"""<!doctype html>
       /* width:auto overrides the global `button { width:100% }` rule above
          so ghost buttons sit at intrinsic width inside flex rows. Without
          this, the Enhance button stretches full-width and forces the
-         No-music pill to wrap to a second line. */
+         No-music pill to wrap to a second line. Tactile surface (item
+         #13 from the polish audit) — pre-this commit they read as
+         outlined stickers. */
       width: auto;
-      background: transparent; border: 1px solid var(--border); color: var(--text);
-      padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+      background: var(--panel-2);
+      border: 1px solid var(--border); color: var(--text);
+      padding: 5px 10px; border-radius: var(--r-xs); font-size: 11px; cursor: pointer;
+      transition: background var(--t-base), border-color var(--t-base), color var(--t-base);
     }
-    .ghost-btn:hover { border-color: var(--accent); color: var(--accent-bright); }
+    .ghost-btn:hover {
+      background: var(--bg-2);
+      border-color: var(--accent);
+      color: var(--accent-bright);
+    }
 
     /* Toggle pill — used for binary on/off controls (e.g. "No music")
        living next to ghost-btn actions. Same height + radius family as
@@ -6047,7 +6055,7 @@ HTML = r"""<!doctype html>
       padding: 4px 12px 4px 4px; border-radius: 999px;
       border: 1.5px solid var(--accent, #5a7cff);
       background: linear-gradient(135deg, rgba(90,124,255,0.10), rgba(90,124,255,0.02));
-      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+      transition: transform var(--t-base) ease, border-color var(--t-base) ease, background var(--t-base) ease, box-shadow var(--t-base) ease;
       box-shadow: 0 0 0 1px rgba(90,124,255,0.18), 0 2px 8px rgba(90,124,255,0.10);
     }
     .creator-link:hover {
@@ -6124,7 +6132,7 @@ HTML = r"""<!doctype html>
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .models-inline-actions button {
-      padding: 7px 14px; border-radius: 7px;
+      padding: 7px 14px; border-radius: var(--r-sm);
       background: var(--accent, #5a7cff); color: white; border: none;
       font-size: 12px; font-weight: 600; cursor: pointer;
       white-space: nowrap;
@@ -6199,7 +6207,7 @@ HTML = r"""<!doctype html>
     .pill-btn {
       width: 100%; padding: 9px 8px; border-radius: 8px;
       background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
-      cursor: pointer; transition: 0.12s; text-align: center;
+      cursor: pointer; transition: var(--t-fast); text-align: center;
       font-size: 12px; font-weight: 500;
       display: flex; flex-direction: column; align-items: center; gap: 2px;
     }
@@ -6426,12 +6434,21 @@ HTML = r"""<!doctype html>
     .carousel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
     .car-card {
       flex: 0 0 168px; scroll-snap-align: start;
-      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
-      background: var(--panel-2); cursor: pointer; transition: 0.12s;
+      border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
+      background: var(--panel-2); cursor: pointer;
+      transition: transform var(--t-base), border-color var(--t-base),
+                  box-shadow var(--t-base);
       display: flex; flex-direction: column;
     }
-    .car-card:hover { border-color: var(--accent); transform: translateY(-1px); }
-    .car-card.active { border-color: var(--accent-bright); box-shadow: 0 0 0 1px var(--accent-bright); }
+    .car-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-2);
+    }
+    .car-card.active {
+      border-color: var(--accent-bright);
+      box-shadow: 0 0 0 2px var(--accent-bright), var(--shadow-2);
+    }
     .car-card.hidden-card { opacity: 0.4; }
     .car-card video { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
     /* ⓘ info button overlaid on the card thumbnail. Subtle until hover so
@@ -6509,7 +6526,7 @@ HTML = r"""<!doctype html>
     .oi-prompt {
       font-size: 12.5px; line-height: 1.55; color: var(--text);
       background: rgba(255,255,255,0.025);
-      border-radius: 5px;
+      border-radius: var(--r-xs);
       padding: 12px 14px;
       max-height: 240px; overflow-y: auto;
       white-space: pre-wrap; word-break: break-word;
@@ -6604,7 +6621,7 @@ HTML = r"""<!doctype html>
       font-size: 11px; color: var(--muted); padding: 0 12px;
       text-decoration: none; border-right: 1px solid var(--border);
       align-self: stretch; display: inline-flex; align-items: center;
-      transition: 0.12s;
+      transition: var(--t-fast);
     }
     .tabs .model-credit:hover { color: var(--accent-bright); }
     .tabs .model-credit::after { content: " ↗"; opacity: 0.6; margin-left: 4px; }
@@ -6637,7 +6654,7 @@ HTML = r"""<!doctype html>
     .now-card .ttl { font-weight: 600; font-size: 13px; }
     .now-card .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
     .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 7px 0; }
-    .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; }
+    .progress-bar .fill { height: 100%; background: var(--accent); transition: width var(--t-slow); }
 
     /* Queue/recent lists */
     .row-list { list-style: none; padding: 0; margin: 0; }
@@ -6678,16 +6695,26 @@ HTML = r"""<!doctype html>
       color: #b0b8c4; margin: 0; max-height: 220px; overflow-y: auto;
     }
 
-    /* Modal */
+    /* Modal — aligned with the agent settings drawer's elevation
+       language (item #14 from the polish audit). Pre-this commit the
+       legacy .modal had no backdrop blur, used the small --radius (10),
+       and lacked elevation shadow — felt 2018 alongside the polished
+       agent settings card. */
     .modal-bg {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.70);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      z-index: 100;
       display: none; align-items: center; justify-content: center;
     }
     .modal-bg.show { display: flex; }
     .modal {
       background: var(--panel); border: 1px solid var(--border-strong);
-      border-radius: var(--radius); padding: 18px; width: min(640px, 92vw);
+      border-radius: var(--r-lg); padding: 22px;
+      width: min(640px, 92vw);
       max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;
+      box-shadow: var(--shadow-2);
     }
     .modal h3 { margin: 0 0 12px; font-size: 14px; }
     .modal textarea.batch {
@@ -7083,13 +7110,13 @@ HTML = r"""<!doctype html>
     .civitai-auth input[type="password"],
     .civitai-auth input[type="text"] {
       flex: 1; min-width: 180px;
-      padding: 6px 8px; border-radius: 5px;
+      padding: 6px 8px; border-radius: var(--r-xs);
       border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
       color: var(--text); font-size: 12px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .civitai-auth button {
-      padding: 6px 12px; border-radius: 5px;
+      padding: 6px 12px; border-radius: var(--r-xs);
       background: var(--accent); color: white; border: none;
       font-size: 12px; font-weight: 600; cursor: pointer;
     }
@@ -7318,16 +7345,19 @@ HTML = r"""<!doctype html>
     }
     .workflow-tabs button {
       flex: 1; padding: 9px 14px;
-      background: transparent; color: var(--muted);
-      border: 1px solid transparent; border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      color: var(--muted);
+      border: 1px solid transparent; border-radius: var(--r-sm);
       font-size: 13px; font-weight: 600; cursor: pointer;
       letter-spacing: 0.2px;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transition: background var(--t-base), color var(--t-base),
+                  border-color var(--t-base), transform var(--t-base);
     }
-    .workflow-tabs button:hover { color: var(--text); }
+    .workflow-tabs button:hover { color: var(--text); background: rgba(255,255,255,0.05); }
     .workflow-tabs button.active {
       background: var(--accent-dim); color: var(--accent-bright);
       border-color: var(--accent);
+      box-shadow: var(--shadow-1);
     }
     .workflow-tabs .new-badge {
       display: inline-block; margin-left: 6px;
@@ -7367,7 +7397,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border); border-radius: 999px;
       font-size: 12px; font-weight: 500;
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color var(--t-base), background var(--t-base);
       max-width: 320px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
@@ -7393,7 +7423,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border); border-radius: 999px;
       font-size: 11.5px; font-weight: 500;
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s, color 0.15s;
+      transition: border-color var(--t-base), background var(--t-base), color var(--t-base);
       white-space: nowrap;
       width: auto;            /* form-reset rule sets buttons to 100% */
       flex: 0 0 auto;
@@ -7420,7 +7450,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border); border-radius: 999px;
       font-size: 11.5px; font-weight: 500;
       cursor: pointer;
-      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
       white-space: nowrap;
       width: auto;            /* form-reset rule sets buttons to 100% */
       flex: 0 0 auto;
@@ -7450,13 +7480,13 @@ HTML = r"""<!doctype html>
       color: var(--muted);
       white-space: nowrap;
       cursor: help;
-      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
     }
     .agent-header .agent-ram-chip .agent-ram-dot {
       width: 7px; height: 7px; border-radius: 50%;
       flex-shrink: 0;
       background: var(--muted);
-      transition: background 0.2s, box-shadow 0.2s;
+      transition: background var(--t-base), box-shadow var(--t-base);
     }
     /* Roomy — chat model fits with comfortable margin. */
     .agent-header .agent-ram-chip.is-roomy { color: var(--success); border-color: rgba(63,185,80,0.4); }
@@ -7492,7 +7522,7 @@ HTML = r"""<!doctype html>
       cursor: pointer;
       display: inline-flex; align-items: center; justify-content: center;
       font-size: 14px;
-      transition: color 0.15s, border-color 0.15s;
+      transition: color var(--t-base), border-color var(--t-base);
     }
     .agent-header .icon-btn:hover {
       color: var(--accent-bright); border-color: var(--accent);
@@ -7514,13 +7544,13 @@ HTML = r"""<!doctype html>
       box-shadow: 14px 0 40px rgba(0, 0, 0, 0.5);
       display: flex; flex-direction: column;
       transform: translateX(-100%);
-      transition: transform 0.22s cubic-bezier(0.2, 0.7, 0.2, 1);
+      transition: transform var(--t-slow) cubic-bezier(0.2, 0.7, 0.2, 1);
       z-index: 60;
       will-change: transform;
     }
     .agent-sessions-panel[data-state="open"] { transform: translateX(0); }
     body.asp-pinned .agent-sessions-panel { box-shadow: none; }
-    body.asp-pinned .form-pane { padding-left: 290px; transition: padding 0.22s; }
+    body.asp-pinned .form-pane { padding-left: 290px; transition: padding var(--t-slow); }
     body.asp-pinned .agent-stage-pane,
     body.asp-pinned .stage-pane { /* untouched in regular mode */ }
     body.agent-fullscreen.asp-pinned .layout {
@@ -7546,7 +7576,7 @@ HTML = r"""<!doctype html>
       width: 26px; height: 26px;
       background: transparent; color: var(--muted);
       border: 1px solid transparent;
-      border-radius: 7px; cursor: pointer;
+      border-radius: var(--r-sm); cursor: pointer;
       display: inline-flex; align-items: center; justify-content: center;
       padding: 0;
     }
@@ -7574,7 +7604,7 @@ HTML = r"""<!doctype html>
       border-radius: 8px;
       font-size: 12px;
       box-sizing: border-box;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color var(--t-base), background var(--t-base);
     }
     .asp-search input:focus {
       outline: none;
@@ -7612,7 +7642,7 @@ HTML = r"""<!doctype html>
       border-radius: 8px;
       cursor: pointer;
       border: 1px solid transparent;
-      transition: background 0.12s, border-color 0.12s;
+      transition: background var(--t-fast), border-color var(--t-fast);
     }
     .asp-item:hover { background: var(--bg-2); }
     .asp-item.is-active {
@@ -7661,7 +7691,7 @@ HTML = r"""<!doctype html>
       cursor: pointer;
       display: inline-flex;
       align-items: center; justify-content: center;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
       padding: 0;
     }
     .asp-action-btn:hover {
@@ -7677,7 +7707,7 @@ HTML = r"""<!doctype html>
       background: var(--bg-2);
       color: var(--text);
       border: 1px solid var(--accent);
-      border-radius: 5px;
+      border-radius: var(--r-xs);
       padding: 2px 6px;
       font-size: 13px;
       font-weight: 500;
@@ -7735,7 +7765,7 @@ HTML = r"""<!doctype html>
       z-index: 55;
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.22s;
+      transition: opacity var(--t-slow);
     }
     .asp-backdrop.is-shown {
       opacity: 1;
@@ -7752,7 +7782,7 @@ HTML = r"""<!doctype html>
       border-radius: 8px;
       font-size: 12px; font-weight: 500;
       cursor: pointer;
-      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
       width: auto;
     }
     .asp-trigger:hover {
@@ -7861,7 +7891,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border); border-radius: 10px;
       cursor: pointer;
       color: var(--text); font-size: 13px;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color var(--t-base), background var(--t-base);
       display: flex; align-items: center; gap: 10px;
     }
     .agent-empty .example:hover {
@@ -7870,7 +7900,7 @@ HTML = r"""<!doctype html>
     }
     .agent-empty .example .arrow {
       color: var(--muted); flex-shrink: 0;
-      transition: transform 0.15s, color 0.15s;
+      transition: transform var(--t-base), color var(--t-base);
     }
     .agent-empty .example:hover .arrow {
       color: var(--accent-bright);
@@ -8044,7 +8074,7 @@ HTML = r"""<!doctype html>
     }
     .agent-reasoning > summary::-webkit-details-marker { display: none; }
     .agent-reasoning > summary svg {
-      transition: transform 0.18s ease;
+      transition: transform var(--t-base) ease;
       flex-shrink: 0;
     }
     .agent-reasoning[open] > summary svg { transform: rotate(90deg); }
@@ -8080,7 +8110,7 @@ HTML = r"""<!doctype html>
       border-left: 2px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color var(--t-base), background var(--t-base);
       animation: agent-fade-in 0.2s ease;
     }
     .agent-tool-card:hover { background: var(--bg-2); }
@@ -8115,7 +8145,7 @@ HTML = r"""<!doctype html>
     }
     .agent-tool-card .head .chevron {
       color: var(--muted); flex-shrink: 0;
-      transition: transform 0.2s ease;
+      transition: transform var(--t-base) ease;
       font-size: 11px;
     }
     .agent-tool-card.open .head .chevron { transform: rotate(90deg); }
@@ -8200,7 +8230,7 @@ HTML = r"""<!doctype html>
       border: 2px solid transparent;
       background: var(--bg);
       padding: 0;
-      transition: border-color 0.15s, transform 0.15s;
+      transition: border-color var(--t-base), transform var(--t-base);
     }
     .anchor-cell:hover {
       border-color: var(--accent);
@@ -8225,7 +8255,7 @@ HTML = r"""<!doctype html>
       font-size: 12px;
       font-weight: 800;
       border: 1px solid var(--border);
-      transition: background 0.15s, color 0.15s;
+      transition: background var(--t-base), color var(--t-base);
     }
     .anchor-cell.selected .check {
       background: #2ea043;
@@ -8319,7 +8349,7 @@ HTML = r"""<!doctype html>
     .agent-stage-head .spacer { flex: 1; }
     .agent-stage-head .stage-tab {
       background: transparent; color: var(--muted);
-      border: 1px solid transparent; border-radius: 7px;
+      border: 1px solid transparent; border-radius: var(--r-sm);
       padding: 5px 10px; font-size: 11px; cursor: pointer;
       width: auto;
     }
@@ -8413,7 +8443,7 @@ HTML = r"""<!doctype html>
       border-radius: 8px;
       overflow: hidden;
       cursor: pointer;
-      transition: border-color 0.15s, transform 0.15s;
+      transition: border-color var(--t-base), transform var(--t-base);
     }
     .stage-output-cell:hover {
       border-color: var(--accent);
@@ -8460,7 +8490,7 @@ HTML = r"""<!doctype html>
       display: flex; align-items: center; justify-content: center;
       cursor: pointer;
       opacity: 0;
-      transition: opacity 0.15s, background 0.15s;
+      transition: opacity var(--t-base), background var(--t-base);
       z-index: 1;
       width: 22px;
     }
@@ -8593,7 +8623,7 @@ HTML = r"""<!doctype html>
       border-radius: 10px;
       display: grid; grid-template-columns: 1fr auto;
       gap: 14px;
-      transition: border-color 0.15s;
+      transition: border-color var(--t-base);
     }
     .model-result:hover { border-color: var(--accent); }
     .model-result .info { min-width: 0; }
@@ -8628,19 +8658,19 @@ HTML = r"""<!doctype html>
       flex-shrink: 0;
     }
     .model-result .install-btn {
-      padding: 7px 14px; border-radius: 7px;
+      padding: 7px 14px; border-radius: var(--r-sm);
       background: var(--accent-dim); color: var(--accent-bright);
       border: 1px solid var(--accent);
       font-size: 11px; font-weight: 600; cursor: pointer;
       width: auto;
-      transition: background 0.15s, color 0.15s;
+      transition: background var(--t-base), color var(--t-base);
     }
     .model-result .install-btn:hover {
       background: var(--accent); color: white;
     }
     .model-result .install-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
     .model-result .info-btn {
-      padding: 7px 10px; border-radius: 7px;
+      padding: 7px 10px; border-radius: var(--r-sm);
       background: transparent; color: var(--muted);
       border: 1px solid var(--border);
       font-size: 11px; cursor: pointer; width: auto;
@@ -8778,7 +8808,7 @@ HTML = r"""<!doctype html>
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      transition: filter 0.15s, transform 0.15s;
+      transition: filter var(--t-base), transform var(--t-base);
       width: auto;
       flex: 0 0 auto;
     }
@@ -8989,7 +9019,7 @@ HTML = r"""<!doctype html>
         0 12px 36px rgba(0,0,0,0.45),
         0 0 0 1px rgba(47,129,247,0.0);
       font-size: 14.5px;
-      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+      transition: border-color var(--t-base), box-shadow var(--t-base), background var(--t-base);
     }
     body.agent-fullscreen .agent-composer textarea:focus {
       background: rgba(28, 36, 72, 0.92);
@@ -9008,7 +9038,7 @@ HTML = r"""<!doctype html>
     body.agent-fullscreen .agent-composer .send-btn {
       width: 38px; height: 38px;
       right: 8px; bottom: 8px;
-      border-radius: 11px;
+      border-radius: var(--r-md);
       z-index: 2;
       box-shadow: 0 6px 20px rgba(47,129,247,0.45);
     }
@@ -9120,7 +9150,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border);
       color: var(--muted);
       cursor: pointer;
-      transition: color 0.12s, border-color 0.12s, background 0.12s;
+      transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
       padding: 0;
       width: auto;
       flex: 0 0 auto;
@@ -9170,7 +9200,7 @@ HTML = r"""<!doctype html>
       font-size: var(--agent-text);
       line-height: 1.55;
       resize: none;
-      transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+      transition: border-color var(--t-base), box-shadow var(--t-base), background var(--t-base);
       box-sizing: border-box;
     }
     /* Paperclip — mirrors send-btn placement on the left edge of the
@@ -9186,7 +9216,7 @@ HTML = r"""<!doctype html>
       cursor: pointer;
       display: inline-flex;
       align-items: center; justify-content: center;
-      transition: background 0.18s, color 0.18s, border-color 0.18s;
+      transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
     }
     .agent-composer .attach-btn:hover {
       background: rgba(255,255,255,0.06);
@@ -9203,7 +9233,7 @@ HTML = r"""<!doctype html>
       padding: 0 3px;
       background: var(--accent);
       color: white;
-      border-radius: 7px;
+      border-radius: var(--r-sm);
       font-size: 9px;
       font-weight: 700;
       display: none;
@@ -9367,7 +9397,7 @@ HTML = r"""<!doctype html>
       cursor: pointer;
       display: inline-flex;
       align-items: center; justify-content: center;
-      transition: background 0.18s, transform 0.18s, box-shadow 0.18s;
+      transition: background var(--t-base), transform var(--t-base), box-shadow var(--t-base);
       box-shadow: 0 2px 8px rgba(47,129,247,0.3);
     }
     .agent-composer .send-btn:hover:not(:disabled) {
@@ -9437,7 +9467,7 @@ HTML = r"""<!doctype html>
       letter-spacing: 0.2px;
       text-transform: none;
       cursor: pointer;
-      transition: border-color 0.15s, color 0.15s;
+      transition: border-color var(--t-base), color var(--t-base);
     }
     .agent-settings-card h2 > button:hover {
       color: var(--text);
@@ -9484,7 +9514,7 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--border); border-radius: 8px;
       font-family: inherit; font-size: 13px;
       box-sizing: border-box;
-      transition: border-color 0.15s;
+      transition: border-color var(--t-base);
     }
     .agent-settings-card input:focus,
     .agent-settings-card select:focus,
@@ -9501,7 +9531,7 @@ HTML = r"""<!doctype html>
       padding: 9px 18px; border-radius: 8px;
       border: none; cursor: pointer;
       font-size: 13px; font-weight: 600;
-      transition: background 0.15s;
+      transition: background var(--t-base);
     }
     .agent-settings-card .actions .save {
       background: var(--accent); color: white;
@@ -9555,13 +9585,13 @@ HTML = r"""<!doctype html>
     }
     .agent-engine-row button {
       padding: 6px 12px;
-      border-radius: 7px;
+      border-radius: var(--r-sm);
       border: 1px solid var(--border);
       background: var(--panel);
       color: var(--text);
       font-size: 11px; font-weight: 600;
       cursor: pointer;
-      transition: border-color 0.15s;
+      transition: border-color var(--t-base);
     }
     .agent-engine-row button:hover {
       border-color: var(--accent);
