@@ -9505,44 +9505,45 @@ HTML = r"""<!doctype html>
     body.agent-fullscreen .layout {
       grid-template-columns: 1fr minmax(440px, 480px);
     }
+    /* Form-pane in fullscreen: padding pattern `0 32px 0 312px`:
+         312 = 280 sidebar overlay + 32 gutter (chat starts right after
+               the sidebar with breathing room)
+          32 = right gutter before stage column begins
+       Per Salo's first-pass screenshot, max-width + margin:auto
+       centered the chat 200px to the right of the sidebar with
+       awkward empty space — switched to left-anchored chat below. */
     body.agent-fullscreen .form-pane {
-      padding-left: 280px;               /* room for the fixed sidebar */
+      padding: 0 32px 0 312px;
       display: flex; flex-direction: column;
       align-items: stretch;
       box-sizing: border-box;
     }
-    /* The asp-pinned class adds its own 290px padding-left. In
-       fullscreen we already pad 280px above; clear asp-pinned's
-       padding so the chat doesn't get shifted twice. */
-    body.agent-fullscreen.asp-pinned .form-pane { padding-left: 280px; }
-
-    /* Chat column: comfortable reading width, generous gutter, the
-       composer (which sticks at the bottom) inherits the same column
-       so the eye doesn't have to track wide-narrow-wide. */
+    body.agent-fullscreen.asp-pinned .form-pane { padding: 0 32px 0 312px; }
     body.agent-fullscreen .agent-chat {
-      max-width: 760px;
+      max-width: 800px;
       width: 100%;
-      margin: 0 auto;
-      padding: 16px 32px 20px;
+      margin: 0;                         /* left-anchored, not auto-centered */
+      padding: 12px 0 20px;
     }
     body.agent-fullscreen .agent-composer {
       max-width: 800px;
       width: 100%;
-      margin: 0 auto 18px;
-      padding: 0 24px;
+      margin: 0 0 18px;
+      padding: 0;
     }
-    /* The header in fullscreen also centers in the column so it lines
-       up with the chat below. */
+    /* Header spans the full form-pane content width so the chips
+       (Sessions / engine / mode / RAM / title / icons) all fit on one
+       row regardless of how many chips light up. Salo's first-pass
+       screenshot showed them wrapping to 2 rows under max-width:800. */
     body.agent-fullscreen .agent-pane > .agent-header {
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 14px 24px;
+      max-width: none;
+      margin: 0;
+      padding: 14px 0;
     }
-    /* Engine-readiness banner sits between header and chat — keep it
-       in the same reading column. */
+    /* Engine-readiness banner aligns with the chat column. */
     body.agent-fullscreen #agentEngineBanner {
       max-width: 800px;
-      margin: 0 auto 8px;
+      margin: 8px 0;
     }
 
     /* User bubble in fullscreen — a touch wider so dialogue beats
@@ -18859,6 +18860,13 @@ function agentToggleFullscreen(force) {
   if (ix) ix.style.display = next ? 'none' : '';
   if (iy) iy.style.display = next ? '' : 'none';
   try { localStorage.setItem('phos_agent_fullscreen', next ? '1' : ''); } catch(e) {}
+  // When ENTERING fullscreen, populate the sessions sidebar — it's
+  // always visible in fullscreen, but the list renders empty until
+  // aspOpen() fetches /agent/sessions. Fixed 2026-05-07 per Salo's
+  // screenshot showing a blank sidebar with just a search box.
+  if (next && typeof aspOpen === 'function') {
+    aspOpen();
+  }
   // After collapse animation settles, scroll chat to bottom so the
   // user keeps their place.
   requestAnimationFrame(() => {
