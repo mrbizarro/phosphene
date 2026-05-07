@@ -16373,7 +16373,7 @@ function agentStageRender(status, sess) {
     .concat(cur ? [cur] : [])
     .concat(status && status.history ? status.history : []);
   const byId = new Map(allJobs.map(j => [j.id, j]));
-  const outputs = submitted.map(s => {
+  let outputs = submitted.map(s => {
     const j = byId.get(s.job_id) || s;
     const p = (j.params || {});
     return {
@@ -16385,6 +16385,27 @@ function agentStageRender(status, sess) {
       duration: s.duration_seconds || null,
     };
   });
+  // Filter out failed / cancelled / error renders entirely — they were
+  // appearing as red "fail" cards alongside real outputs and polluting
+  // the gallery. The user explicitly asked to not see them.
+  outputs = outputs.filter(o =>
+    o.status !== 'failed' && o.status !== 'cancelled' && o.status !== 'error');
+  // Deduplicate by label — when the same shot was submitted multiple
+  // times (retry, refine, append-take), only the most recent attempt
+  // should surface. Prefer entries with status === 'done' over
+  // queued/running (the user wants to see WORKING renders, not three
+  // copies of the same label in different states). Walk in submission
+  // order; keep the LAST seen entry per label, but bias toward 'done'
+  // if any entry for that label is done.
+  const byLabel = new Map();
+  for (const o of outputs) {
+    const cur = byLabel.get(o.label);
+    if (!cur) { byLabel.set(o.label, o); continue; }
+    // Prefer done > running > queued > unknown
+    const rank = (s) => s === 'done' ? 3 : s === 'running' ? 2 : s === 'queued' ? 1 : 0;
+    if (rank(o.status) >= rank(cur.status)) byLabel.set(o.label, o);
+  }
+  outputs = Array.from(byLabel.values());
   outputsCountEl.textContent = outputs.length;
   if (outputs.length === 0) {
     outputsEl.innerHTML = `<div class="stage-empty">No mp4s rendered yet. Submit a shot from the chat.</div>`;
