@@ -9159,7 +9159,10 @@ HTML = r"""<!doctype html>
        live canvas / code-interpreter view. */
     body.agent-fullscreen > header,
     body.agent-fullscreen .bottom-pane,
-    body.agent-fullscreen .form-pane > :not(.agent-pane),
+    /* Hide form-pane children EXCEPT .agent-pane (the chat itself) and
+       .agent-sessions-panel (the left sidebar — fullscreen polish 2026-05-07
+       per Salo: sessions stay visible always in fullscreen). */
+    body.agent-fullscreen .form-pane > :not(.agent-pane):not(.agent-sessions-panel),
     body.agent-fullscreen .workflow-tabs,
     body.agent-fullscreen .stage-pane {
       display: none !important;
@@ -9445,21 +9448,33 @@ HTML = r"""<!doctype html>
             regular mode so users discover the affordance; in
             fullscreen it inverts to a subdued "exit" treatment. */
 
-    /* ---- A. Sessions sidebar pinned in fullscreen ------------- */
+    /* ---- A. Sessions sidebar always visible in fullscreen ----------
+       The panel is nested inside .form-pane in the DOM and uses
+       position:fixed at left:0 so its slide-in transform doesn't
+       reflow the chat. In fullscreen we keep that fixed positioning
+       (taking it out of flow) but force transform:none so it's always
+       visible at the screen's left edge. The form-pane and the layout
+       grid then reserve 280px of left padding so the chat sits cleanly
+       to the right of the sidebar. This matches how the regular-layout
+       asp-pinned mode works (see line 7642), but applies UNCONDITIONALLY
+       in fullscreen — no toggle needed. */
     body.agent-fullscreen .agent-sessions-panel {
-      position: relative !important;     /* take grid space, not fixed overlay */
-      width: 100%;
-      height: 100vh;
-      transform: none !important;        /* always shown — no slide-in */
+      transform: none !important;        /* always shown */
       box-shadow: none !important;
       border-right: 1px solid var(--ph-border-soft);
-      background: rgba(8, 13, 36, 0.55);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      box-sizing: border-box;
+      background: rgba(8, 13, 36, 0.7);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      width: 280px;
+      z-index: 5;                        /* above chat scroll, below modals */
     }
     body.agent-fullscreen .asp-backdrop { display: none !important; }
     body.agent-fullscreen #aspPinBtn { display: none !important; }   /* irrelevant — always pinned */
+    /* Hide the in-panel close (X) button: in fullscreen the sidebar
+       can't be closed without exiting fullscreen, so the X is dead. */
+    body.agent-fullscreen .agent-sessions-panel .asp-head .asp-icon[onclick*="aspClose"] {
+      display: none !important;
+    }
     /* Sessions panel head/search inherit Linear chrome but lose the
        hairlines that made sense as an overlay; here they read as
        internal sections of the integrated sidebar. */
@@ -9482,27 +9497,28 @@ HTML = r"""<!doctype html>
       padding: 4px 10px 16px;
     }
 
-    /* ---- B. Three-column grid ---------------------------------- */
+    /* ---- B. Two-column grid + 280px form-pane padding ---------- */
+    /* The layout grid has only 2 children (form-pane + stage-pane);
+       sessions are nested INSIDE form-pane as a fixed overlay. So we
+       use a 2-col grid (1fr + 480px) and pad form-pane left by 280px
+       to make room for the fixed-positioned sidebar. */
     body.agent-fullscreen .layout {
-      grid-template-columns: 268px 1fr minmax(440px, 480px);
+      grid-template-columns: 1fr minmax(440px, 480px);
     }
-    body.agent-fullscreen.asp-pinned .layout {
-      /* same grid in fullscreen regardless of asp-pinned — sessions
-         are always inline, ignore the (now redundant) pin class. */
-      grid-template-columns: 268px 1fr minmax(440px, 480px);
+    body.agent-fullscreen .form-pane {
+      padding-left: 280px;               /* room for the fixed sidebar */
+      display: flex; flex-direction: column;
+      align-items: stretch;
+      box-sizing: border-box;
     }
-    /* Form-pane padding-left override that asp-pinned added is
-       irrelevant in fullscreen (sessions are a separate column),
-       reset it so the chat doesn't get pushed twice. */
-    body.agent-fullscreen.asp-pinned .form-pane { padding-left: 0; }
+    /* The asp-pinned class adds its own 290px padding-left. In
+       fullscreen we already pad 280px above; clear asp-pinned's
+       padding so the chat doesn't get shifted twice. */
+    body.agent-fullscreen.asp-pinned .form-pane { padding-left: 280px; }
 
     /* Chat column: comfortable reading width, generous gutter, the
        composer (which sticks at the bottom) inherits the same column
        so the eye doesn't have to track wide-narrow-wide. */
-    body.agent-fullscreen .form-pane {
-      display: flex; flex-direction: column;
-      align-items: stretch;
-    }
     body.agent-fullscreen .agent-chat {
       max-width: 760px;
       width: 100%;
@@ -9521,6 +9537,12 @@ HTML = r"""<!doctype html>
       max-width: 800px;
       margin: 0 auto;
       padding: 14px 24px;
+    }
+    /* Engine-readiness banner sits between header and chat — keep it
+       in the same reading column. */
+    body.agent-fullscreen #agentEngineBanner {
+      max-width: 800px;
+      margin: 0 auto 8px;
     }
 
     /* User bubble in fullscreen — a touch wider so dialogue beats
