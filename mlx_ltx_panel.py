@@ -5352,6 +5352,40 @@ class Handler(BaseHTTPRequestHandler):
                     mflux_family="flux2",
                     mflux_quantize=4,
                 )
+            elif engine_override == "flux2_edit_inline":
+                # FLUX.2 Klein-Edit (distilled klein-4b). Multi-ref via
+                # mflux-generate-flux2-edit's --image-paths (REQUIRED).
+                # ~30 s/image at Q4 + 4 steps. Use this when the user
+                # has a character ref and wants quick iteration —
+                # without it the panel UI route silently dropped refs
+                # because flux2_inline maps to t2i mflux-generate-flux2.
+                # mflux's flux2_edit_generate.py FORCES guidance == 1.0
+                # on distilled bases.
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="flux2-klein-4b",
+                    mflux_family="flux2_edit",
+                    mflux_quantize=4,
+                    mflux_steps=4,
+                    mflux_guidance=1.0,
+                )
+            elif engine_override == "flux2_edit_high_inline":
+                # FLUX.2 Klein-Base-Edit (NON-distilled klein-base-4b).
+                # Real CFG, ~3-5 min/image at Q8 + 25 steps. The
+                # photoreal path when the user has a character ref —
+                # produces photographic output (vs the illustrative
+                # look of distilled flux2_edit). Pass the SHORTHAND
+                # model name; mflux's distilled-detection looks for
+                # "base" substring in the resolved config name and
+                # rejects guidance != 1.0 if missing.
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="flux2-klein-base-4b",
+                    mflux_family="flux2_edit",
+                    mflux_quantize=8,
+                    mflux_steps=25,
+                    mflux_guidance=4.0,
+                )
             elif engine_override == "z_image_turbo_inline":
                 cfg = agent_image_engine.ImageEngineConfig(
                     kind="mflux",
@@ -12692,8 +12726,10 @@ HTML = r"""<!doctype html>
             <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref · 8-step Q4, ~1 min/image)</option>
             <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2509 + Lightning (multi-ref · 4-step Q4, ~10-15 s/image)</option>
             <option value="qwen_edit_high_inline">Qwen-Image-Edit-2509 high quality (multi-ref · 30-step Q8, ~5 min/image)</option>
-            <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
-            <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
+            <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
+            <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q4, ~30 s/image)</option>
+            <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
+            <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
             <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
           </select>
         </div>
