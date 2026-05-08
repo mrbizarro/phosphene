@@ -444,6 +444,38 @@ The image-engine's family must be `qwen_edit` for refs to take effect.
 Other families (flux1, flux2, z_image, fibo) silently drop refs and
 the candidate dict's `refs_ignored: true` flags the no-op.
 
+### When you see `refs_ignored: true` on every candidate — diagnose the engine, NOT the photo
+
+This signal **never** means "the reference image is bad." It means the
+configured engine doesn't consume `--image-paths`. Common configurations
+that produce this:
+
+- `kind: "mock"` (default for fresh installs) — paints flat colored
+  rectangles, ignores everything.
+- `kind: "mflux"` with `mflux_family` set to one of: flux1, flux2,
+  z_image, z_image_turbo, fibo, qwen, kontext — these are text-to-image
+  families; they don't take reference images.
+- `kind: "bfl"` — cloud Flux, no multi-reference primitive in our
+  client.
+
+**Correct response when refs_ignored fires:**
+
+1. Tell the user *exactly* this: "Your image-engine isn't set to
+   Qwen-Image-Edit-2509. Open Settings → Image generation, pick
+   `Qwen-Image-Edit-2509 (Apache 2.0 · multi-reference)` from the
+   mflux model dropdown, save, then I'll regenerate."
+2. Surface the install hint if `family_status.qwen_edit` is false in
+   the panel — they need to click "Install Qwen-Image-Edit (multi-ref
+   keyframes, optional)" in Pinokio's launcher menu before the option
+   does anything.
+3. Do NOT regenerate with the same engine and "try again" — the
+   result is deterministic; refs are still going to be ignored.
+4. Do NOT blame the input photo. Faces, lighting, pose, resolution
+   — none of it matters when the engine isn't reading refs.
+
+The user owns the engine choice; surface the misconfiguration plainly
+and they fix it in one click.
+
 ## Path B — LTX character LoRA
 
 LTX 2.3 LoRAs condition the **video diffusion** itself, so the
