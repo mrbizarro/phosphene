@@ -179,7 +179,22 @@ module.exports = {
           // releases (stole SSH keys via a poisoned post-install script).
           // See agent/engine.py for routing details. Falls back to stdlib
           // urllib if missing — safe to omit but the loop is less robust.
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14'",
+          //
+          // smolagents: Phase 2 of the agent-layer refactor (see
+          // /Users/salo/.claude/plans/fancy-conjuring-lovelace.md). Powers
+          // the optional CodeAgent runtime in agent/runtime_smol.py,
+          // selectable per-request via PHOSPHENE_RUNTIME=smol. smolagents
+          // pulls transformers as a transitive dep — the huggingface-hub
+          // floor is bumped to >=1.5.0 to satisfy transformers' pin.
+          // smolagents itself ships with a pessimistic <1.0 hub pin that
+          // is empirically benign in practice.
+          //
+          // The hub pin range we settle on (>=1.5.0,<2.0) satisfies:
+          //   - mflux>=0.17.5            wants >=1.1.6,<2.0
+          //   - transformers (5.7.0+)    wants >=1.5.0,<2.0
+          //   - smolagents 1.24.0        warns about <1.0 but works
+          //   - hf download CLI          needs v1+ for the new command name
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.5.0,<2.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14' 'smolagents>=1.24.0'",
           // v2.0.3: post-install confirmation that the local packages
           // actually landed in site-packages. The Y1.034+ patch script's
           // i2v target tolerates a missing ltx_pipelines_mlx — without

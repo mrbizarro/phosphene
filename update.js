@@ -100,6 +100,21 @@ module.exports = {
         message: "./ltx-2-mlx/env/bin/pip install --upgrade 'litellm>=1.83.14'"
       }
     },
+    // smolagents: powers the optional CodeAgent runtime in
+    // agent/runtime_smol.py (Phase 2 of the agent-layer refactor —
+    // see /Users/salo/.claude/plans/fancy-conjuring-lovelace.md).
+    // Off by default; the panel uses it only when launched with
+    // PHOSPHENE_RUNTIME=smol. Pulls transformers as a transitive dep
+    // which downgrades huggingface-hub to <1.0 — re-pin >=1.5.0,<2.0
+    // afterwards to keep mflux + the hf v1 CLI working. The
+    // smolagents <1.0 hub pin is empirically benign (verified
+    // CodeAgent + LocalPythonExecutor both work on hub 1.14.0).
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'smolagents>=1.24.0' 'huggingface-hub>=1.5.0,<2.0'"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
     // Pin to the venv's python3.11 to match install.js — `python3` on
