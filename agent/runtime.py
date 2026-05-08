@@ -37,6 +37,14 @@ from agent import engine, tools, prompts
 
 
 MAX_STEPS_PER_TURN = 30           # safety cap on tool-loop iterations per user turn
+# Per-turn cap on total shots queued via submit_shot / submit_shots. Counts
+# every individual shot — one submit_shot call = +1, one submit_shots call =
+# +len(shots). Hitting the cap returns a structured error to the agent and
+# does NOT dispatch the tool, so a prompt-injected or runaway agent can't
+# burn hours of GPU time queuing 50 LTX renders in a single turn before the
+# user has a chance to intervene. Counter resets at the start of each
+# run_turn() call. (Security review H4, 2026-05-08.)
+MAX_SUBMITS_PER_TURN = 8
 SESSION_VERSION = 1
 
 
@@ -349,6 +357,10 @@ def run_turn(session: Session, user_message: str | None,
         # Clear finished flag — a new user message resets the loop.
         session.finished = False
 
+    # Per-turn submit budget — see MAX_SUBMITS_PER_TURN. Local to this
+    # run_turn() call: a fresh user message always gets a fresh budget.
+    submits_used = 0
+
     # 2. Drive the loop.
     for step_i in range(max_steps):
         # Call engine
@@ -391,7 +403,32 @@ def run_turn(session: Session, user_message: str | None,
             "tool": tool_name, "args": tool_args, "step": step_i,
         }))
 
-        result_obj = tools.dispatch(tool_name, tool_args, panel_ops, session.tool_state)
+        # Enforce the per-turn submit budget BEFORE dispatch. We refuse the
+        # call (and synthesize an error result for the agent) the moment
+        # this call would push the running total past the cap. Partial
+        # batches are not allowed: a submit_shots(shots=[a,b,c,d]) when 6
+        # have already been queued is rejected wholesale rather than
+        # silently truncated, since truncation would surprise the agent.
+        submit_count = 0
+        if tool_name == "submit_shot":
+            submit_count = 1
+        elif tool_name == "submit_shots":
+            shots = tool_args.get("shots") if isinstance(tool_args, dict) else None
+            submit_count = len(shots) if isinstance(shots, list) else 1
+
+        if submit_count and submits_used + submit_count > MAX_SUBMITS_PER_TURN:
+            result_obj = {
+                "ok": False,
+                "error": (
+                    f"submit cap reached: agent already queued "
+                    f"{submits_used} shots this turn (limit "
+                    f"{MAX_SUBMITS_PER_TURN}). Use multiple turns to "
+                    f"queue more, or call finish."
+                ),
+            }
+        else:
+            submits_used += submit_count
+            result_obj = tools.dispatch(tool_name, tool_args, panel_ops, session.tool_state)
         yield emit(TurnEvent("tool_result", {
             "tool": tool_name, "result": result_obj, "step": step_i,
         }))
