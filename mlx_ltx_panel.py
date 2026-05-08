@@ -2313,7 +2313,47 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
     # ascending; users immediately reported it as a regression. The
     # in-chat Stage Outputs grid is reversed in agentStageRender() to
     # match the same "newest first" rule across both surfaces.
-    files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
+    #
+    # The gallery is unified across video (mp4 in OUTPUT) and image
+    # (png/jpg/jpeg/webp under panel_uploads/library/manual/, where the
+    # mode=='image' queue worker drops Studio renders). Each entry
+    # carries a `kind` field ('video' | 'image') so the right-pane viewer
+    # and filter chips can branch without re-detecting from the suffix.
+    video_files = sorted(OUTPUT.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)[:120]
+    image_root = UPLOADS / "library" / "manual"
+    image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+    image_candidates: list[tuple[Path, float]] = []
+    if image_root.exists():
+        # Bounded recursive walk — date-bucketed dirs already keep this
+        # cheap, but we cap at 200 so a runaway library can't stall the
+        # status poll. Same MAX_DEPTH as /library/images so the worst case
+        # is the same shape.
+        MAX_IMG = 200
+        try:
+            for p in image_root.rglob("*"):
+                if len(image_candidates) >= MAX_IMG:
+                    break
+                try:
+                    if not p.is_file() or p.suffix.lower() not in image_exts:
+                        continue
+                    image_candidates.append((p, p.stat().st_mtime))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    image_candidates.sort(key=lambda t: t[1], reverse=True)
+    # Merge-sort videos + images by mtime DESC before the bounded scan
+    # below so the 60-cap doesn't filter out recent images just because
+    # there's a backlog of older mp4s in OUTPUT (or vice versa).
+    combined: list[tuple[Path, float]] = []
+    for p in video_files:
+        try:
+            combined.append((p, p.stat().st_mtime))
+        except OSError:
+            continue
+    combined.extend(image_candidates[:120])
+    combined.sort(key=lambda t: t[1], reverse=True)
+    files = [p for (p, _) in combined]
     # Y1.039 — skip files that ffmpeg is still writing.
     #
     # Pre-Y1.039 a fresh render appeared in the gallery the moment its mp4
@@ -2393,15 +2433,28 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
         # if a file was overwritten in place (e.g. an upscale rewriting the
         # native mp4), the browser would keep serving its cached old copy.
         # `mt` was captured above for the in-flight skip; reuse it here.
+        is_image = p.suffix.lower() in image_exts
+        # Image cells use /image (which serves PNG/JPG with the right MIME
+        # and accepts UPLOADS-rooted paths); video cells stay on /file
+        # (Range-aware mp4 streaming, OUTPUT-bound). One field per kind so
+        # the renderer doesn't have to re-detect.
+        if is_image:
+            url = f"/image?path={quote(path_s)}&v={int(mt)}"
+        else:
+            url = f"/file?path={quote(path_s)}&v={int(mt)}"
         out.append({
             "name": p.name,
             "path": path_s,
             "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mt)),
             "size_mb": p.stat().st_size / 1024 / 1024,
             "elapsed_sec": elapsed_sec,
-            "url": f"/file?path={quote(path_s)}&v={int(mt)}",
+            "url": url,
             "has_sidecar": has_sidecar,
             "hidden": is_hidden,
+            # 'kind' lets the right-pane viewer + filter chips branch
+            # without re-parsing the filename. Mirrors isPhotoOutput() on
+            # the agent-stage pane (commit af5c184).
+            "kind": "image" if is_image else "video",
         })
         if len(out) >= 60:
             break
@@ -5168,9 +5221,16 @@ class Handler(BaseHTTPRequestHandler):
                 path = Path(qs.get("path", [""])[0]).resolve()
             except Exception:
                 self.send_error(400); return
+            # Sidecars live next to the output they describe. Videos sit
+            # under OUTPUT (mlx_outputs/*.mp4.json); image-mode queue jobs
+            # write theirs under UPLOADS/library/manual/<...>/cand_*.png.json.
+            # Allow both roots so the right-pane Outputs gallery can fetch
+            # the prompt for a photo's Animate flow without 404'ing.
             try:
-                _ = path.relative_to(OUTPUT.resolve())
-            except ValueError:
+                roots = [OUTPUT.resolve(), UPLOADS.resolve()]
+            except Exception:
+                roots = []
+            if not any(path.is_relative_to(r) for r in roots):
                 self.send_error(404); return
             sidecar = path.with_suffix(path.suffix + ".json")
             if not sidecar.exists():
@@ -7437,7 +7497,8 @@ HTML = r"""<!doctype html>
       background: black; min-height: 0; position: relative;
       overflow: hidden;
     }
-    .player-wrap video {
+    .player-wrap video,
+    .player-wrap img {
       max-width: 100%; max-height: 100%; width: auto; height: auto;
       display: block;
     }
@@ -7504,7 +7565,8 @@ HTML = r"""<!doctype html>
       box-shadow: 0 0 0 2px var(--accent-bright), var(--shadow-2);
     }
     .car-card.hidden-card { opacity: 0.4; }
-    .car-card video { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
+    .car-card video,
+    .car-card img.car-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
     /* ⓘ info button overlaid on the card thumbnail. Subtle until hover so
        it doesn't compete with the video preview itself. Click → opens
        outputInfoModal with the full sidecar data. */
@@ -13039,7 +13101,8 @@ HTML = r"""<!doctype html>
       <div class="name" id="playerName"></div>
       <div class="actions-bar">
         <button id="loadParamsBtn" onclick="loadParams()" disabled>Load params</button>
-        <button onclick="useAsExtendSource()">Use as Extend</button>
+        <button id="useAsExtendBtn" onclick="useAsExtendSource()">Use as Extend</button>
+        <button id="animateBtn" onclick="animateActive()" style="display:none">Animate</button>
         <button onclick="hideActive()">Hide</button>
       </div>
     </div>
@@ -13050,6 +13113,22 @@ HTML = r"""<!doctype html>
           <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
           <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
         </div>
+      </div>
+      <!-- All / Videos / Photos kind filter for the main outputs gallery.
+           Lives below the visible/hidden seg-toggle so the two filters
+           stack instead of competing for the same row. Persisted to
+           localStorage['phos_main_outputs_filter'] (DIFFERENT key from
+           the agent-stage one in commit ef7f114) so the user's choice
+           sticks across reloads, AND auto-flips when the form-pane mode
+           pill switches to/from 'image' (Photos for Studio, Videos for
+           t2v/i2v/keyframe/extend). -->
+      <div class="stage-outputs-filter" id="mainOutputsFilter" style="margin: 0 0 6px;">
+        <button type="button" id="mainOutputsFilterAll" class="active"
+                onclick="setMainOutputsFilter('all')">All</button>
+        <button type="button" id="mainOutputsFilterVideos"
+                onclick="setMainOutputsFilter('videos')">Videos</button>
+        <button type="button" id="mainOutputsFilterPhotos"
+                onclick="setMainOutputsFilter('photos')">Photos</button>
       </div>
       <div class="carousel" id="carousel"></div>
     </div>
@@ -13762,6 +13841,96 @@ let activePath = null;
 let currentOutputs = [];
 let currentMode = 't2v';
 
+// Main right-pane gallery kind filter (All / Videos / Photos). Independent
+// of `filterMode` (which is visible/hidden) and independent of
+// `window.outputsFilter` (which is the agent-stage Session outputs filter
+// from commit ef7f114). The localStorage key is intentionally different:
+// the user can have "Photos" pinned on the main pane while Sessions sits
+// on "All". Default is 'all'; setMode('image') auto-flips to 'photos',
+// the video modes auto-flip to 'videos'. Manual user clicks always win.
+let mainOutputsFilter = 'all';
+try {
+  const stored = localStorage.getItem('phos_main_outputs_filter');
+  if (stored === 'all' || stored === 'videos' || stored === 'photos') {
+    mainOutputsFilter = stored;
+  }
+} catch (e) {}
+// Photo detection that matches commit af5c184's isPhotoOutput on the
+// agent-stage pane: explicit kind > params.mode > filename suffix. The
+// server now stamps a `kind` field, but the suffix fallback covers
+// outputs whose sidecar got lost (older entries) and any future caller
+// that forgets to set kind.
+function isPhotoOutputMain(o) {
+  if (!o) return false;
+  if (o.kind === 'image') return true;
+  if (o.kind === 'video') return false;
+  const path = (o.path || o.name || '').toLowerCase();
+  if (/\.(png|jpg|jpeg|webp)$/.test(path)) return true;
+  if (/\.mp4$/.test(path)) return false;
+  return false;
+}
+// Apply the main filter on top of currentOutputs. Returns the filtered
+// array; callers also use this for the count badge so the filter and
+// the rendered cells agree.
+function filteredMainOutputs() {
+  if (mainOutputsFilter === 'all') return currentOutputs;
+  if (mainOutputsFilter === 'photos') return currentOutputs.filter(isPhotoOutputMain);
+  return currentOutputs.filter(o => !isPhotoOutputMain(o));
+}
+function _updateMainFilterChips() {
+  const a = document.getElementById('mainOutputsFilterAll');
+  const v = document.getElementById('mainOutputsFilterVideos');
+  const p = document.getElementById('mainOutputsFilterPhotos');
+  if (a) a.classList.toggle('active', mainOutputsFilter === 'all');
+  if (v) v.classList.toggle('active', mainOutputsFilter === 'videos');
+  if (p) p.classList.toggle('active', mainOutputsFilter === 'photos');
+}
+function setMainOutputsFilter(mode) {
+  if (mode !== 'all' && mode !== 'videos' && mode !== 'photos') mode = 'all';
+  mainOutputsFilter = mode;
+  try { localStorage.setItem('phos_main_outputs_filter', mode); } catch (e) {}
+  _updateMainFilterChips();
+  // If the active selection was filtered out, switch to the first match.
+  const visible = filteredMainOutputs();
+  if (visible.length && !visible.some(o => o.path === activePath)) {
+    selectOutput(visible[0].path);
+  }
+  renderCarousel();
+  // Count badge mirrors the active filter (e.g. "Outputs · 23 photos").
+  const titleEl = document.getElementById('carouselTitle');
+  if (titleEl && filterMode !== 'hidden') {
+    const label = mode === 'all' ? '' : ` ${mode}`;
+    titleEl.textContent = `Outputs · ${visible.length}${label}`;
+  }
+}
+// Auto-set helper called from setMode(). DOES NOT persist (writing to
+// localStorage would override the user's manual pick the next time they
+// switch modes), but DOES bump the active chip + re-render so the
+// gallery snaps to the new default. The user can override after, and
+// THAT click persists via setMainOutputsFilter().
+function _autoMainOutputsFilterForMode(mode) {
+  // Auto-set NEVER lands on 'all' — that's user-only, per spec.
+  let target = null;
+  if (mode === 'image') target = 'photos';
+  else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend') target = 'videos';
+  if (!target || target === mainOutputsFilter) return;
+  mainOutputsFilter = target;
+  // No localStorage write — see comment above.
+  _updateMainFilterChips();
+  if (typeof renderCarousel === 'function') renderCarousel();
+  const titleEl = document.getElementById('carouselTitle');
+  if (titleEl && filterMode !== 'hidden') {
+    const visible = filteredMainOutputs();
+    titleEl.textContent = `Outputs · ${visible.length} ${target}`;
+  }
+  // Swap the player to a matching entry if the current active is now
+  // off-filter (e.g. mode=image but the viewer is showing a video).
+  const visible = filteredMainOutputs();
+  if (visible.length && !visible.some(o => o.path === activePath)) {
+    selectOutput(visible[0].path);
+  }
+}
+
 // Model tag in the bottom-pane nav links to dgrauet's repo. Strip an
 // absolute filesystem path back to the HF repo id form for display
 // (the panel sets LTX_MODEL to a local path in Pinokio installs).
@@ -13797,12 +13966,22 @@ function setMode(mode) {
     // Wire ref drop-zones once + refresh library on every entry
     if (typeof imgStudioWireRefSlots === 'function') imgStudioWireRefSlots();
     if (typeof imgStudioRefreshLibrary === 'function') imgStudioRefreshLibrary();
+    // Auto-set the right-pane outputs gallery to "Photos" — image mode
+    // is composing photos, so a video gallery makes no sense as the
+    // default. User can still flip back to All/Videos manually.
+    if (typeof _autoMainOutputsFilterForMode === 'function') {
+      _autoMainOutputsFilterForMode('image');
+    }
     return;
   }
   if (studio) studio.classList.remove('show');
   if (genForm) genForm.style.display = '';
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  // Mode → main-outputs filter auto-set (Videos for video modes).
+  if (typeof _autoMainOutputsFilterForMode === 'function') {
+    _autoMainOutputsFilterForMode(mode);
+  }
   // For i2v, switch the actual mode based on the i2vMode select
   if (mode === 'i2v') {
     document.getElementById('mode').value = document.getElementById('i2vMode').value;
@@ -15029,13 +15208,31 @@ async function poll() {
   if (JSON.stringify(currentOutputs) !== JSON.stringify(s.outputs)) {
     currentOutputs = s.outputs;
     renderCarousel();
-    if (!activePath && currentOutputs.length) selectOutput(currentOutputs[0].path);
+    // Pick the first FILTERED entry as the default selection so the
+    // viewer agrees with what the gallery is showing — without this,
+    // landing on Photos with no active selection would auto-pick a
+    // video and fight the filter.
+    if (!activePath) {
+      const visible = filteredMainOutputs();
+      if (visible.length) selectOutput(visible[0].path);
+    }
+    // The Extend source dropdown is video-only — Extend mode operates on
+    // mp4 input. Filter to videos so the user can't accidentally pick a
+    // .png as an Extend source (which would 400 server-side).
     const sel = document.getElementById('extendSrcSelect');
+    const videoOutputs = currentOutputs.filter(o => !isPhotoOutputMain(o));
     sel.innerHTML = '<option value="">— pick an output below or paste a path —</option>' +
-      currentOutputs.slice(0, 40).map(o => `<option value="${escapeHtml(o.path)}">${escapeHtml(o.name)}</option>`).join('');
+      videoOutputs.slice(0, 40).map(o => `<option value="${escapeHtml(o.path)}">${escapeHtml(o.name)}</option>`).join('');
   }
   document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
-  document.getElementById('carouselTitle').textContent = filterMode === 'hidden' ? 'Hidden outputs' : `Outputs · ${currentOutputs.length}`;
+  // Title: count is post-filter so the badge agrees with the rendered
+  // cells. "Outputs · 23 photos" when Photos is active, plain "Outputs · N"
+  // when All. Hidden override stays unchanged.
+  const _visible = filteredMainOutputs();
+  const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
+  document.getElementById('carouselTitle').textContent =
+    filterMode === 'hidden' ? 'Hidden outputs'
+                            : `Outputs · ${_visible.length}${_kindLabel}`;
 }
 
 // Recent-tab type filter (All / Videos / Photos). Stored on window so
@@ -15088,6 +15285,13 @@ function setOutputsFilter(mode) {
 document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('outputsFilterAll')) {
     setOutputsFilter(window.outputsFilter || 'all');
+  }
+  // Same first-paint sync for the main right-pane chip strip — the
+  // localStorage value was loaded into `mainOutputsFilter` at script
+  // top, but the chip DOM hadn't been built yet, so the .active class
+  // is still on All. Re-apply now that the strip exists.
+  if (document.getElementById('mainOutputsFilterAll')) {
+    _updateMainFilterChips();
   }
 });
 
@@ -15144,31 +15348,49 @@ function _outputDurationLabel(o) {
 
 function renderCarousel() {
   const el = document.getElementById('carousel');
-  if (!currentOutputs.length) { el.innerHTML = '<div class="empty-msg">No outputs in this view yet.</div>'; return; }
-  el.innerHTML = currentOutputs.map(o => {
+  const visible = filteredMainOutputs();
+  if (!visible.length) {
+    const msg = mainOutputsFilter === 'photos' ? 'No photo outputs yet.'
+              : mainOutputsFilter === 'videos' ? 'No video outputs yet.'
+              : 'No outputs in this view yet.';
+    el.innerHTML = `<div class="empty-msg">${msg}</div>`;
+    return;
+  }
+  el.innerHTML = visible.map(o => {
     const pathAttr = JSON.stringify(o.path).replace(/"/g, '&quot;');
-    // Thumbnail seek point: 2.5s is the midpoint of an LTX 5s clip (121
-    // frames at 24fps ≈ 5.04s). The first half-second of LTX renders is
-    // often dark/static (model fades into the scene), so #t=0.5 produced
-    // "black thumbnail" complaints — the video was fine, the seek point
-    // was the darkest moment. Mid-clip is reliably the visual peak.
+    const isPhoto = isPhotoOutputMain(o);
+    // Thumbnail markup branches on kind. Videos use <video> with a
+    // mid-clip seek (2.5s — LTX clips are 5s at 24fps and the first
+    // half-second is often a dark fade-in, so seeking to the middle
+    // gets a representative frame). Photos use <img> directly with
+    // the same /image?path=… cache-bust URL the server stamped.
+    const thumbHtml = isPhoto
+      ? `<img class="car-thumb" src="${o.url}" alt="${escapeHtml(o.name)}" loading="lazy">`
+      : `<video src="${o.url}#t=2.5" preload="metadata" muted></video>`;
+    // Action row also branches: photos can't be Extended (Extend is
+    // video-only) so swap that secondary button to Animate, which
+    // mirrors the Recent tab's photo-row Animate button (commit 0d9c6eb).
+    const animateArgs = JSON.stringify({path: o.path, prompt: ''}).replace(/"/g, '&quot;');
+    const secondaryBtn = isPhoto
+      ? `<button onclick="event.stopPropagation(); animateFromPhoto(${animateArgs})">Animate</button>`
+      : `<button onclick="event.stopPropagation(); useAsExtendSourcePath(${pathAttr})">Extend</button>`;
     return `
     <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
-      <video src="${o.url}#t=2.5" preload="metadata" muted></video>
+      ${thumbHtml}
       ${o.has_sidecar
         ? `<button class="car-info-btn" type="button" title="Show generation info"
                    onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
         : ''}
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
-        <div class="sub" title="Render time · file size">
-          ${_outputDurationLabel(o)} · ${o.size_mb.toFixed(1)} MB
+        <div class="sub" title="${isPhoto ? 'File size' : 'Render time · file size'}">
+          ${isPhoto ? '' : _outputDurationLabel(o) + ' · '}${o.size_mb.toFixed(1)} MB
         </div>
       </div>
       <div class="row-btns">
         <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})">${o.hidden ? 'Show' : 'Hide'}</button>
-        <button onclick="event.stopPropagation(); useAsExtendSourcePath(${pathAttr})">Extend</button>
+        ${secondaryBtn}
       </div>
     </div>`;
   }).join('');
@@ -15184,11 +15406,73 @@ function selectOutput(path) {
   // the player ends up on the cached stale-bytes URL and re-shows black
   // until the browser cache expires.
   const o = currentOutputs.find(x => x.path === path);
-  const playerSrc = o ? o.url : `/file?path=${encodeURIComponent(path)}`;
-  wrap.innerHTML = `<video controls autoplay src="${playerSrc}"></video>`;
+  const isPhoto = isPhotoOutputMain(o);
+  // Photo entries don't go through /file (which is OUTPUT-bound and
+  // serves video with Range headers). Use /image which supports both
+  // OUTPUT and UPLOADS roots, with the right MIME headers. Server-side
+  // list_outputs() already builds the right URL per kind, so o.url
+  // is correct for both — the fallback path below only runs when an
+  // unknown path is requested (e.g. clicked from a stale modal link).
+  let playerSrc;
+  if (o) {
+    playerSrc = o.url;
+  } else if (isPhoto) {
+    playerSrc = `/image?path=${encodeURIComponent(path)}`;
+  } else {
+    playerSrc = `/file?path=${encodeURIComponent(path)}`;
+  }
+  // Photo viewer is a static <img> — no controls, no autoplay (would
+  // be a no-op on an image element anyway). Video viewer keeps the
+  // existing controls + autoplay behaviour.
+  wrap.innerHTML = isPhoto
+    ? `<img src="${playerSrc}" alt="${o ? escapeHtml(o.name) : ''}">`
+    : `<video controls autoplay src="${playerSrc}"></video>`;
   document.getElementById('playerMeta').style.display = '';
-  document.getElementById('playerName').innerHTML = o ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB` : '';
-  document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar);
+  // Meta line: photos drop the playback duration slot since there's
+  // nothing to play back. Videos keep the existing
+  // "<name> · <mtime> · <size> MB" tagline.
+  document.getElementById('playerName').innerHTML = o
+    ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB`
+    : '';
+  // Load params is video-only — image sidecars use the library@1 schema
+  // which doesn't carry the i2v/t2v form fields the loader expects.
+  // Photo prompt re-use already happens through Animate (see below),
+  // which reads the prompt out of the library@1 sidecar directly.
+  document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar) || isPhoto;
+  // Action button row: swap "Use as Extend" for "Animate" on photo
+  // entries (Extend is video-only, but the still can be the seed for
+  // an i2v render). The DOM nodes both exist; we just toggle display
+  // so the button labels stay in their authored slot.
+  const useExtBtn = document.getElementById('useAsExtendBtn');
+  const animBtn = document.getElementById('animateBtn');
+  if (useExtBtn) useExtBtn.style.display = isPhoto ? 'none' : '';
+  if (animBtn) animBtn.style.display = isPhoto ? '' : 'none';
+}
+
+// Animate the active output (photo only). Mirrors animateFromPhoto's
+// shape — pre-fills the i2v form from the active entry's path and the
+// sidecar's prompt if there is one. Sidecar fetch is best-effort; if it
+// fails (or there isn't one), we still animate with an empty prompt so
+// the user can type their own.
+async function animateActive() {
+  if (!activePath) return;
+  const o = currentOutputs.find(x => x.path === activePath);
+  let prompt = '';
+  if (o && o.has_sidecar) {
+    try {
+      const r = await fetch('/sidecar?path=' + encodeURIComponent(activePath));
+      if (r.ok) {
+        const data = await r.json();
+        // Image sidecars use schema "phosphene/library/image@1" with
+        // a top-level `prompt`; video sidecars nest it under `params`.
+        // Cover both shapes so the UI works regardless of source.
+        prompt = (data && (data.prompt || (data.params && data.params.prompt))) || '';
+      }
+    } catch (e) {}
+  }
+  if (typeof animateFromPhoto === 'function') {
+    animateFromPhoto({path: activePath, prompt: prompt});
+  }
 }
 
 async function hide(path) { await fetch('/output/hide?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
