@@ -34,13 +34,59 @@ _MODEL_PATH: str = ""
 _LAST_ERROR: str = ""
 
 
+_LAST_REACHABLE_AT: float = 0.0
+
+
+def _port_reachable(port: int, timeout: float = 0.25) -> bool:
+    """Cheap TCP-connect probe to see if the engine is actually serving.
+
+    `_PROC.poll() is None` returns True for a few hundred ms after a
+    failed bind (the process is alive long enough for the bind error
+    to crash it). Without this probe the panel would tell the user the
+    engine is "live" while requests time out. Cached for 750 ms so the
+    polling status endpoint stays cheap.
+    """
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(("127.0.0.1", port))
+        finally:
+            sock.close()
+        return True
+    except OSError:
+        return False
+
+
 def status() -> dict:
-    """Snapshot for the UI: is the local engine running, and on what?"""
-    global _PROC
+    """Snapshot for the UI: is the local engine running, and on what?
+
+    Two booleans because they can disagree:
+      - `running`     — `_PROC` is alive (process-level, cheap)
+      - `reachable`   — port is bound and accepts TCP connect
+    During the bind-collision window after panel restart, the new
+    engine is `running=True` but `reachable=False` for the second or
+    two until it crashes; the UI should treat the engine as healthy
+    only when BOTH are true.
+    """
+    global _PROC, _LAST_REACHABLE_AT
     with _LOCK:
         running = _PROC is not None and _PROC.poll() is None
+        reachable = False
+        if running:
+            now = time.time()
+            # Cache the probe for 750 ms so status() polls cheaply.
+            if now - _LAST_REACHABLE_AT > 0.75:
+                reachable = _port_reachable(_PORT)
+                if reachable:
+                    _LAST_REACHABLE_AT = now
+            else:
+                # Recent successful probe — assume still good.
+                reachable = True
         return {
             "running": running,
+            "reachable": reachable,
             "port": _PORT,
             "model_path": _MODEL_PATH,
             "pid": _PROC.pid if running else None,
@@ -73,6 +119,21 @@ def start(model_path: str, *, venv_python: str, log_sink=None) -> dict:
             if _MODEL_PATH and _MODEL_PATH == model_path:
                 return _status_locked()
             _stop_locked(reason="model change")
+
+        # Reap orphaned `mlx_lm.server` processes left behind by prior
+        # panel sessions. mlx_lm.server is spawned with `start_new_session=True`
+        # so when the panel exits without a clean shutdown, the engine
+        # survives — and on next panel boot it still holds port 8200.
+        # The new spawn would then fail with `[Errno 48] Address already
+        # in use` and exit immediately, but `_PROC.poll()` returned None
+        # for a few hundred ms before it died, so the panel's status pill
+        # showed "live" while the engine was actually broken.
+        # Symptom Salo hit: "live" pill + "Local unreachable" banner side
+        # by side; agent submits return "engine error: Remote end closed
+        # connection without response". Fix: scan for any python running
+        # `mlx_lm.server` against our port BEFORE we try to spawn, and
+        # SIGTERM them (escalating to SIGKILL on holdouts).
+        _reap_orphan_servers(port=_PORT, log_sink=log_sink)
 
         if not Path(venv_python).exists():
             _LAST_ERROR = f"venv python not found: {venv_python}"
@@ -149,6 +210,72 @@ def start(model_path: str, *, venv_python: str, log_sink=None) -> dict:
     return status()
 
 
+def _reap_orphan_servers(*, port: int, log_sink=None) -> None:
+    """SIGTERM any `mlx_lm.server` python processes pointing at our port.
+
+    Survives panel restarts because mlx_lm.server is spawned with
+    `start_new_session=True` (so the engine doesn't die when the panel
+    process tree dies). Without this reap, a fresh panel boot collides
+    with the surviving engine from the previous session. Best-effort
+    only — failures are logged but don't abort the start path.
+    """
+    import shutil
+
+    if not shutil.which("ps"):
+        return  # macOS edge case; ps should always be there
+    try:
+        out = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return
+    if out.returncode != 0:
+        return
+
+    port_marker = f"--port {port}"
+    needle = "mlx_lm.server"
+    self_pid = os.getpid()
+    targets: list[int] = []
+    for raw in out.stdout.splitlines():
+        if needle not in raw or port_marker not in raw:
+            continue
+        # Lines look like "12345 /path/to/python -m mlx_lm.server --port 8200 ..."
+        try:
+            pid_str = raw.strip().split(None, 1)[0]
+            pid = int(pid_str)
+        except (ValueError, IndexError):
+            continue
+        if pid == self_pid:
+            continue
+        targets.append(pid)
+
+    if not targets:
+        return
+
+    msg = f"local_server: reaping {len(targets)} orphan engine(s) on port {port}: {targets}"
+    if log_sink is not None:
+        try: log_sink(msg)
+        except Exception: pass    # noqa: BLE001
+    # First SIGTERM all of them, give the kernel a beat to release the
+    # port, then SIGKILL anything that didn't exit. Without the wait,
+    # the next bind would still race with port shutdown.
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(1.5)
+    for pid in targets:
+        try:
+            os.kill(pid, 0)        # probe — raises if already dead
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    # Final settle so the kernel surrenders the port before our spawn.
+    time.sleep(0.5)
+
+
 def stop(reason: str = "manual stop") -> dict:
     with _LOCK:
         _stop_locked(reason)
@@ -178,9 +305,14 @@ def _stop_locked(reason: str) -> None:
 
 
 def _status_locked() -> dict:
+    # Note: this internal helper deliberately does NOT call _port_reachable —
+    # callers from inside _LOCK don't need the probe (they're either
+    # mid-spawn or mid-stop, neither of which has a stable port state).
+    # The public status() is the only path that pays the probe cost.
     running = _PROC is not None and _PROC.poll() is None
     return {
         "running": running,
+        "reachable": False,           # internal helper — caller is mid-flux
         "port": _PORT,
         "model_path": _MODEL_PATH,
         "pid": _PROC.pid if running else None,

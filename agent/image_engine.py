@@ -487,9 +487,10 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # for a confusing argparse failure.
     if fam == "qwen_edit" and not refs:
         raise ValueError(
-            "qwen_edit requires at least 1 reference image. Either "
-            "switch the engine to 'qwen' (text-to-image, same model "
-            "family) or pass refs=[<path>] to compose against."
+            "Qwen-Image-Edit-2509 needs at least 1 reference image — drop "
+            "a photo into one of the 3 reference slots above, or switch "
+            "the Engine dropdown to FLUX.2 [klein] / Z-Image-Turbo for "
+            "text-only generation."
         )
 
     # Effective steps + guidance: prefer user-set values if non-zero,

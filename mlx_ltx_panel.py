@@ -12661,7 +12661,7 @@ HTML = r"""<!doctype html>
       <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
         <div class="field">
           <label>Engine</label>
-          <select id="imgStudioEngine">
+          <select id="imgStudioEngine" onchange="imgStudioUpdateValidity()">
             <option value="auto" selected>Auto (use Settings)</option>
             <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref · 8-step Q4, ~1 min/image)</option>
             <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2509 + Lightning (multi-ref · 4-step Q4, ~10-15 s/image)</option>
@@ -13492,6 +13492,39 @@ const IMG_STUDIO = {
   busy: false,
 };
 
+// Engine families that REQUIRE at least one reference image (mflux's
+// qwen-edit CLI marks --image-paths as required; calling it without
+// refs returns an argparse error after model load). The Studio engine
+// override values map 1:1 to these check predicates. Used by
+// imgStudioUpdateValidity() to gate the Generate button.
+function imgStudioRequiresRefs(engineOverride) {
+  return engineOverride === 'qwen_edit_inline'
+      || engineOverride === 'qwen_edit_lightning_inline'
+      || engineOverride === 'qwen_edit_high_inline';
+}
+
+function imgStudioUpdateValidity() {
+  const btn = document.getElementById('imgStudioGenBtn');
+  const eng = document.getElementById('imgStudioEngine');
+  const status = document.getElementById('imgStudioStatus');
+  if (!btn || !eng) return;
+  const refsCount = IMG_STUDIO.refs.filter(r => r && r.path).length;
+  const needsRefs = imgStudioRequiresRefs(eng.value);
+  let invalidReason = '';
+  if (needsRefs && refsCount === 0) {
+    invalidReason = 'Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.';
+  }
+  // Don't override the busy state — imgStudioGenerate manages disabled
+  // during in-flight gens.
+  if (!IMG_STUDIO.busy) {
+    btn.disabled = !!invalidReason;
+    btn.title = invalidReason || 'Generate (Cmd/Ctrl+Enter)';
+    if (status && !status.textContent.startsWith('Generating')) {
+      status.textContent = invalidReason ? '⚠ ' + invalidReason : '';
+    }
+  }
+}
+
 // Reveal the mock-engine option only when the URL has ?debug=1.
 // Mock paints flat colored rectangles — useful for testing the UX
 // without spending GPU time, but a casual user picks it and gets
@@ -13513,6 +13546,10 @@ const IMG_STUDIO = {
 // mode hides it. The pill row drives both flows.
 function openImageStudio() {
   setMode('image');
+  // Re-evaluate Generate button state (engine + ref count) every time the
+  // user enters Studio so they don't see a stale "ready" button when the
+  // engine selection makes refs mandatory.
+  imgStudioUpdateValidity();
   setTimeout(() => {
     const t = document.getElementById('imgStudioPrompt');
     if (t) {
@@ -13572,6 +13609,7 @@ function imgStudioRenderSlot(idx) {
     slot.classList.remove('has-image');
     slot.innerHTML = `<div class="placeholder">Drop or click<br>ref ${idx + 1}</div>`;
   }
+  imgStudioUpdateValidity();
 }
 
 function imgStudioClearRef(idx) {
@@ -16739,9 +16777,17 @@ function workflowSwitch(name) {
     .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');
   const agent = document.getElementById('agentPane');
+  const studio = document.getElementById('studioSection');
   // Set body data attribute so CSS can switch the layout (wider form-pane,
   // show agent-stage-pane on the right).
   document.body.setAttribute('data-workflow', name);
+  // Studio is an inline pane inside form-pane — when leaving Manual it
+  // must hide too, otherwise the user lands on Agentic Flows with the
+  // Studio form overlapping the chat. Also reset currentMode to t2v so
+  // a future Manual click returns to a sane default. Bug fix from the
+  // browser-driven audit: switching tabs while Studio was active left
+  // the chat inaccessible.
+  if (studio) studio.classList.remove('show');
   if (name === 'agent') {
     if (manual) manual.style.display = 'none';
     if (agent) agent.hidden = false;
@@ -16876,16 +16922,64 @@ function agentEngineBannerShow(j, opts) {
     detail = j.message || 'Will auto-start on first message.';
     actionLabel = 'Start engine';
     actionEl && (actionEl.onclick = function() {
-      // Reuse the existing one-click engine-start path.
-      fetch('/agent/local/start', {method: 'POST'})
-        .then(() => agentRefreshConfig())
-        .then(() => setTimeout(() => agentCheckEngine({forceShow: true}), 1500));
+      // Reuse the existing one-click engine-start path. After the
+      // POST returns we poll agentRefreshConfig + agentCheckEngine
+      // every 2 s for up to 45 s — Gemma 12B 4-bit binds the port
+      // ~10-15 s after spawn, longer if weights need to come off
+      // disk. Without the poll, the pill stays "starting…" forever
+      // because nothing triggers a refresh once port is bound.
+      fetch('/agent/local/start', {method: 'POST'}).then(() => {
+        let tries = 0;
+        const maxTries = 22;        // ~45 s budget
+        const tick = () => {
+          agentRefreshConfig().then(() => {
+            const local = (window.AGENT.config || {}).local_server || {};
+            const reachable = (typeof local.reachable === 'boolean')
+              ? local.reachable : !!local.running;
+            if (reachable || tries >= maxTries) {
+              agentCheckEngine({forceShow: true});
+              return;
+            }
+            tries += 1;
+            setTimeout(tick, 2000);
+          }).catch(() => {
+            tries += 1;
+            if (tries < maxTries) setTimeout(tick, 2000);
+          });
+        };
+        // First tick immediately so the pill flips out of "click to start"
+        // the moment the spawn reports running=true.
+        setTimeout(tick, 500);
+      });
     });
   } else {
     title = `${kindLabel} unreachable`;
     detail = j.message || 'Probe failed.';
-    actionLabel = 'Open Settings';
-    actionEl && (actionEl.onclick = function() { openAgentSettings(); });
+    actionLabel = 'Restart engine';
+    actionEl && (actionEl.onclick = function() {
+      // Restart-engine action — for the most common cause of unreachable
+      // (orphaned process holding the port). The local_server.start path
+      // now reaps orphans before spawning, so this is a clean recovery.
+      fetch('/agent/local/stop', {method: 'POST'}).then(() =>
+        fetch('/agent/local/start', {method: 'POST'})
+      ).then(() => {
+        let tries = 0;
+        const tick = () => {
+          agentRefreshConfig().then(() => {
+            const local = (window.AGENT.config || {}).local_server || {};
+            const reachable = (typeof local.reachable === 'boolean')
+              ? local.reachable : !!local.running;
+            if (reachable || tries >= 22) {
+              agentCheckEngine({forceShow: true});
+              return;
+            }
+            tries += 1;
+            setTimeout(tick, 2000);
+          });
+        };
+        setTimeout(tick, 500);
+      });
+    });
   }
 
   if (titleEl) titleEl.textContent = title;
@@ -16939,7 +17033,17 @@ async function agentRefreshConfig() {
     let live = false;
     let summary = '';
     if (eng.kind === 'phosphene_local') {
-      live = !!local.running;
+      // The pill is green only when BOTH process is alive AND port
+      // accepts connections. Without the reachable check, a freshly
+      // crashed engine (bind error after orphan collision) still
+      // shows green for ~1 s and the user submits a chat that 500s
+      // with "Remote end closed connection without response".
+      // `local.reachable` is `true | false`; older panels that don't
+      // expose it default to !!local.running for backward compat.
+      const reachableOk = (typeof local.reachable === 'boolean')
+        ? local.reachable
+        : !!local.running;
+      live = !!local.running && reachableOk;
       const modelName = formatModelName(eng.model || '');
       // Look up the resident size from the discovered models so the user
       // sees "22 GB" inline next to the name — no surprise loads.
@@ -16950,9 +17054,17 @@ async function agentRefreshConfig() {
         const hit = list.find(m => m.path === path);
         if (hit && hit.size_gb) sizeBit = ` · ${hit.size_gb.toFixed(1)} GB`;
       } catch (e) {}
-      summary = live
-        ? `${modelName || 'Local'}${sizeBit} · live`
-        : `${modelName || 'Local'}${sizeBit} · click to start`;
+      // Three-state summary: live / starting / click-to-start. The
+      // "starting" state appears the moment a spawn begins until the
+      // port is bound (typically 5-15 s for Gemma 12B, longer on first
+      // run if weights need to come off disk).
+      if (local.running && !reachableOk) {
+        summary = `${modelName || 'Local'}${sizeBit} · starting…`;
+      } else if (live) {
+        summary = `${modelName || 'Local'}${sizeBit} · live`;
+      } else {
+        summary = `${modelName || 'Local'}${sizeBit} · click to start`;
+      }
     } else {
       const u = (eng.base_url || '').replace(/^https?:\/\//, '').replace(/\/v1$/, '');
       summary = `${eng.model || 'remote'} · ${u}`;
