@@ -20426,27 +20426,60 @@ function agentStageRender(status, sess) {
       const failed = o.status === 'error' || o.status === 'failed' || o.status === 'cancelled';
       cell.className = 'stage-output-cell' + (failed ? ' failed' : '');
       cell.title = o.label + ' · ' + o.status;
-      // If we have a finished output_path, show the video as a thumbnail.
-      // Otherwise show a status badge.
+      // If we have a finished output_path, show the media as a thumbnail.
+      // Use <img> for photo outputs and <video> for video outputs — without
+      // this branch, .png paths stuffed into a <video> tag rendered as
+      // empty cells when the user picked the Photos filter.
       if (o.output_path && o.status === 'done') {
-        const v = document.createElement('video');
-        v.className = 'vid';
-        v.src = '/file?path=' + encodeURIComponent(o.output_path);
-        v.preload = 'metadata';
-        v.muted = true;
-        cell.appendChild(v);
-        cell.addEventListener('click', () => agentStageLightboxOpen(o.output_path, o.label, o.id));
-        // Refine button (overlay top-right): "give me a variation of this clip"
-        const refine = document.createElement('button');
-        refine.type = 'button';
-        refine.className = 'refine-btn';
-        refine.title = 'Refine this clip — start a variation in the chat';
-        refine.textContent = '↻';
-        refine.addEventListener('click', (e) => {
-          e.stopPropagation();
-          agentSetRefine({jobId: o.id, label: o.label, clipPath: o.output_path});
-        });
-        cell.appendChild(refine);
+        if (isPhotoOutput(o)) {
+          const im = document.createElement('img');
+          im.className = 'vid';
+          im.src = '/file?path=' + encodeURIComponent(o.output_path);
+          im.loading = 'lazy';
+          im.alt = o.label || 'photo output';
+          cell.appendChild(im);
+          // Click on photo: open full-size in a new tab (lightbox is
+          // video-only). Cheapest viewer that works with /file?path=…
+          // and the cache-bust headers already set on that endpoint.
+          cell.addEventListener('click', () => {
+            window.open('/file?path=' + encodeURIComponent(o.output_path), '_blank', 'noopener');
+          });
+          // Animate button (overlay top-right): pre-fill the i2v form
+          // with this still as the reference. Mirrors the Recent tab's
+          // Animate flow from commit 0d9c6eb so users have one button
+          // to "animate this picture" no matter where they click from.
+          const anim = document.createElement('button');
+          anim.type = 'button';
+          anim.className = 'refine-btn';
+          anim.title = 'Animate this still — pre-fill the i2v form';
+          anim.textContent = '▶';
+          anim.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (typeof animateFromPhoto === 'function') {
+              animateFromPhoto({path: o.output_path, prompt: ''});
+            }
+          });
+          cell.appendChild(anim);
+        } else {
+          const v = document.createElement('video');
+          v.className = 'vid';
+          v.src = '/file?path=' + encodeURIComponent(o.output_path);
+          v.preload = 'metadata';
+          v.muted = true;
+          cell.appendChild(v);
+          cell.addEventListener('click', () => agentStageLightboxOpen(o.output_path, o.label, o.id));
+          // Refine button (overlay top-right): "give me a variation of this clip"
+          const refine = document.createElement('button');
+          refine.type = 'button';
+          refine.className = 'refine-btn';
+          refine.title = 'Refine this clip — start a variation in the chat';
+          refine.textContent = '↻';
+          refine.addEventListener('click', (e) => {
+            e.stopPropagation();
+            agentSetRefine({jobId: o.id, label: o.label, clipPath: o.output_path});
+          });
+          cell.appendChild(refine);
+        }
       } else {
         cell.style.display = 'flex';
         cell.style.alignItems = 'center';
