@@ -467,12 +467,32 @@ def render_tools_doc() -> str:
     contract as the dispatcher. Keep tool docstrings tight and accurate.
     """
     sections = []
-    # Stable order so the prompt is reproducible across reboots.
+    # Stable order so the prompt is reproducible across reboots. Order
+    # groups by workflow phase rather than alphabetically:
+    #   1. planning          — estimate_shot
+    #   2. shot composition  — generate_shot_images, get_selected_anchors,
+    #                          inspect_clip, extract_frame, upload_image,
+    #                          list_library_images
+    #   3. submission + wait — submit_shot, get_queue_status, wait_for_shot
+    #   4. style + memory    — list_loras, get_master_style,
+    #                          read_project_notes, append_project_notes,
+    #                          read_document
+    #   5. delivery          — write_session_manifest, finish
+    # Adding a tool? Insert it in the right phase here AND keep its
+    # @tool name aligned with the registry. Out-of-list names land at
+    # the bottom alphabetically (the trailing fallback below).
     order = [
-        "estimate_shot", "submit_shot", "get_queue_status",
-        "wait_for_shot", "extract_frame", "upload_image",
-        "read_document", "list_loras", "get_master_style",
-        "read_project_notes", "append_project_notes",
+        # planning
+        "estimate_shot",
+        # shot composition (anchor stills + reference assets)
+        "generate_shot_images", "get_selected_anchors", "list_library_images",
+        "inspect_clip", "extract_frame", "upload_image",
+        # submission + wait
+        "submit_shot", "get_queue_status", "wait_for_shot",
+        # style + memory
+        "list_loras", "get_master_style",
+        "read_project_notes", "append_project_notes", "read_document",
+        # delivery
         "write_session_manifest", "finish",
     ]
     for name in order:
@@ -481,7 +501,7 @@ def render_tools_doc() -> str:
             continue
         doc = (fn.__doc__ or "").strip()
         sections.append(f"## `{name}`\n\n{doc}")
-    # Any new tools registered later land at the bottom.
+    # Any new tools registered later land at the bottom alphabetically.
     for name in sorted(tools.TOOL_HANDLERS.keys()):
         if name in order:
             continue

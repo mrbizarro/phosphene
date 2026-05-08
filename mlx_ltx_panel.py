@@ -3789,13 +3789,18 @@ def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
                 cfg = promoted
                 # Persist so subsequent loads short-circuit. Failure to
                 # write isn't fatal — promotion still applies in-memory
-                # this run.
+                # this run. chmod 0o600 because bfl_api_key may also be
+                # in this file.
                 try:
                     STATE_DIR.mkdir(parents=True, exist_ok=True)
                     atomic_write_text(
                         AGENT_IMAGE_CONFIG_PATH,
                         json.dumps(cfg.__dict__, indent=2),
                     )
+                    try:
+                        os.chmod(AGENT_IMAGE_CONFIG_PATH, 0o600)
+                    except OSError:
+                        pass
                     push(f"agent: auto-promoted image engine mock -> {cfg.kind}/{cfg.mflux_family} (model={cfg.mflux_model})")
                 except OSError as e:
                     push(f"agent: image-engine auto-promote in-memory only (write failed: {e})")
@@ -3837,6 +3842,19 @@ def _auto_promote_image_engine_kind(
 
 
 def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineConfig:
+    """Merge `updates` into the saved image config and persist.
+
+    Secret-handling convention (matches _save_agent_config):
+      - `None` value or absent key  → leave as-is
+      - `""` empty string           → CLEAR the secret
+    The previous version short-circuited empty-string for bfl_api_key,
+    which left the key stuck in the config forever once entered. With
+    explicit-clear semantics the user can blank the input box and save
+    to remove the key.
+
+    File is written 0o600 because it carries the BFL API key. Mirrors
+    the agent session file pattern in agent/runtime.py:save_session.
+    """
     global _AGENT_IMAGE_CONFIG_CACHE
     with AGENT_LOCK:
         cur = _load_agent_image_config()
@@ -3844,12 +3862,18 @@ def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineCon
         for k, v in (updates or {}).items():
             if k not in merged:
                 continue
-            if k == "bfl_api_key" and v == "":
-                continue                        # blank means "leave as-is"
+            if v is None:
+                continue                        # absent / null means "leave as-is"
             merged[k] = v
         cfg = agent_image_engine.ImageEngineConfig(**merged)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(AGENT_IMAGE_CONFIG_PATH, json.dumps(cfg.__dict__, indent=2))
+        # Tighten permissions — the file holds bfl_api_key in plaintext.
+        # atomic_write_text doesn't chmod; we do it ourselves. Best-effort.
+        try:
+            os.chmod(AGENT_IMAGE_CONFIG_PATH, 0o600)
+        except OSError:
+            pass
         _AGENT_IMAGE_CONFIG_CACHE = cfg
         return cfg
 
@@ -12640,16 +12664,16 @@ HTML = r"""<!doctype html>
             <option value="qwen_edit_high_inline">Qwen-Image-Edit-2509 high quality (multi-ref · 30-step Q8, ~5 min/image)</option>
             <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
             <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
-            <option value="mock_inline">Mock (testing)</option>
+            <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
           </select>
         </div>
         <div class="field">
           <label>Aspect</label>
           <select id="imgStudioAspect">
-            <option value="16:9" selected>16:9 — 1024×576</option>
+            <option value="16:9" selected>16:9 — 1280×720</option>
             <option value="4:3">4:3 — 1024×768</option>
-            <option value="1:1">1:1 — 768×768</option>
-            <option value="9:16">9:16 — 576×1024</option>
+            <option value="1:1">1:1 — 1024×1024</option>
+            <option value="9:16">9:16 — 720×1280</option>
             <option value="3:4">3:4 — 768×1024</option>
             <option value="21:9">21:9 — 1280×544</option>
           </select>
@@ -13464,6 +13488,20 @@ const IMG_STUDIO = {
   busy: false,
 };
 
+// Reveal the mock-engine option only when the URL has ?debug=1.
+// Mock paints flat colored rectangles — useful for testing the UX
+// without spending GPU time, but a casual user picks it and gets
+// confused output. Audit finding HIGH #14.
+(function() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('debug') === '1') {
+      const m = document.getElementById('imgStudioMockOption');
+      if (m) m.removeAttribute('hidden');
+    }
+  } catch (e) {}
+})();
+
 // Phase 1: Image Studio is now an inline pane (#studioSection) shown by
 // setMode('image'). These two functions stay as no-arg shims so any
 // caller still doing openImageStudio()/closeImageStudio() works.
@@ -13573,8 +13611,36 @@ async function imgStudioGenerate() {
   };
   IMG_STUDIO.busy = true;
   document.getElementById('imgStudioGenBtn').disabled = true;
-  document.getElementById('imgStudioStatus').textContent = 'Generating…';
   document.getElementById('imgStudioResults').innerHTML = '';
+  // Live elapsed-time counter so the user doesn't sit on a frozen
+  // "Generating…" string while mflux works. Stops on completion or
+  // failure (the finally block clears the interval).
+  const tStart = Date.now();
+  const fmtElapsed = (ms) => {
+    const s = Math.floor(ms / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    return mm + ':' + ss;
+  };
+  // Engine-specific ETA hint so the user knows what to expect
+  const eta = (() => {
+    const eng = body.engine_override || 'auto';
+    if (eng === 'qwen_edit_lightning_inline') return '~10-15 s/image, batched';
+    if (eng === 'qwen_edit_inline')           return '~1 min/image at 8 steps Q4';
+    if (eng === 'qwen_edit_high_inline')      return '~5 min/image at 30 steps Q8';
+    if (eng === 'flux2_inline')               return '~15 s/image at 4 steps';
+    if (eng === 'z_image_turbo_inline')       return '~30 s/image at 9 steps';
+    if (eng === 'mock_inline')                return 'instant (testing only)';
+    return ''; // 'auto' — engine TBD on server
+  })();
+  document.getElementById('imgStudioStatus').textContent =
+    'Generating… 00:00' + (eta ? ' · ' + eta : '');
+  IMG_STUDIO.elapsedTimer = setInterval(() => {
+    const s = document.getElementById('imgStudioStatus');
+    if (s && IMG_STUDIO.busy) {
+      s.textContent = 'Generating… ' + fmtElapsed(Date.now() - tStart) + (eta ? ' · ' + eta : '');
+    }
+  }, 1000);
   try {
     const r = await fetch('/image/generate', {
       method: 'POST',
@@ -13609,6 +13675,10 @@ async function imgStudioGenerate() {
   } finally {
     IMG_STUDIO.busy = false;
     document.getElementById('imgStudioGenBtn').disabled = false;
+    if (IMG_STUDIO.elapsedTimer) {
+      clearInterval(IMG_STUDIO.elapsedTimer);
+      IMG_STUDIO.elapsedTimer = null;
+    }
   }
 }
 
@@ -18821,12 +18891,18 @@ function openAgentSettings() {
     // Steps: 0 means "use family default". Fill in the right per-family
     // value for display so the user sees what will actually be used,
     // mirroring agent/image_engine.py MFLUX_FAMILY_DEFAULTS.
+    // Family-default step count when the user hasn't explicitly set one.
+    // Must mirror agent/image_engine.py:MFLUX_FAMILY_DEFAULTS — flagged at
+    // the source. Out-of-sync defaults are how Settings was showing 25/30
+    // for qwen_edit when image_engine was already running 8.
     let stepsForDisplay = imgCfg.mflux_steps;
     if (!stepsForDisplay) {
-      if (/flux\.?2|flux2-klein/i.test(mfModel)) stepsForDisplay = 4;
+      if (/qwen-image-edit|qwen_image_edit|qwen-edit/i.test(mfModel)) stepsForDisplay = 8;
+      else if (/flux\.?2|flux2-klein/i.test(mfModel)) stepsForDisplay = 4;
       else if (/z-image-turbo|z_image_turbo/i.test(mfModel)) stepsForDisplay = 9;
       else if (/schnell/i.test(mfModel)) stepsForDisplay = 4;
       else if (/fibo/i.test(mfModel)) stepsForDisplay = 30;
+      else if (/qwen/i.test(mfModel)) stepsForDisplay = 30;  // plain Qwen-Image (T2I)
       else stepsForDisplay = 25;                 // flux1-dev/krea, z-image base
     }
     document.getElementById('agentMfluxSteps').value = stepsForDisplay;

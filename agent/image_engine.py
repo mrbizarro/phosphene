@@ -120,12 +120,16 @@ class ImageEngineConfig:
         return d
 
 
-# Aspect ratios → (width, height). Flux is most stable on these.
+# Aspect ratios → (width, height). Picks favor larger dimensions because
+# Qwen-Image-Edit-2509 is documented to be best at 1024² and 1280×720;
+# the previous 1024×576 default for 16:9 was a Flux-era artifact and
+# visibly degrades qwen_edit output. Flux2 / Z-Image fine here too — they
+# scale gracefully past 1024.
 ASPECT_DIMS = {
-    "16:9":  (1024, 576),
+    "16:9":  (1280, 720),
     "4:3":   (1024, 768),
-    "1:1":   (768, 768),
-    "9:16":  (576, 1024),
+    "1:1":   (1024, 1024),
+    "9:16":  (720, 1280),
     "3:4":   (768, 1024),
     "21:9":  (1280, 544),
 }
@@ -469,6 +473,17 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             f"(see docs/AGENTIC_FLOWS.md § Image generation backends). "
             f"First-run model download is 4-34 GB to ~/.cache/huggingface "
             f"depending on family."
+        )
+
+    # qwen_edit refuses to start without --image-paths (mflux argparse
+    # marks it required for the qwen-edit CLI). Catch this here with a
+    # clear validation error instead of letting the user wait minutes
+    # for a confusing argparse failure.
+    if fam == "qwen_edit" and not refs:
+        raise ValueError(
+            "qwen_edit requires at least 1 reference image. Either "
+            "switch the engine to 'qwen' (text-to-image, same model "
+            "family) or pass refs=[<path>] to compose against."
         )
 
     # Effective steps + guidance: prefer user-set values if non-zero,
