@@ -2986,6 +2986,161 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     }
 
 
+# ---------------------------------------------------------------------------
+# Image-job pre-flight: refuse jobs we can predict will OOM mid-Metal-render.
+#
+# Background: mflux subprocesses on macOS hit the SIGABRT-from-Metal cliff
+# silently (commit bc818a5 added post-mortem detection). A pre-flight rejection
+# is much better UX. We estimate per-engine RAM need from a small lookup,
+# compare against `vm_stat`-derived free RAM, and check disk on the HF cache
+# volume in case the model still needs downloading.
+#
+# Bypass with `PHOSPHENE_SKIP_PREFLIGHT=1` — the threshold is a guideline, not
+# a wall, and the user gets to choose to push their luck.
+# ---------------------------------------------------------------------------
+# (family, quantize) → estimated RAM need in GB. The Q-size step gives ~30%
+# savings, so missing entries fall back to a same-family entry scaled by the
+# quantize delta. Numbers come from the recent OOM crash + per-family Metal
+# heap observations on the M4 Max 64 GB.
+_PREFLIGHT_BASE_GB: dict[tuple[str, int], float] = {
+    # Qwen-Image-Edit (24 GB safetensors per shard, several shards)
+    ("qwen_edit", 4): 18.0,
+    ("qwen_edit", 6): 24.0,
+    ("qwen_edit", 8): 32.0,
+    # FLUX.2 — distilled 4B and base 4B/9B variants
+    ("flux2", 4):      6.0,
+    ("flux2", 6):      8.0,
+    ("flux2", 8):     12.0,
+    ("flux2_edit", 4): 6.0,   # klein-edit distilled 4B
+    ("flux2_edit", 6): 8.0,
+    ("flux2_edit", 8): 16.0,  # klein-base-edit (NON-distilled) jumps here
+    # Z-Image-Turbo — small T2I, fits comfortably on 8 GB Macs
+    ("z_image_turbo", 4): 4.0,
+    ("z_image_turbo", 6): 5.0,
+    # FLUX.1 family (krea-dev / dev / schnell) — covered for completeness
+    ("flux1", 4): 6.0,
+    ("flux1", 6): 8.0,
+    ("flux1", 8): 12.0,
+}
+
+# When the user picks the explicit `_high_inline` Klein-Base-9B path the
+# family string is still "flux2" but the model carries `9b` in its name.
+# We surface the variant via a small heuristic on `mflux_model`.
+_PREFLIGHT_9B_GB = 36.0
+
+
+def _preflight_estimate_ram_gb(cfg) -> float:
+    """Return the best-effort RAM estimate (GB) for the given image cfg.
+
+    Lookup order:
+      1. exact (family, quantize) match
+      2. same family, nearest quantize, scaled by ~30% per Q-step
+      3. fall back to 8 GB (the smallest realistic image model)
+
+    The `9b` variant gets a hard override — its Metal residency dwarfs
+    every 4B sibling regardless of quantize.
+    """
+    if cfg.kind != "mflux":
+        # `mock` engine doesn't allocate; `bfl` is cloud-side.
+        return 1.0
+    fam = (cfg.mflux_family or "auto").lower()
+    q = int(cfg.mflux_quantize or 6)
+    model = (getattr(cfg, "mflux_model", "") or "").lower()
+    if fam == "flux2" and "9b" in model:
+        return _PREFLIGHT_9B_GB
+    direct = _PREFLIGHT_BASE_GB.get((fam, q))
+    if direct is not None:
+        return direct
+    # Try same family, nearest q. Each step down in q saves ~30%.
+    fam_keys = [(fk, fq) for (fk, fq) in _PREFLIGHT_BASE_GB if fk == fam]
+    if fam_keys:
+        nearest = min(fam_keys, key=lambda k: abs(k[1] - q))
+        base = _PREFLIGHT_BASE_GB[nearest]
+        steps = q - nearest[1]
+        # +1 step ≈ +30% RAM, -1 step ≈ -30%. Multiplicative.
+        return round(base * (1.30 ** steps), 1)
+    return 8.0
+
+
+def _preflight_disk_free_gb(path: Path) -> float:
+    """Free disk on the volume containing `path`, in GB.
+
+    Uses os.statvfs because it's stdlib and matches what `df` reports for the
+    volume root. Returns 0.0 on any error so the caller's "below 10 GB"
+    threshold trips and we surface the disk problem rather than silently
+    pretending it's OK.
+    """
+    try:
+        st = os.statvfs(str(path))
+        return (st.f_bavail * st.f_frsize) / (1024 ** 3)
+    except OSError:
+        return 0.0
+
+
+def _preflight_model_cached(cfg) -> bool:
+    """True if the model's HF cache snapshot already exists on disk.
+
+    A `False` here means the worker will trigger a `hf download` first, so
+    we need to tighten the disk-free threshold (24 GB Qwen weights filling
+    a near-full disk to 100% has wedged the panel before).
+    """
+    if cfg.kind != "mflux":
+        return True
+    model = (getattr(cfg, "mflux_model", "") or "").strip()
+    if not model:
+        return True
+    # Local path or named shorthand (e.g. "flux2-klein-4b") — mflux resolves
+    # these via its own bundled cache, not HF Hub. Treat as cached.
+    if "/" not in model:
+        return True
+    return _repo_hf_cache_dir(model) is not None
+
+
+def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
+    """Raise RuntimeError if the host can't safely run this image cfg.
+
+    Checks (in order):
+      1. Free RAM (vm_stat) ≥ per-engine need.
+      2. Free disk on HF cache volume ≥ 10 GB if model isn't cached.
+
+    Bypass with `PHOSPHENE_SKIP_PREFLIGHT=1`. We log every preflight result
+    (pass or skip) so post-mortems can tell the difference between "preflight
+    rejected this" and "preflight passed and the render still died".
+    """
+    if (os.environ.get("PHOSPHENE_SKIP_PREFLIGHT") or "").strip() in ("1", "true", "yes"):
+        push(f"[preflight] skipped via PHOSPHENE_SKIP_PREFLIGHT (engine={engine_override})")
+        return
+
+    need_gb = _preflight_estimate_ram_gb(cfg)
+    mem = get_memory()
+    total_gb = float(mem.get("total_gb") or 0.0)
+    used_gb = float(mem.get("used_gb") or 0.0)
+    free_gb = max(0.0, total_gb - used_gb)
+    if free_gb < need_gb:
+        raise RuntimeError(
+            f"pre-flight: this engine ({engine_override}) needs ~{need_gb:.0f} GB free RAM "
+            f"but only {free_gb:.1f} GB is available "
+            f"(total {total_gb:.0f} GB, used {used_gb:.1f} GB). "
+            f"Close other apps or set PHOSPHENE_SKIP_PREFLIGHT=1 to override."
+        )
+
+    cache_root = _hf_cache_root()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    free_disk_gb = _preflight_disk_free_gb(cache_root)
+    cached = _preflight_model_cached(cfg)
+    if not cached and free_disk_gb < 10.0:
+        raise RuntimeError(
+            f"pre-flight: only {free_disk_gb:.1f} GB free on the HF cache volume "
+            f"({cache_root}) and this engine ({engine_override}) isn't cached yet. "
+            f"Free at least 10 GB or set PHOSPHENE_SKIP_PREFLIGHT=1 to override."
+        )
+
+    push(
+        f"[preflight] OK · engine={engine_override} need~{need_gb:.0f}G "
+        f"free={free_gb:.1f}G disk={free_disk_gb:.0f}G cached={cached}"
+    )
+
+
 def run_image_job_inner(job: dict) -> None:
     """Run an image-generation job through the same queue worker as video.
 
@@ -3045,6 +3200,12 @@ def run_image_job_inner(job: dict) -> None:
         cfg = _build_image_engine_config(engine_override)
     except ValueError as e:
         raise RuntimeError(str(e))
+
+    # Pre-flight: refuse the job up-front when we can predict it will OOM
+    # mid-Metal-render (commit bc818a5 covers the post-mortem; this short-
+    # circuits before the subprocess even spawns). Bypass with
+    # PHOSPHENE_SKIP_PREFLIGHT=1.
+    _preflight_image_job(cfg, engine_override=engine_override)
 
     # Same date-bucketed + per-request output dir scheme as /image/generate
     # so the library reader (and any downstream consumer) sees one shape.
@@ -5000,6 +5161,67 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 40
             self._json({"uploads": list_uploads(limit=max(1, min(200, limit)))})
             return
+        if parsed.path == "/panel/bug-context":
+            # Sysinfo + log tail bundle for the bug-report modal. The browser
+            # has no access to sysctl / sw_vers / git, so we collect everything
+            # server-side and ship it back as a single JSON payload. Used to
+            # pre-fill the description textarea in openBugModal().
+            try:
+                ver = _read_local_version() or "unknown"
+                sha = _VERSION_STATE.get("local_short") or ""
+                branch = ""
+                try:
+                    branch = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=2, cwd=str(ROOT),
+                    ).stdout.strip()
+                except Exception:                                   # noqa: BLE001
+                    pass
+                mac_ver = ""
+                try:
+                    mac_ver = subprocess.run(
+                        ["sw_vers", "-productVersion"],
+                        capture_output=True, text=True, timeout=2,
+                    ).stdout.strip()
+                except Exception:                                   # noqa: BLE001
+                    pass
+                hw_model = ""
+                try:
+                    hw_model = subprocess.run(
+                        ["sysctl", "-n", "hw.model"],
+                        capture_output=True, text=True, timeout=2,
+                    ).stdout.strip()
+                except Exception:                                   # noqa: BLE001
+                    pass
+                mem = get_memory()
+                ram_gb = round(float(mem.get("total_gb") or 0.0))
+                with LOCK:
+                    tail = list(STATE["log"])[-50:]
+                # Crash count — the modal hides the "Include crash reports"
+                # checkbox when zero so the user doesn't see an empty zip.
+                crash_count = 0
+                try:
+                    diag = Path.home() / "Library" / "Logs" / "DiagnosticReports"
+                    if diag.is_dir():
+                        crash_count = sum(
+                            1 for p in diag.iterdir()
+                            if p.is_file() and p.suffix.lower() == ".ips"
+                        )
+                except OSError:
+                    pass
+                self._json({
+                    "version": ver,
+                    "commit": sha,
+                    "branch": branch or "unknown",
+                    "macOS": mac_ver,
+                    "hwModel": hw_model,
+                    "ramGB": ram_gb,
+                    "logTail": tail,
+                    "crashCount": crash_count,
+                })
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"error": f"context build failed: {exc}"}, 500)
+            return
         if parsed.path == "/models":
             # Per-repo status snapshot for the Models modal in the UI.
             # Same data the menu/install rely on, just shaped per-repo so
@@ -5747,6 +5969,76 @@ class Handler(BaseHTTPRequestHandler):
                 "model": getattr(cfg, "mflux_model", None) or cfg.kind,
                 "output_dir": str(out_dir),
             })
+            return
+
+        # Bug-report endpoint — used by the header bug button + modal. The
+        # client supplies a title + body (already pre-filled with environment
+        # info) and an `includeCrashReports` flag. We URL-build the GitHub
+        # `issues/new?title=&body=&labels=bug` link entirely client-side
+        # (no auth, no API hit, no token required) and optionally bundle
+        # the latest crash IPS files into a tmp zip the user drags onto the
+        # issue. NO server-side issue creation — keeps the surface tiny.
+        if path == "/panel/bug-report" and ctype.startswith("application/json"):
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._json({"error": "invalid Content-Length"}, 400); return
+            if length <= 0:
+                self._json({"error": "Content-Length required"}, 411); return
+            # Cap the body — title + body + a few flags is at most a couple
+            # of KB; 256 KB is wide enough for paste-bombed log tails while
+            # staying well below GitHub's 65 KB URL limit (we'll truncate
+            # the body before URL-encoding anyway).
+            if length > 256 * 1024:
+                self._json({"error": "body too large (max 256 KB)"}, 413); return
+            try:
+                payload = json.loads(self.rfile.read(length).decode() or "{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._json({"error": "invalid JSON body"}, 400); return
+
+            title = (payload.get("title") or "[bug] ").strip()
+            body = (payload.get("body") or "").strip()
+            include_crash = bool(payload.get("includeCrashReports"))
+
+            # GitHub's URL parser tolerates ~8 KB of querystring before it
+            # silently drops the body. Truncate the body to ~6 KB pre-encode
+            # to leave headroom for percent-escaping (which roughly doubles
+            # length for JSON / log content).
+            if len(body) > 6000:
+                body = body[:6000] + "\n\n…(truncated; remaining log on disk)…"
+            from urllib.parse import quote as _urlq
+            issue_url = (
+                f"https://github.com/mrbizarro/phosphene/issues/new"
+                f"?title={_urlq(title)}&body={_urlq(body)}&labels=bug"
+            )
+
+            zip_path: str | None = None
+            if include_crash:
+                try:
+                    import zipfile
+                    diag = Path.home() / "Library" / "Logs" / "DiagnosticReports"
+                    if diag.is_dir():
+                        # Latest 5 ips files (any process; .ips is the only
+                        # universal extension across crash sources). Sorted
+                        # by mtime descending.
+                        ips = sorted(
+                            (p for p in diag.iterdir()
+                             if p.is_file() and p.suffix.lower() == ".ips"),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True,
+                        )[:5]
+                        if ips:
+                            zp = Path(f"/tmp/phosphene-bug-{int(time.time())}.zip")
+                            with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+                                for ip in ips:
+                                    zf.write(ip, arcname=ip.name)
+                            zip_path = str(zp)
+                except Exception as exc:                            # noqa: BLE001
+                    # Crash bundling is a nicety; if it fails we still
+                    # surface the issue URL. Log so we can debug.
+                    push(f"[bug-report] crash-bundle skipped: {exc}")
+
+            self._json({"ok": True, "issueUrl": issue_url, "zipPath": zip_path})
             return
 
         # All other POST endpoints expect urlencoded body
@@ -11377,6 +11669,34 @@ HTML = r"""<!doctype html>
       color: var(--text);
       background: rgba(140, 160, 220, 0.06);
     }
+    /* Bug button — neon-pulsing accent so it reads as "interactive" and
+       discoverable. Uses an HSL accent (cyan-leaning) that's distinct from
+       the danger / warning / success colors already in use elsewhere. The
+       pulse is subtle enough to live in the header without being loud. */
+    body > header #bugBtn.bug-btn {
+      color: #5fc8ff;
+      animation: bug-neon 2.4s ease-in-out infinite;
+      filter: drop-shadow(0 0 4px rgba(95, 200, 255, 0.45));
+    }
+    body > header #bugBtn.bug-btn:hover {
+      color: #88dcff;
+      background: rgba(95, 200, 255, 0.10);
+      filter: drop-shadow(0 0 8px rgba(95, 200, 255, 0.85));
+      animation-duration: 1.2s;
+    }
+    @keyframes bug-neon {
+      0%, 100% {
+        filter: drop-shadow(0 0 3px rgba(95, 200, 255, 0.30));
+        opacity: 0.75;
+      }
+      50% {
+        filter: drop-shadow(0 0 9px rgba(95, 200, 255, 0.85));
+        opacity: 1;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      body > header #bugBtn.bug-btn { animation: none; }
+    }
     body > header #stopComfyBtn {
       height: 24px; padding: 0 10px;
       font-size: 11px; font-weight: 500;
@@ -12282,6 +12602,26 @@ HTML = r"""<!doctype html>
        No modal — confirm() + small toast for everything. -->
   <span id="versionPill" class="pill pill-checking" style="cursor:pointer"
         onclick="versionPillClick()" title="Phosphene version">phosphene · …</span>
+  <!-- Bug-report button — neon-pulsing in the header pill row. Opens a
+       modal that pre-fills environment info + log tail and finishes with a
+       pre-filled GitHub issue (URL-built client-side, no auth). Sits before
+       the settings cog so it's where the user looks first when something
+       feels off. -->
+  <button id="bugBtn" class="icon-btn bug-btn" onclick="openBugModal()" title="Report a bug — opens GitHub issue with environment pre-filled">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 2l1.88 1.88"></path>
+      <path d="M14.12 3.88L16 2"></path>
+      <path d="M9 7.13v-1a3.003 3.003 0 0 1 6 0v1"></path>
+      <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6z"></path>
+      <path d="M12 20v-9"></path>
+      <path d="M6.53 9C4.6 8.8 3 7.1 3 5"></path>
+      <path d="M6 13H2"></path>
+      <path d="M3 21c0-2.1 1.7-3.8 3.8-4"></path>
+      <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"></path>
+      <path d="M22 13h-4"></path>
+      <path d="M17.2 17c2.1.2 3.8 1.9 3.8 4"></path>
+    </svg>
+  </button>
   <!-- Settings cog: opens the modal that lets users pick output codec
        presets (Standard / Video production / Web / Custom). Sits between the
        runtime pills and Stop Comfy so it's findable but not loud. -->
@@ -13449,6 +13789,48 @@ HTML = r"""<!doctype html>
     </div>
     <div id="outputInfoBody" class="output-info-body">
       <div class="hint">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============== BUG REPORT MODAL ============== -->
+<!-- Opened by the neon bug button in the header pill row. Pre-fills
+     environment info + log tail server-side via /panel/bug-context, then
+     opens a pre-filled GitHub issue when the user submits. NO server-side
+     issue creation — the client builds the URL, opens it in a new tab,
+     and we're done. Optional crash-report zip lives in /tmp for the user
+     to drag onto the issue. -->
+<div id="bugModal" class="models-modal" style="display:none"
+     onclick="if(event.target===this) closeBugModal()">
+  <div class="models-card" style="width: min(720px, 96vw)">
+    <div class="models-head">
+      <h2>Report a bug</h2>
+      <button class="ghost-btn" onclick="closeBugModal()">Close</button>
+    </div>
+    <div class="models-hint">
+      Opens a pre-filled GitHub issue in a new tab. Environment info, version,
+      and the last 50 log lines are filled in for you.
+    </div>
+    <div id="bugModalBody" style="padding: 12px 0; display:flex; flex-direction:column; gap:10px">
+      <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted)">
+        Title
+        <input id="bugTitle" type="text" value="[bug] "
+               style="padding:6px 9px; font-size:13px; background:rgba(140,160,220,0.04); border:1px solid var(--ph-border-soft); border-radius:6px; color:var(--text); font-family:inherit">
+      </label>
+      <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted)">
+        Description
+        <textarea id="bugBody" rows="14"
+                  style="padding:8px 10px; font-size:12px; background:rgba(140,160,220,0.04); border:1px solid var(--ph-border-soft); border-radius:6px; color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; line-height:1.45; resize:vertical">Loading environment…</textarea>
+      </label>
+      <label id="bugCrashRow" style="display:none; align-items:center; gap:8px; font-size:12px; color:var(--muted)">
+        <input id="bugCrashCheck" type="checkbox" checked>
+        <span id="bugCrashLabel">Include latest crash reports (zips up to 5 .ips files)</span>
+      </label>
+      <div id="bugSubmitRow" style="display:flex; gap:8px; justify-content:flex-end; align-items:center">
+        <span id="bugStatus" style="flex:1; font-size:12px; color:var(--muted)"></span>
+        <button class="ghost-btn" onclick="closeBugModal()">Cancel</button>
+        <button id="bugSubmitBtn" class="primary-btn" onclick="submitBugReport()">Open GitHub issue</button>
+      </div>
     </div>
   </div>
 </div>
@@ -16136,6 +16518,137 @@ function openTierModal() {
   });
 }
 function closeTierModal() { document.getElementById('tierModal').style.display = 'none'; }
+
+// ====== Bug report modal ======
+// Fetches env + log tail from /panel/bug-context on open, lets the user
+// type into pre-marked sections, then on submit POSTs the title+body to
+// /panel/bug-report (which builds the GitHub URL + optional crash zip)
+// and opens the URL in a new tab. Stays purely in the panel — no auth,
+// no API hit, the user reviews the issue body in GitHub before posting.
+let _bugCtxCache = null;
+async function openBugModal() {
+  const modal = document.getElementById('bugModal');
+  modal.style.display = 'flex';
+  const titleEl = document.getElementById('bugTitle');
+  const bodyEl = document.getElementById('bugBody');
+  const crashRow = document.getElementById('bugCrashRow');
+  const crashLabel = document.getElementById('bugCrashLabel');
+  const statusEl = document.getElementById('bugStatus');
+  const submitBtn = document.getElementById('bugSubmitBtn');
+  // Clear stale state in case the user opens twice in a row.
+  titleEl.value = '[bug] ';
+  bodyEl.value = 'Loading environment…';
+  statusEl.textContent = '';
+  submitBtn.disabled = false;
+  submitBtn.textContent = 'Open GitHub issue';
+  try {
+    const r = await fetch('/panel/bug-context');
+    if (!r.ok) throw new Error('bug-context: ' + r.status);
+    _bugCtxCache = await r.json();
+  } catch (err) {
+    bodyEl.value = '## Environment\n- (server context unavailable: ' + err + ')\n\n'
+      + '## What I was doing\n\n\n## What happened\n\n\n## Expected\n\n';
+    crashRow.style.display = 'none';
+    return;
+  }
+  const c = _bugCtxCache;
+  const tail = (c.logTail || []).join('\n') || '(no recent log lines)';
+  bodyEl.value =
+`## Environment
+- Phosphene version: ${c.version}${c.commit ? ' (' + c.commit + ')' : ''}
+- Branch: ${c.branch}
+- macOS: ${c.macOS || 'unknown'}
+- Mac: ${c.hwModel || 'unknown'} · ${c.ramGB || '?'} GB RAM
+
+## What I was doing
+
+
+## What happened
+
+
+## Expected
+
+
+## Logs / repro
+\`\`\`
+${tail}
+\`\`\`
+`;
+  // Crash-report checkbox only when there's something to bundle.
+  if ((c.crashCount || 0) > 0) {
+    crashRow.style.display = 'flex';
+    crashLabel.textContent =
+      `Include latest crash reports (zips up to 5 of ${c.crashCount} .ips files)`;
+    document.getElementById('bugCrashCheck').checked = true;
+  } else {
+    crashRow.style.display = 'none';
+  }
+  // Focus the "What I was doing" line for the user to start typing.
+  // Place caret right after the heading.
+  setTimeout(() => {
+    bodyEl.focus();
+    const marker = '## What I was doing\n';
+    const idx = bodyEl.value.indexOf(marker);
+    if (idx >= 0) {
+      const pos = idx + marker.length;
+      bodyEl.setSelectionRange(pos, pos);
+    }
+  }, 50);
+}
+function closeBugModal() {
+  document.getElementById('bugModal').style.display = 'none';
+}
+async function submitBugReport() {
+  const submitBtn = document.getElementById('bugSubmitBtn');
+  const statusEl = document.getElementById('bugStatus');
+  const title = document.getElementById('bugTitle').value.trim() || '[bug] (untitled)';
+  const body = document.getElementById('bugBody').value;
+  const includeCrashEl = document.getElementById('bugCrashCheck');
+  const includeCrash = includeCrashEl && document.getElementById('bugCrashRow').style.display !== 'none'
+    ? !!includeCrashEl.checked : false;
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Working…';
+  statusEl.textContent = 'Building issue…';
+  try {
+    const r = await fetch('/panel/bug-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body, includeCrashReports: includeCrash }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.issueUrl) throw new Error(data.error || ('HTTP ' + r.status));
+    // Open the issue in a new tab. noopener for safety.
+    window.open(data.issueUrl, '_blank', 'noopener');
+    if (data.zipPath) {
+      // Try to copy the path to clipboard so the user can paste-find it
+      // in Finder, OR drag the file from /tmp directly onto the GitHub
+      // issue. Best-effort — clipboard write requires a user gesture
+      // context, which a click handler counts as.
+      try { await navigator.clipboard.writeText(data.zipPath); } catch (e) { /* ignore */ }
+      statusEl.innerHTML =
+        'Crash report bundled. Drag this file into the GitHub issue:<br>' +
+        '<code style="font-size:11px">' + data.zipPath + '</code><br>' +
+        '<span style="color:var(--success,#3fb950)">(path copied to clipboard)</span>';
+      submitBtn.textContent = 'Done — close';
+      submitBtn.disabled = false;
+      submitBtn.onclick = closeBugModal;
+    } else {
+      statusEl.textContent = 'GitHub issue opened in a new tab.';
+      submitBtn.textContent = 'Done — close';
+      submitBtn.disabled = false;
+      submitBtn.onclick = closeBugModal;
+      // Auto-close after a short delay if the user doesn't click Close.
+      setTimeout(() => {
+        const m = document.getElementById('bugModal');
+        if (m && m.style.display !== 'none') closeBugModal();
+      }, 4000);
+    }
+  } catch (err) {
+    statusEl.innerHTML = '<span style="color:var(--danger,#f85149)">Failed: ' + err + '</span>';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Try again';
+  }
+}
 
 // ====== Settings modal ======
 // Single-shot fetch on open (settings change rarely). The modal hydrates
