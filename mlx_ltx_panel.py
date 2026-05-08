@@ -5364,12 +5364,16 @@ class Handler(BaseHTTPRequestHandler):
             t0 = time.time()
             try:
                 try:
+                    # Stream mflux stdout into the panel log card so users
+                    # see step-by-step progress while the gen runs.
+                    # tqdm progress bars come through line-buffered.
                     candidates = agent_image_engine.generate(
                         prompt=prompt, n=n, aspect=aspect,
                         output_dir=out_dir,
                         base_seed=base_seed,
                         refs=refs_resolved or None,
                         config=cfg,
+                        on_log=lambda line: push(f"[image] {line}"),
                     )
                 except FileNotFoundError as e:
                     self._json({"error": str(e)}, 404); return

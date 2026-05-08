@@ -139,7 +139,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
              aspect: str = "16:9",
              base_seed: int | None = None,
              refs: list[str] | None = None,
-             config: ImageEngineConfig) -> list[dict]:
+             config: ImageEngineConfig,
+             on_log: "callable | None" = None) -> list[dict]:
     """Generate `n` candidate images for one shot. Saves under `output_dir`.
 
     Args:
@@ -162,6 +163,10 @@ def generate(*, prompt: str, n: int, output_dir: Path,
               to a non-supporting family, a warning shows in the result
               dict but the call still succeeds with text-only output.
         config: backend selection + per-backend params
+        on_log: optional callback `(line: str) -> None` invoked once per
+            stdout/stderr line emitted by the underlying engine. Lets the
+            panel surface live mflux progress (e.g., tqdm `[12/30]` step
+            lines) instead of waiting silently. None = discard log lines.
 
     Returns a list of `{png_path, seed, engine, width, height, ...}`
     dicts in submission order.
@@ -185,7 +190,7 @@ def generate(*, prompt: str, n: int, output_dir: Path,
     if config.kind == "mock":
         return _generate_mock(prompt, n, width, height, output_dir, base_seed, refs=refs)
     if config.kind == "mflux":
-        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs)
+        return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
@@ -421,7 +426,8 @@ def _generate_mock(prompt: str, n: int, width: int, height: int,
 def _generate_mflux(prompt: str, n: int, width: int, height: int,
                     output_dir: Path, base_seed: int | None,
                     config: ImageEngineConfig,
-                    refs: list[str] | None = None) -> list[dict]:
+                    refs: list[str] | None = None,
+                    on_log: "callable | None" = None) -> list[dict]:
     """Subprocess the right `mflux-generate-*` binary ONCE for all `n` seeds.
 
     Pre-2026-05-08 this spawned one subprocess per candidate, paying the
@@ -559,24 +565,69 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     per_image_budget = 60 if fam in ("flux2", "z_image_turbo") else 360
     cold_start_budget = 240 if fam in ("flux2", "z_image_turbo") else 1800
     timeout_s = cold_start_budget + per_image_budget * n
+
+    # Switched to Popen + line-streaming so the panel can surface mflux's
+    # tqdm progress bars (`[12/30]`-style step lines) and weight-download
+    # status to the user while the subprocess runs. Capturing both
+    # stdout and stderr to one stream so the line ordering matches what
+    # mflux actually printed; tail of the stream is kept for inclusion
+    # in any error message.
+    import collections
+    last_lines: collections.deque[str] = collections.deque(maxlen=64)
+    stderr_tail = ""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        text=True,
+        bufsize=1,
+    )
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, env=env, timeout=timeout_s,
-        )
+        deadline = time.time() + timeout_s
+        if proc.stdout is not None:
+            for raw in iter(proc.stdout.readline, ""):
+                line = raw.rstrip("\n")
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                last_lines.append(line)
+                if on_log is not None:
+                    try:
+                        on_log(line)
+                    except Exception:                # noqa: BLE001
+                        # A buggy logger callback must not break the gen.
+                        pass
+                if time.time() > deadline:
+                    proc.kill()
+                    raise RuntimeError(
+                        f"{bin_name} timed out after {timeout_s}s on a batch of "
+                        f"{n} seeds. First run downloads weights — qwen_edit Q8 "
+                        f"weights are ~34 GB; give it longer or pre-pull."
+                    )
+        rc = proc.wait(timeout=max(1, deadline - time.time()))
     except subprocess.TimeoutExpired as e:
+        try:
+            proc.kill()
+        except OSError:
+            pass
         raise RuntimeError(
             f"{bin_name} timed out after {timeout_s}s on a batch of {n} seeds. "
-            f"First run downloads weights — for qwen_edit the Q8 weights "
-            f"are ~34 GB; give the first batch longer or pre-pull with: "
-            f"`{bin_path} --model {config.mflux_model} "
-            f"--prompt warmup --steps 1 --output /tmp/_mflux_warmup.png "
-            f"--image-paths /tmp/anything.png` (qwen_edit needs --image-paths)"
+            f"First run downloads weights; give it longer next time."
         ) from e
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")
+    finally:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+
+    stderr_tail = "\n".join(last_lines)
+    if rc != 0:
         raise RuntimeError(
-            f"{bin_name} failed (exit {result.returncode}) on batch of {n} seeds: "
-            f"{err[:800]}"
+            f"{bin_name} failed (exit {rc}) on batch of {n} seeds. "
+            f"Tail of stdout/stderr:\n{stderr_tail[:1200]}"
         )
 
     # Build results from whatever files actually landed. If the
