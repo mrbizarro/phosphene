@@ -252,6 +252,25 @@ OUTPUT_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
+# Memory policy controls the VAE decode trade-off. Denoising remains identical;
+# this only decides when the helper can use the faster full-volume VAE decode
+# instead of the safer temporal-streamed decode.
+MEMORY_POLICIES: dict[str, dict[str, str]] = {
+    "auto": {
+        "label": "Auto",
+        "blurb": "Use the faster path when this Mac has headroom, stream decode when clips get long or memory pressure rises.",
+    },
+    "fast": {
+        "label": "Fast memory",
+        "blurb": "Spend more unified memory to full-decode medium clips faster. Best with other heavy apps closed.",
+    },
+    "safe": {
+        "label": "Safe memory",
+        "blurb": "Lower peak memory by streaming VAE decode. Slower, but best under pressure or on smaller Macs.",
+    },
+}
+DEFAULT_MEMORY_POLICY = "auto"
+
 # Default preset for fresh installs. Switched from "archival" to "standard"
 # after multiple users reported X upload failures (X rejects yuv444p) and
 # disk-fill complaints about ~50 MB clips. Existing installs keep whatever
@@ -292,6 +311,9 @@ def _settings_defaults() -> dict:
         # to flip OFF→ON so kids / casual visitors can't enable it by a
         # stray click.
         "spicy_mode": False,
+        # Memory/speed policy. Defaults to Auto so 5 s clips keep the fast
+        # full-decode path while long/high-pressure renders stay protected.
+        "memory_policy": DEFAULT_MEMORY_POLICY,
     }
 
 
@@ -472,6 +494,12 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         else:
             out["spicy_mode"] = str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    if "memory_policy" in patch:
+        policy = str(patch["memory_policy"]).strip().lower()
+        if policy not in MEMORY_POLICIES:
+            return {}, f"unknown memory_policy: {policy}"
+        out["memory_policy"] = policy
+
     return out, None
 
 
@@ -514,6 +542,7 @@ def get_settings_public() -> dict:
         "has_hf_token": bool(s.get("hf_token", "").strip()),
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "spicy_mode": bool(s.get("spicy_mode", False)),
+        "memory_policy": s.get("memory_policy", DEFAULT_MEMORY_POLICY),
     }
 
 
@@ -2081,6 +2110,71 @@ def get_memory() -> dict:
     return info
 
 
+def plan_memory_policy(frames: int, *, mode: str, quality: str) -> dict:
+    """Choose the VAE full-decode cutoff for this job.
+
+    The expensive denoise path is unchanged. This only governs the patched VAE
+    decode: full-volume decode is faster but peaks higher; temporal streaming
+    is slower but avoids the long-clip "done denoising, stuck at the end"
+    memory-pressure cliff.
+    """
+    saved = str(get_settings().get("memory_policy", DEFAULT_MEMORY_POLICY)).strip().lower()
+    if saved not in MEMORY_POLICIES:
+        saved = DEFAULT_MEMORY_POLICY
+
+    mem = get_memory()
+    pressure = int(mem.get("pressure_pct") or 0)
+    swap_gb = float(mem.get("swap_gb") or 0.0)
+    pressured = pressure >= 82 or swap_gb >= 4.0
+
+    # Base-tier machines should not spend memory for speed; they need to avoid
+    # swap. High/Pro can full-decode more frames before streaming becomes wiser.
+    tier_auto = {
+        "base": 0,
+        "standard": 121,  # 5 s @ 24 fps
+        "high": 241,     # 10 s @ 24 fps
+        "pro": 361,      # 15 s @ 24 fps
+    }
+    tier_fast = {
+        "base": 0,
+        "standard": 241, # 10 s @ 24 fps
+        "high": 361,     # 15 s @ 24 fps
+        "pro": 481,      # 20 s @ 24 fps
+    }
+
+    reason = ""
+    if saved == "safe" or SYSTEM_TIER == "base":
+        effective = "safe"
+        max_full = 0
+        reason = "safe policy" if saved == "safe" else "compact memory tier"
+    elif pressured:
+        effective = "safe"
+        max_full = 0
+        reason = f"memory pressure {pressure}%, swap {swap_gb:.1f} GB"
+    elif saved == "fast":
+        effective = "fast"
+        max_full = tier_fast.get(SYSTEM_TIER, 121)
+        reason = "user selected Fast memory"
+    else:
+        effective = "auto"
+        max_full = tier_auto.get(SYSTEM_TIER, 121)
+        reason = f"{SYSTEM_CAPS['label']} tier"
+
+    return {
+        "requested": saved,
+        "effective": effective,
+        "full_decode_max_frames": int(max_full),
+        "vae_decode": "full" if int(frames) <= int(max_full) else "stream",
+        "frames": int(frames),
+        "tier": SYSTEM_TIER,
+        "pressure_pct": pressure,
+        "swap_gb": round(swap_gb, 2),
+        "reason": reason,
+        "mode": mode,
+        "quality": quality,
+    }
+
+
 # ---- hidden / output state ---------------------------------------------------
 
 def load_hidden() -> None:
@@ -2982,6 +3076,7 @@ def run_job_inner(job: dict) -> None:
         else:
             width, height = req_w, req_h
         frames = p["frames"]
+        memory_plan = plan_memory_policy(frames, mode="keyframe", quality="high")
         # Filename: derive from the user's label or first words of the prompt.
         # Technical metadata (dimensions, frames, timestamp) lives in the
         # sidecar at <out_path>.json, surfaced by the gallery info button.
@@ -3031,13 +3126,18 @@ def run_job_inner(job: dict) -> None:
                 "stage1_steps": 20,
                 "stage2_steps": 3,
                 "cfg_scale": 3.0,
+                "memory_policy": memory_plan["effective"],
+                "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
             },
         }
-        push(f"Run KEYFRAME via helper: id={job['id']} {width}x{height} {frames}f · Q8 two-stage (stage1=20)")
+        push(f"Run KEYFRAME via helper: id={job['id']} {width}x{height} {frames}f · Q8 two-stage (stage1=20) · "
+             f"memory={memory_plan['effective']} VAE={memory_plan['vae_decode']}")
         result = HELPER.run(job_spec)
         if "seed_used" in result:
             push(f"seed used: {result['seed_used']}")
             p["seed_used"] = result["seed_used"]
+        if result.get("memory_policy"):
+            memory_plan = {**memory_plan, "helper": result.get("memory_policy")}
         sidecar = {
             "output": str(out_path), "raw_output": str(out_path),
             "params": {**p, "command": "keyframe"},
@@ -3047,6 +3147,7 @@ def run_job_inner(job: dict) -> None:
             "fps": FPS, "model": MODEL_ID_HQ, "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
             "output_codec": output_codec_settings(),
+            "memory_policy": memory_plan,
         }
         write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
         job["output_path"] = str(out_path)
@@ -3086,6 +3187,7 @@ def run_job_inner(job: dict) -> None:
             "requested_duration_sec": round(requested_duration, 3),
             "method": "ffmpeg_minterpolate_mci",
         }
+    memory_plan = plan_memory_policy(model_frames, mode=mode, quality=quality)
 
     # T2V/I2V resolution clamp — only applies on the base tier (< 48 GB).
     # Standard / high / pro tiers pass full user-requested W×H through.
@@ -3172,9 +3274,12 @@ def run_job_inner(job: dict) -> None:
                 "stg_scale": 0.0,
                 "enable_teacache": True,
                 "teacache_thresh": 1.0,
+                "memory_policy": memory_plan["effective"],
+                "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
             },
         }
-        push(f"Run HIGH via helper: id={job['id']} mode={mode} {width}x{height} {frames}f · Q8 two-stage HQ + TeaCache")
+        push(f"Run HIGH via helper: id={job['id']} mode={mode} {width}x{height} {frames}f · Q8 two-stage HQ + TeaCache · "
+             f"memory={memory_plan['effective']} VAE={memory_plan['vae_decode']}")
     else:
         # Quick / Standard — Q4 one-stage with steps from form.
         # Resolve LoRAs: user-picked entries from p["loras"] plus the
@@ -3204,6 +3309,8 @@ def run_job_inner(job: dict) -> None:
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": loras,
                 "accel": p.get("accel", "off"),
+                "memory_policy": memory_plan["effective"],
+                "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
                 # Sharp/PiperSR is a panel-side post-render pass. Do not pass it
                 # through to the helper; the helper's old "model" path is the
                 # hidden LTX latent upscaler experiment that distorted faces.
@@ -3221,15 +3328,19 @@ def run_job_inner(job: dict) -> None:
             push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
                  f"{width}x{height} {model_frames}f · {len(loras)} LoRA"
                  f"{'s' if len(loras) != 1 else ''}"
-                 f"{' (incl. HDR)' if p.get('hdr') else ''}{temporal_suffix}")
+                 f"{' (incl. HDR)' if p.get('hdr') else ''}{temporal_suffix} · "
+                 f"memory={memory_plan['effective']} VAE={memory_plan['vae_decode']}")
         else:
             push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
-                 f"{width}x{height} {model_frames}f{temporal_suffix}")
+                 f"{width}x{height} {model_frames}f{temporal_suffix} · "
+                 f"memory={memory_plan['effective']} VAE={memory_plan['vae_decode']}")
 
     result = HELPER.run(job_spec)
     if "seed_used" in result:
         push(f"seed used: {result['seed_used']}")
         p["seed_used"] = result["seed_used"]
+    if result.get("memory_policy"):
+        memory_plan = {**memory_plan, "helper": result.get("memory_policy")}
 
     final_target = raw_out
     if mode == "i2v_clean_audio":
@@ -3356,6 +3467,7 @@ def run_job_inner(job: dict) -> None:
         "fps": FPS, "model": MODEL_ID, "queue_id": job["id"],
         "helper_elapsed_sec": result.get("elapsed_sec"),
         "output_codec": output_codec_settings(),
+        "memory_policy": memory_plan,
     }
     if result.get("accel_metrics"):
         sidecar["accel_metrics"] = result["accel_metrics"]
@@ -4371,6 +4483,7 @@ class Handler(BaseHTTPRequestHandler):
                 "alive": HELPER.is_alive(), "pid": HELPER.pid(),
                 "low_memory": HELPER_LOW_MEMORY == "true",
                 "idle_timeout_sec": HELPER_IDLE_TIMEOUT,
+                "memory_policy": get_settings().get("memory_policy", DEFAULT_MEMORY_POLICY),
             }
             # Completeness checks come from the shared required_files.json so
             # the menu, the UI, and the run-time job validator all agree on
@@ -4466,6 +4579,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "settings": get_settings_public(),
                 "presets": OUTPUT_PRESETS,
+                "memory_policies": MEMORY_POLICIES,
                 "default_preset": DEFAULT_OUTPUT_PRESET,
             })
             return
@@ -5504,6 +5618,10 @@ class Handler(BaseHTTPRequestHandler):
                 prev.get("civitai_api_key", "") != current.get("civitai_api_key", "") or
                 prev.get("hf_token", "") != current.get("hf_token", "")
             )
+            memory_policy_changed = (
+                prev.get("memory_policy", DEFAULT_MEMORY_POLICY) !=
+                current.get("memory_policy", DEFAULT_MEMORY_POLICY)
+            )
             if codec_changed:
                 push(
                     f"settings: output codec → {current['output_pix_fmt']} "
@@ -5514,6 +5632,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Don't log token values themselves, just the action.
                 push("settings: API tokens updated. Helper restarted; "
                      "takes effect on next job.")
+            if memory_policy_changed:
+                push(
+                    f"settings: memory policy → "
+                    f"{MEMORY_POLICIES[current['memory_policy']]['label']} "
+                    "(takes effect on next job)."
+                )
             if codec_changed or tokens_changed:
                 HELPER.kill()
             # Return only the public-safe view — never echo the saved
@@ -12390,6 +12514,86 @@ HTML = r"""<!doctype html>
         <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
       </div>
     </form>
+
+    <!-- ============== IMAGE STUDIO (inline, mode='image') ============== -->
+    <!-- Sibling of #genForm inside form-pane. Shown/hidden by setMode().
+         Lives outside the form so its prompt textarea doesn't submit the
+         video form on Enter. The right rail (queue · current · history)
+         to the right of form-pane stays visible during image gen. -->
+    <div class="mode-only" id="studioSection">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div>
+          <h3 style="margin:0">Image Studio</h3>
+          <div class="hint" style="margin-top:2px">Generate reference stills. They land in your library and the agent can pick them up.</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Prompt</label>
+        <textarea id="imgStudioPrompt" rows="4" style="width:100%" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
+      </div>
+
+      <div class="field">
+        <label>Reference images <span class="hint">(0-3, used by Qwen-Image-Edit-2509 to compose character + place; ignored by other engines)</span></label>
+        <div id="imgStudioRefs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+          <div class="img-ref-slot" data-slot="0"></div>
+          <div class="img-ref-slot" data-slot="1"></div>
+          <div class="img-ref-slot" data-slot="2"></div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+        <div class="field">
+          <label>Engine</label>
+          <select id="imgStudioEngine">
+            <option value="auto" selected>Auto (use Settings)</option>
+            <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref)</option>
+            <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
+            <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
+            <option value="mock_inline">Mock (testing)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Aspect</label>
+          <select id="imgStudioAspect">
+            <option value="16:9" selected>16:9 — 1024×576</option>
+            <option value="4:3">4:3 — 1024×768</option>
+            <option value="1:1">1:1 — 768×768</option>
+            <option value="9:16">9:16 — 576×1024</option>
+            <option value="3:4">3:4 — 768×1024</option>
+            <option value="21:9">21:9 — 1280×544</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Candidates (n)</label>
+          <input type="number" id="imgStudioN" min="1" max="8" value="4">
+        </div>
+        <div class="field">
+          <label>Seed (-1 random)</label>
+          <input type="number" id="imgStudioSeed" value="-1">
+        </div>
+      </div>
+
+      <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button class="small primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">Generate</button>
+        <span id="imgStudioStatus" class="hint" style="flex:1"></span>
+        <button class="small" onclick="imgStudioRefreshLibrary()">Refresh library</button>
+      </div>
+
+      <!-- Generation results inline -->
+      <div id="imgStudioResults" style="margin-top:14px"></div>
+
+      <!-- Library inline (Phase 1). Phase 2 will move this into the right
+           rail so it sits next to the queue / current / history cards. -->
+      <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+        <h4 style="margin:0 0 6px 0">Library</h4>
+        <div class="hint" style="margin-bottom:8px">Recent stills from this panel. Click any image to copy its path for use as a reference.</div>
+        <input type="search" id="imgStudioLibrarySearch" placeholder="Filter by prompt…" oninput="imgStudioRefreshLibrary()" style="width:100%;margin-bottom:10px">
+        <div id="imgStudioLibrary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-height:50vh;overflow-y:auto;padding-right:4px">
+          <div class="hint">Loading…</div>
+        </div>
+      </div>
+    </div>
   </aside>
 
   <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
@@ -12535,6 +12739,19 @@ HTML = r"""<!doctype html>
       <div class="preset-grid" id="settingsPresets">
         <!-- populated by openSettingsModal() from /settings -->
       </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Memory / speed</h3>
+      <div class="hint" style="margin-bottom:8px">
+        Controls the VAE decode path after denoising. Fast uses more unified
+        memory on medium clips; Safe streams decode to reduce peak RAM.
+      </div>
+      <div class="settings-row">
+        <label>Policy</label>
+        <select id="settingsMemoryPolicy" style="flex:1"></select>
+      </div>
+      <div class="hint" id="settingsMemoryPolicyHint" style="margin-top:6px"></div>
     </div>
 
     <div class="settings-section">
@@ -13036,94 +13253,6 @@ HTML = r"""<!doctype html>
   </div>
 </div>
 
-<!-- ============== IMAGE STUDIO MODAL ============== -->
-<!-- Manual still generation. Opens via the "Studio" pill in the mode row.
-     Backed by the same image_engine the agent uses (mflux family, BFL, mock),
-     defaults to Qwen-Image-Edit-2509 multi-reference when installed.
-     Output lands in panel_uploads/library/manual/ where the agent can
-     pick it up via list_library_images. -->
-<div class="modal-bg" id="imageStudioModal" onclick="if(event.target===this)closeImageStudio()" style="display:none;align-items:flex-start;padding-top:40px">
-  <div class="modal" style="max-width:1100px;width:96%;max-height:88vh;overflow-y:auto">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-      <div>
-        <h3 style="margin:0">Image Studio</h3>
-        <div class="hint" style="margin-top:2px">Generate reference stills. They land in your library and the agent can pick them up automatically.</div>
-      </div>
-      <button class="small" onclick="closeImageStudio()" title="Close">✕</button>
-    </div>
-
-    <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:18px;margin-top:16px">
-      <!-- LEFT: form -->
-      <div>
-        <div class="field">
-          <label>Prompt</label>
-          <textarea id="imgStudioPrompt" rows="4" style="width:100%" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
-        </div>
-
-        <div class="field">
-          <label>Reference images <span class="hint">(0-3, used by Qwen-Image-Edit-2509 to compose character + place; ignored by other engines)</span></label>
-          <div id="imgStudioRefs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-            <div class="img-ref-slot" data-slot="0"></div>
-            <div class="img-ref-slot" data-slot="1"></div>
-            <div class="img-ref-slot" data-slot="2"></div>
-          </div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
-          <div class="field">
-            <label>Engine</label>
-            <select id="imgStudioEngine">
-              <option value="auto" selected>Auto (use Settings)</option>
-              <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref)</option>
-              <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
-              <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
-              <option value="mock_inline">Mock (testing)</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Aspect</label>
-            <select id="imgStudioAspect">
-              <option value="16:9" selected>16:9 — 1024×576</option>
-              <option value="4:3">4:3 — 1024×768</option>
-              <option value="1:1">1:1 — 768×768</option>
-              <option value="9:16">9:16 — 576×1024</option>
-              <option value="3:4">3:4 — 768×1024</option>
-              <option value="21:9">21:9 — 1280×544</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Candidates (n)</label>
-            <input type="number" id="imgStudioN" min="1" max="8" value="4">
-          </div>
-          <div class="field">
-            <label>Seed (-1 random)</label>
-            <input type="number" id="imgStudioSeed" value="-1">
-          </div>
-        </div>
-
-        <div class="modal-actions" style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <button class="small primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">Generate</button>
-          <span id="imgStudioStatus" class="hint" style="flex:1"></span>
-          <button class="small" onclick="imgStudioRefreshLibrary()">Refresh library</button>
-        </div>
-
-        <!-- Generation results inline -->
-        <div id="imgStudioResults" style="margin-top:14px"></div>
-      </div>
-
-      <!-- RIGHT: library -->
-      <div style="border-left:1px solid var(--border);padding-left:14px">
-        <h4 style="margin:0 0 6px 0">Library</h4>
-        <div class="hint" style="margin-bottom:8px">Recent stills from this panel. Click any image to copy its path for use as a reference.</div>
-        <input type="search" id="imgStudioLibrarySearch" placeholder="Filter by prompt…" oninput="imgStudioRefreshLibrary()" style="width:100%;margin-bottom:10px">
-        <div id="imgStudioLibrary" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;max-height:60vh;overflow-y:auto;padding-right:4px">
-          <div class="hint">Loading…</div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- ============== BATCH MODAL ============== -->
 <div class="modal-bg" id="batchModal" onclick="if(event.target===this)closeBatch()">
   <div class="modal">
@@ -13198,16 +13327,26 @@ document.getElementById('audio').value = BOOT.default_audio;
 
 // ====== Pill-button group helpers ======
 function setMode(mode) {
-  // Studio mode is a launcher — open the Image Studio modal but keep the
-  // last video mode active (so the user comes back to t2v/i2v/keyframe/extend
-  // exactly where they were). The pill row briefly highlights "Studio" via
-  // CSS while the modal is open; closing the modal restores the previous
-  // active pill.
+  currentMode = mode;
+  // The Studio pill swaps the form-pane in place: hide the video form
+  // (genForm) and show the inline #studioSection. Right rail (queue,
+  // current, history) stays visible regardless of mode. The mode dropdown
+  // value is set to a non-form value when in studio so an accidental
+  // form submit doesn't trigger a video render with stale fields.
+  const studio = document.getElementById('studioSection');
+  const genForm = document.getElementById('genForm');
   if (mode === 'image') {
-    openImageStudio();
+    if (studio) studio.classList.add('show');
+    if (genForm) genForm.style.display = 'none';
+    document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === 'image'));
+    // Wire ref drop-zones once + refresh library on every entry
+    if (typeof imgStudioWireRefSlots === 'function') imgStudioWireRefSlots();
+    if (typeof imgStudioRefreshLibrary === 'function') imgStudioRefreshLibrary();
     return;
   }
-  currentMode = mode;
+  if (studio) studio.classList.remove('show');
+  if (genForm) genForm.style.display = '';
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   // For i2v, switch the actual mode based on the i2vMode select
@@ -13235,27 +13374,27 @@ const IMG_STUDIO = {
   busy: false,
 };
 
+// Phase 1: Image Studio is now an inline pane (#studioSection) shown by
+// setMode('image'). These two functions stay as no-arg shims so any
+// caller still doing openImageStudio()/closeImageStudio() works.
+// Switching to 'image' shows the pane; switching to any other video
+// mode hides it. The pill row drives both flows.
 function openImageStudio() {
-  const m = document.getElementById('imageStudioModal');
-  if (!m) return;
-  m.style.display = 'flex';
-  m.classList.add('open');
-  // Wire up the ref slots once
-  imgStudioWireRefSlots();
-  // Refresh library on every open so the user sees recent gens
-  imgStudioRefreshLibrary();
-  // Focus prompt textarea
+  setMode('image');
   setTimeout(() => {
     const t = document.getElementById('imgStudioPrompt');
-    if (t) t.focus();
+    if (t) {
+      t.focus();
+      try { t.scrollIntoView({behavior:'smooth', block:'center'}); } catch (e) {}
+    }
   }, 50);
 }
 
 function closeImageStudio() {
-  const m = document.getElementById('imageStudioModal');
-  if (!m) return;
-  m.style.display = 'none';
-  m.classList.remove('open');
+  // Return to the last sensible video mode. t2v is the safe default;
+  // a future enhancement could remember the previous mode the user was
+  // on before clicking Studio. For Phase 1, t2v is fine.
+  setMode('t2v');
 }
 
 function imgStudioWireRefSlots() {
@@ -14601,6 +14740,15 @@ function renderOutputInfoBody(path, data) {
     const savingsText = savings != null ? ` · ~${escapeHtml(String(savings))}% denoise calls saved` : '';
     genRows.push(`<dt>Accel metrics</dt><dd>${cachedCount}/${totalSteps} cached${savingsText}${cachedList}</dd>`);
   }
+  if (data.memory_policy) {
+    const mp = data.memory_policy;
+    const req = mp.requested || p.memory_policy || 'auto';
+    const eff = mp.effective || req;
+    const decode = mp.vae_decode || (mp.helper && mp.helper.vae_decode) || '';
+    const fullMax = mp.full_decode_max_frames != null ? ` · full≤${escapeHtml(String(mp.full_decode_max_frames))}f` : '';
+    const reason = mp.reason ? ` · ${escapeHtml(mp.reason)}` : '';
+    genRows.push(`<dt>Memory</dt><dd>${escapeHtml(req)}${eff !== req ? ` → ${escapeHtml(eff)}` : ''}${decode ? ` · VAE ${escapeHtml(decode)}` : ''}${fullMax}${reason}</dd>`);
+  }
   if (p.temporal_mode === 'fps12_interp24' || data.temporal) {
     const t = data.temporal || {};
     const sourceFrames = t.source_frames || p.model_frames || '—';
@@ -15125,6 +15273,25 @@ async function openSettingsModal() {
   document.getElementById('settingsCustomSection').style.display =
     cur.output_preset === 'custom' ? 'block' : 'none';
 
+  // Memory policy — populated from the server so labels/blurbs stay aligned
+  // with backend behavior.
+  const memSelect = document.getElementById('settingsMemoryPolicy');
+  const memPolicies = _settingsCache.memory_policies || {};
+  if (memSelect) {
+    memSelect.innerHTML = '';
+    for (const key of ['auto', 'fast', 'safe']) {
+      const mp = memPolicies[key];
+      if (!mp) continue;
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = mp.label || key;
+      memSelect.appendChild(opt);
+    }
+    memSelect.value = cur.memory_policy || 'auto';
+    memSelect.onchange = renderMemoryPolicyHint;
+    renderMemoryPolicyHint();
+  }
+
   // Token rows. We never receive the actual key from the server (the
   // /settings GET returns has_X booleans only), so we display either
   // "set" with an empty placeholder input, or "—" with the placeholder.
@@ -15153,6 +15320,15 @@ async function openSettingsModal() {
   // on the JS side; only ON/OFF gets persisted.
   _spicyArmed = false;
   renderSpicyState(!!cur.spicy_mode);
+}
+
+function renderMemoryPolicyHint() {
+  const sel = document.getElementById('settingsMemoryPolicy');
+  const hint = document.getElementById('settingsMemoryPolicyHint');
+  if (!sel || !hint) return;
+  const policies = (_settingsCache && _settingsCache.memory_policies) || {};
+  const p = policies[sel.value] || {};
+  hint.textContent = p.blurb || '';
 }
 
 let _spicyArmed = false;
@@ -15401,6 +15577,7 @@ async function applySettings() {
     fd.set('output_pix_fmt', document.getElementById('settingsPixFmt').value);
     fd.set('output_crf', document.getElementById('settingsCrfNum').value);
   }
+  fd.set('memory_policy', document.getElementById('settingsMemoryPolicy')?.value || 'auto');
   // Tokens — only send a key when the input has a value. Empty input
   // means "leave as-is" (clearing is explicit via the Clear button).
   // This protects against accidentally wiping a saved key by clicking
