@@ -453,6 +453,13 @@ def run_turn(session: Session, user_message: str | None,
         instructions += "\n\n# Prior conversation in this session\n\n" + prior
 
     # 4. Construct the CodeAgent.
+    #
+    # `executor_kwargs={"timeout_seconds": ...}` bumps LocalPythonExecutor's
+    # per-step Python execution cap from its 30 s default. Our tools are
+    # SLOW (generate_shot_images ~2-4 min for an mflux Qwen-Edit batch,
+    # wait_for_shot can poll for tens of minutes). 30 s would kill nearly
+    # every meaningful turn. The cap is on the executor, not on the LLM
+    # request — the LLM still has cfg.max_tokens room.
     try:
         smol_model = _build_smol_model(session.engine_config)
         smol_tools = _build_smol_tools(panel_ops, session.tool_state, on_event=emit)
@@ -463,6 +470,7 @@ def run_turn(session: Session, user_message: str | None,
             additional_authorized_imports=[],   # NO imports — only our tools
             max_steps=max_steps,
             verbosity_level=0,
+            executor_kwargs={"timeout_seconds": 1800},  # 30 min per step
         )
     except Exception as e:                              # noqa: BLE001
         err_msg = f"smolagents init failed: {type(e).__name__}: {e}"
