@@ -4079,46 +4079,61 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
     if engine_override == "auto":
         return _load_agent_image_config()
     if engine_override == "qwen_edit_inline":
-        # Iteration default: Q4 + 8 steps, ~1 min/image. Multi-ref capable.
+        # Iteration default: Qwen-Image-Edit-2511 (Apache 2.0, ungated)
+        # at Q6 + 8 steps. 2511 is the current best Qwen-Edit — stronger
+        # character consistency than 2509, mitigated multi-ref drift,
+        # built-in popular LoRAs. Q6 (vs prior Q4) is the Apple-Silicon
+        # community sweet spot — ~4-6% quality loss vs full precision
+        # instead of 8-12% for Q4, with negligible speed impact on
+        # M4 Max 64 GB.
         return agent_image_engine.ImageEngineConfig(
-            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
-            mflux_family="qwen_edit", mflux_quantize=4, mflux_steps=8,
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
+            mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=8,
         )
     if engine_override == "qwen_edit_lightning_inline":
-        # Fast preset: Q4 + 4 steps + Lightning distillation LoRA.
+        # Fast preset: 2511 + Q6 + 4 steps + Lightning distillation LoRA.
         # Pin the bf16 4-step file via the `repo:filename` collection-format
         # syntax so mflux doesn't pull all four LoRA variants and stall.
+        # Prior config had a 2509 base + 2511 Lightning version mismatch.
         return agent_image_engine.ImageEngineConfig(
-            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
-            mflux_family="qwen_edit", mflux_quantize=4, mflux_steps=4,
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
+            mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=4,
             mflux_lora_paths=[
                 "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
             ],
             mflux_lora_scales=[1.0],
         )
     if engine_override == "qwen_edit_high_inline":
-        # Final-render preset: Q8 + 30 steps, no LoRA. ~5 min/image.
+        # Final-render preset: 2511 Q8 + 40 steps. 40 steps matches the
+        # official Diffusers reference (qwen.ai blog: true_cfg_scale=4.0
+        # + guidance_scale=1.0 + steps=40). mflux's --guidance maps to
+        # true_cfg_scale on the qwen-edit CLI.
         return agent_image_engine.ImageEngineConfig(
-            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
-            mflux_family="qwen_edit", mflux_quantize=8, mflux_steps=30,
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
+            mflux_family="qwen_edit", mflux_quantize=8, mflux_steps=40,
+            mflux_guidance=4.0,
         )
     if engine_override == "flux2_inline":
+        # Q6 instead of Q4 — same Apple-Silicon sweet-spot rationale as
+        # the qwen presets above.
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
-            mflux_family="flux2", mflux_quantize=4,
+            mflux_family="flux2", mflux_quantize=6,
         )
     if engine_override == "flux2_edit_inline":
         # FLUX.2 Klein-Edit (distilled klein-4b). mflux's flux2_edit_generate.py
-        # FORCES guidance == 1.0 on distilled bases.
+        # FORCES guidance == 1.0 on distilled bases. Q6 default for the
+        # same reason as above (Q4 → 8-12% quality loss; Q6 → 4-6%).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="flux2-klein-4b",
-            mflux_family="flux2_edit", mflux_quantize=4,
+            mflux_family="flux2_edit", mflux_quantize=6,
             mflux_steps=4, mflux_guidance=1.0,
         )
     if engine_override == "flux2_edit_high_inline":
         # FLUX.2 Klein-Base-Edit (NON-distilled klein-base-4b). Real CFG,
         # ~3-5 min/image at Q8 + 25 steps. Photographic output (vs the
-        # illustrative look of distilled flux2_edit).
+        # illustrative look of distilled flux2_edit). Already at Q8 — no
+        # change.
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="flux2-klein-base-4b",
             mflux_family="flux2_edit", mflux_quantize=8,
@@ -12961,11 +12976,11 @@ HTML = r"""<!doctype html>
           <label>Engine</label>
           <select id="imgStudioEngine" onchange="imgStudioUpdateValidity()">
             <option value="auto" selected>Auto (use Settings)</option>
-            <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref · 8-step Q4, ~1 min/image)</option>
-            <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2509 + Lightning (multi-ref · 4-step Q4, ~10-15 s/image)</option>
-            <option value="qwen_edit_high_inline">Qwen-Image-Edit-2509 high quality (multi-ref · 30-step Q8, ~5 min/image)</option>
+            <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2511 + Lightning (multi-ref &middot; 4-step Q6, ~10-15 s/image)</option>
+            <option value="qwen_edit_inline">Qwen-Image-Edit-2511 (multi-ref &middot; 8-step Q6, ~1 min/image)</option>
+            <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 high quality (multi-ref &middot; 40-step Q8, ~5 min/image)</option>
+            <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q6, ~30 s/image)</option>
             <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
-            <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q4, ~30 s/image)</option>
             <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
             <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
             <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
