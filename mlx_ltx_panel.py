@@ -405,15 +405,42 @@ def _load_settings() -> dict:
 
 
 def _save_settings(settings: dict) -> None:
-    """Atomic write so a Pinokio kill mid-write can't leave a half-file."""
-    import tempfile, os as _os
-    fd, tmp = tempfile.mkstemp(prefix="panel_settings.", dir=str(STATE_DIR))
+    """Atomic write so a Pinokio kill mid-write can't leave a half-file.
+
+    M3: matches the same O_EXCL temp + fsync + replace + explicit
+    chmod 0o600 shape used by `atomic_write_text` (defined later in this
+    module) and `agent/runtime.py:save_session`. Inlined rather than
+    delegated because `_save_settings` is reachable from `_load_settings`
+    at module-import time, before `atomic_write_text` is defined.
+    panel_settings.json carries `hf_token` and `civitai_api_key`; the
+    explicit final chmod stops perms from drifting back to 0o644 if the
+    file was ever recreated by an external process. See
+    security-review.md §M3.
+    """
+    import os as _os
+    tmp = SETTINGS_FILE.with_name(
+        f".{SETTINGS_FILE.name}.{_os.getpid()}.{threading.get_ident()}."
+        f"{time.time_ns()}.tmp"
+    )
+    fd = _os.open(
+        str(tmp),
+        _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL | _os.O_TRUNC,
+        0o600,
+    )
     try:
         with _os.fdopen(fd, "w") as fh:
             fh.write(json.dumps(settings, indent=2))
             fh.flush()
             _os.fsync(fh.fileno())
+        try:
+            _os.chmod(tmp, 0o600)
+        except OSError:
+            pass
         _os.replace(tmp, SETTINGS_FILE)
+        try:
+            _os.chmod(SETTINGS_FILE, 0o600)
+        except OSError:
+            pass
     except Exception:
         try: _os.unlink(tmp)
         except OSError: pass
@@ -5623,6 +5650,18 @@ class Handler(BaseHTTPRequestHandler):
                 path = Path(qs.get("path", [""])[0]).resolve()
             except Exception:
                 self.send_error(400); return
+            # M1: only serve sidecars whose underlying media has a known
+            # extension. Without this, an attacker who dropped a `.json`
+            # alongside an arbitrary file under OUTPUT/UPLOADS could read
+            # it via /sidecar?path=<that-file>. Sidecars are always
+            # `<media>.json` where <media> is mp4/png/webp/jpg/jpeg, so
+            # rejecting other suffixes closes that off without breaking
+            # any legitimate caller. See security-review.md §M1.
+            _SIDECAR_MEDIA_SUFFIXES = {".mp4", ".png", ".webp", ".jpg", ".jpeg"}
+            if path.suffix.lower() not in _SIDECAR_MEDIA_SUFFIXES:
+                self.send_error(400, "sidecar requires media path "
+                                     "(.mp4/.png/.webp/.jpg)")
+                return
             # Sidecars live next to the output they describe. Videos sit
             # under OUTPUT (mlx_outputs/*.mp4.json); image-mode queue jobs
             # write theirs under UPLOADS/library/manual/<...>/cand_*.png.json.
@@ -6290,10 +6329,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/output/hide":
             target = qs.get("path", [""])[0] or form.get("path", [""])[0]
-            if target:
-                set_hidden(target, True); self._json({"hidden": target})
-            else:
-                self._json({"error": "missing path"}, 400)
+            if not target:
+                self._json({"error": "missing path"}, 400); return
+            # M6: require the path to resolve under OUTPUT or UPLOADS
+            # before persisting it into HIDDEN_PATHS / panel_hidden.json.
+            # Without this, an attacker who beats the loopback/Origin
+            # check (or a buggy first-party caller) could fill the
+            # hidden-list with arbitrary strings, slowly polluting
+            # persistent state. Same containment shape as
+            # `agent/tools.py:_ensure_under` used for submit_shot. See
+            # security-review.md §M6.
+            try:
+                _resolved = Path(target).resolve()
+            except OSError as e:
+                self._json({"error": f"path not resolvable: {e}",
+                            "rejected": [target]}, 400)
+                return
+            try:
+                _roots = [OUTPUT.resolve(), UPLOADS.resolve()]
+            except OSError:
+                _roots = []
+            if not any(_resolved.is_relative_to(r) for r in _roots):
+                self._json({"error": (
+                    "path must resolve under outputs/ or uploads/"
+                ), "rejected": [target]}, 400)
+                return
+            set_hidden(str(_resolved), True)
+            self._json({"hidden": str(_resolved)})
             return
 
         if path == "/output/show":
@@ -6965,6 +7027,25 @@ class Handler(BaseHTTPRequestHandler):
             repo_id = (payload.get("repo_id") or "").strip()
             if not repo_id:
                 self._json({"error": "repo_id is required"}, 400); return
+            # M2: same allowlist as /agent/local/start (H3, commit 947af34)
+            # — endpoint downloads with the user's stored HF token, so an
+            # attacker who beats the loopback/Origin check could fetch
+            # any HF repo (gated, huge, malicious) without this gate.
+            # Reuse `_LOCAL_MODEL_HF_REPO_RE` + `_LOCAL_MODEL_HF_ALLOWED_OWNERS`
+            # rather than a parallel list. See security-review.md §M2.
+            if not _LOCAL_MODEL_HF_REPO_RE.match(repo_id):
+                self._json({"error": (
+                    "repo_id must look like <owner>/<name> using "
+                    "[A-Za-z0-9_.-]"
+                )}, 400)
+                return
+            owner = repo_id.split("/", 1)[0]
+            if owner not in _LOCAL_MODEL_HF_ALLOWED_OWNERS:
+                self._json({"error": (
+                    f"repo_id owner {owner!r} is not on the allow-list "
+                    f"({', '.join(_LOCAL_MODEL_HF_ALLOWED_OWNERS)})"
+                )}, 400)
+                return
             res = _hf_model_install_async(repo_id)
             if not res.get("ok"):
                 self._json(res, 409 if "already" in (res.get("error") or "") else 500)
