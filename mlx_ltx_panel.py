@@ -12942,22 +12942,13 @@ HTML = r"""<!doctype html>
       <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <button class="small primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">Generate</button>
         <span id="imgStudioStatus" class="hint" style="flex:1"></span>
-        <button class="small" onclick="imgStudioRefreshLibrary()">Refresh library</button>
       </div>
 
-      <!-- Generation results inline -->
+      <!-- Submission status. Image jobs flow through the same queue as
+           video jobs now, so the actual results show up in the right-rail
+           Recent tab (with the Photos filter) along with everything else.
+           This pane is just a thin "submitted" confirmation. -->
       <div id="imgStudioResults" style="margin-top:14px"></div>
-
-      <!-- Library inline (Phase 1). Phase 2 will move this into the right
-           rail so it sits next to the queue / current / history cards. -->
-      <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
-        <h4 style="margin:0 0 6px 0">Library</h4>
-        <div class="hint" style="margin-bottom:8px">Recent stills from this panel. Click any image to copy its path for use as a reference.</div>
-        <input type="search" id="imgStudioLibrarySearch" placeholder="Filter by prompt…" oninput="imgStudioRefreshLibrary()" style="width:100%;margin-bottom:10px">
-        <div id="imgStudioLibrary" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-height:50vh;overflow-y:auto;padding-right:4px">
-          <div class="hint">Loading…</div>
-        </div>
-      </div>
     </div>
   </aside>
 
@@ -13908,80 +13899,54 @@ async function imgStudioGenerate() {
     engine_override: document.getElementById('imgStudioEngine').value,
     refs,
   };
+  // Submit through the same /queue/add endpoint video jobs use, with
+  // mode='image'. The worker thread routes mode==='image' to
+  // run_image_job_inner (commit 1). Progress streams into the panel
+  // log + the right-rail Now/Queue/Recent cards exactly the way video
+  // jobs do — no need for the Studio's own elapsed-counter or in-pane
+  // result grid. The Recent tab's Photos filter (commit 2) surfaces
+  // the result with thumbnail + Animate.
   IMG_STUDIO.busy = true;
   document.getElementById('imgStudioGenBtn').disabled = true;
-  document.getElementById('imgStudioResults').innerHTML = '';
-  // Live elapsed-time counter so the user doesn't sit on a frozen
-  // "Generating…" string while mflux works. Stops on completion or
-  // failure (the finally block clears the interval).
-  const tStart = Date.now();
-  const fmtElapsed = (ms) => {
-    const s = Math.floor(ms / 1000);
-    const mm = String(Math.floor(s / 60)).padStart(2, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    return mm + ':' + ss;
-  };
-  // Engine-specific ETA hint so the user knows what to expect
-  const eta = (() => {
-    const eng = body.engine_override || 'auto';
-    if (eng === 'qwen_edit_lightning_inline') return '~10-15 s/image, batched';
-    if (eng === 'qwen_edit_inline')           return '~1 min/image at 8 steps Q4';
-    if (eng === 'qwen_edit_high_inline')      return '~5 min/image at 30 steps Q8';
-    if (eng === 'flux2_inline')               return '~15 s/image at 4 steps';
-    if (eng === 'z_image_turbo_inline')       return '~30 s/image at 9 steps';
-    if (eng === 'mock_inline')                return 'instant (testing only)';
-    return ''; // 'auto' — engine TBD on server
-  })();
-  document.getElementById('imgStudioStatus').textContent =
-    'Generating… 00:00' + (eta ? ' · ' + eta : '');
-  IMG_STUDIO.elapsedTimer = setInterval(() => {
-    const s = document.getElementById('imgStudioStatus');
-    if (s && IMG_STUDIO.busy) {
-      s.textContent = 'Generating… ' + fmtElapsed(Date.now() - tStart) + (eta ? ' · ' + eta : '');
-    }
-  }, 1000);
+  document.getElementById('imgStudioResults').innerHTML =
+    '<div class="hint">Submitted to queue. Watch the Now / Recent tabs on the right ' +
+    '(Recent → Photos for just images).</div>';
+  document.getElementById('imgStudioStatus').textContent = 'Queueing…';
   try {
-    const r = await fetch('/image/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const j = await r.json();
-    if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
-    const cands = j.candidates || [];
-    // refs_ignored: surface a warning when the user passed refs but the
-    // selected engine silently dropped them (anything other than qwen_edit).
-    // Without this, the user sees plausible-looking T2I output and assumes
-    // their character ref worked.
-    const refsIgnored = (refs.length > 0) && cands.some(c => c.refs_ignored === true);
-    let warn = '';
-    if (refsIgnored) {
-      warn = ' · ⚠ refs IGNORED — switch to Qwen-Image-Edit-2509 for character composition';
-    }
+    const fd = new URLSearchParams();
+    fd.set('mode', 'image');
+    fd.set('prompt', body.prompt);
+    fd.set('engine_override', body.engine_override || 'auto');
+    fd.set('aspect', body.aspect || '16:9');
+    fd.set('n', String(body.n || 4));
+    fd.set('seed', String(body.seed != null ? body.seed : -1));
+    // refs is a list of paths — the existing /image/generate code
+    // accepts a JSON-encoded list as a form field, and make_job()
+    // mode='image' parses the same shape (commit 1).
+    fd.set('refs', JSON.stringify(body.refs || []));
+    const r = await fetch('/queue/add', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     document.getElementById('imgStudioStatus').textContent =
-      `${cands.length} image${cands.length === 1 ? '' : 's'} in ${j.elapsed_seconds || '?'} s · engine: ${j.engine || '?'}` + warn;
-    const html = cands.map((c, i) => `
-      <div class="lib-tile" onclick="imgStudioCopyPath('${(c.png_path || '').replace(/'/g, "\\'")}')" title="Click to copy path">
-        <img src="/image?path=${encodeURIComponent(c.png_path)}&t=${Date.now()}" alt="">
-        <div class="lib-meta">cand ${i + 1} · seed ${c.seed}</div>
-      </div>
-    `).join('');
-    document.getElementById('imgStudioResults').innerHTML =
-      `<div style="display:grid;grid-template-columns:repeat(${Math.min(4, cands.length || 1)},1fr);gap:8px">${html}</div>`;
-    imgStudioRefreshLibrary();
+      'Submitted. Watch Now / Recent → Photos.';
   } catch (e) {
-    document.getElementById('imgStudioStatus').textContent = 'Failed: ' + e.message;
+    document.getElementById('imgStudioStatus').textContent = 'Submit failed: ' + e.message;
   } finally {
     IMG_STUDIO.busy = false;
     document.getElementById('imgStudioGenBtn').disabled = false;
-    if (IMG_STUDIO.elapsedTimer) {
-      clearInterval(IMG_STUDIO.elapsedTimer);
-      IMG_STUDIO.elapsedTimer = null;
-    }
   }
 }
 
+// imgStudioRefreshLibrary used to populate the right-pane Studio
+// gallery. The unified Recent tab (commit 2) now covers that need —
+// the function is kept as a no-op so any setMode('image') call sites
+// that still reference it (defensive setMode plumbing) don't error.
 async function imgStudioRefreshLibrary() {
+  // intentionally empty: replaced by the unified Recent tab.
+  return;
+}
+
+// Disabled stub so the old Library renderer path stays inert.
+async function _imgStudioRefreshLibraryLegacy() {
   const grid = document.getElementById('imgStudioLibrary');
   if (!grid) return;
   const q = (document.getElementById('imgStudioLibrarySearch').value || '').trim();
