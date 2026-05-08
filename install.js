@@ -173,7 +173,13 @@ module.exports = {
           // than the default Python downloader for big repos like Q8 (~25 GB).
           // The panel sets HF_HUB_ENABLE_HF_TRANSFER=1 in download envs; if the
           // package is missing the hf CLI falls back gracefully with a warning.
-          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6'",
+          // litellm: agent's chat client (multi-provider router for OpenAI /
+          // Anthropic / Ollama / mlx-lm.server). Pinned to >=1.83.14 — the
+          // March 2026 PyPI supply-chain incident affected earlier 1.x
+          // releases (stole SSH keys via a poisoned post-install script).
+          // See agent/engine.py for routing details. Falls back to stdlib
+          // urllib if missing — safe to omit but the loop is less robust.
+          "uv pip install --python env/bin/python pillow numpy 'huggingface-hub>=1.0' 'hf_transfer>=0.1.6' 'litellm>=1.83.14'",
           // v2.0.3: post-install confirmation that the local packages
           // actually landed in site-packages. The Y1.034+ patch script's
           // i2v target tolerates a missing ltx_pipelines_mlx — without

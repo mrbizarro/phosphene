@@ -87,6 +87,19 @@ module.exports = {
         message: "./ltx-2-mlx/env/bin/pip install --upgrade 'hf_transfer>=0.1.6'"
       }
     },
+    // litellm: replaces the stdlib urllib chat client in agent/engine.py
+    // with a multi-provider router (free retries, normalized errors,
+    // single abstraction for OpenAI / Anthropic / Ollama / mlx-lm.server).
+    // Pinned to >=1.83.14 — earlier 1.x had a March 2026 PyPI supply-
+    // chain incident (post-install script stole SSH keys). engine.py
+    // falls back to stdlib urllib if litellm is missing — safe but the
+    // loop is less robust. Idempotent on repeat updates.
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'litellm>=1.83.14'"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
     // Pin to the venv's python3.11 to match install.js — `python3` on

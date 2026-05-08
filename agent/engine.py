@@ -6,7 +6,10 @@ No streaming, no tool-calling spec — the agent emits actions as fenced
 works on every Chat Completions server we'd want to support, regardless
 of whether the server / model implements OpenAI's tool-calling shape.
 
-Stdlib only. Phosphene's venv has urllib + json; we don't pull a new dep.
+LiteLLM-backed multi-provider router when available (free retries +
+normalized error messages + provider abstraction for OpenAI / Anthropic
+/ Ollama / custom OpenAI-compat). Transparently falls back to a stdlib
+urllib path on venvs that haven't run `update.js` yet.
 """
 
 from __future__ import annotations
@@ -15,6 +18,25 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
+
+# LiteLLM is added by install.js / update.js. If a user is on an older
+# venv we keep working via the stdlib path below.
+try:
+    import litellm
+    from litellm import completion as _litellm_completion
+    # Quiet by default — Phosphene's panel log already shows turn events.
+    # Telemetry off: LiteLLM otherwise pings their backend on first import.
+    try:
+        litellm.telemetry = False
+        litellm.set_verbose = False
+        litellm.suppress_debug_info = True
+        # Don't log raw payloads (contains user prompts + tool results).
+        litellm.drop_params = True
+    except Exception:                           # noqa: BLE001 — best effort
+        pass
+    _HAS_LITELLM = True
+except Exception:                               # noqa: BLE001
+    _HAS_LITELLM = False
 
 
 # 15 minutes. Local reasoning-class models (Qwen 3.6, DeepSeek R1) on
@@ -137,28 +159,147 @@ def chat(messages: list[dict], config: EngineConfig,
          *, timeout: int = DEFAULT_TIMEOUT_S) -> ChatResult:
     """Send a chat completion request. Returns the assistant text.
 
-    Raises RuntimeError on transport failure or non-200 response.
-    Server-side errors bubble up with the upstream body so the user
-    sees what the engine actually said (helpful for debugging API key
-    / model name typos in the Settings drawer).
+    Raises RuntimeError on transport failure or non-200 response. Server-
+    side errors bubble up with the upstream body so the user sees what
+    the engine actually said (helpful for debugging API key / model name
+    typos in the Settings drawer).
+
+    Routes through LiteLLM when available; else stdlib urllib.
+    """
+    if _HAS_LITELLM:
+        return _chat_litellm(messages, config, timeout=timeout)
+    if config.kind == "anthropic":
+        return _chat_anthropic_urllib(messages, config, timeout=timeout)
+    return _chat_urllib_openai(messages, config, timeout=timeout)
+
+
+# -- LiteLLM path -------------------------------------------------------------
+def _chat_litellm(messages: list[dict], config: EngineConfig,
+                  *, timeout: int) -> ChatResult:
+    """Route through LiteLLM. Maps EngineConfig.kind to a provider prefix.
+
+    LiteLLM provider prefixes (https://docs.litellm.ai/docs/providers):
+      - openai/<id>     — OpenAI proper OR any OpenAI-compatible api_base
+      - anthropic/<id>  — Anthropic Messages API
+      - ollama/<id>     — Ollama (api_base = base_url)
     """
     if config.kind == "anthropic":
-        return _chat_anthropic(messages, config, timeout=timeout)
+        litellm_model = f"anthropic/{config.model or 'claude-sonnet-4-5'}"
+        # Use Anthropic's default endpoint unless the user pointed elsewhere
+        # (e.g. an enterprise Bedrock proxy speaking the Anthropic shape).
+        # base_url defaults to https://api.anthropic.com/v1; LiteLLM has its
+        # own default if api_base is omitted, so only pass it through when
+        # the user clearly customized it.
+        api_base = config.base_url.rstrip("/") if config.base_url and "anthropic.com" not in config.base_url else None
+    elif config.kind == "ollama":
+        litellm_model = f"ollama/{config.model}"
+        api_base = config.base_url.rstrip("/")
+    elif config.kind == "phosphene_local":
+        # mlx-lm.server identifies models by their LOAD PATH, not by short
+        # name. Its /v1/chat/completions 404s with a HuggingFace lookup error
+        # if it receives a short name it interprets as a HF repo id and
+        # tries to download. So for the local engine we always pass the
+        # absolute path as the request "model" field.
+        wire_model = config.local_model_path or config.model
+        litellm_model = f"openai/{wire_model}"
+        api_base = config.base_url.rstrip("/")
+    else:  # "custom" — arbitrary OpenAI-compat endpoint
+        litellm_model = f"openai/{config.model}"
+        api_base = config.base_url.rstrip("/")
 
+    norm = _normalize_for_wire(messages)
+
+    kwargs: dict = {
+        "model": litellm_model,
+        "messages": norm,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "timeout": timeout,
+        "stream": False,
+    }
+    if api_base:
+        kwargs["api_base"] = api_base
+    if config.api_key:
+        kwargs["api_key"] = config.api_key
+    elif config.kind == "phosphene_local":
+        # mlx-lm.server doesn't enforce auth but LiteLLM's OpenAI client
+        # complains if api_key is unset. Any non-empty string works.
+        kwargs["api_key"] = "not-needed"
+
+    if config.kind == "anthropic" and config.anthropic_version:
+        kwargs["extra_headers"] = {"anthropic-version": config.anthropic_version}
+
+    try:
+        resp = _litellm_completion(**kwargs)
+    except Exception as e:                      # noqa: BLE001 — LiteLLM raises rich types
+        # Surface as RuntimeError so runtime.py's existing handler shows
+        # it inline in the chat. Include the type name so failure modes
+        # are distinguishable in logs.
+        msg = f"engine error ({type(e).__name__}): {e}"
+        if config.kind == "phosphene_local" and "Connection" in str(e):
+            msg += "  — If using Phosphene Local, the model server may not be up yet (click Start Local Engine in the Agentic Flows settings drawer)."
+        raise RuntimeError(msg) from e
+
+    # Normalize LiteLLM's response object to our ChatResult shape.
+    try:
+        choice = resp.choices[0]
+        msg = choice.message
+    except (AttributeError, IndexError) as e:
+        raise RuntimeError(f"engine response malformed: {e!r}") from e
+
+    content = (getattr(msg, "content", None) or "")
+    finish = getattr(choice, "finish_reason", None) or "stop"
+
+    # Reasoning content (Anthropic extended thinking, mlx-lm reasoning
+    # models). LiteLLM normalizes both to `reasoning_content`. Some
+    # OpenAI-compat servers expose `reasoning` directly — try both.
+    reasoning = (
+        getattr(msg, "reasoning_content", None)
+        or getattr(msg, "reasoning", None)
+        or ""
+    )
+
+    # Reasoning truncation — preserve the same UX as the urllib path.
+    if not content and reasoning:
+        if finish == "length":
+            raise RuntimeError(
+                "Reasoning model truncated mid-thought "
+                f"({len(reasoning)} chars of reasoning, no answer). "
+                f"Bump 'Max tokens' in agent settings — current is "
+                f"{config.max_tokens}; try 12000+ for Qwen 3.6 / DeepSeek R1."
+            )
+        # No length issue but content empty — promote reasoning so
+        # SOMETHING surfaces in the chat.
+        content = reasoning
+        reasoning = ""
+
+    usage: dict = {}
+    try:
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            if hasattr(u, "model_dump"):
+                usage = u.model_dump()
+            elif hasattr(u, "dict"):
+                usage = u.dict()
+            else:
+                usage = dict(u)
+    except Exception:                           # noqa: BLE001
+        pass
+
+    return ChatResult(
+        content=content,
+        finish_reason=finish,
+        usage=usage,
+        reasoning=reasoning,
+        model=getattr(resp, "model", "") or config.model,
+    )
+
+
+# -- Stdlib urllib fallback ---------------------------------------------------
+def _chat_urllib_openai(messages: list[dict], config: EngineConfig,
+                        *, timeout: int) -> ChatResult:
+    """Pre-LiteLLM path. Same as the original engine.chat() body."""
     url = config.base_url.rstrip("/") + "/chat/completions"
-    # mlx-lm.server identifies models by their LOAD PATH, not by short
-    # name. Its /v1/models endpoint returns the absolute path (e.g.
-    # "/Users/.../mlx_models/gemma-3-12b-it-4bit") as the model id, and
-    # /v1/chat/completions 404s with a HuggingFace lookup error
-    # ("Repository Not Found for url: https://huggingface.co/api/models/
-    # gemma-3-12b-it-4bit/revision/main") if it receives anything else
-    # — it interprets unknown short names as HF repo ids and tries to
-    # download them. So for the local engine we always pass the absolute
-    # path as the request "model" field.
-    #
-    # Ollama and Custom OpenAI-compat endpoints get `config.model` as-is
-    # — Ollama wants tags like "qwen2.5-coder:32b", remote APIs want
-    # short ids like "claude-sonnet-4-6" or "gpt-5".
     if config.kind == "phosphene_local" and config.local_model_path:
         wire_model = config.local_model_path
     else:
@@ -181,11 +322,10 @@ def chat(messages: list[dict], config: EngineConfig,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
-        # Read the body so the caller can see why the server rejected.
         detail = ""
         try:
             detail = e.read().decode("utf-8", errors="replace")
-        except Exception:
+        except Exception:                       # noqa: BLE001
             pass
         raise RuntimeError(
             f"engine returned HTTP {e.code} ({e.reason}). "
@@ -213,15 +353,6 @@ def chat(messages: list[dict], config: EngineConfig,
     content = msg.get("content") or ""
     finish = data["choices"][0].get("finish_reason") or "stop"
     usage = data.get("usage") or {}
-
-    # Reasoning-model handling. mlx-lm.server (and similar) split a
-    # thinking model's output into `message.reasoning` (chain-of-thought)
-    # and `message.content` (final answer). When max_tokens is too small,
-    # reasoning consumes the budget and content comes back empty with
-    # finish_reason="length" — the agent gets nothing and the chat
-    # appears "stuck". We surface reasoning ALWAYS (so the UI can show
-    # "what the model was thinking") and fall back to using it as
-    # content only when content is empty.
     reasoning = msg.get("reasoning") or ""
     if not content and reasoning:
         if finish == "length":
@@ -231,19 +362,17 @@ def chat(messages: list[dict], config: EngineConfig,
                 f"Bump 'Max tokens' in agent settings — current is "
                 f"{config.max_tokens}; try 12000+ for Qwen 3.6 / DeepSeek R1."
             )
-        # No length issue but content is empty — fall back to reasoning
-        # so SOMETHING surfaces in the chat.
         content = reasoning
-        reasoning = ""               # already promoted to content; don't double-show
+        reasoning = ""
 
     return ChatResult(content=content, finish_reason=finish, usage=usage,
                       reasoning=reasoning,
                       model=data.get("model", config.model))
 
 
-def _chat_anthropic(messages: list[dict], config: EngineConfig,
-                    *, timeout: int) -> ChatResult:
-    """Anthropic Messages API — `/v1/messages` shape.
+def _chat_anthropic_urllib(messages: list[dict], config: EngineConfig,
+                           *, timeout: int) -> ChatResult:
+    """Pre-LiteLLM Anthropic path — `/v1/messages` shape.
 
     Differences from the OpenAI shape we already handle:
       - System prompt is a top-level `system` STRING, not a {role:"system"}
@@ -258,9 +387,6 @@ def _chat_anthropic(messages: list[dict], config: EngineConfig,
     """
     base = config.base_url.rstrip("/") or "https://api.anthropic.com/v1"
     url = base + "/messages"
-    # Normalize first (collapse adjacent same-role messages so the
-    # Anthropic "strict alternation" rule passes), THEN extract the
-    # leading system message.
     norm = _normalize_for_wire(messages)
     system_text = ""
     if norm and norm[0].get("role") == "system":
@@ -292,16 +418,15 @@ def _chat_anthropic(messages: list[dict], config: EngineConfig,
         detail = ""
         try:
             detail = e.read().decode("utf-8", errors="replace")
-        except Exception:
+        except Exception:                       # noqa: BLE001
             pass
-        # Anthropic ships errors as {"type":"error","error":{"type","message"}}.
         nice = detail
         try:
             j = json.loads(detail)
             if isinstance(j, dict) and isinstance(j.get("error"), dict):
                 err = j["error"]
                 nice = f"{err.get('type','?')}: {err.get('message','?')}"
-        except Exception:
+        except Exception:                       # noqa: BLE001
             pass
         raise RuntimeError(
             f"Anthropic API returned HTTP {e.code} ({e.reason}). "
@@ -335,6 +460,10 @@ def health_check(config: EngineConfig, *, timeout: int = 5) -> tuple[bool, str]:
     `mlx-lm.server` exposes /v1/models. OpenAI / Anthropic / LM Studio
     all expose the same. We don't insist on a specific shape — any 200
     response means the endpoint is alive and accepts auth (if provided).
+
+    Stays on stdlib urllib regardless of whether LiteLLM is installed —
+    a 5s probe of /v1/models doesn't benefit from LiteLLM's retry/timeout
+    machinery, and a transport-only probe leaves the LLM cold (faster).
     """
     base = config.base_url.rstrip("/") or (
         "https://api.anthropic.com/v1" if config.kind == "anthropic" else ""
@@ -342,7 +471,6 @@ def health_check(config: EngineConfig, *, timeout: int = 5) -> tuple[bool, str]:
     url = base + "/models"
     headers = {}
     if config.kind == "anthropic":
-        # Anthropic auth is x-api-key + anthropic-version, not Bearer.
         headers["anthropic-version"] = config.anthropic_version or "2023-06-01"
         if config.api_key:
             headers["x-api-key"] = config.api_key
@@ -358,5 +486,11 @@ def health_check(config: EngineConfig, *, timeout: int = 5) -> tuple[bool, str]:
         return False, f"engine returned HTTP {e.code}"
     except urllib.error.URLError as e:
         return False, f"unreachable: {e.reason}"
-    except Exception as e:                  # noqa: BLE001 — surface any other transport hiccup
+    except Exception as e:                      # noqa: BLE001
         return False, f"probe failed: {e}"
+
+
+def is_litellm_active() -> bool:
+    """Diagnostic helper — surfaces in /agent/config GETs so the panel
+    can show 'LiteLLM' vs 'urllib' in the status row."""
+    return _HAS_LITELLM
