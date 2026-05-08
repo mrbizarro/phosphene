@@ -855,17 +855,36 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
                             previous candidates stay clickable and the new
                             take stacks below.
       refs: list[str] = [] — 1-3 absolute paths to reference images. Only
-                            honored when the configured image engine is
-                            Qwen-Image-Edit-2509 (mflux family `qwen_edit`).
+                            honored when the engine is Qwen-Image-Edit-2509
+                            (`engine_override="qwen_edit"` or
+                            `engine_override="qwen_edit_lightning"`).
                             With refs, the model COMPOSES the prompt onto
                             the references — character + place / character +
-                            character / character + product. This is the
-                            primary path for cross-shot character continuity:
-                            pass the same character ref on every shot and
-                            the identity is locked at the still stage. For
-                            other engines, refs are silently dropped and
-                            the candidate dict's `refs_ignored: true` flags
-                            the no-op.
+                            character / character + product. The primary
+                            path for cross-shot character continuity: pass
+                            the same character ref on every shot and the
+                            identity is locked at the still stage.
+      engine_override: str = "" — per-call engine choice, OVERRIDES the
+                            user's saved Settings without changing it.
+                            Valid values:
+                              "qwen_edit_lightning"  4-step Q4 + Lightning LoRA,
+                                                     ~10-15 s/image, NEEDS refs
+                              "qwen_edit"            8-step Q4, ~1 min/image,
+                                                     NEEDS refs
+                              "qwen_edit_high"       30-step Q8, ~5 min/image,
+                                                     NEEDS refs
+                              "flux2"                4-step T2I, ~15 s/image,
+                                                     no refs supported
+                              "z_image_turbo"        9-step T2I, ~30 s/image,
+                                                     no refs supported
+                              "mock"                 flat colored squares,
+                                                     instant (testing only)
+                            Use this to react to errors: if a qwen_edit
+                            call returns "needs at least 1 reference image"
+                            and the user explicitly didn't provide one,
+                            retry with engine_override="z_image_turbo"
+                            instead of trying the same family again or
+                            calling finish() with nothing rendered.
 
     Returns: {shot_label, prompt, candidates: [{png_path, seed, ...}, ...],
               takes: [{candidates, generated_at, prompt}, ...],
@@ -924,6 +943,64 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     # stays free of panel imports.
     cfg_dict = (ops.capabilities or {}).get("image_engine_config") or {}
     cfg = _image_engine.ImageEngineConfig(**cfg_dict)
+
+    # Agent-side engine override. Same preset names the panel's Image
+    # Studio uses. Lets the agent switch engines per-call without
+    # touching the user's persisted config — critical for cases like
+    # "user said no refs, qwen_edit can't run, fall back to T2I" which
+    # otherwise the agent retries-itself-into-finish() because it has
+    # no path to satisfy the request. Unknown override raises a clear
+    # validation error instead of silently using the saved config.
+    engine_override = (args.get("engine_override") or "").strip()
+    if engine_override:
+        if engine_override == "qwen_edit_lightning":
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_family="qwen_edit",
+                mflux_quantize=4,
+                mflux_steps=4,
+                mflux_lora_paths=["lightx2v/Qwen-Image-Edit-2511-Lightning"],
+                mflux_lora_scales=[1.0],
+            )
+        elif engine_override == "qwen_edit":
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_family="qwen_edit",
+                mflux_quantize=4,
+                mflux_steps=8,
+            )
+        elif engine_override == "qwen_edit_high":
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_family="qwen_edit",
+                mflux_quantize=8,
+                mflux_steps=30,
+            )
+        elif engine_override == "flux2":
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
+                mflux_family="flux2",
+                mflux_quantize=4,
+            )
+        elif engine_override == "z_image_turbo":
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
+                mflux_family="z_image_turbo",
+                mflux_quantize=4,
+            )
+        elif engine_override == "mock":
+            cfg = _image_engine.ImageEngineConfig(kind="mock")
+        else:
+            raise _ToolValidationError(
+                f"engine_override={engine_override!r} unknown. Valid: "
+                f"qwen_edit | qwen_edit_lightning | qwen_edit_high | "
+                f"flux2 | z_image_turbo | mock"
+            )
 
     safe_label = re.sub(r"[^a-z0-9_-]", "_", label.lower())[:40] or "untitled"
     sid = session.get("session_id") or "session"
