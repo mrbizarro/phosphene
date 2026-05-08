@@ -13318,6 +13318,16 @@ HTML = r"""<!doctype html>
       <ul class="row-list" id="queueList"></ul>
     </div>
     <div class="tab-content" id="tab-recent">
+      <!-- Type filter — image jobs and video jobs share this list now
+           that mode='image' goes through the same worker. The filter
+           is purely client-side: history is delivered whole and the
+           render hides rows that don't match. Default 'all' so users
+           don't lose their videos by selecting Photos and forgetting. -->
+      <div class="row-list-filter" style="display:flex;gap:6px;padding:6px 8px;border-bottom:1px solid var(--bd,#2a2a2a)">
+        <button id="recentFilterAll" class="active" onclick="setRecentFilter('all')">All</button>
+        <button id="recentFilterVideos" onclick="setRecentFilter('videos')">Videos</button>
+        <button id="recentFilterPhotos" onclick="setRecentFilter('photos')">Photos</button>
+      </div>
       <ul class="row-list" id="historyList"></ul>
     </div>
     <div class="tab-content" id="tab-logs">
@@ -14807,7 +14817,12 @@ async function poll() {
     }
     fill.style.width = pct + '%';
     nowCard.querySelector('.ttl').textContent = snippet(s.current.params.label || s.current.params.prompt, 80);
-    const baseMeta = `${s.current.params.mode} · ${s.current.params.width}×${s.current.params.height} · ${s.current.params.frames}f · ${timing}`;
+    // Image jobs don't have width/height/frames; show n × aspect instead.
+    // Falls through to the video shape when those fields ARE present.
+    const cur = s.current.params;
+    const baseMeta = (cur.mode === 'image')
+      ? `image · ${cur.aspect || '?'} · n=${cur.n || '?'} · ${cur.engine_override || 'auto'} · ${timing}`
+      : `${cur.mode} · ${cur.width}×${cur.height} · ${cur.frames}f · ${timing}`;
     nowCard.querySelector('.meta').innerHTML = phaseLabel
       ? `${baseMeta}<br><span style="color:var(--muted)">${escapeHtml(phaseLabel)}</span>`
       : baseMeta;
@@ -14880,19 +14895,40 @@ async function poll() {
   // Queue list
   const ql = document.getElementById('queueList');
   if (!s.queue.length) ql.innerHTML = '<li class="empty-state"><span></span><span>Queue empty</span><span></span><span></span></li>';
-  else ql.innerHTML = s.queue.map((j, i) => `
+  else ql.innerHTML = s.queue.map((j, i) => {
+    // Image jobs don't have width/height/frames; show n × aspect instead.
+    const params = (j.params.mode === 'image')
+      ? `image · ${j.params.aspect || '?'} · n=${j.params.n || '?'}`
+      : `${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f`;
+    return `
     <li>
       <span class="pos">#${i+1}</span>
       <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
-      <span class="params">${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f</span>
+      <span class="params">${params}</span>
       <button title="Remove" onclick="removeJob('${j.id}')">×</button>
-    </li>`).join('');
+    </li>`;
+  }).join('');
 
   // History — failed jobs show the error inline in the title slot, so
   // users can see WHY without having to scroll the log to find it.
+  // mode='image' jobs render with a thumbnail of the first candidate
+  // and an Animate button that pre-fills the i2v form (does NOT
+  // auto-submit — user keeps the chance to tweak prompt/seed).
   const hl = document.getElementById('historyList');
-  if (!s.history.length) hl.innerHTML = '<li class="empty-state"><span></span><span>No history yet</span><span></span><span></span></li>';
-  else hl.innerHTML = s.history.slice(0, 20).map(j => {
+  // Apply the All / Videos / Photos filter (set by setRecentFilter).
+  const filterPhotos = (window.recentFilter || 'all');
+  const filtered = s.history.filter(j => {
+    if (filterPhotos === 'all') return true;
+    const isPhoto = (j.params && j.params.mode === 'image');
+    return filterPhotos === 'photos' ? isPhoto : !isPhoto;
+  });
+  if (!filtered.length) {
+    const empty = filterPhotos === 'photos' ? 'No photo renders yet'
+                : filterPhotos === 'videos' ? 'No video renders yet'
+                : 'No history yet';
+    hl.innerHTML = `<li class="empty-state"><span></span><span>${empty}</span><span></span><span></span></li>`;
+  }
+  else hl.innerHTML = filtered.slice(0, 20).map(j => {
     const titleText = escapeHtml(j.params.label || snippet(j.params.prompt, 60));
     const titleAttr = escapeHtml(j.params.prompt || '');
     let titleHtml;
@@ -14901,6 +14937,31 @@ async function poll() {
         `<span class="err-inline" title="${escapeHtml(j.error)}">— ${escapeHtml(snippet(j.error, 70))}</span>`;
     } else {
       titleHtml = titleText;
+    }
+    // Image rows get a thumbnail + Animate button; video rows keep
+    // the existing 4-column shape so the layout doesn't shift.
+    const isPhoto = (j.params && j.params.mode === 'image');
+    if (isPhoto && j.status === 'done' && j.output_path) {
+      const cands = (j.params.candidate_paths && j.params.candidate_paths.length)
+        ? j.params.candidate_paths.length : 1;
+      const engineLabel = escapeHtml(j.params.engine || 'image');
+      const thumbSrc = `/image?path=${encodeURIComponent(j.output_path)}&t=${Date.now()}`;
+      const animateArgs = JSON.stringify({
+        path: j.output_path, prompt: j.params.prompt || ''
+      }).replace(/"/g, '&quot;');
+      return `
+      <li class="${j.status}" data-photo="1">
+        <span class="badge">photo</span>
+        <span class="ttl photo-ttl" title="${titleAttr}">
+          <img class="photo-thumb" src="${thumbSrc}" alt=""
+               style="width:36px;height:36px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:6px">
+          ${titleHtml}
+          <span class="photo-meta hint" style="margin-left:6px;font-size:11px;opacity:0.7">${cands}× · ${engineLabel}</span>
+        </span>
+        <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
+        <span><button class="animate-btn" type="button"
+              onclick='animateFromPhoto(${animateArgs})' title="Pre-fill i2v with this image (does not auto-submit)">Animate</button></span>
+      </li>`;
     }
     return `
     <li class="${j.status}">
@@ -14922,6 +14983,50 @@ async function poll() {
   }
   document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
   document.getElementById('carouselTitle').textContent = filterMode === 'hidden' ? 'Hidden outputs' : `Outputs · ${currentOutputs.length}`;
+}
+
+// Recent-tab type filter (All / Videos / Photos). Stored on window so
+// the value survives across renders without polluting the existing
+// `filterMode` global (which is for the hidden/visible carousel filter,
+// a different concept). Defaults to 'all'.
+window.recentFilter = window.recentFilter || 'all';
+function setRecentFilter(mode) {
+  window.recentFilter = mode;
+  document.getElementById('recentFilterAll').classList.toggle('active', mode === 'all');
+  document.getElementById('recentFilterVideos').classList.toggle('active', mode === 'videos');
+  document.getElementById('recentFilterPhotos').classList.toggle('active', mode === 'photos');
+  // Re-poll so the filter's effect is visible immediately. /status is
+  // a localhost no-op, so the user perceives no latency.
+  poll();
+}
+
+// Animate button — pre-fills the i2v form with the given still as the
+// reference image and the same prompt. Does NOT auto-submit; the user
+// keeps the chance to tweak prompt/seed/quality before clicking
+// Generate. Reversible (changing the image picker resets it).
+function animateFromPhoto(payload) {
+  if (!payload || !payload.path) return;
+  // Switch to i2v mode (pill + form fields). setMode('i2v') hides the
+  // Studio pane, shows the video form, and applies the i2v-specific
+  // dropdown selection.
+  setMode('i2v');
+  // Use the existing image picker helper so the preview tile updates
+  // alongside the hidden form field. Pass snapAspect:false to keep
+  // whatever aspect the user already had selected (matches loadParams).
+  if (typeof pickerSetImage === 'function') {
+    pickerSetImage('image', payload.path, { snapAspect: false });
+  } else {
+    document.getElementById('image').value = payload.path;
+  }
+  if (payload.prompt) {
+    document.getElementById('prompt').value = payload.prompt;
+  }
+  // Scroll the form pane to the top so the image picker + prompt are
+  // immediately visible.
+  const formPane = document.querySelector('aside.form-pane');
+  if (formPane) formPane.scrollTop = 0;
+  if (typeof updateDerived === 'function') updateDerived();
+  if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
 }
 
 function setFilter(mode) {
