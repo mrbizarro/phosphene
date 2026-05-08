@@ -4363,6 +4363,48 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
     raise ValueError(f"unknown engine_override: {engine_override!r}")
 
 
+def _validate_mflux_python_path(value: str) -> str:
+    """Reject arbitrary-binary paths in `mflux_python_path`.
+
+    Without this gate, the field is a CSRF-amplifier: a hostile page
+    that beats the loopback/Origin check could POST any path here and
+    the next mflux call would exec it (defense-in-depth on top of the
+    CSRF gate in `_is_local_request`).
+
+    Acceptable values:
+      - "" → cleared, falls back to the panel's bundled venv
+      - An absolute path that EXISTS, is a regular file, is executable
+        by the user, AND whose basename starts with `python3` /
+        `mflux-generate` (the only binaries we ever spawn).
+    Anything else raises ValueError → caller maps to HTTP 400.
+    """
+    s = (value or "").strip()
+    if not s:
+        return ""
+    p = Path(s)
+    if not p.is_absolute():
+        raise ValueError(
+            "mflux_python_path must be an absolute path to a python3 "
+            "or mflux-generate executable in a venv bin directory"
+        )
+    try:
+        rp = p.resolve()
+    except OSError as e:
+        raise ValueError(f"mflux_python_path is not resolvable: {e}")
+    if not rp.is_file() or not os.access(rp, os.X_OK):
+        raise ValueError(
+            "mflux_python_path must be an existing python3 executable "
+            "in a venv bin directory"
+        )
+    name = rp.name
+    if not (name.startswith("python3") or name.startswith("mflux-generate")):
+        raise ValueError(
+            "mflux_python_path basename must start with 'python3' or "
+            "'mflux-generate' (a venv bin entry)"
+        )
+    return str(rp)
+
+
 def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineConfig:
     """Merge `updates` into the saved image config and persist.
 
@@ -4376,6 +4418,10 @@ def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineCon
 
     File is written 0o600 because it carries the BFL API key. Mirrors
     the agent session file pattern in agent/runtime.py:save_session.
+
+    `mflux_python_path` is validated against an exec-allowlist (see
+    `_validate_mflux_python_path`) so a CSRF can't repoint mflux at
+    `/bin/sh` or `/usr/bin/curl`. Raises ValueError → caller HTTP 400.
     """
     global _AGENT_IMAGE_CONFIG_CACHE
     with AGENT_LOCK:
@@ -4386,6 +4432,9 @@ def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineCon
                 continue
             if v is None:
                 continue                        # absent / null means "leave as-is"
+            if k == "mflux_python_path":
+                # Raises ValueError on bad input; HTTP layer maps to 400.
+                v = _validate_mflux_python_path(v)
             merged[k] = v
         cfg = agent_image_engine.ImageEngineConfig(**merged)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -4892,11 +4941,94 @@ def _hf_model_install_cancel() -> dict:
     return {"ok": True}
 
 
+# Allow-prefixes for HF repo ids passed to /agent/local/start. These are
+# the only owners we ever want mlx_lm.server to download with the user's
+# stored HF token. Anything else (including unknown private orgs) is
+# rejected at endpoint entry — see _validate_local_model_path.
+_LOCAL_MODEL_HF_ALLOWED_OWNERS = (
+    "Qwen",
+    "mlx-community",
+    "lmstudio-community",
+    "unsloth",
+    "Lightricks",
+    "Black-Forest-Labs",
+    "lightx2v",
+    "filipstrand",
+    "huihui-ai",
+    "google",
+)
+
+_LOCAL_MODEL_HF_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _validate_local_model_path(value: str) -> str:
+    """Constrain `model_path` accepted by POST /agent/local/start.
+
+    Without this gate, the field is a CSRF + token-burn sink: an attacker
+    who beats the loopback/Origin check (or just a misclick on a hostile
+    page that bypasses it via some future bug) could ask mlx_lm.server
+    to download any HF repo with the user's stored token, or load
+    weights from any directory the panel can read.
+
+    Acceptable values:
+      - HF repo id matching `<owner>/<name>` whose owner is in
+        `_LOCAL_MODEL_HF_ALLOWED_OWNERS`.
+      - Local path that resolves under `MODELS_DIR` (mlx_models/) or the
+        HF cache root (`_hf_cache_root()`).
+    Anything else: ValueError → caller maps to HTTP 400.
+
+    Empty string is the saved-default case and is handled by the caller
+    before reaching here.
+    """
+    s = (value or "").strip()
+    if not s:
+        raise ValueError("model_path must not be empty")
+
+    # Local path: starts with /, ~, ./, or ../.
+    looks_like_path = s.startswith(("/", "~", "./", "../"))
+    if looks_like_path:
+        try:
+            p = Path(s).expanduser().resolve()
+        except OSError as e:
+            raise ValueError(f"model_path is not resolvable: {e}")
+        roots: list[Path] = []
+        for r in (MODELS_DIR, _hf_cache_root()):
+            try:
+                roots.append(r.resolve())
+            except OSError:
+                pass
+        for r in roots:
+            try:
+                if p.is_relative_to(r):
+                    return str(p)
+            except ValueError:
+                continue
+        raise ValueError(
+            "model_path must resolve under mlx_models/ or the "
+            "HuggingFace cache directory"
+        )
+
+    # HF repo id: <owner>/<name>.
+    if not _LOCAL_MODEL_HF_REPO_RE.match(s):
+        raise ValueError(
+            "model_path must be a HuggingFace repo id "
+            "(<owner>/<name>) or a path under mlx_models/"
+        )
+    owner = s.split("/", 1)[0]
+    if owner not in _LOCAL_MODEL_HF_ALLOWED_OWNERS:
+        raise ValueError(
+            f"model_path owner {owner!r} is not on the allow-list "
+            f"({', '.join(_LOCAL_MODEL_HF_ALLOWED_OWNERS)})"
+        )
+    return s
+
+
 def _agent_local_start(model_path: str | None = None) -> dict:
     """Spawn the bundled mlx-lm.server against the current config's model.
 
     `model_path` overrides the saved `local_model_path` for one-off boots
-    (e.g. switching models without persisting the change).
+    (e.g. switching models without persisting the change). HTTP callers
+    must pre-validate via `_validate_local_model_path`.
     """
     cfg = _load_agent_config()
     target = model_path or cfg.local_model_path or str(GEMMA)
@@ -4912,7 +5044,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _is_local_request(self) -> bool:
-        """Reject DNS-rebinding attacks.
+        """Reject DNS-rebinding and `Origin: null` CSRF attacks.
 
         We bind to 127.0.0.1, but a malicious page on the open internet can
         still reach us if the user's resolver returns 127.0.0.1 for an
@@ -4924,8 +5056,12 @@ class Handler(BaseHTTPRequestHandler):
         Rules:
           - Host header must be loopback (127.0.0.1, [::1], localhost) on
             our PORT, or empty (some local tooling omits it).
-          - If Origin is present it must also be loopback.
-          - Referer is only checked as a last-resort hint.
+          - If Origin is present it must be loopback. `Origin: null` is
+            REJECTED — browsers send `null` for `file://` pages, sandboxed
+            iframes, opaque-origin redirects, and some PDF viewers, which
+            is exactly the CSRF surface a local malicious HTML drop would
+            use. The legitimate panel UI always sends the loopback origin.
+          - Referer-based fallback is intentionally not honored.
         """
         host = (self.headers.get("Host") or "").strip().lower()
         # Host can include the port; strip it.
@@ -4936,7 +5072,10 @@ class Handler(BaseHTTPRequestHandler):
         if host_name not in allowed:
             return False
         origin = (self.headers.get("Origin") or "").strip().lower()
-        if origin and origin != "null":
+        if origin:
+            # Treat `null` as untrusted — see docstring.
+            if origin == "null":
+                return False
             try:
                 from urllib.parse import urlparse as _u
                 ohost = (_u(origin).hostname or "").lower()
@@ -6488,6 +6627,11 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError as e:
                 self._json({"error": f"bad JSON: {e}"}, 400); return
             override = (payload.get("model_path") or "").strip() or None
+            if override is not None:
+                try:
+                    override = _validate_local_model_path(override)
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400); return
             status = _agent_local_start(override)
             self._json({"ok": status.get("running"), "local_server": status})
             return
@@ -6757,7 +6901,10 @@ class Handler(BaseHTTPRequestHandler):
                            else {k: v[0] if v else "" for k, v in form.items()})
             except json.JSONDecodeError as e:
                 self._json({"error": f"bad JSON: {e}"}, 400); return
-            cfg = _save_agent_image_config(payload)
+            try:
+                cfg = _save_agent_image_config(payload)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
             push(f"agent: image engine updated to {cfg.kind}"
                  + (f" ({cfg.bfl_model})" if cfg.kind == "bfl" else ""))
             ok, msg = agent_image_engine.health_check(cfg)

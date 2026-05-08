@@ -345,8 +345,19 @@ def _resolve_mflux_bin(config: ImageEngineConfig) -> str | None:
     bin_name = MFLUX_FAMILY_BIN.get(fam, "mflux-generate")
 
     if config.mflux_python_path:
+        # Defensive re-validation at exec time. Save-time
+        # (_validate_mflux_python_path in mlx_ltx_panel.py) already
+        # gates this field, but the file may have been deleted between
+        # save and use, or an older config may pre-date the gate. Only
+        # accept absolute paths to existing executable files whose
+        # basename starts with python3 or mflux-generate. Anything
+        # else: fall back silently to the panel's bundled venv.
         cand = Path(config.mflux_python_path)
-        if cand.is_file() and os.access(cand, os.X_OK):
+        if (cand.is_absolute()
+                and cand.is_file()
+                and os.access(cand, os.X_OK)
+                and (cand.name.startswith("python3")
+                     or cand.name.startswith("mflux-generate"))):
             return str(cand)
 
     repo_root = Path(__file__).resolve().parent.parent
