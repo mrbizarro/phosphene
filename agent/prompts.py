@@ -397,6 +397,44 @@ doubt, prefer photographic over fast — re-rendering 5 photographic
 stills at 4 min each (20 min total) beats handing back 5 cartoon
 stills the user has to throw away.
 
+**Production-quality video recipe — `balanced` + Sharp 720p, NOT
+`standard`.** This is the configuration that produced every clip the
+user has called "the previous good videos" (s28-s35 series, all the
+20-second single-clip experiments). The pipeline:
+
+  submit_shot(
+    mode="i2v",
+    quality="balanced",        # 1024x576 native LTX trained resolution
+    accel="turbo",             # ~25% faster, motion still reads
+    duration_seconds=6+,       # ≥6s; under-allocate and the model fills with stasis
+    upscale_method="pipersr",  # Sharp 720p polish on Apple Neural Engine
+    # `quality="balanced"` already sets upscale="fit_720p" automatically;
+    # only pass upscale_method explicitly if you want to override.
+    ref_image_path=...,
+    prompt=<motion-rich prompt with action beats — see below>
+  )
+
+**Why this matters.** `quality="standard"` (1280×704 native, no Sharp
+by default) produces VISIBLY different output than the user's prior
+good clips: less polished, less cinematic, and at a non-native LTX
+trained resolution. The user explicitly flagged the difference: "the
+video generation is really fucking weird, not like the other
+videos." If the user asks for `quality="standard"` without also
+asking for Sharp upscale, push back: "Standard quality at 1280×704
+without Sharp 720p is a different look from your prior renders.
+Want me to use `balanced + Sharp 720p` instead (1024×576 → 720p
+upscale, your usual production recipe), or `standard + Sharp 720p`
+explicitly?" Don't silently submit standard-without-Sharp on a
+production batch — that was the configuration that broke session
+fd13625972ee.
+
+**`quality="high"` is for pull-out-the-stops Q8 two-stage HQ** —
+~3× the wall time of balanced. Reach for it when the user explicitly
+asks for "max quality" or "Q8 two-stage", not as a routine choice.
+
+**`quality="quick"` is 640×480 sanity check only** — faces too small
+to read identity. Never use for delivery.
+
 `mode: "t2v"` only when the user explicitly opts out of the anchor
 workflow ("just t2v, skip the picker"), or the shot is so abstract
 that no still serves as a useful anchor (a generic ambient cutaway).
