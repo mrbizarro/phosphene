@@ -5300,6 +5300,47 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 40
             self._json({"uploads": list_uploads(limit=max(1, min(200, limit)))})
             return
+        if parsed.path == "/image/engine_status":
+            # Per-engine cache + wall-time data for the Image Studio's status
+            # pill + Generate button label. The Studio polls this on entry +
+            # whenever the user picks a different engine so the user can see
+            # at a glance whether the chosen engine's weights are local or
+            # need a fresh download. Bundled-mflux engines (flux2-klein-4b,
+            # flux2-klein-base-4b) ship inside the panel venv — flagged
+            # "ready" without a cache check.
+            #
+            # Per-image seconds are best-effort defaults pulled from the
+            # engine option labels in the Studio dropdown so the wall-time
+            # estimate matches the user-facing copy.
+            try:
+                # (engine_override, repo_id_or_none, est_dl_gb, sec_per_image)
+                ENGINES = [
+                    ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0, 13.0),
+                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0, 60.0),
+                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 300.0),
+                    ("flux2_edit_inline",          None,                         0.0,  30.0),
+                    ("flux2_edit_high_inline",     None,                         0.0, 240.0),
+                    ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
+                    ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
+                    ("mock_inline",                None,                         0.0,   0.5),
+                ]
+                out = []
+                for engine, repo, dl_gb, sec in ENGINES:
+                    if repo is None:
+                        cached = True
+                    else:
+                        cached = _repo_hf_cache_dir(repo) is not None
+                    out.append({
+                        "engine": engine,
+                        "repo_id": repo or "",
+                        "cached": cached,
+                        "download_gb": dl_gb,
+                        "sec_per_image": sec,
+                    })
+                self._json({"engines": out})
+            except Exception as exc:                                # noqa: BLE001
+                self._json({"error": f"engine_status failed: {exc}"}, 500)
+            return
         if parsed.path == "/panel/bug-context":
             # Sysinfo + log tail bundle for the bug-report modal. The browser
             # has no access to sysctl / sw_vers / git, so we collect everything
@@ -7769,6 +7810,309 @@ HTML = r"""<!doctype html>
       color: white; padding: 16px 6px 4px;
       font-size: 10px; line-height: 1.2;
       pointer-events: none;
+    }
+
+    /* ============================================================
+       Image Studio composer (.studio-pane) — restyled to mirror the
+       video form-pane (#genForm). Section labels are h2 mono uppercase,
+       inputs use the same hairline-bordered chrome, ref slots reuse the
+       picker idiom (dashed → solid + accent on populate), and the
+       Generate row carries an inline wall-time estimate.
+       ============================================================ */
+    .studio-pane.show { display: block; }
+    .studio-head { margin-bottom: 8px; }
+    .studio-head .studio-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    .studio-head .hint {
+      margin-top: 2px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .studio-pane h2 {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+      color: var(--ph-text-faint);
+      text-transform: uppercase;
+      margin: 22px 0 8px;
+      font-weight: 500;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .studio-pane h2:first-of-type { margin-top: 14px; }
+    .studio-pane h2 .h2-hint {
+      font-size: 10.5px;
+      letter-spacing: 0;
+      color: var(--ph-text-faint);
+      text-transform: none;
+      font-family: inherit;
+      font-weight: 400;
+      opacity: 0.85;
+    }
+    .studio-pane textarea,
+    .studio-pane input[type="text"],
+    .studio-pane input[type="number"],
+    .studio-pane select {
+      width: 100%;
+      background: rgba(12, 19, 48, 0.5);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 13px;
+      color: var(--text);
+      font-family: inherit;
+    }
+    .studio-pane textarea {
+      min-height: 84px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+    .studio-pane textarea:focus,
+    .studio-pane input:focus,
+    .studio-pane select:focus {
+      border-color: var(--accent);
+      background: rgba(12, 19, 48, 0.7);
+      box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.18);
+      outline: none;
+    }
+    .studio-pane .lbl {
+      display: block;
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      font-weight: 500;
+    }
+    /* 2-col field grid for engine / aspect / n / seed. The engine
+       dropdown spans both columns so the long option labels don't get
+       clipped — that's what `.studio-field-wide` does. */
+    .studio-field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+    }
+    .studio-field-wide { grid-column: 1 / -1; }
+    /* Engine select + status pill on one row. The pill flexes to its
+       label width; the select takes the rest. */
+    .studio-engine-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .studio-engine-row select {
+      flex: 1 1 auto;
+      min-width: 0;          /* lets the select shrink so the pill stays */
+    }
+    .engine-status-pill {
+      flex: 0 0 auto;
+      align-self: stretch;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 0 11px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0;
+      border: 1px solid var(--ph-border-soft);
+      background: rgba(12, 19, 48, 0.5);
+      color: var(--muted);
+      white-space: nowrap;
+      cursor: default;
+      user-select: none;
+      transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+    }
+    .engine-status-pill[data-state="ready"] {
+      color: var(--success);
+      border-color: rgba(63, 185, 80, 0.35);
+      background: rgba(63, 185, 80, 0.10);
+    }
+    .engine-status-pill[data-state="missing"] {
+      color: var(--warning);
+      border-color: rgba(210, 153, 34, 0.4);
+      background: rgba(210, 153, 34, 0.10);
+      cursor: pointer;
+    }
+    .engine-status-pill[data-state="missing"]:hover {
+      background: rgba(210, 153, 34, 0.18);
+      border-color: rgba(210, 153, 34, 0.6);
+    }
+    .engine-status-pill[data-state="unknown"] { opacity: 0.6; }
+    /* Reference image grid + slots. Same dashed-border / accent-on-hover
+       idiom as the video picker, but compact enough to fit three across
+       and tagged so users know which slot is "Primary" vs "Multi-ref". */
+    .studio-ref-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .studio-ref-slot {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      border: 1.5px dashed var(--ph-border-strong);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.015);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+      transition: border-color var(--t-fast), background var(--t-fast);
+    }
+    .studio-ref-slot:hover {
+      border-color: var(--accent);
+      background: rgba(90, 124, 255, 0.04);
+    }
+    .studio-ref-slot.dragover {
+      border-style: solid;
+      border-color: var(--accent-bright);
+      background: rgba(90, 124, 255, 0.10);
+    }
+    .studio-ref-slot.has-image {
+      border-style: solid;
+      border-color: var(--accent);
+    }
+    .studio-ref-slot img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .studio-ref-slot .ref-tag {
+      position: absolute;
+      top: 6px; left: 6px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 9.5px;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: rgba(0, 6, 26, 0.65);
+      border: 1px solid var(--ph-border-soft);
+      color: var(--ph-text-faint);
+      pointer-events: none;
+    }
+    .studio-ref-slot.has-image .ref-tag {
+      background: rgba(0, 6, 26, 0.78);
+      color: var(--accent-bright);
+      border-color: rgba(47, 129, 247, 0.35);
+    }
+    .studio-ref-slot .ref-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px;
+      pointer-events: none;
+    }
+    .studio-ref-slot .ref-empty .ref-icon {
+      font-size: 18px;
+      line-height: 1;
+      opacity: 0.7;
+    }
+    .studio-ref-slot .ref-empty .ref-cta {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.3;
+    }
+    .studio-ref-slot .clear-x {
+      position: absolute;
+      top: 6px; right: 6px;
+      width: 22px; height: 22px;
+      background: rgba(0, 0, 0, 0.65);
+      color: white;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 50%;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .studio-ref-slot.has-image .clear-x { display: flex; }
+    .studio-ref-slot .clear-x:hover {
+      background: rgba(220, 80, 80, 0.55);
+      border-color: rgba(220, 80, 80, 0.7);
+    }
+    /* Recent uploads strip — mirrors video's .picker-recent. */
+    .studio-ref-recent { margin-top: 10px; }
+    .studio-ref-recent-label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    .studio-ref-recent-strip {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: thin;
+    }
+    .studio-ref-recent-strip::-webkit-scrollbar { height: 6px; }
+    .studio-ref-recent-strip::-webkit-scrollbar-thumb {
+      background: var(--ph-border-strong);
+      border-radius: 3px;
+    }
+    .studio-ref-recent-thumb {
+      flex: 0 0 auto;
+      width: 56px; height: 56px;
+      border-radius: 6px;
+      border: 2px solid transparent;
+      object-fit: cover;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.04);
+      transition: border-color var(--t-fast), transform var(--t-fast);
+    }
+    .studio-ref-recent-thumb:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .studio-ref-recent-thumb.in-use { border-color: var(--success); }
+    /* Generate row — sits flush at the bottom of the form. The button
+       stretches to a comfortable width like video's #genBtn; the
+       wall-time estimate floats to the right and updates as the user
+       changes engine / aspect / n. */
+    .studio-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .studio-run-btn {
+      flex: 1 1 auto;
+      padding: 11px 16px !important;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .studio-wall-estimate {
+      flex: 0 0 auto;
+      font-size: 11.5px;
+      font-family: var(--ph-font-mono);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .studio-wall-estimate.dim { opacity: 0.55; }
+    .studio-status-row {
+      margin-top: 8px;
+      min-height: 16px;
+    }
+    .studio-status-row .hint {
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .studio-results {
+      margin-top: 14px;
     }
 
     .pill-btn:disabled, .pill-btn.disabled {
@@ -13507,46 +13851,70 @@ HTML = r"""<!doctype html>
          Lives outside the form so its prompt textarea doesn't submit the
          video form on Enter. The right rail (queue · current · history)
          to the right of form-pane stays visible during image gen. -->
-    <div class="mode-only" id="studioSection">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <div>
-          <h3 style="margin:0">Image Studio</h3>
-          <div class="hint" style="margin-top:2px">Generate reference stills. They land in your library and the agent can pick them up.</div>
-        </div>
+    <!-- Restyled to mirror the video form-pane: same h2 mono-uppercase
+         section labels, same hairline-bordered input chrome, same picker
+         idiom for ref slots, same dense 2-col field grid for engine /
+         aspect / n / seed, and a Generate row with an inline wall-time
+         estimate that updates as the user changes engine + n + aspect.
+         An engine-status pill on the engine row tells the user whether
+         the chosen engine's weights are cached locally or need a fresh
+         download — driven by /image/engine_status (server-side cache
+         probe via _repo_hf_cache_dir). -->
+    <div class="mode-only studio-pane" id="studioSection">
+      <div class="studio-head">
+        <h3 class="studio-title">Image Studio</h3>
+        <div class="hint">Generate reference stills. They land in your library and the agent can pick them up.</div>
       </div>
 
-      <div class="field">
-        <label>Prompt</label>
-        <textarea id="imgStudioPrompt" rows="4" style="width:100%" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
-      </div>
+      <h2>Prompt</h2>
+      <textarea id="imgStudioPrompt" rows="4" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
 
-      <div class="field">
-        <label>Reference images <span class="hint">(0-3, used by Qwen-Image-Edit-2509 to compose character + place; ignored by other engines)</span></label>
-        <div id="imgStudioRefs" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
-          <div class="img-ref-slot" data-slot="0"></div>
-          <div class="img-ref-slot" data-slot="1"></div>
-          <div class="img-ref-slot" data-slot="2"></div>
+      <h2>Reference images
+        <span class="h2-hint">multi-ref · Qwen-Image-Edit-2511 / FLUX.2 Klein-Edit only</span>
+      </h2>
+      <div class="studio-ref-grid" id="imgStudioRefs">
+        <div class="studio-ref-slot" data-slot="0">
+          <span class="ref-tag">Primary</span>
+        </div>
+        <div class="studio-ref-slot" data-slot="1">
+          <span class="ref-tag">Multi-ref</span>
+        </div>
+        <div class="studio-ref-slot" data-slot="2">
+          <span class="ref-tag">Multi-ref</span>
         </div>
       </div>
+      <!-- Mirrors the video I2V picker's "Recent uploads · click to use"
+           strip. Click a thumb → fills the next empty ref slot. Hidden
+           when /uploads is empty. -->
+      <div class="studio-ref-recent" id="imgStudioRecentWrap" style="display:none">
+        <div class="studio-ref-recent-label">Recent uploads · click to use</div>
+        <div class="studio-ref-recent-strip" id="imgStudioRecentStrip"></div>
+      </div>
 
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
-        <div class="field">
-          <label>Engine</label>
-          <select id="imgStudioEngine" onchange="imgStudioUpdateValidity()">
-            <option value="auto" selected>Auto (use Settings)</option>
-            <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2511 + Lightning (multi-ref &middot; 4-step Q6, ~10-15 s/image)</option>
-            <option value="qwen_edit_inline">Qwen-Image-Edit-2511 (multi-ref &middot; 8-step Q6, ~1 min/image)</option>
-            <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 high quality (multi-ref &middot; 40-step Q8, ~5 min/image)</option>
-            <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q6, ~30 s/image)</option>
-            <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
-            <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
-            <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-            <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
-          </select>
+      <h2>Settings</h2>
+      <div class="studio-field-grid">
+        <div class="studio-field studio-field-wide">
+          <label class="lbl">Engine</label>
+          <div class="studio-engine-row">
+            <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate()">
+              <option value="auto" selected>Auto (use Settings)</option>
+              <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2511 + Lightning (multi-ref &middot; 4-step Q6, ~10-15 s/image)</option>
+              <option value="qwen_edit_inline">Qwen-Image-Edit-2511 (multi-ref &middot; 8-step Q6, ~1 min/image)</option>
+              <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 high quality (multi-ref &middot; 40-step Q8, ~5 min/image)</option>
+              <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q6, ~30 s/image)</option>
+              <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
+              <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
+              <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
+              <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
+            </select>
+            <span class="engine-status-pill" id="imgStudioEnginePill"
+            data-state="unknown" title="Checking engine weights…"
+            onclick="imgStudioOnPillClick()">…</span>
+          </div>
         </div>
-        <div class="field">
-          <label>Aspect</label>
-          <select id="imgStudioAspect">
+        <div class="studio-field">
+          <label class="lbl">Aspect</label>
+          <select id="imgStudioAspect" onchange="imgStudioUpdateEstimate()">
             <option value="16:9" selected>16:9 — 1280×720</option>
             <option value="4:3">4:3 — 1024×768</option>
             <option value="1:1">1:1 — 1024×1024</option>
@@ -13555,26 +13923,31 @@ HTML = r"""<!doctype html>
             <option value="21:9">21:9 — 1280×544</option>
           </select>
         </div>
-        <div class="field">
-          <label>Candidates (n)</label>
-          <input type="number" id="imgStudioN" min="1" max="8" value="4">
+        <div class="studio-field">
+          <label class="lbl">Candidates (n)</label>
+          <input type="number" id="imgStudioN" min="1" max="8" value="4" oninput="imgStudioUpdateEstimate()">
         </div>
-        <div class="field">
-          <label>Seed (-1 random)</label>
+        <div class="studio-field">
+          <label class="lbl">Seed (-1 random)</label>
           <input type="number" id="imgStudioSeed" value="-1">
         </div>
       </div>
 
-      <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <button class="small primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">Generate</button>
-        <span id="imgStudioStatus" class="hint" style="flex:1"></span>
+      <div class="studio-actions">
+        <button class="primary studio-run-btn" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
+          <span id="imgStudioGenBtnLabel">Generate</span>
+        </button>
+        <span class="studio-wall-estimate" id="imgStudioWallEstimate"></span>
+      </div>
+      <div class="studio-status-row">
+        <span id="imgStudioStatus" class="hint"></span>
       </div>
 
       <!-- Submission status. Image jobs flow through the same queue as
            video jobs now, so the actual results show up in the right-rail
            Recent tab (with the Photos filter) along with everything else.
            This pane is just a thin "submitted" confirmation. -->
-      <div id="imgStudioResults" style="margin-top:14px"></div>
+      <div id="imgStudioResults" class="studio-results"></div>
     </div>
   </aside>
 
@@ -14495,6 +14868,12 @@ function setMode(mode) {
     // Wire ref drop-zones once + refresh library on every entry
     if (typeof imgStudioWireRefSlots === 'function') imgStudioWireRefSlots();
     if (typeof imgStudioRefreshLibrary === 'function') imgStudioRefreshLibrary();
+    // Pull engine cache state + recent-uploads strip + estimate so the
+    // composer is fully populated before the user reads it. These are
+    // best-effort and silent on failure.
+    if (typeof imgStudioRefreshEngineStatus === 'function') imgStudioRefreshEngineStatus();
+    if (typeof imgStudioRefreshRecent === 'function') imgStudioRefreshRecent();
+    if (typeof imgStudioUpdateEstimate === 'function') imgStudioUpdateEstimate();
     // Auto-set the right-pane outputs gallery to "Photos" — image mode
     // is composing photos, so a video gallery makes no sense as the
     // default. User can still flip back to All/Videos manually.
@@ -14611,11 +14990,15 @@ function closeImageStudio() {
 }
 
 function imgStudioWireRefSlots() {
-  document.querySelectorAll('.img-ref-slot').forEach(slot => {
+  // Backwards-compat: the legacy `.img-ref-slot` selector matched the old
+  // 3-column flat grid. The new restyled composer uses `.studio-ref-slot`.
+  // Wire both so any in-flight upgrade path keeps working.
+  document.querySelectorAll('.studio-ref-slot, .img-ref-slot').forEach(slot => {
     if (slot.dataset.wired === '1') return;
     slot.dataset.wired = '1';
     const idx = parseInt(slot.dataset.slot, 10);
-    // Click → file picker
+    // Click → file picker. Skip when the user clicked the close (×) button
+    // — its handler manages the clear flow.
     slot.addEventListener('click', (e) => {
       if (e.target.classList && e.target.classList.contains('clear-x')) return;
       const input = document.createElement('input');
@@ -14626,12 +15009,16 @@ function imgStudioWireRefSlots() {
       };
       input.click();
     });
-    // Drag + drop
-    slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.style.borderColor = 'var(--accent)'; });
-    slot.addEventListener('dragleave', () => { slot.style.borderColor = ''; });
+    // Drag + drop. .dragover class is style-driven (no inline style) so it
+    // composes cleanly with .has-image / hover.
+    slot.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      slot.classList.add('dragover');
+    });
+    slot.addEventListener('dragleave', () => slot.classList.remove('dragover'));
     slot.addEventListener('drop', (e) => {
       e.preventDefault();
-      slot.style.borderColor = '';
+      slot.classList.remove('dragover');
       const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       if (f) imgStudioUploadRef(idx, f);
     });
@@ -14639,21 +15026,190 @@ function imgStudioWireRefSlots() {
   });
 }
 
+const _STUDIO_REF_TAGS = ['Primary', 'Multi-ref', 'Multi-ref'];
+
 function imgStudioRenderSlot(idx) {
-  const slot = document.querySelector(`.img-ref-slot[data-slot="${idx}"]`);
+  const slot = document.querySelector(
+    `.studio-ref-slot[data-slot="${idx}"], .img-ref-slot[data-slot="${idx}"]`);
   if (!slot) return;
   const ref = IMG_STUDIO.refs[idx];
+  const tag = _STUDIO_REF_TAGS[idx] || `Ref ${idx + 1}`;
   if (ref && ref.path) {
     slot.classList.add('has-image');
     slot.innerHTML = `
+      <span class="ref-tag">${tag}</span>
       <img src="/image?path=${encodeURIComponent(ref.path)}" alt="">
       <button class="clear-x" type="button" onclick="imgStudioClearRef(${idx});event.stopPropagation()" title="Remove">×</button>
     `;
   } else {
     slot.classList.remove('has-image');
-    slot.innerHTML = `<div class="placeholder">Drop or click<br>ref ${idx + 1}</div>`;
+    const cta = idx === 0
+      ? 'Drop · click<br>character'
+      : (idx === 1 ? 'Drop · click<br>place' : 'Drop · click<br>style');
+    slot.innerHTML = `
+      <span class="ref-tag">${tag}</span>
+      <div class="ref-empty">
+        <div class="ref-icon">🖼</div>
+        <div class="ref-cta">${cta}</div>
+      </div>
+    `;
   }
   imgStudioUpdateValidity();
+  // Recent strip's "in-use" highlight depends on which paths are bound to
+  // slots — re-render the strip so freshly-cleared slots release their
+  // selection ring.
+  if (typeof imgStudioMarkRecentInUse === 'function') imgStudioMarkRecentInUse();
+}
+
+// ---- Engine status pill + wall-time estimate ----
+// Cache of /image/engine_status results so onchange handlers don't refetch
+// on every keystroke. Refreshed when setMode('image') runs and after a
+// successful Generate (in case the worker just downloaded weights).
+let _IMG_ENGINE_STATUS = {};   // engine_override -> {cached, download_gb, sec_per_image}
+
+async function imgStudioRefreshEngineStatus() {
+  try {
+    const r = await fetch('/image/engine_status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const map = {};
+    (j.engines || []).forEach(e => { map[e.engine] = e; });
+    _IMG_ENGINE_STATUS = map;
+  } catch (e) {
+    // Silent — pill falls back to "unknown" (dim ellipsis).
+    _IMG_ENGINE_STATUS = {};
+  }
+  imgStudioRenderEnginePill();
+  imgStudioUpdateEstimate();
+}
+
+function imgStudioRenderEnginePill() {
+  const pill = document.getElementById('imgStudioEnginePill');
+  const eng = document.getElementById('imgStudioEngine');
+  if (!pill || !eng) return;
+  const v = eng.value;
+  // 'auto' resolves to whatever the user saved in Settings — we don't try
+  // to second-guess that here, just show a neutral pill.
+  if (v === 'auto') {
+    pill.dataset.state = 'unknown';
+    pill.textContent = 'auto';
+    pill.title = 'Uses your saved Settings engine';
+    return;
+  }
+  const info = _IMG_ENGINE_STATUS[v];
+  if (!info) {
+    pill.dataset.state = 'unknown';
+    pill.textContent = '…';
+    pill.title = 'Checking weights…';
+    return;
+  }
+  if (info.cached) {
+    pill.dataset.state = 'ready';
+    pill.textContent = '✓ ready';
+    pill.title = 'Weights are cached locally';
+  } else {
+    pill.dataset.state = 'missing';
+    const gb = info.download_gb || 0;
+    pill.textContent = '⤓ ' + (gb > 0 ? gb.toFixed(0) + ' GB' : 'fetch');
+    pill.title = (gb > 0
+      ? `Weights not cached — first run will download ~${gb.toFixed(0)} GB`
+      : 'Weights not cached — first run will fetch');
+  }
+}
+
+function imgStudioUpdateEstimate() {
+  const out = document.getElementById('imgStudioWallEstimate');
+  const btnLabel = document.getElementById('imgStudioGenBtnLabel');
+  if (!out || !btnLabel) return;
+  const eng = (document.getElementById('imgStudioEngine') || {}).value || 'auto';
+  const n = parseInt((document.getElementById('imgStudioN') || {}).value || '4', 10);
+  const safeN = Math.max(1, Math.min(8, isFinite(n) ? n : 4));
+  // Wall-time = n × per-image. Per-image comes from /image/engine_status;
+  // the auto preset doesn't know its target ahead of time so we hide.
+  const info = _IMG_ENGINE_STATUS[eng];
+  let label = 'Generate';
+  if (info && !info.cached && (info.download_gb || 0) > 0) {
+    label = `Generate · downloads ~${info.download_gb.toFixed(0)} GB first`;
+  }
+  btnLabel.textContent = label;
+  if (eng === 'auto' || !info || !info.sec_per_image) {
+    out.textContent = '';
+    out.classList.add('dim');
+    return;
+  }
+  const total = safeN * info.sec_per_image;
+  out.textContent = '~' + _imgStudioFmtDuration(total) + (safeN > 1 ? ` · ${safeN} imgs` : '');
+  out.classList.remove('dim');
+}
+
+function _imgStudioFmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+// ---- Recent uploads strip ----
+async function imgStudioRefreshRecent() {
+  const strip = document.getElementById('imgStudioRecentStrip');
+  const wrap = document.getElementById('imgStudioRecentWrap');
+  if (!strip || !wrap) return;
+  let data;
+  try { data = await api('/uploads?limit=18'); }
+  catch (e) { return; }
+  const items = (data && data.uploads) || [];
+  if (!items.length) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  strip.innerHTML = items.map(u => `
+    <img class="studio-ref-recent-thumb"
+         src="${escapeHtml(u.url)}"
+         data-path="${escapeHtml(u.path)}"
+         title="${escapeHtml(u.name)} · ${u.size_kb} KB · ${escapeHtml(u.mtime)}"
+         alt="">
+  `).join('');
+  strip.querySelectorAll('img').forEach(img => {
+    img.addEventListener('click', () => {
+      // Find the next empty slot, or replace slot 0 if all are full.
+      const path = img.dataset.path;
+      let target = IMG_STUDIO.refs.findIndex(r => !r || !r.path);
+      if (target < 0) target = 0;
+      const fname = (path || '').split('/').pop() || 'recent';
+      IMG_STUDIO.refs[target] = { path, name: fname };
+      imgStudioRenderSlot(target);
+      imgStudioMarkRecentInUse();
+    });
+  });
+  imgStudioMarkRecentInUse();
+}
+
+function imgStudioMarkRecentInUse() {
+  const strip = document.getElementById('imgStudioRecentStrip');
+  if (!strip) return;
+  const usedPaths = new Set(IMG_STUDIO.refs.filter(r => r && r.path).map(r => r.path));
+  strip.querySelectorAll('img.studio-ref-recent-thumb').forEach(img => {
+    img.classList.toggle('in-use', usedPaths.has(img.dataset.path));
+  });
+}
+
+// Click handler for the engine-status pill. Only meaningful when the pill
+// is in 'missing' state — focus the Generate button so the user can hit it
+// with the download-consent label already showing. (We don't kick off a
+// pre-emptive `hf download` here: the queue worker already triggers one
+// on first render, and a separate code path would risk drift between the
+// prefetch + render configs.)
+function imgStudioOnPillClick() {
+  const pill = document.getElementById('imgStudioEnginePill');
+  if (!pill || pill.dataset.state !== 'missing') return;
+  const btn = document.getElementById('imgStudioGenBtn');
+  if (!btn) return;
+  btn.focus();
+  try { btn.scrollIntoView({behavior:'smooth', block:'center'}); } catch (e) {}
+  const s = document.getElementById('imgStudioStatus');
+  if (s) s.textContent = 'Click Generate to start — first run will download the engine weights.';
 }
 
 function imgStudioClearRef(idx) {
@@ -14724,6 +15280,13 @@ async function imgStudioGenerate() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     document.getElementById('imgStudioStatus').textContent =
       'Submitted. Watch Now / Recent → Photos.';
+    // Recent uploads may now include the refs the user just touched, and
+    // the worker will start downloading weights for an uncached engine —
+    // refresh both so the next user click sees the fresh state.
+    if (typeof imgStudioRefreshRecent === 'function') imgStudioRefreshRecent();
+    setTimeout(() => {
+      if (typeof imgStudioRefreshEngineStatus === 'function') imgStudioRefreshEngineStatus();
+    }, 2000);
   } catch (e) {
     document.getElementById('imgStudioStatus').textContent = 'Submit failed: ' + e.message;
   } finally {
