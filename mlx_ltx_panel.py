@@ -3593,6 +3593,17 @@ def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
     Empty-string values are treated as 'leave as-is' for `api_key` so the
     masked /agent/config GET → echo POST round-trip doesn't accidentally
     erase the saved key (mirrors the panel_settings.json convention).
+
+    Provider-kind normalization (post-merge): when the resulting `kind`
+    changes provider (local ↔ cloud), the frontend can't be trusted to
+    clear stale fields the new provider doesn't use — a switch to
+    phosphene_local would otherwise inherit the previous Anthropic/
+    custom base_url and api_key, and local-engine traffic would either
+    leak prompts to a remote endpoint or fail the URL validator. Same
+    in reverse: switching to a cloud kind shouldn't leave a local model
+    path lying around in the persisted config. Normalize server-side
+    so the saved file always reflects only fields the current kind
+    actually consumes.
     """
     global _AGENT_CONFIG_CACHE
     with AGENT_LOCK:
@@ -3604,6 +3615,24 @@ def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
             if k == "api_key" and v == "":
                 continue            # treat blank as no-change for secrets
             merged[k] = v
+
+        kind = merged.get("kind", "phosphene_local")
+        if kind == "phosphene_local":
+            # Local engine always talks to the panel-spawned mlx-lm.server
+            # on 127.0.0.1. Force the URL and wipe any cloud secret so a
+            # subsequent kind switch back to a cloud provider re-prompts
+            # for credentials rather than re-using a stale leak.
+            local_port = int(os.environ.get("LTX_AGENT_LOCAL_PORT", "8200"))
+            merged["base_url"] = f"http://127.0.0.1:{local_port}/v1"
+            merged["api_key"] = ""
+        else:
+            # Cloud / external provider: drop the local-only model path so
+            # the persisted config doesn't carry it forward into Settings
+            # round-trips. Don't drop api_key here — the user just typed
+            # it; the caller already handled the empty-string-means-keep
+            # convention above.
+            merged["local_model_path"] = ""
+
         cfg = agent_engine.EngineConfig(**merged)
         ok, why = _validate_engine_base_url(cfg.kind, cfg.base_url)
         if not ok:
@@ -4838,11 +4867,45 @@ class Handler(BaseHTTPRequestHandler):
             if include_manual:
                 roots.append(UPLOADS / "library" / "manual")
 
+            # Scan caps. The since-filter is the cheap fast-path for
+            # incremental polls; these caps protect the cold-start case
+            # (modal opened, no since cursor) where the dir already has
+            # tens of thousands of files. MAX_DEPTH=5 covers the
+            # agentflow/<sid>/<label>/[take_NN]/cand_NN.png shape;
+            # MAX_SCAN bounds the worst case.
+            MAX_DEPTH = 5
+            MAX_SCAN = 5000
+            scanned = 0
+
+            def _walk_capped(start: Path, base_depth: int = 0):
+                nonlocal scanned
+                stack = [(start, base_depth)]
+                while stack and scanned < MAX_SCAN:
+                    cur, depth = stack.pop()
+                    if depth > MAX_DEPTH:
+                        continue
+                    try:
+                        with os.scandir(cur) as it:
+                            entries = list(it)
+                    except (PermissionError, FileNotFoundError, NotADirectoryError):
+                        continue
+                    for entry in entries:
+                        if scanned >= MAX_SCAN:
+                            return
+                        try:
+                            if entry.is_dir(follow_symlinks=False) and depth < MAX_DEPTH:
+                                stack.append((Path(entry.path), depth + 1))
+                            elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".png"):
+                                scanned += 1
+                                yield Path(entry.path)
+                        except OSError:
+                            continue
+
             items: list[dict] = []
             for root in roots:
                 if not root.exists():
                     continue
-                for png in root.rglob("*.png"):
+                for png in _walk_capped(root):
                     # Cheap pre-filter: skip files whose mtime falls
                     # before `since` BEFORE doing the sidecar JSON read.
                     # On a 10K-file library this turns a 3-second walk

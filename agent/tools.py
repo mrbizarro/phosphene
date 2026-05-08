@@ -352,26 +352,50 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
         "stop_comfy": "off",
     }
 
+    # ---- Path-traversal hardening ----------------------------------------
+    # I2V refs and keyframe images can live under uploads/ (user uploads,
+    # agent-generated stills) OR outputs/ (frame extracts from prior
+    # renders). Extend's source_clip must be an actual rendered clip, so
+    # outputs-only is the right gate. Without these checks, a prompt-
+    # injected agent could enqueue a job naming any readable file on disk
+    # (and for I2V, the file's PIL-decodable bytes get encoded into the
+    # video — a data-exfil channel). Same _ensure_under pattern the
+    # extract_frame and refs paths already use.
     if mode == "i2v":
         ref = args.get("ref_image_path") or ""
         if not ref:
             raise _ToolValidationError("ref_image_path is required for mode=i2v")
-        ref = _resolve_path(ref, ops.uploads_dir)
-        if not Path(ref).is_file():
-            raise _ToolValidationError(f"ref_image_path not found: {ref}")
-        form["image"] = ref
+        ref_str = _resolve_path(ref, ops.uploads_dir)
+        try:
+            ref_p = _ensure_under(Path(ref_str), [ops.uploads_dir, ops.outputs_dir])
+        except _ToolValidationError as e:
+            raise _ToolValidationError(
+                f"ref_image_path must live under uploads/outputs: {ref!r} ({e})"
+            ) from e
+        if not ref_p.is_file():
+            raise _ToolValidationError(f"ref_image_path not found: {ref_p}")
+        form["image"] = str(ref_p)
 
     elif mode == "extend":
         src = args.get("source_clip") or ""
         if not src:
             raise _ToolValidationError("source_clip is required for mode=extend")
-        src = _resolve_path(src, ops.outputs_dir)
-        if not Path(src).is_file():
-            raise _ToolValidationError(f"source_clip not found: {src}")
+        src_str = _resolve_path(src, ops.outputs_dir)
+        try:
+            # Outputs-only: source_clip must be a previously-rendered video
+            # the user owns. Restricting to outputs/ rules out an attempt
+            # to extend an arbitrary mp4 from elsewhere on disk.
+            src_p = _ensure_under(Path(src_str), [ops.outputs_dir])
+        except _ToolValidationError as e:
+            raise _ToolValidationError(
+                f"source_clip must live under outputs: {src!r} ({e})"
+            ) from e
+        if not src_p.is_file():
+            raise _ToolValidationError(f"source_clip not found: {src_p}")
         ext_secs = float(args.get("extend_seconds", 2.0))
         # Each extend latent = 8 video frames at 24 fps. So latents = secs * 24 / 8 = secs * 3.
         ext_latents = max(1, int(round(ext_secs * 3)))
-        form["video_path"] = src
+        form["video_path"] = str(src_p)
         form["extend_frames"] = str(ext_latents)
         form["extend_direction"] = (args.get("extend_direction") or "after")
         form["extend_steps"] = "12"
@@ -384,15 +408,22 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
                 "keyframes must be a list with ≥2 items "
                 "(each {image_path, frame_index})"
             )
-        # Validate ordering + bounds, resolve paths
+        # Validate ordering + bounds, resolve paths, enforce containment
         last_idx = -1
         normalized = []
         for kf in kfs:
             if not isinstance(kf, dict):
                 raise _ToolValidationError("each keyframe must be a dict")
-            img = _resolve_path(kf.get("image_path", ""), ops.uploads_dir)
-            if not Path(img).is_file():
-                raise _ToolValidationError(f"keyframe image not found: {img}")
+            img_str = _resolve_path(kf.get("image_path", ""), ops.uploads_dir)
+            try:
+                img_p = _ensure_under(Path(img_str), [ops.uploads_dir, ops.outputs_dir])
+            except _ToolValidationError as e:
+                raise _ToolValidationError(
+                    f"keyframe image_path must live under uploads/outputs: "
+                    f"{kf.get('image_path')!r} ({e})"
+                ) from e
+            if not img_p.is_file():
+                raise _ToolValidationError(f"keyframe image not found: {img_p}")
             idx = int(kf.get("frame_index", 0))
             if idx < 0 or idx >= target_frames:
                 raise _ToolValidationError(
@@ -401,7 +432,7 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
             if idx <= last_idx:
                 raise _ToolValidationError("frame_index values must strictly increase")
             last_idx = idx
-            normalized.append({"image_path": img, "frame_index": idx})
+            normalized.append({"image_path": str(img_p), "frame_index": idx})
         # The first and last keyframes drop into the legacy two-keyframe panel
         # contract; intermediate keyframes go through the new `keyframes_json`
         # form field (see Layer 2 in mlx_ltx_panel.py).
@@ -723,9 +754,36 @@ def _write_session_manifest(args: dict, ops: PanelOps, session: dict) -> dict:
         })
 
     session_id = session.get("session_id") or "session"
-    out_dir = ops.outputs_dir / f"agentflow_{session_id}"
+    out_dir = (ops.outputs_dir / f"agentflow_{session_id}").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / (args.get("output_name") or "manifest.json")
+
+    # Sanitize output_name strictly:
+    #   - reduce to its basename so `..`, absolute paths, and any nested
+    #     dir components are stripped (a prompt-injected agent can no
+    #     longer write outside out_dir even if it escapes the basename
+    #     check via Unicode tricks — the resolve() check below is the
+    #     real backstop)
+    #   - require a `.json` suffix so the manifest can't masquerade as
+    #     a script / config / dotfile
+    #   - cap length to keep weird filesystems happy
+    raw_name = (args.get("output_name") or "manifest.json").strip()
+    safe_name = Path(raw_name).name
+    if not safe_name or safe_name in (".", "..") or safe_name.startswith("."):
+        safe_name = "manifest.json"
+    if not safe_name.lower().endswith(".json"):
+        safe_name = safe_name + ".json"
+    safe_name = safe_name[:120]
+
+    out_path = (out_dir / safe_name).resolve()
+    # Belt-and-braces: reject if the resolved final path escapes out_dir
+    # (catches the rare case where safe_name still contains a separator
+    # the OS treated as path traversal — shouldn't happen post-basename
+    # but the check is free).
+    if not out_path.is_relative_to(out_dir):
+        raise _ToolValidationError(
+            f"output_name resolved outside session folder: {raw_name!r}"
+        )
+
     manifest = {
         "schema": "phosphene/agentflow/manifest@1",
         "title": title,
@@ -739,7 +797,27 @@ def _write_session_manifest(args: dict, ops: PanelOps, session: dict) -> dict:
             "to make cross-shot cuts invisible."
         ),
     }
-    out_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    # Atomic write: serialize to a temp file in the same directory, fsync,
+    # then os.replace. A crash mid-write leaves either the previous
+    # manifest or nothing — never a half-written JSON.
+    tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+    payload = json.dumps(manifest, indent=2).encode("utf-8")
+    try:
+        with open(tmp_path, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass  # fsync isn't critical for manifest correctness
+        os.replace(tmp_path, out_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
     return {
         "manifest_path": str(out_path),
         "shot_count": len(rows),
@@ -1384,15 +1462,51 @@ def _list_library_images(args: dict, ops: PanelOps, session: dict) -> dict:
     if include_manual:
         roots.append(ops.uploads_dir / "library" / "manual")
 
+    # Scan caps. Without these, after months of agent use the dir holds
+    # tens of thousands of files and rglob walks the entire tree before
+    # the limit can help — every list_library_images call costs seconds.
+    # MAX_SCAN bounds the worst case; MAX_DEPTH stops descent into
+    # surprise-deep trees (a malicious upload nest, or a future bug
+    # that lands files way down). The agentflow layout is 4 levels:
+    # agentflow/<sid>/<label>/[take_NN]/cand_NN.png.
+    MAX_DEPTH = 5
+    MAX_SCAN = 5000
     items: list[dict] = []
     total_scanned = 0
+
+    def _walk_capped(start: Path, base_depth: int = 0):
+        """Yield .png files under `start` up to MAX_DEPTH below the
+        given base. Pure os.scandir for performance — Path.rglob is
+        2-3× slower at this size. Stops cleanly when MAX_SCAN is hit."""
+        nonlocal total_scanned
+        stack = [(start, base_depth)]
+        while stack and total_scanned < MAX_SCAN:
+            cur, depth = stack.pop()
+            if depth > MAX_DEPTH:
+                continue
+            try:
+                with os.scandir(cur) as it:
+                    entries = list(it)
+            except (PermissionError, FileNotFoundError, NotADirectoryError):
+                continue
+            for entry in entries:
+                if total_scanned >= MAX_SCAN:
+                    return
+                # follow_symlinks=False: don't traverse into symlinks
+                # the user / agent dropped that point outside the tree.
+                try:
+                    if entry.is_dir(follow_symlinks=False) and depth < MAX_DEPTH:
+                        stack.append((Path(entry.path), depth + 1))
+                    elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".png"):
+                        total_scanned += 1
+                        yield Path(entry.path)
+                except OSError:
+                    continue
+
     for root in roots:
         if not root.exists():
             continue
-        # Walk for *.png. Limit recursion to a sane depth (4 levels —
-        # agentflow/<sid>/<label>/take_NN/cand.png is depth 4).
-        for png in root.rglob("*.png"):
-            total_scanned += 1
+        for png in _walk_capped(root):
             sidecar = png.with_suffix(png.suffix + ".json")
             meta: dict = {}
             if sidecar.is_file():

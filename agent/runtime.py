@@ -119,18 +119,63 @@ def sessions_dir(state_dir: Path) -> Path:
 
 def save_session(session: Session, state_dir: Path) -> None:
     session.updated_at = time.time()
-    p = sessions_dir(state_dir) / f"{session.session_id}.json"
-    tmp = p.with_suffix(p.suffix + ".tmp")
+    d = sessions_dir(state_dir)
+    p = d / f"{session.session_id}.json"
     # Persisted shape keeps api_key so the conversation can resume after a
-    # panel restart without the user re-entering their key.
-    tmp.write_text(json.dumps(session.to_persisted_dict(), indent=2), encoding="utf-8")
-    os.replace(tmp, p)                              # atomic — never see half-write on read
-    # umask alone leaves these world-readable on most systems; the file holds
-    # the user's full conversation history (often with API keys baked in).
+    # panel restart without the user re-entering their key. The file is
+    # therefore secret-bearing and must NEVER appear in a permissive
+    # mode, even momentarily — the previous tmp.write_text → os.replace
+    # → chmod 0o600 sequence left the file world-readable for the
+    # window between replace and chmod (≈microseconds, but still real).
+    # Use os.open with O_CREAT|O_EXCL|0o600 so the file is born private,
+    # then fsync + atomic rename. No other process can ever see a
+    # readable handle.
+    payload = json.dumps(session.to_persisted_dict(), indent=2).encode("utf-8")
+    tmp_path = d / f".{p.name}.{os.getpid()}.tmp"
+    fd = os.open(
+        tmp_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_TRUNC,
+        0o600,
+    )
     try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            # umask on some systems would have widened the mode the
+            # kernel sets; chmod the temp explicitly before the rename.
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp_path, p)                  # atomic — never see half-write on read
+            # Belt-and-braces: chmod the final path too. os.replace
+            # preserves the source's mode on most filesystems but a
+            # paranoid extra chmod is free and protects against weird
+            # mounts.
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            # Clean up the temp file if anything went wrong before
+            # rename; otherwise the dir slowly accumulates orphaned
+            # `.<id>.json.<pid>.tmp` files.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    finally:
+        # If os.fdopen never ran (rare), close the descriptor manually.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def load_session(session_id: str, state_dir: Path) -> Session | None:
