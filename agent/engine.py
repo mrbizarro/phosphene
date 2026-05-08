@@ -63,6 +63,19 @@ class EngineConfig:
     #                   chat is instant. Use only when the Mac has headroom
     #                   (no concurrent renders, or a small chat model).
     mode: str = "plan_sleep"
+    # When True (default), the panel auto-stops the local engine the moment
+    # the LTX worker picks up a render job, and auto-restarts it once the
+    # queue drains. Solves the 64 GB Mac swap-thrash problem where the
+    # chat model (~7-22 GB resident) and the LTX renderer (~22-30 GB)
+    # compete for unified memory and the system pages out denoise tensors.
+    # Only applies when kind == "phosphene_local"; cloud engines (anthropic,
+    # ollama-on-localhost, custom) don't compete for RAM and are never
+    # paused. Caveat: an agent in `interactive` mode that's mid-turn when
+    # a render starts will see its in-flight engine.chat() fail; the
+    # runtime surfaces this and the user retries after the queue drains.
+    # In `plan_sleep` mode the agent always finishes before submitting,
+    # so no conflict.
+    auto_pause_during_renders: bool = True
 
     def to_public_dict(self) -> dict:
         """Strip the api_key for safe display in /agent/config GETs."""

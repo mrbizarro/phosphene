@@ -3389,6 +3389,13 @@ def run_job_inner(job: dict) -> None:
 # ---- worker thread -----------------------------------------------------------
 
 def worker_loop() -> None:
+    # Auto-pause bookkeeping. When the local agent engine is running and
+    # the user has `auto_pause_during_renders=True` (default), we stop
+    # mlx-lm.server before the LTX render starts and restart it after
+    # the queue drains. The flag survives across multiple jobs in the
+    # same batch so the engine isn't reload-thrashed between shots —
+    # one stop at the start of a render burst, one start at the end.
+    auto_paused = False
     while True:
         with QUEUE_COND:
             while not STATE["queue"] or STATE["paused"]:
@@ -3404,6 +3411,27 @@ def worker_loop() -> None:
             STATE["log"] = []
             caffeinate_on()
         persist_queue()
+
+        # Auto-pause local engine before the render starts. Kept inside
+        # the per-iteration body (NOT lifted to the top of the loop) so
+        # the pause never fires when the queue has been empty all along
+        # — only when there's actual work about to run. Idempotent:
+        # subsequent iterations within the same batch see is_running()
+        # return False and skip the stop.
+        if not auto_paused:
+            try:
+                _agent_cfg = _load_agent_config()
+                if (getattr(_agent_cfg, "auto_pause_during_renders", True)
+                    and getattr(_agent_cfg, "kind", "") == "phosphene_local"
+                    and agent_local_server.is_running()):
+                    agent_local_server.stop("auto-pause: LTX render starting")
+                    auto_paused = True
+                    push("[engine] paused for render — will resume when queue drains")
+            except Exception as exc:                            # noqa: BLE001
+                # Auto-pause is a nicety; if it errors, the render still
+                # runs (the user just pays the swap tax). Surface the
+                # reason in the job log for diagnosis without aborting.
+                push(f"[engine] auto-pause check failed (continuing): {exc}")
 
         try:
             run_job_inner(job)
@@ -3428,6 +3456,25 @@ def worker_loop() -> None:
                 STATE["pid"] = None
                 STATE["pgid"] = None
             persist_queue()
+
+            # Resume the local engine ONLY when the queue is fully drained
+            # (no current job, nothing queued). If more jobs follow this
+            # one we stay paused — restarting between every shot would
+            # cost ~10 s × N reloads for nothing. The next iteration of
+            # the outer loop will block on QUEUE_COND.wait until either
+            # a new job arrives (still paused, fine) or… well, this
+            # branch fires here on the way out.
+            if auto_paused:
+                with LOCK:
+                    queue_drained = (not STATE["queue"]) and (STATE["current"] is None)
+                if queue_drained:
+                    try:
+                        _agent_local_start()
+                        push("[engine] resumed after render")
+                        auto_paused = False
+                    except Exception as exc:                    # noqa: BLE001
+                        push(f"[engine] resume failed (try Settings → Agent → Start): {exc}")
+                        auto_paused = False  # don't keep retrying on every job
 
 
 # ---- Agentic Flows integration -----------------------------------------------
