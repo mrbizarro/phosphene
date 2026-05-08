@@ -97,7 +97,7 @@ class ImageEngineConfig:
     mflux_family: str = "auto"                      # "auto" or one of the family ids above
     mflux_base_model: str = ""                      # only needed when mflux_model is a path/HF id and family inference can't tell the architecture
     mflux_steps: int = 0                            # 0 = use family default (4/9/25 per family)
-    mflux_quantize: int = 4                         # 4 | 8 | 16 — 4-bit fits comfortably on 64 GB
+    mflux_quantize: int = 6                         # 3 | 4 | 5 | 6 | 8 — Q6 is the Apple-Silicon community sweet spot (~4-6% quality loss vs full precision; Q4 is 8-12%). Draw Things uses Q6/Q5 by default. Q4 only matters on ≤16 GB Macs; on 64 GB M4 Max the speed gap is negligible and the quality jump is visible.
     mflux_guidance: float | None = None             # None = use family default (1.0 / 0.0 / 4.5 / 5.0 per family)
     mflux_python_path: str = ""                     # optional override for the mflux CLI location
     # Optional Lightning / acceleration LoRAs. With qwen_edit + a 4-step

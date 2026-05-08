@@ -1125,16 +1125,23 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     engine_override = (args.get("engine_override") or "").strip()
     if engine_override:
         if engine_override == "flux2_edit":
-            # Distilled klein-4b — fast but illustrative. mflux's
+            # Distilled klein-4b — fast but illustrative at Q4. mflux's
             # flux2_edit_generate.py FORCES guidance == 1.0 on distilled
             # bases; passing anything else would parser.error. Pass the
             # mflux SHORTHAND name (not the HF repo) so mflux resolves
             # the correct base config.
+            #
+            # Q6 instead of Q4: Apple-Silicon community consensus for
+            # FLUX.2 — Q6 is ~4-6% quality loss vs full precision, Q4
+            # is 8-12%. On a 64 GB M4 Max the per-image speed gap is
+            # negligible (~1-2 s) but the visible quality jump is real
+            # (skin texture, gear detail, photographic feel). Draw
+            # Things ships Q5/Q6 as default for the same reason.
             cfg = _image_engine.ImageEngineConfig(
                 kind="mflux",
                 mflux_model="flux2-klein-4b",
                 mflux_family="flux2_edit",
-                mflux_quantize=4,
+                mflux_quantize=6,
                 mflux_steps=4,
                 mflux_guidance=1.0,
             )

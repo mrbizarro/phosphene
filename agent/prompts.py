@@ -697,6 +697,76 @@ all at the same denoise step. But the user's expectation tends to be
 "character first, style second" — surface that ordering in the agent's
 plan summary so the user can sanity-check what's being layered.
 
+# How FLUX.2 Klein parses prompts — the hierarchy matters
+
+When you write a prompt for `generate_shot_images` (Phase B) and the
+engine is FLUX.2-klein-4B / klein-base-4B (the photoreal default
+when refs are present), the model parses your prompt with a strict
+priority order. Mixing the order produces mushy or off-target
+output — the symptom we hit in session fd13625972ee where the
+character looked illustrative even though "photorealistic" was in
+the prompt.
+
+**Order, every prompt:**
+
+1. **Subject** — concrete nouns first. The character or main thing,
+   with its identifying features. "Bizarro the steampunk character —
+   brass-gear top hat, large blue glowing goggles, waxed mustache,
+   trimmed beard, dark Victorian suit." Content words (nouns and
+   proper nouns) anchor the embedding more than modifiers.
+2. **Environment** — where the subject is, plus lighting and
+   atmosphere. "sitting on warm sand at a tropical beach during
+   golden hour, palm fronds and soft ocean in the background."
+3. **Style** — the aesthetic register. "documentary photography,
+   photorealistic, with particular attention to natural skin texture
+   and brass gear details." Klein responds to natural-language
+   emphasis: phrases like *"prominently featuring"*, *"with
+   particular attention to"*, *"especially detailed"* upweight the
+   following clause without any special syntax.
+4. **Technical specs** — composition, focal length, DOF, color.
+   "medium close-up, shallow depth of field, 35mm DSLR, soft warm
+   volumetric light, no text, no logos."
+
+**What NOT to do (the broken pattern):**
+
+> "Cinematic medium close-up of Bizarro the steampunk character at a
+> tropical beach at golden hour. Top hat with brass gear ornaments..."
+
+That leads with **style** ("Cinematic"), then jumps to **technical**
+("medium close-up"), then buries the **subject** ("Bizarro the
+steampunk character") mid-sentence. The model has nothing to anchor
+the subject embedding on early — output drifts toward generic
+"steampunk" trope rather than the specific character.
+
+**What TO do:**
+
+> "Bizarro the steampunk character — brass-gear top hat, large blue
+> glowing goggles, waxed mustache, trimmed beard, dark Victorian
+> suit — sitting on warm sand at a tropical beach during golden hour,
+> palm fronds and soft ocean in the background. Documentary
+> photography, photorealistic, with particular attention to natural
+> skin texture and brass gear details. Medium close-up, shallow
+> depth of field, 35mm DSLR, soft warm volumetric light, no text, no
+> logos."
+
+Same words, same beats — but the model parses subject first, locks
+identity from the ref, then layers environment, style, and technical
+constraints.
+
+**Resolution sweet spot:** klein-4B was trained at 1024×1024.
+Generation at 1024×1024, 1024×768, 768×1024 — the trained-aspect
+neighborhood — produces the cleanest output. 1280×720 and other
+non-trained resolutions degrade visibly (edge sharpness, identity
+drift). Use `aspect="1:1"` (1024×1024) when the still doesn't need
+to feed an i2v render directly. For i2v anchors at 16:9, prefer
+`aspect="16:9"` which maps to 1280×720, accept the slight quality
+hit, and lean on Q6+ quantization to compensate.
+
+**Quantization:** Q6 is the default. Q4 was the historical default
+but it's the wrong call on 64 GB M4 Max — Q4 costs 8-12% quality
+for ~1-2 seconds of speed savings vs Q6. Q8 (used by
+`flux2_edit_high`) is best when you have the wall time.
+
 # Writing prompts FOR ANCHOR STILLS (Phase B)
 
 When the user asks for **more variations of an already-generated shot**
