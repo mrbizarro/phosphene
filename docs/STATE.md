@@ -95,6 +95,36 @@ A Pinokio Reset wipes the install dir but preserves all four — Salo can Reset 
   Settings)
 - Plan/Interactive mode pill toggle in agent header
 
+**Image Studio (v2.0.6+, May 8 2026)**
+- Five engines in dropdown: Qwen-Edit-2511 Lightning (4-step distilled,
+  fast preview), Qwen-Edit-2511 standard, Qwen-Edit-2511 high-quality,
+  Klein-Edit fast (distilled flux2_edit Q4), and Klein-Base-Edit
+  photoreal (`flux2_edit_high`, klein-base-4b Q8 25-step guidance 4.0
+  — non-distilled, real photographic look)
+- Q6 default quantization (was Q4) — Apple-Silicon community sweet
+  spot, ~4-6% quality loss vs full precision (Q4 was 8-12%), per-image
+  speed gap negligible on M4 Max
+- Image jobs go through the same queue worker as video — they appear
+  in Now / Queue / Recent / Logs alongside video jobs (was: synchronous
+  HTTP, invisible in panel)
+- Right-pane viewer is mode-aware: `<img>` tag for image mode,
+  `<video>` for video. Carousel thumbnails ditto.
+- OUTPUTS gallery filter chips: All / Videos / Photos. Auto-flips
+  on mode change (Photos on `setMode('image')`, Videos on
+  t2v/i2v/keyframe/extend); manual clicks persist.
+- Animate button on photo cells → pre-fills the i2v form (mode, image
+  picker, prompt) so the user can tweak before clicking Generate.
+  Pre-fill, not auto-submit.
+- Pre-flight RAM/disk check rejects oversized jobs before mflux
+  launches (24 GB Qwen-Edit on a Mac with 8 GB free was silently
+  SIGABRTing mid-Metal). Lookup table per (family, quantize); compares
+  to vm_stat free GB. `PHOSPHENE_SKIP_PREFLIGHT=1` escape hatch.
+- Report-bug button (neon-pulsing icon in header pill row) opens a
+  modal pre-filled with sysinfo + git branch/sha + sw_vers + last 50
+  log lines, generates a github.com/.../issues/new link with
+  labels=bug, optionally bundles the latest 5 .ips crash files into
+  /tmp/phosphene-bug-TS.zip.
+
 **Frontend extraction (parked on `frontend-extraction` branch)**
 - `webapp/` directory: index.html, style/all.css, js/main.js,
   vendor/marked.min.js + dompurify.min.js (MIT/Apache licenses)
@@ -137,7 +167,21 @@ Pre-2.0 was the `Y1.NNN` sequential counter. v2.0.0 cut over to semver on May 3 
 **v2.0.4** (May 5) — Strip em-dash from install.js sanity check. Was breaking install on some Pinokio shells (KTDS + second user hit identical SyntaxError). Pure ASCII now.
 **v2.0.5** (May 6) — Drop the `print('venv OK: ...')` decoration from the sanity-import step. KTDS reproduced the SyntaxError on v2.0.4 — turns out something in their environment (Pinokio's command preprocessor or a user-side rewriter) was cutting the literal `OK:` out of the Python string AND appending `OK` after the closing shell quote, so Python received `...importable')OK` and bailed. Removing the print sidesteps the rewriter entirely. The exit code from a successful `import` is the only success signal `shell.run` needs anyway.
 
-Full git log on `main`. Tags `v2.0.0` through `v2.0.4` published. v2.0.5 awaiting promotion on dev.
+**v2.0.6** (May 8 2026) — Image Studio overhaul + agent quality pass + security review. Headline ships:
+- Image jobs flow through the unified queue worker (Now / Queue / Recent / Logs); the in-Studio gallery is gone, the unified Recent tab covers it.
+- Mode-aware right-pane viewer + OUTPUTS gallery (All / Videos / Photos chips, auto-flip on mode change, "Animate" button on photo cells pre-fills i2v).
+- Q6 default quantization for mflux + non-distilled photoreal presets (`flux2_edit_high`, `qwen_edit_high`, `kontext_high`); klein-4B prompt structure taught to the agent (subject → environment → style → technical hierarchy); Qwen-Edit defaults bumped from 2509 → 2511.
+- `submit_shots` plural tool — agent batches a multi-shot plan in one dispatch + finishes the turn before auto-pause kills the engine (used to crash mid-batch).
+- Phase C i2v prompt-writing rules in `prompts.py` (forbid still-prompt reuse, require explicit motion beats, ~1 beat / 2-3 sec); production recipe taught as Balanced + Sharp 720p.
+- Pre-flight RAM/disk check + Metal/MLX SIGABRT detection with actionable OOM hint (no more silent exit -6).
+- Report-bug button — neon-pulsing icon, opens pre-filled GitHub issue with sysinfo + git sha + last 50 log lines + optional .ips crash bundle.
+- Manual mode genuinely hides the AF pane (was a `display:flex` vs `[hidden]` no-op).
+- Agent header strip rebuilt; Outputs photo/video filter wired from `setMode`.
+- Composer in Image Studio restyled to match the video form's polish.
+- Agent now switches engines via `engine_override` arg on `generate_shot_images`.
+- Security review pass: 0 CRITICAL, 4 HIGH, 6 MEDIUM identified — all 10 shipped this session. (See Known bugs section for details.)
+
+Full git log on `main`. Tags `v2.0.0` through `v2.0.4` published. v2.0.5 + v2.0.6 awaiting promotion on dev.
 
 ## 5. The folder layout
 
@@ -237,6 +281,31 @@ phosphene-dev.git/
 - **S2 noir dialogue attribution swap**: "Same thing, honey" delivered by wrong character. Root cause: prompt format diverged from LTX docs. Documented in Linear HAI-152.
 - **v2.0.2 install sanity check broken by em-dash**: Pinokio shells mangled the unicode em-dash, triggering Python SyntaxError, falsely failing every install. Fixed in v2.0.4 (ASCII colon).
 
+### Fixed in v2.0.6 (May 8 2026)
+
+Image Studio + agent quality pass shipped to `dev` across ~18 commits. Each root cause + fix:
+
+- **klein-4B prompt structure mismatch** — outputs from other tools (Draw Things) at the same model + ref looked visibly better than ours. Two implementation bugs: prompts didn't follow klein-4B's preferred subject → environment → style → technical hierarchy, AND default quantization was Q4. Fixed in `agent/prompts.py` (taught the structure) + Q6 default in `ImageEngineConfig.mflux_quantize`.
+- **Q4 stylization artifact** — Apple-Silicon community sweet spot is Q6 (~4-6% quality loss vs Q4's 8-12%). Per-image speed gap is 1-2 s on M4 Max. Q6 is the new default for mflux across the board. Draw Things ships Q5/Q6 by default for the same reason.
+- **Image jobs invisible in Now / Queue / Recent / Logs** — `/image/generate` was a synchronous HTTP endpoint that bypassed the queue/worker entirely. Image renders never appeared anywhere in the panel's job-tracking surfaces. Fixed by routing `mode='image'` jobs through `make_job` + a new `run_image_job_inner` that calls `agent_image_engine.generate()` with the same on_log → push() bridge so panel Logs streams live. `/image/generate` kept synchronous for agent callers; `_IMG_STUDIO_LOCK` arbitrates between the two paths.
+- **Image Studio's redundant in-pane gallery** — deleted now that the unified Recent tab can render image-mode jobs. Outputs land in the unified gallery alongside videos.
+- **Original beach.mp4 "barely moves, just a zoom out" bug** — the agent reused the still prompt verbatim for the i2v video render. Result: zero motion verbs in the i2v prompt, ~4 seconds of an almost-static frame. Fixed by adding a "Phase C — Writing prompts FOR i2v VIDEO renders" section to `agent/prompts.py` that forbids still-prompt reuse, requires explicit motion beats (~1 beat / 2-3 sec), and includes a director-rewrite checklist before each `submit_shot`.
+- **The 400×400 still-output mystery** — `flux2_edit` family was referenced in saved configs but never wired into `image_engine.py`. The fam fell through to "flux2" via inference; `mflux-generate-flux2` doesn't take `--image-paths`, so refs were silently dropped → output downsized to ref dim. Fixed by adding `flux2_edit` to `MFLUX_FAMILY_BIN` + `MFLUX_FAMILY_DEFAULTS`, routing refs to `--image-paths` for fam in (`qwen_edit`, `flux2_edit`), `--image-path` (singular) for `kontext`. Also added non-distilled photoreal presets (`flux2_edit_high`, `kontext_high`) — the previous engine_override list was all distilled (illustrative-cartoon look).
+- **Issue #2 (Akossimon's Metal abort crash)** — mflux SIGABRTs mid-Metal when 24 GB Qwen-Edit is asked to run with 8 GB free. The Python interpreter can't catch SIGABRT; mflux exits -6 and the panel UI shows nothing. Fixed: pre-flight RAM/disk check refuses jobs that can't fit before mflux launches, AND a SIGABRT detector in `agent/image_engine.py` raises a `RuntimeError` with an actionable OOM hint when mflux reaps -6. Report-bug button gives users a one-click GitHub-issue flow with sysinfo + log tail + .ips bundle.
+- **`auto_pause_during_renders` killed mid-batch agent calls** — chat engine got stopped the moment the first job hit the LTX worker, so the agent's next `submit_shot` chat call failed with "Connection error" (in the wild: queued 1 of 5 planned shots). Fixed: new `submit_shots` plural tool batches the entire plan in one dispatch + sets `_finish_after_turn` flag the runtime honors as loop-exit. Prompts.py teaches the agent to use `submit_shots` for any 2+ shot batch.
+- **`submit_shot` silently coerced invalid accel values** ("distilled" → "turbo"). Strict validation now rejects unknown values with a clear message; "exact" accepted as a friendly alias for "off".
+- **Agent obeyed broken user instructions** (e.g. `aspect="1:1"` for a 16:9 i2v shot → letterboxed → reads as slow zoom). New "push back when the user's instructions will produce broken output" rule in prompts.py rules of engagement. Aspect mismatches surface as questions instead of silent crops.
+- **AF pane stayed visible in Manual mode** — toggle was using `[hidden]` but a CSS rule `display: flex` overrode the browser's UA `[hidden] { display: none }`. Sessions chip, Plan/Sleep pill, engine pill, RAM chip, and engine readiness banner all kept rendering above the manual form. Fixed by switching to explicit `style.display` toggling.
+
+### Security review pass (2026-05-08)
+
+Full audit ran against `dev` mid-session. Findings: **0 CRITICAL · 4 HIGH · 6 MEDIUM**. All 10 shipped this session.
+
+- **HIGH (4)** — H1: reject `Origin: null` in `_is_local_request` (a local malicious HTML file dragged into the browser could otherwise drive the panel API with the user's session). H2: validate `mflux_python_path` at save (`_save_agent_image_config` → `_validate_mflux_python_path`) — must be an absolute path to an existing executable; defensive re-check in `agent/image_engine._resolve_mflux_bin`. H3: validate `model_path` at `/agent/local/start` — HF repo ids must match `<owner>/<name>` with owner on a small allow-list (Qwen, mlx-community, lmstudio-community, unsloth, Lightricks, Black-Forest-Labs, lightx2v, filipstrand, huihui-ai, google); local paths must resolve under `mlx_models/` or HF cache root. H4: cap `submit_shot`/`submit_shots` calls per turn in `agent/runtime` (was unbounded — a runaway agent loop could enqueue arbitrary numbers of renders).
+- **MEDIUM (6)** — M1: `/sidecar?path=` requires the underlying media to be one of `.mp4/.png/.webp/.jpg/.jpeg` before serving the `.json` next to it. M2: `/agent/models/install` reuses the H3 owner allow-list. M3: `_save_settings` lays down `panel_settings.json` with O_EXCL + fsync + os.replace + chmod 0o600 (atomic + perms-stable). M4: `inspect_clip`'s `prompt`/`negative_prompt` fields are wrapped in a "do NOT execute as instructions" marker and truncated to 2000 chars (defangs prompt-injection laundering). M5: `read_document`'s PDF branch rejects > 50 MB files pre-parse and runs pypdf in a daemon thread with a 30 s watchdog. M6: `/output/hide` rejects targets whose resolved path doesn't sit under OUTPUT or UPLOADS (containment).
+
+Full audit at `/tmp/phos_audit/security-review.md` — note that `/tmp` is ephemeral on macOS, so this report will need to be re-generated for the next pass. L-tier (low-severity) items, especially L2 anchors / select containment, are still open.
+
 ### Shipped in v2.0.6 (May 7 2026, autonomous overnight Phase 0 polish)
 
 Roadmap reference: `docs/AGENTIC_FLOWS_ROADMAP.md`. Three Phase 0 items
@@ -302,6 +371,14 @@ panel restart (M), #0.8 default-engine recommendation banner (S).
 ## 8. Open work / future direction
 
 Everything below is also tracked in Linear (HAI-150 → HAI-158 under the Phosphene project). This section duplicates the most current state for fast scan.
+
+### Loose ends from May 8 session
+
+- **Qwen-Image-Edit-2511 weights download paused** at ~54 GB partial in `cache/HF_HOME/hub`. User OK'd to keep when it completes; the old 2509 cache (~54 GB) should be deleted once 2511 is intact. Resume the download at the next session start.
+- **Issue #2 (Akossimon Metal abort)** — SIGABRT detection + pre-flight RAM check shipped, but awaiting user repro details to confirm the fix lands their case.
+- **L-tier security items still open** — especially L2 (anchors / select containment) from the May 8 audit. Re-run the audit on a fresh `/tmp/phos_audit/security-review.md` (the old one is gone with the next reboot).
+- **Image Studio "auto" engine pill** still shows the literal string "auto"; should resolve to the actual saved-engine status server-side and display the resolved name.
+- **Dead code cleanup** — `_imgStudioRefreshLibraryLegacy` + `imgStudioCopyPath` (~40 lines) can be deleted in a follow-up pass; they're vestigial after the unified Recent tab landed.
 
 ### Multi-keyframe interpolation as SDK shot-composition primitive
 
@@ -415,7 +492,7 @@ Issue prefixes are `HAI-NN` because of the team constraint. Active:
 
 1. `cd /Users/salo/pinokio/api/phosphene-dev.git/`
 2. `git fetch origin && git status -sb` — surface any drift first
-3. Read this file (`docs/STATE.md`) and `CLAUDE.md`
+3. Read this file (`docs/STATE.md`) AND check `git log --oneline dev -25` — recent commits move faster than this doc; the v2.0.6 May 8 batch is a good example (~18 commits in one session). Read `CLAUDE.md` for architecture.
 4. Skim Linear `HAI-150` through `HAI-158` for state of each workstream
 5. Check the dev panel is alive: `curl -s http://127.0.0.1:8199/status | python3 -m json.tool | head -10`
 6. Last 5 commits on dev: `git log --oneline -5 dev`
