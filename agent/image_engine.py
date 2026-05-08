@@ -651,6 +651,55 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
 
     stderr_tail = "\n".join(last_lines)
     if rc != 0:
+        # Detect MLX/Metal `abort()` from the GPU completion thread (issue #2:
+        # @Akossimon's three crashes in 2 minutes were all this exact
+        # signature). When MLX submits a Metal command buffer and the GPU
+        # returns an error, mlx::core::gpu::check_error throws a C++
+        # exception on the Metal completion queue — Python never gets a
+        # clean traceback, the whole process gets SIGABRT and dumps
+        # ~/Library/Logs/DiagnosticReports/python3.11-*.ips. From the
+        # subprocess parent's view, `rc` is -6 (POSIX signal -SIGABRT)
+        # or 134 (shell-style 128+6). Without this branch the user sees
+        # `mflux failed (exit -6)` which tells them nothing.
+        # rc == -6 is Popen's "killed by SIGABRT" convention (signal-numbered
+        # negative). rc == 134 is the shell convention (128 + signal 6).
+        # Cover both because `subprocess` is inconsistent across versions.
+        looks_like_abort = (
+            rc in (-6, 134)
+            or "abort()" in stderr_tail
+            or "MTLCommandBuffer" in stderr_tail
+            or ("Metal" in stderr_tail and "error" in stderr_tail.lower())
+        )
+        # Distinguish OOM from other Metal errors when we can — mflux's
+        # tqdm + MLX print specific markers for each. OOM is the common
+        # one for first-time users with too-big a model.
+        looks_like_oom = (
+            "out of memory" in stderr_tail.lower()
+            or "MetalAlloc" in stderr_tail
+            or "insufficient memory" in stderr_tail.lower()
+            or "kIOReturnNoSpace" in stderr_tail
+        )
+        if looks_like_abort or looks_like_oom:
+            hint = (
+                "GPU/Metal abort detected — almost always means the model "
+                "was too big for available memory."
+                if looks_like_oom or rc in (-6, 134)
+                else "GPU/Metal error from MLX. Could be OOM or a kernel limit."
+            )
+            raise RuntimeError(
+                f"{bin_name} aborted on batch of {n} seeds (exit {rc}). {hint}\n\n"
+                f"Try one of:\n"
+                f"  - Smaller engine (FLUX.2 [klein] 4B / Z-Image-Turbo) "
+                f"if you picked a 9B/edit model.\n"
+                f"  - Lower resolution (1024×1024 instead of 1280×720).\n"
+                f"  - Lower quantization (Q4 instead of Q6/Q8) for tight RAM.\n"
+                f"  - Quit other big apps (browsers + IDEs eat 8-15 GB).\n"
+                f"A crash report was saved to ~/Library/Logs/DiagnosticReports/"
+                f"python3.11-*.ips — useful for a bug report.\n\n"
+                f"Tail of stdout/stderr:\n{stderr_tail[:800]}"
+            )
+        # Generic non-zero exit — pass through the tail so the user sees
+        # whatever mflux printed last.
         raise RuntimeError(
             f"{bin_name} failed (exit {rc}) on batch of {n} seeds. "
             f"Tail of stdout/stderr:\n{stderr_tail[:1200]}"
