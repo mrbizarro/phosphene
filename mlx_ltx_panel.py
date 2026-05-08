@@ -2789,6 +2789,62 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             val = val[0] if val else default
         return (val or "").strip() or default
 
+    # ---- mode == "image" branch ----
+    # Image jobs use a different params shape (engine_override, aspect, n,
+    # refs[]) and skip all the video-only fields. Keeping a single
+    # make_job() entry point so /queue/add stays mode-agnostic; the
+    # worker dispatches by params.mode in run_job_inner.
+    mode_in = f("mode", "t2v")
+    if mode_in == "image":
+        prompt = override_prompt if override_prompt is not None else f("prompt", "")
+        if not prompt:
+            prompt = "A cinematic atmospheric scene"
+        try:
+            n = max(1, min(8, int(f("n", "4") or 4)))
+        except (TypeError, ValueError):
+            n = 4
+        try:
+            seed = int(f("seed", "-1") or -1)
+        except (TypeError, ValueError):
+            seed = -1
+        engine_override = (f("engine_override", "auto") or "auto").lower()
+        aspect = f("aspect", "16:9") or "16:9"
+        # refs comes as a JSON-encoded list (e.g. '["panel_uploads/foo.png"]').
+        # Plain form fields can't carry a list cleanly; the panel JS already
+        # serializes refs this way for /image/generate, so the same shape
+        # works here.
+        refs_raw = f("refs", "[]") or "[]"
+        try:
+            refs = json.loads(refs_raw)
+            if not isinstance(refs, list):
+                refs = []
+        except (json.JSONDecodeError, ValueError):
+            refs = []
+        return {
+            "id": _new_job_id(),
+            "status": "queued",
+            "queued_at": iso_now(),
+            "started_at": None,
+            "started_ts": None,
+            "finished_at": None,
+            "elapsed_sec": None,
+            "params": {
+                "mode": "image",
+                "prompt": prompt,
+                "engine_override": engine_override,
+                "aspect": aspect,
+                "n": n,
+                "seed": str(seed),
+                "refs": list(refs),
+                "label": f("preset_label", "") or None,
+                "session_tag": f("session_tag", ""),
+            },
+            "command": None,
+            "raw_path": None,
+            "output_path": None,
+            "error": None,
+        }
+
     prompt = override_prompt if override_prompt is not None else f("prompt", "")
     if not prompt:
         prompt = "A cinematic atmospheric scene"
@@ -2877,9 +2933,157 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     }
 
 
+def run_image_job_inner(job: dict) -> None:
+    """Run an image-generation job through the same queue worker as video.
+
+    Mirrors the synchronous ``/image/generate`` HTTP path but writes
+    progress through ``push()`` (so Logs/Now/Recent stream live, the
+    way they do for video) and stores the first candidate's PNG as
+    ``job["output_path"]`` so the Recent tab can surface it.
+
+    All N candidates are saved with the existing
+    ``phosphene/library/image@1`` sidecar schema, so
+    ``list_library_images`` continues to find them transparently.
+
+    Concurrency: shares ``_IMG_STUDIO_LOCK`` with /image/generate so an
+    agent-driven sync image render and a panel-queued image render
+    can't crash each other on the GPU.
+    """
+    p = job["params"]
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("image job: prompt required")
+    engine_override = (p.get("engine_override") or "auto").lower()
+    aspect = (p.get("aspect") or "16:9").strip() or "16:9"
+    try:
+        n = max(1, min(8, int(p.get("n") or 4)))
+    except (TypeError, ValueError):
+        n = 4
+    try:
+        seed = int(p.get("seed", -1))
+    except (TypeError, ValueError):
+        seed = -1
+    base_seed = seed if seed >= 0 else None
+
+    # Validate refs against UPLOADS / OUTPUT — same path-traversal guard
+    # /image/generate uses. We re-do it here because the form path may
+    # have arrived from anywhere (panel JS, agent tool, manual /queue/add).
+    refs_in = p.get("refs") or []
+    if not isinstance(refs_in, list):
+        raise RuntimeError(f"refs must be a list, got {type(refs_in).__name__}")
+    if len(refs_in) > 3:
+        raise RuntimeError(
+            "refs supports at most 3 images (Qwen-Edit-2509 limit)"
+        )
+    refs_resolved: list[str] = []
+    for r in refs_in:
+        if not isinstance(r, str) or not r.strip():
+            raise RuntimeError("each ref must be a non-empty path string")
+        rp = Path(r)
+        rp = (rp if rp.is_absolute() else (UPLOADS / r)).resolve()
+        allowed = [UPLOADS.resolve(), OUTPUT.resolve()]
+        if not any(rp.is_relative_to(root) for root in allowed):
+            raise RuntimeError(f"ref path not under uploads/outputs: {r}")
+        if not rp.is_file():
+            raise RuntimeError(f"ref image not found: {r}")
+        refs_resolved.append(str(rp))
+
+    try:
+        cfg = _build_image_engine_config(engine_override)
+    except ValueError as e:
+        raise RuntimeError(str(e))
+
+    # Same date-bucketed + per-request output dir scheme as /image/generate
+    # so the library reader (and any downstream consumer) sees one shape.
+    out_dir = (UPLOADS / "library" / "manual"
+               / time.strftime("%Y%m%d")
+               / str(int(time.time() * 1000)))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not _IMG_STUDIO_LOCK.acquire(blocking=False):
+        # The video worker already serialises queue jobs, so this
+        # only fires when an agent-driven /image/generate call is in
+        # progress at the same time. Surface the contention clearly
+        # so the user sees it in the failed-job error.
+        raise RuntimeError(
+            "another image generation is already in progress "
+            "(agent or sync /image/generate request)"
+        )
+    t0 = time.time()
+    push(f"Image job: {n} candidate(s) via {engine_override} · "
+         f"aspect={aspect} · refs={len(refs_resolved)} · "
+         f"prompt={prompt[:60]}{'…' if len(prompt) > 60 else ''}")
+    try:
+        candidates = agent_image_engine.generate(
+            prompt=prompt, n=n, aspect=aspect,
+            output_dir=out_dir,
+            base_seed=base_seed,
+            refs=refs_resolved or None,
+            config=cfg,
+            on_log=lambda line: push(f"[image] {line}"),
+        )
+    finally:
+        _IMG_STUDIO_LOCK.release()
+    elapsed = round(time.time() - t0, 2)
+
+    # Sidecar JSON next to each candidate. Schema must match
+    # `phosphene/library/image@1` exactly so list_library_images and the
+    # unified Recent tab pick these up just like /image/generate output.
+    generated_at = time.time()
+    candidate_paths: list[str] = []
+    for c in candidates:
+        png = c.get("png_path")
+        if not png:
+            continue
+        candidate_paths.append(png)
+        sidecar_path = Path(png).with_suffix(Path(png).suffix + ".json")
+        sidecar = {
+            "schema": "phosphene/library/image@1",
+            "png_path": png,
+            "prompt": prompt,
+            "refs": list(refs_resolved),
+            "engine": c.get("engine"),
+            "family": c.get("family"),
+            "model": c.get("model"),
+            "seed": c.get("seed"),
+            "width": c.get("width"),
+            "height": c.get("height"),
+            "aspect": aspect,
+            "session_id": p.get("session_tag") or None,
+            "shot_label": None,
+            "take_index": None,
+            "generated_at": generated_at,
+            "refs_ignored": c.get("refs_ignored", False),
+            "source": "panel.queue.image",
+        }
+        try:
+            sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    # Mirror video-job conventions so the unified Recent tab can render
+    # this row the same way: output_path = thumbnail target, params.*
+    # carries the rest.
+    if candidate_paths:
+        job["output_path"] = candidate_paths[0]
+        job["raw_path"] = candidate_paths[0]
+    p["candidate_paths"] = candidate_paths
+    p["elapsed_seconds"] = elapsed
+    p["engine"] = cfg.kind + (f"/{cfg.mflux_family}" if cfg.kind == "mflux" else "")
+    p["model"] = getattr(cfg, "mflux_model", None) or cfg.kind
+    p["output_dir"] = str(out_dir)
+    push(f"Image job done: {len(candidate_paths)} candidate(s) in {elapsed}s "
+         f"→ {out_dir}")
+
+
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
+    # Image jobs share the queue + worker but use a totally different
+    # params shape (no width/height/frames, etc.). Dispatch to the
+    # image path before any of the video-only validation runs.
+    if mode == "image":
+        return run_image_job_inner(job)
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
@@ -3857,6 +4061,77 @@ def _auto_promote_image_engine_kind(
                    "mflux_family": fam}
             )
     return None
+
+
+def _build_image_engine_config(engine_override: str) -> agent_image_engine.ImageEngineConfig:
+    """Map an `engine_override` shorthand to a transient ImageEngineConfig.
+
+    Used by both the synchronous ``/image/generate`` HTTP endpoint AND
+    the ``mode == "image"`` queue-worker path. Centralising the mapping
+    here keeps the inline-shorthand catalogue in exactly one place — when
+    a new shorthand is added to the modal, both surfaces pick it up.
+
+    Returns the user's saved Settings config when ``engine_override == 'auto'``;
+    otherwise constructs a transient cfg WITHOUT touching the persisted
+    user setting (so trying Qwen once doesn't hijack their default).
+    """
+    engine_override = (engine_override or "auto").lower()
+    if engine_override == "auto":
+        return _load_agent_image_config()
+    if engine_override == "qwen_edit_inline":
+        # Iteration default: Q4 + 8 steps, ~1 min/image. Multi-ref capable.
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
+            mflux_family="qwen_edit", mflux_quantize=4, mflux_steps=8,
+        )
+    if engine_override == "qwen_edit_lightning_inline":
+        # Fast preset: Q4 + 4 steps + Lightning distillation LoRA.
+        # Pin the bf16 4-step file via the `repo:filename` collection-format
+        # syntax so mflux doesn't pull all four LoRA variants and stall.
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
+            mflux_family="qwen_edit", mflux_quantize=4, mflux_steps=4,
+            mflux_lora_paths=[
+                "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+            ],
+            mflux_lora_scales=[1.0],
+        )
+    if engine_override == "qwen_edit_high_inline":
+        # Final-render preset: Q8 + 30 steps, no LoRA. ~5 min/image.
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2509",
+            mflux_family="qwen_edit", mflux_quantize=8, mflux_steps=30,
+        )
+    if engine_override == "flux2_inline":
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
+            mflux_family="flux2", mflux_quantize=4,
+        )
+    if engine_override == "flux2_edit_inline":
+        # FLUX.2 Klein-Edit (distilled klein-4b). mflux's flux2_edit_generate.py
+        # FORCES guidance == 1.0 on distilled bases.
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="flux2-klein-4b",
+            mflux_family="flux2_edit", mflux_quantize=4,
+            mflux_steps=4, mflux_guidance=1.0,
+        )
+    if engine_override == "flux2_edit_high_inline":
+        # FLUX.2 Klein-Base-Edit (NON-distilled klein-base-4b). Real CFG,
+        # ~3-5 min/image at Q8 + 25 steps. Photographic output (vs the
+        # illustrative look of distilled flux2_edit).
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="flux2-klein-base-4b",
+            mflux_family="flux2_edit", mflux_quantize=8,
+            mflux_steps=25, mflux_guidance=4.0,
+        )
+    if engine_override == "z_image_turbo_inline":
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
+            mflux_family="z_image_turbo", mflux_quantize=4,
+        )
+    if engine_override == "mock_inline":
+        return agent_image_engine.ImageEngineConfig(kind="mock")
+    raise ValueError(f"unknown engine_override: {engine_override!r}")
 
 
 def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineConfig:
@@ -5299,104 +5574,14 @@ class Handler(BaseHTTPRequestHandler):
                 refs_resolved.append(str(rp))
 
             # Engine override: "auto" (use saved Settings config), or
-            # one of the inline shorthands the modal exposes. The inline
-            # shorthands construct a transient ImageEngineConfig WITHOUT
-            # touching the persisted user setting (so the panel doesn't
-            # lose their chosen default just because they tried Qwen
-            # once).
+            # one of the inline shorthands the modal exposes. Catalogue
+            # is centralised in `_build_image_engine_config` so the
+            # ``mode == "image"`` queue worker shares the same shorthands.
             engine_override = (payload.get("engine_override") or "auto").lower()
-            if engine_override == "auto":
-                cfg = _load_agent_image_config()
-            elif engine_override == "qwen_edit_inline":
-                # Iteration default: Q4 + 8 steps, ~1 min/image (after the
-                # one-time weight download). Multi-ref still works.
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="Qwen/Qwen-Image-Edit-2509",
-                    mflux_family="qwen_edit",
-                    mflux_quantize=4,
-                    mflux_steps=8,
-                )
-            elif engine_override == "qwen_edit_lightning_inline":
-                # Fast preset: Q4 + 4 steps + Lightning distillation LoRA.
-                # ~10-15 s/image after first-call LoRA download (~1 GB).
-                # The repo contains 4 variants (bf16/fp32 × 4-step/8-step);
-                # mflux without an explicit filename downloads all 4 and
-                # hangs on ambiguous resolution — so pin the bf16 4-step
-                # file via the `repo:filename` collection-format syntax.
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="Qwen/Qwen-Image-Edit-2509",
-                    mflux_family="qwen_edit",
-                    mflux_quantize=4,
-                    mflux_steps=4,
-                    mflux_lora_paths=[
-                        "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-                    ],
-                    mflux_lora_scales=[1.0],
-                )
-            elif engine_override == "qwen_edit_high_inline":
-                # Final-render preset: Q8 + 30 steps, no LoRA. ~5 min/image.
-                # The model card recommends 30-40 steps for production.
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="Qwen/Qwen-Image-Edit-2509",
-                    mflux_family="qwen_edit",
-                    mflux_quantize=8,
-                    mflux_steps=30,
-                )
-            elif engine_override == "flux2_inline":
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
-                    mflux_family="flux2",
-                    mflux_quantize=4,
-                )
-            elif engine_override == "flux2_edit_inline":
-                # FLUX.2 Klein-Edit (distilled klein-4b). Multi-ref via
-                # mflux-generate-flux2-edit's --image-paths (REQUIRED).
-                # ~30 s/image at Q4 + 4 steps. Use this when the user
-                # has a character ref and wants quick iteration —
-                # without it the panel UI route silently dropped refs
-                # because flux2_inline maps to t2i mflux-generate-flux2.
-                # mflux's flux2_edit_generate.py FORCES guidance == 1.0
-                # on distilled bases.
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="flux2-klein-4b",
-                    mflux_family="flux2_edit",
-                    mflux_quantize=4,
-                    mflux_steps=4,
-                    mflux_guidance=1.0,
-                )
-            elif engine_override == "flux2_edit_high_inline":
-                # FLUX.2 Klein-Base-Edit (NON-distilled klein-base-4b).
-                # Real CFG, ~3-5 min/image at Q8 + 25 steps. The
-                # photoreal path when the user has a character ref —
-                # produces photographic output (vs the illustrative
-                # look of distilled flux2_edit). Pass the SHORTHAND
-                # model name; mflux's distilled-detection looks for
-                # "base" substring in the resolved config name and
-                # rejects guidance != 1.0 if missing.
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="flux2-klein-base-4b",
-                    mflux_family="flux2_edit",
-                    mflux_quantize=8,
-                    mflux_steps=25,
-                    mflux_guidance=4.0,
-                )
-            elif engine_override == "z_image_turbo_inline":
-                cfg = agent_image_engine.ImageEngineConfig(
-                    kind="mflux",
-                    mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
-                    mflux_family="z_image_turbo",
-                    mflux_quantize=4,
-                )
-            elif engine_override == "mock_inline":
-                cfg = agent_image_engine.ImageEngineConfig(kind="mock")
-            else:
-                self._json({"error": f"unknown engine_override: {engine_override!r}"}, 400); return
+            try:
+                cfg = _build_image_engine_config(engine_override)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
 
             # Output dir: panel_uploads/library/manual/<YYYYMMDD>/<unix_ms>/
             # — date-bucketed for directory hygiene PLUS a per-request
