@@ -9568,6 +9568,36 @@ HTML = r"""<!doctype html>
       grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
       gap: 8px;
     }
+    /* Filter chips above the Session outputs grid — same shape as the
+       Recent tab's row-list-filter (single row of pill buttons, the
+       active one tinted with the accent border). Sits between the
+       count badge and the grid. */
+    .stage-outputs-filter {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 8px;
+    }
+    .stage-outputs-filter button {
+      width: auto;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      cursor: pointer;
+      transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
+    }
+    .stage-outputs-filter button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .stage-outputs-filter button.active {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.12));
+    }
     .stage-output-cell {
       position: relative;
       aspect-ratio: 16/9;
@@ -11651,12 +11681,35 @@ HTML = r"""<!doctype html>
       border-radius: 0;
     }
     .agent-pane > .agent-header {
-      height: 40px;
+      /* Single-row chip strip — was collapsing/overlapping when the
+         engine pill carried a long label ("Gemma 3 12B · 7.5 GB ·
+         click to start") because flex-wrap defaulted to wrap and
+         children had no min-width:0, so they bled into the next row
+         underneath the banner. min-height (not height) lets the row
+         honour the 40px target without clipping when a chip happens
+         to be a hair taller; flex-wrap:nowrap + flex-shrink on the
+         engine pill keeps everything on one line and lets the long
+         engine label ellipsis instead of pushing siblings down. */
+      min-height: 40px;
       padding: 0 14px;
       gap: 8px;
       background: transparent;
       border-bottom: 1px solid var(--ph-border-soft);
+      flex-wrap: nowrap;
+      overflow: hidden;
     }
+    .agent-pane > .agent-header > * { flex-shrink: 0; }
+    .agent-pane > .agent-header > .engine-pill {
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+    .agent-pane > .agent-header > .engine-pill > #agentEngineLabel {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .agent-pane > .agent-header > .session-title { flex-shrink: 1; }
     /* Sessions trigger — chip-style, mono "0" count */
     .agent-header .asp-trigger {
       display: inline-flex;
@@ -13009,6 +13062,17 @@ HTML = r"""<!doctype html>
       <!-- Session outputs -->
       <div class="agent-stage-section">
         <h4>Session outputs <span class="count" id="agentStageOutputsCount">0</span></h4>
+        <!-- All / Videos / Photos chip filter — same shape and behaviour
+             as the bottom-pane Recent tab (commit 0d9c6eb). Choice is
+             persisted to localStorage so it survives panel reloads. -->
+        <div class="stage-outputs-filter" id="stageOutputsFilter">
+          <button type="button" id="outputsFilterAll" class="active"
+                  onclick="setOutputsFilter('all')">All</button>
+          <button type="button" id="outputsFilterVideos"
+                  onclick="setOutputsFilter('videos')">Videos</button>
+          <button type="button" id="outputsFilterPhotos"
+                  onclick="setOutputsFilter('photos')">Photos</button>
+        </div>
         <div class="stage-outputs" id="agentStageOutputs">
           <div class="stage-empty">No mp4s rendered yet.</div>
         </div>
@@ -14964,6 +15028,44 @@ function setRecentFilter(mode) {
   // a localhost no-op, so the user perceives no latency.
   poll();
 }
+
+// Session-outputs (right-pane Agentic Flows gallery) filter — same
+// All / Videos / Photos chip language as the Recent tab, but persisted
+// across panel reloads via localStorage so picking "Photos" once
+// sticks. Photo discrimination uses params.mode === 'image' first, then
+// falls back to filename suffix for older sidecar-less entries.
+try {
+  const stored = localStorage.getItem('phos_outputs_filter');
+  if (stored === 'all' || stored === 'videos' || stored === 'photos') {
+    window.outputsFilter = stored;
+  }
+} catch (e) {}
+window.outputsFilter = window.outputsFilter || 'all';
+function setOutputsFilter(mode) {
+  if (mode !== 'all' && mode !== 'videos' && mode !== 'photos') mode = 'all';
+  window.outputsFilter = mode;
+  try { localStorage.setItem('phos_outputs_filter', mode); } catch (e) {}
+  const a = document.getElementById('outputsFilterAll');
+  const v = document.getElementById('outputsFilterVideos');
+  const p = document.getElementById('outputsFilterPhotos');
+  if (a) a.classList.toggle('active', mode === 'all');
+  if (v) v.classList.toggle('active', mode === 'videos');
+  if (p) p.classList.toggle('active', mode === 'photos');
+  // Re-render the stage outputs immediately so the gallery reflects
+  // the new filter without waiting for the next status poll. The
+  // status + session caches are kept on window so we can reuse them.
+  if (typeof agentStageRender === 'function'
+      && window.AGENT && window.AGENT.lastStatus) {
+    agentStageRender(window.AGENT.lastStatus, window.AGENT.lastSession);
+  }
+}
+// Apply the persisted filter on first paint so the chip styling
+// matches the live `window.outputsFilter` before the user clicks.
+document.addEventListener('DOMContentLoaded', () => {
+  if (document.getElementById('outputsFilterAll')) {
+    setOutputsFilter(window.outputsFilter || 'all');
+  }
+});
 
 // Animate button — pre-fills the i2v form with the given still as the
 // reference image and the same prompt. Does NOT auto-submit; the user
@@ -20158,6 +20260,12 @@ function agentRenderRamChip(status) {
 }
 
 function agentStageRender(status, sess) {
+  // Cache the most recent payloads so setOutputsFilter (and other UI
+  // toggles) can re-render without a network round-trip.
+  if (window.AGENT) {
+    window.AGENT.lastStatus = status;
+    window.AGENT.lastSession = sess;
+  }
   const dot = document.getElementById('agentStageDot');
   const sessionPill = document.getElementById('agentStageSession');
   const nowEl = document.getElementById('agentStageNow');
@@ -20276,10 +20384,38 @@ function agentStageRender(status, sess) {
   // user just got, with older flowing right and down. Matches the
   // main gallery's "newest first" convention.
   outputs.reverse();
-  outputsCountEl.textContent = outputs.length;
-  if (outputs.length === 0) {
-    outputsEl.innerHTML = `<div class="stage-empty">No mp4s rendered yet. Submit a shot from the chat.</div>`;
+  // Apply All / Videos / Photos filter (set by setOutputsFilter; persisted
+  // to localStorage as 'phos_outputs_filter'). Video modes: t2v / i2v /
+  // keyframe / extend (or anything that's not 'image'); photo mode is
+  // 'image'. Falls back to filename suffix when mode is missing — older
+  // sessions don't always record one.
+  const outputsFilter = (window.outputsFilter || 'all');
+  const isPhotoOutput = (o) => {
+    if (o.mode === 'image') return true;
+    if (o.mode === 't2v' || o.mode === 'i2v' || o.mode === 'keyframe' || o.mode === 'extend') return false;
+    const path = (o.output_path || '').toLowerCase();
+    if (/\.(png|jpg|jpeg|webp)$/.test(path)) return true;
+    if (/\.mp4$/.test(path)) return false;
+    return false;
+  };
+  const filteredOutputs = outputs.filter(o => {
+    if (outputsFilter === 'all') return true;
+    return outputsFilter === 'photos' ? isPhotoOutput(o) : !isPhotoOutput(o);
+  });
+  // Count badge mirrors the active filter so users see e.g.
+  // "Session outputs · 23 photos" while Photos is selected.
+  if (outputsFilter === 'all') {
+    outputsCountEl.textContent = filteredOutputs.length;
   } else {
+    outputsCountEl.textContent = `${filteredOutputs.length} ${outputsFilter}`;
+  }
+  if (filteredOutputs.length === 0) {
+    const emptyMsg = outputsFilter === 'photos' ? 'No photo renders yet.'
+                   : outputsFilter === 'videos' ? 'No video renders yet.'
+                   : 'No mp4s rendered yet. Submit a shot from the chat.';
+    outputsEl.innerHTML = `<div class="stage-empty">${emptyMsg}</div>`;
+  } else {
+    outputs = filteredOutputs;
     outputsEl.innerHTML = '';
     // No display cap — the count and the rendered cells must agree.
     // The grid is auto-fill so it wraps; the parent stage pane scrolls.
