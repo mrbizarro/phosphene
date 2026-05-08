@@ -60,7 +60,14 @@ class ImageEngineConfig:
     GET masks `bfl_api_key` (returns `has_bfl_api_key` bool only).
     """
 
-    kind: str = "mock"                              # "mock" | "mflux" | "bfl"
+    # `mock` was the historical default but it produces flat colored
+    # rectangles — every fresh install hit this and got confused output
+    # before realizing they had to pick a real engine in Settings. New
+    # default is `mflux` with FLUX.2 [klein] (Apache 2.0, ~4.3 GB,
+    # 4-step generation). Existing configs with kind=mock get auto-
+    # promoted at panel load time IF mflux is installed (see
+    # _load_agent_image_config in mlx_ltx_panel.py).
+    kind: str = "mflux"                             # "mock" | "mflux" | "bfl"
 
     # BFL (cloud)
     bfl_api_key: str = ""

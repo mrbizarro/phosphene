@@ -3756,7 +3756,18 @@ def _save_agent_config(updates: dict) -> agent_engine.EngineConfig:
 
 
 def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
-    """Read state/agent_image_config.json (creating defaults on first call)."""
+    """Read state/agent_image_config.json (creating defaults on first call).
+
+    Auto-promote `kind=mock` to a real engine: mock paints flat colored
+    rectangles for UX testing, but a fresh-install user who never opens
+    Settings keeps hitting it and gets confused output (the agent saw
+    refs_ignored=true on every gen and wrongly blamed the user's photo).
+    On every load: if the saved kind is "mock" AND a real mflux family
+    binary is on PATH, silently rewrite to mflux+qwen_edit (multi-ref,
+    works with refs) or mflux+flux2 (T2I fallback) — preferring whatever
+    the install actually has. The promotion persists via _save_agent_image_config
+    so the user only ever pays the upgrade cost once.
+    """
     global _AGENT_IMAGE_CONFIG_CACHE
     with AGENT_LOCK:
         if _AGENT_IMAGE_CONFIG_CACHE is not None:
@@ -3766,12 +3777,63 @@ def _load_agent_image_config() -> agent_image_engine.ImageEngineConfig:
                 data = json.loads(AGENT_IMAGE_CONFIG_PATH.read_text(encoding="utf-8"))
                 cfg = agent_image_engine.ImageEngineConfig(**data)
             except (OSError, json.JSONDecodeError, TypeError) as e:
-                push(f"agent: invalid agent_image_config.json ({e}); using mock defaults")
+                push(f"agent: invalid agent_image_config.json ({e}); using defaults")
                 cfg = agent_image_engine.ImageEngineConfig()
         else:
             cfg = agent_image_engine.ImageEngineConfig()
+
+        # Auto-promote away from mock if a real engine is installed.
+        if cfg.kind == "mock":
+            promoted = _auto_promote_image_engine_kind(cfg)
+            if promoted is not None:
+                cfg = promoted
+                # Persist so subsequent loads short-circuit. Failure to
+                # write isn't fatal — promotion still applies in-memory
+                # this run.
+                try:
+                    STATE_DIR.mkdir(parents=True, exist_ok=True)
+                    atomic_write_text(
+                        AGENT_IMAGE_CONFIG_PATH,
+                        json.dumps(cfg.__dict__, indent=2),
+                    )
+                    push(f"agent: auto-promoted image engine mock -> {cfg.kind}/{cfg.mflux_family} (model={cfg.mflux_model})")
+                except OSError as e:
+                    push(f"agent: image-engine auto-promote in-memory only (write failed: {e})")
+
         _AGENT_IMAGE_CONFIG_CACHE = cfg
         return cfg
+
+
+def _auto_promote_image_engine_kind(
+    cur: agent_image_engine.ImageEngineConfig,
+) -> agent_image_engine.ImageEngineConfig | None:
+    """Pick the best installed mflux family and return a new config, or None.
+
+    Preference order — picks the first one whose CLI binary is on PATH:
+      1. qwen_edit  (multi-reference; the right default for the agent +
+         Image Studio workflow because it composes character + place)
+      2. flux2      (text-to-image, fast, Apache 2.0)
+      3. z_image_turbo  (T2I, smaller, Compact-tier)
+      4. flux1      (legacy)
+    Returns a new config copy with kind/family/model set to match the
+    chosen family, or None if no family is installed (caller keeps mock).
+    """
+    candidates = [
+        ("qwen_edit",     "Qwen/Qwen-Image-Edit-2509"),
+        ("flux2",         "Runpod/FLUX.2-klein-4B-mflux-4bit"),
+        ("z_image_turbo", "filipstrand/Z-Image-Turbo-mflux-4bit"),
+        ("flux1",         "krea-dev"),
+    ]
+    for fam, model in candidates:
+        probe = agent_image_engine.ImageEngineConfig(kind="mflux", mflux_family=fam)
+        if agent_image_engine._resolve_mflux_bin(probe):
+            return agent_image_engine.ImageEngineConfig(
+                **{**cur.__dict__,
+                   "kind": "mflux",
+                   "mflux_model": model,
+                   "mflux_family": fam}
+            )
+    return None
 
 
 def _save_agent_image_config(updates: dict) -> agent_image_engine.ImageEngineConfig:
@@ -5204,11 +5266,37 @@ class Handler(BaseHTTPRequestHandler):
             if engine_override == "auto":
                 cfg = _load_agent_image_config()
             elif engine_override == "qwen_edit_inline":
+                # Iteration default: Q4 + 8 steps, ~1 min/image (after the
+                # one-time weight download). Multi-ref still works.
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="Qwen/Qwen-Image-Edit-2509",
+                    mflux_family="qwen_edit",
+                    mflux_quantize=4,
+                    mflux_steps=8,
+                )
+            elif engine_override == "qwen_edit_lightning_inline":
+                # Fast preset: Q4 + 4 steps + Lightning distillation LoRA.
+                # ~10-15 s/image, intentional softer output. Pair with the
+                # per-shot quality bump before committing a final pick.
+                cfg = agent_image_engine.ImageEngineConfig(
+                    kind="mflux",
+                    mflux_model="Qwen/Qwen-Image-Edit-2509",
+                    mflux_family="qwen_edit",
+                    mflux_quantize=4,
+                    mflux_steps=4,
+                    mflux_lora_paths=["lightx2v/Qwen-Image-Edit-2511-Lightning"],
+                    mflux_lora_scales=[1.0],
+                )
+            elif engine_override == "qwen_edit_high_inline":
+                # Final-render preset: Q8 + 30 steps, no LoRA. ~5 min/image.
+                # The model card recommends 30-40 steps for production.
                 cfg = agent_image_engine.ImageEngineConfig(
                     kind="mflux",
                     mflux_model="Qwen/Qwen-Image-Edit-2509",
                     mflux_family="qwen_edit",
                     mflux_quantize=8,
+                    mflux_steps=30,
                 )
             elif engine_override == "flux2_inline":
                 cfg = agent_image_engine.ImageEngineConfig(
@@ -12547,7 +12635,9 @@ HTML = r"""<!doctype html>
           <label>Engine</label>
           <select id="imgStudioEngine">
             <option value="auto" selected>Auto (use Settings)</option>
-            <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref)</option>
+            <option value="qwen_edit_inline">Qwen-Image-Edit-2509 (multi-ref · 8-step Q4, ~1 min/image)</option>
+            <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2509 + Lightning (multi-ref · 4-step Q4, ~10-15 s/image)</option>
+            <option value="qwen_edit_high_inline">Qwen-Image-Edit-2509 high quality (multi-ref · 30-step Q8, ~5 min/image)</option>
             <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I)</option>
             <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I)</option>
             <option value="mock_inline">Mock (testing)</option>
