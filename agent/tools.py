@@ -1168,30 +1168,48 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
                 mflux_guidance=4.0,
             )
         elif engine_override == "qwen_edit_lightning":
+            # Qwen-Image-Edit-2511 + Lightning LoRA 4-step. 2511 is the
+            # current best Qwen-Edit (Apache 2.0) — significantly stronger
+            # character consistency than 2509, mitigated image drift on
+            # multi-ref edits, multi-person fusion, built-in popular LoRAs.
+            # The Lightning LoRA filename pin avoids mflux downloading all
+            # 4 variants (bf16/fp32 × 4-step/8-step) and getting stuck on
+            # ambiguous resolution.
             cfg = _image_engine.ImageEngineConfig(
                 kind="mflux",
-                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_model="Qwen/Qwen-Image-Edit-2511",
                 mflux_family="qwen_edit",
-                mflux_quantize=4,
+                mflux_quantize=6,
                 mflux_steps=4,
-                mflux_lora_paths=["lightx2v/Qwen-Image-Edit-2511-Lightning"],
+                mflux_lora_paths=[
+                    "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+                ],
                 mflux_lora_scales=[1.0],
             )
         elif engine_override == "qwen_edit":
+            # Standard Qwen-Edit-2511 at Q6 8-step. 2511 base, no
+            # Lightning. ~1 min/image on M4 Max. Iteration tier with
+            # 2511's improved consistency over 2509.
             cfg = _image_engine.ImageEngineConfig(
                 kind="mflux",
-                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_model="Qwen/Qwen-Image-Edit-2511",
                 mflux_family="qwen_edit",
-                mflux_quantize=4,
+                mflux_quantize=6,
                 mflux_steps=8,
             )
         elif engine_override == "qwen_edit_high":
+            # Final-render preset: Qwen-Image-Edit-2511 Q8 + 40 steps.
+            # 40 steps matches the Diffusers reference example for
+            # Qwen-Edit (qwen.ai blog: 2511 official inference uses
+            # num_inference_steps=40 + true_cfg_scale=4.0 +
+            # guidance_scale=1.0 + negative_prompt=" "). mflux's --guidance
+            # maps to true_cfg_scale on the qwen-edit CLI.
             cfg = _image_engine.ImageEngineConfig(
                 kind="mflux",
-                mflux_model="Qwen/Qwen-Image-Edit-2509",
+                mflux_model="Qwen/Qwen-Image-Edit-2511",
                 mflux_family="qwen_edit",
                 mflux_quantize=8,
-                mflux_steps=30,
+                mflux_steps=40,
                 mflux_guidance=4.0,
             )
         elif engine_override == "kontext_high":
