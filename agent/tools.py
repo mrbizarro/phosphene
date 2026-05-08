@@ -285,13 +285,30 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
     if quality not in ("quick", "balanced", "standard", "high"):
         raise _ToolValidationError(f"quality must be quick|balanced|standard|high, got {quality!r}")
 
-    accel = (args.get("accel") or "turbo").lower()
-    if accel not in ("exact", "boost", "turbo"):
-        accel = "turbo"
+    # accel: panel uses "off"/"boost"/"turbo" (panel UI labels "off" as
+    # "Exact" — accept that alias for friendliness). Reject anything else
+    # explicitly so a typo like accel="distilled" fails fast instead of
+    # silently coercing to "turbo" and producing surprisingly motion-poor
+    # output. (This is the bug we hit in session fd13625972ee — the agent
+    # passed "distilled", got silently turned into "turbo", and the user
+    # wondered why every clip was barely-moving.)
+    raw_accel = (args.get("accel") or "turbo").lower()
+    if raw_accel == "exact":
+        accel = "off"
+    elif raw_accel in ("off", "boost", "turbo"):
+        accel = raw_accel
+    else:
+        raise _ToolValidationError(
+            f"accel must be off|boost|turbo (or alias 'exact' for off), "
+            f"got {raw_accel!r}. Default is 'turbo'. 'off' = full sampler "
+            f"every step (best motion); 'boost' = ~10-15% faster; 'turbo' = "
+            f"~20-25% faster (skips up to 3 steps via cache — costs motion "
+            f"on subtle scenes)."
+        )
     # Modes that don't allow acceleration are normalized later by the panel
     # but we mirror the rule here so estimates match what the queue runs.
     if mode in ("extend", "keyframe") or quality == "high":
-        accel = "exact"
+        accel = "off"
 
     duration = float(args.get("duration_seconds", 5.0))
     if duration <= 0:
@@ -553,6 +570,131 @@ def _submit_shot(args: dict, ops: PanelOps, session: dict) -> dict:
         "frames": target_frames,
         "width": width,
         "height": height,
+    }
+
+
+@tool("submit_shots")
+def _submit_shots(args: dict, ops: PanelOps, session: dict) -> dict:
+    """Submit MULTIPLE shots in ONE tool call. This is the right tool
+    when queuing a batch (a multi-shot short film, a 5-clip storyboard,
+    overnight render of N scenes).
+
+    **Why this exists.** When the panel's local chat engine
+    (`phosphene_local`) is configured with `auto_pause_during_renders`
+    (the default), the LTX worker stops mlx-lm.server the moment it
+    picks up the FIRST job from the render queue — to free RAM for the
+    diffusion run. Any subsequent chat call from the agent fails with
+    `Connection error` until the queue drains. Calling individual
+    `submit_shot` tools in sequence therefore gets you exactly ONE
+    shot queued, then a crash. `submit_shots` batches the entire
+    plan into a single tool dispatch + (by default) signals
+    end-of-turn so the runtime exits before another chat call is
+    needed. This is the path Salo's "queue them all so renders run
+    overnight" workflow expects.
+
+    Args:
+      shots: list[dict] (required) — each item is the same arg shape
+        as `submit_shot`. Required per shot:
+          { "prompt": str, "mode": "i2v"|"t2v"|..., "label": str,
+            "ref_image_path": str (i2v only),
+            "duration_seconds": float, "quality": str, ... }
+        Each item is dispatched through the same validation as a
+        single `submit_shot`, so an invalid one fails its row but
+        does NOT abort the rest of the batch.
+      auto_finish: bool = true — when true (default), the runtime
+        treats this dispatch as terminal and exits the agent loop
+        after returning. Set to false ONLY when you have follow-up
+        non-chat work that doesn't need the engine (rare).
+
+    Returns:
+      { "submitted": int,
+        "failed": int,
+        "results": [ {ok: bool, job_id?: str, error?: str, label?: str}, ... ],
+        "queue_depth": int,
+        "auto_finished": bool }
+
+    The agent's chat reply that calls submit_shots is the LAST one
+    until the user types again. Compose your written summary BEFORE
+    the action block — that's what the user will read when they wake.
+    """
+    shots = args.get("shots")
+    if not isinstance(shots, list) or not shots:
+        raise _ToolValidationError(
+            "shots must be a non-empty list of shot specs (each the "
+            "same shape as submit_shot args). Got: "
+            f"{type(shots).__name__}"
+        )
+    if len(shots) > 50:
+        # Practical cap: 50 × 6 s standard turbo ≈ 4 hours wall.
+        # Anything larger is almost certainly an agent loop bug.
+        raise _ToolValidationError(
+            f"shots list too long ({len(shots)}); cap is 50 per call. "
+            "Split the batch into multiple turns if the user really "
+            "wants more."
+        )
+
+    auto_finish = args.get("auto_finish")
+    if auto_finish is None:
+        auto_finish = True
+    auto_finish = bool(auto_finish)
+
+    results: list[dict] = []
+    submitted = 0
+    failed = 0
+    for idx, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            results.append({
+                "ok": False,
+                "index": idx,
+                "label": None,
+                "error": "validation: shot must be a dict",
+            })
+            failed += 1
+            continue
+        label = (shot.get("label") or "")[:80]
+        try:
+            r = _submit_shot(shot, ops, session)
+            results.append({
+                "ok": True,
+                "index": idx,
+                "label": label or None,
+                "job_id": r.get("job_id"),
+                "estimated_wall_seconds": r.get("estimated_wall_seconds"),
+                "frames": r.get("frames"),
+                "width": r.get("width"),
+                "height": r.get("height"),
+            })
+            submitted += 1
+        except _ToolValidationError as e:
+            results.append({
+                "ok": False, "index": idx, "label": label or None,
+                "error": f"validation: {e}",
+            })
+            failed += 1
+        except Exception as e:                          # noqa: BLE001
+            results.append({
+                "ok": False, "index": idx, "label": label or None,
+                "error": f"{type(e).__name__}: {e}",
+            })
+            failed += 1
+
+    snap = ops.queue_snapshot() or {}
+    queue_depth = len(snap.get("queue") or [])
+
+    if auto_finish and submitted > 0:
+        # Signal the runtime to exit the loop after this dispatch
+        # returns. Required because the LTX worker pauses the local
+        # chat engine on first render — any follow-up chat call would
+        # fail with "Connection error". See agent/runtime.py for the
+        # corresponding consumer of this flag.
+        session["_finish_after_turn"] = True
+
+    return {
+        "submitted": submitted,
+        "failed": failed,
+        "results": results,
+        "queue_depth": queue_depth,
+        "auto_finished": (auto_finish and submitted > 0),
     }
 
 
@@ -867,18 +1009,47 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
       engine_override: str = "" — per-call engine choice, OVERRIDES the
                             user's saved Settings without changing it.
                             Valid values:
+                              "flux2_edit"           4-step Q4 distilled FLUX.2
+                                                     Klein-Edit, ~30 s/image,
+                                                     NEEDS refs. Distilled =
+                                                     fast but ILLUSTRATIVE
+                                                     style (cartoonish).
+                              "flux2_edit_high"      25-step Q8 NON-DISTILLED
+                                                     FLUX.2 Klein-Base-Edit
+                                                     with guidance 4.0,
+                                                     ~3-5 min/image, NEEDS
+                                                     refs. Use this when the
+                                                     user asks for
+                                                     PHOTOREALISTIC stills —
+                                                     this is the default
+                                                     photoreal path.
                               "qwen_edit_lightning"  4-step Q4 + Lightning LoRA,
                                                      ~10-15 s/image, NEEDS refs
                               "qwen_edit"            8-step Q4, ~1 min/image,
                                                      NEEDS refs
-                              "qwen_edit_high"       30-step Q8, ~5 min/image,
-                                                     NEEDS refs
+                              "qwen_edit_high"       30-step Q8 + guidance 4.0,
+                                                     ~5 min/image, NEEDS refs.
+                                                     Alternative photoreal
+                                                     path; multi-ref-strong.
+                              "kontext_high"         30-step Q8 FLUX.1 Kontext
+                                                     guidance 4.5, ~3 min/image,
+                                                     NEEDS refs. Mature
+                                                     image-conditioning
+                                                     family — different
+                                                     aesthetic than flux2/qwen.
                               "flux2"                4-step T2I, ~15 s/image,
                                                      no refs supported
                               "z_image_turbo"        9-step T2I, ~30 s/image,
                                                      no refs supported
                               "mock"                 flat colored squares,
                                                      instant (testing only)
+                            **Default for photoreal stills with refs:
+                            "flux2_edit_high"** (or qwen_edit_high if
+                            multi-character composition is needed).
+                            Use the bare "flux2_edit" only when the user
+                            explicitly asks for "fast iteration" or
+                            "draft quality" — its distilled weights
+                            produce illustrative output, not photographs.
                             Use this to react to errors: if a qwen_edit
                             call returns "needs at least 1 reference image"
                             and the user explicitly didn't provide one,
@@ -953,7 +1124,43 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
     # validation error instead of silently using the saved config.
     engine_override = (args.get("engine_override") or "").strip()
     if engine_override:
-        if engine_override == "qwen_edit_lightning":
+        if engine_override == "flux2_edit":
+            # Distilled klein-4b — fast but illustrative. mflux's
+            # flux2_edit_generate.py FORCES guidance == 1.0 on distilled
+            # bases; passing anything else would parser.error. Pass the
+            # mflux SHORTHAND name (not the HF repo) so mflux resolves
+            # the correct base config.
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="flux2-klein-4b",
+                mflux_family="flux2_edit",
+                mflux_quantize=4,
+                mflux_steps=4,
+                mflux_guidance=1.0,
+            )
+        elif engine_override == "flux2_edit_high":
+            # Non-distilled klein-base-4b — accepts real CFG and renders
+            # photorealistic. ~3-5 min/image at Q8. The default
+            # photoreal path when the user has a character ref.
+            #
+            # CRITICAL: pass the SHORTHAND mflux model name
+            # ("flux2-klein-base-4b") instead of an HF repo path.
+            # mflux's flux2_edit_generate.py uses ModelConfig.from_name
+            # to detect "is this a distilled base?" via substring match.
+            # If you pass "black-forest-labs/FLUX.2-klein-4B" as model
+            # the substring check sees "klein-4b" (no "base") and
+            # rejects guidance != 1.0 — the photoreal path silently
+            # falls back to the distilled config and you get the
+            # illustrative output anyway.
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="flux2-klein-base-4b",
+                mflux_family="flux2_edit",
+                mflux_quantize=8,
+                mflux_steps=25,
+                mflux_guidance=4.0,
+            )
+        elif engine_override == "qwen_edit_lightning":
             cfg = _image_engine.ImageEngineConfig(
                 kind="mflux",
                 mflux_model="Qwen/Qwen-Image-Edit-2509",
@@ -978,6 +1185,20 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
                 mflux_family="qwen_edit",
                 mflux_quantize=8,
                 mflux_steps=30,
+                mflux_guidance=4.0,
+            )
+        elif engine_override == "kontext_high":
+            # FLUX.1 Kontext-dev — image-conditioning, mature family.
+            # Q8 + 30 steps + guidance 4.5 produces a different
+            # aesthetic than flux2/qwen — useful when those two
+            # produce inconsistent output for a specific composition.
+            cfg = _image_engine.ImageEngineConfig(
+                kind="mflux",
+                mflux_model="black-forest-labs/FLUX.1-Kontext-dev",
+                mflux_family="kontext",
+                mflux_quantize=8,
+                mflux_steps=30,
+                mflux_guidance=4.5,
             )
         elif engine_override == "flux2":
             cfg = _image_engine.ImageEngineConfig(
@@ -998,8 +1219,9 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
         else:
             raise _ToolValidationError(
                 f"engine_override={engine_override!r} unknown. Valid: "
+                f"flux2_edit | flux2_edit_high | "
                 f"qwen_edit | qwen_edit_lightning | qwen_edit_high | "
-                f"flux2 | z_image_turbo | mock"
+                f"kontext_high | flux2 | z_image_turbo | mock"
             )
 
     safe_label = re.sub(r"[^a-z0-9_-]", "_", label.lower())[:40] or "untitled"

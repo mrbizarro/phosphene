@@ -225,6 +225,15 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
 MFLUX_FAMILY_BIN = {
     "flux1":          "mflux-generate",
     "flux2":          "mflux-generate-flux2",
+    # FLUX.2 Klein Edit — image-conditioned variant of FLUX.2. Like qwen_edit
+    # it takes --image-paths (REQUIRED) and composes the prompt onto the
+    # reference image(s). Distilled at 4 steps for the klein-4b/9b base
+    # models (guidance MUST be 1.0); the klein-base-4b/9b non-distilled
+    # variants run at 25+ steps with real guidance (4.0 typical) and
+    # produce photorealistic output instead of the distilled illustrative
+    # look. See engine_override "flux2_edit" (distilled) vs
+    # "flux2_edit_high" (base, photoreal) in agent/tools.py.
+    "flux2_edit":     "mflux-generate-flux2-edit",
     "z_image":        "mflux-generate-z-image",
     "z_image_turbo":  "mflux-generate-z-image-turbo",
     "fibo":           "mflux-generate-fibo",
@@ -246,6 +255,13 @@ MFLUX_FAMILY_BIN = {
 MFLUX_FAMILY_DEFAULTS = {
     "flux1":         {"steps": 25, "guidance": 4.5,  "base_model": "dev"},
     "flux2":         {"steps": 4,  "guidance": 1.0,  "base_model": "flux2-klein-4b"},
+    # flux2_edit default: 4 steps + guidance 1.0 (the distilled klein-4b
+    # path, fastest). Switch to klein-base-4b/9b + steps 25 + guidance 4.0
+    # via engine_override="flux2_edit_high" for photorealistic output —
+    # see agent/tools.py engine_override branches. The distilled path
+    # FORCES guidance == 1.0 (mflux's flux2_edit_generate.py rejects any
+    # other value); the base path REQUIRES guidance > 1.0 to do real CFG.
+    "flux2_edit":    {"steps": 4,  "guidance": 1.0,  "base_model": "flux2-klein-4b"},
     "z_image":       {"steps": 25, "guidance": 5.0,  "base_model": ""},
     "z_image_turbo": {"steps": 9,  "guidance": 0.0,  "base_model": ""},
     "fibo":          {"steps": 30, "guidance": 5.0,  "base_model": ""},
@@ -481,13 +497,13 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             f"depending on family."
         )
 
-    # qwen_edit refuses to start without --image-paths (mflux argparse
-    # marks it required for the qwen-edit CLI). Catch this here with a
-    # clear validation error instead of letting the user wait minutes
-    # for a confusing argparse failure.
-    if fam == "qwen_edit" and not refs:
+    # qwen_edit and flux2_edit BOTH refuse to start without --image-paths
+    # (mflux argparse marks it required on both edit-flavored CLIs).
+    # Catch here with a clear validation error instead of letting the
+    # user wait minutes for a confusing argparse failure.
+    if fam in ("qwen_edit", "flux2_edit") and not refs:
         raise ValueError(
-            "Qwen-Image-Edit-2509 needs at least 1 reference image — drop "
+            f"{fam} needs at least 1 reference image — drop "
             "a photo into one of the 3 reference slots above, or switch "
             "the Engine dropdown to FLUX.2 [klein] / Z-Image-Turbo for "
             "text-only generation."
@@ -529,13 +545,22 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         "--guidance", str(eff_guidance),
         "--seed", *[str(s) for s in seeds],
     ]
-    # Multi-reference input — only the qwen_edit family consumes
-    # --image-paths today (mflux v0.11.1+). For other families we
-    # silently drop refs and tag refs_ignored=True on each result.
+    # Reference image input — three different argument shapes across
+    # mflux's edit-flavored CLIs:
+    #   qwen_edit  / flux2_edit  : --image-paths (plural, 1+ images)
+    #   kontext                  : --image-path  (singular, 1 image only)
+    # Other families silently drop refs and tag refs_ignored=True.
+    # mflux v0.17+. Adding more edit families? Update this dispatch.
     refs_used: list[str] = []
-    if refs and fam == "qwen_edit":
+    if refs and fam in ("qwen_edit", "flux2_edit"):
         refs_used = [str(Path(r).resolve()) for r in refs]
         cmd.extend(["--image-paths", *refs_used])
+    elif refs and fam == "kontext":
+        # kontext only consumes a single image. Use the first ref;
+        # the agent's tools.py refs validation already caps at 3 so
+        # we silently take refs[0] without warning here.
+        refs_used = [str(Path(refs[0]).resolve())]
+        cmd.extend(["--image-path", refs_used[0]])
     # Optional Lightning / acceleration LoRAs
     if config.mflux_lora_paths:
         cmd.append("--lora-paths")
@@ -651,7 +676,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "model": config.mflux_model,
             "width": width, "height": height,
             "refs": refs_used,
-            "refs_ignored": (bool(refs) and fam != "qwen_edit"),
+            "refs_ignored": (bool(refs) and fam not in ("qwen_edit", "flux2_edit")),
             "lora_paths": list(config.mflux_lora_paths or []),
         })
 

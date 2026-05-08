@@ -404,8 +404,15 @@ def run_turn(session: Session, user_message: str | None,
         )
         session.messages.append({"role": "user", "content": tool_result_msg})
 
-        # 5. If the model called `finish`, stop the loop.
-        if tool_name == "finish":
+        # 5. If the model called `finish`, OR a tool set the
+        # `_finish_after_turn` flag in tool_state (e.g. submit_shots
+        # with auto_finish=true — needed because the LTX worker pauses
+        # the local chat engine the moment it picks up the FIRST job
+        # from the queue, so any subsequent chat call would fail with
+        # "Connection error"; the agent must commit the whole batch
+        # AND signal completion in a single tool dispatch), stop the
+        # loop.
+        if tool_name == "finish" or session.tool_state.pop("_finish_after_turn", False):
             session.finished = True
             yield emit(TurnEvent("done", {"reason": "finished", "step": step_i}))
             return
@@ -426,7 +433,7 @@ def list_tool_catalog() -> list[dict]:
     and `body` (rest, trimmed). Stable order matches `render_tools_doc`.
     """
     order = [
-        "estimate_shot", "submit_shot", "get_queue_status",
+        "estimate_shot", "submit_shot", "submit_shots", "get_queue_status",
         "wait_for_shot", "extract_frame", "inspect_clip",
         "generate_shot_images", "get_selected_anchors", "upload_image",
         "read_document", "list_loras", "get_master_style",
@@ -488,7 +495,7 @@ def render_tools_doc() -> str:
         "generate_shot_images", "get_selected_anchors", "list_library_images",
         "inspect_clip", "extract_frame", "upload_image",
         # submission + wait
-        "submit_shot", "get_queue_status", "wait_for_shot",
+        "submit_shot", "submit_shots", "get_queue_status", "wait_for_shot",
         # style + memory
         "list_loras", "get_master_style",
         "read_project_notes", "append_project_notes", "read_document",
