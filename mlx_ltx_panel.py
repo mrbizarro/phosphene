@@ -8436,6 +8436,15 @@ HTML = r"""<!doctype html>
       --agent-radius: 12px;
       --avatar: 28px;
     }
+    /* The `display: flex` rule above wins over the UA stylesheet's
+       `[hidden] { display: none }`, so toggling the `hidden` attribute
+       on #agentPane (workflowSwitch's Manual branch) was a no-op — the
+       agent header strip (Sessions chip, engine pill, RAM chip, fullscreen
+       icon, etc.) and the engine readiness banner kept rendering above
+       the manual form. Force the override so Manual really hides the
+       Agentic Flows pane. Same shape as the line-8521 fix for the
+       header's own [hidden] children. */
+    .agent-pane[hidden] { display: none !important; }
 
     /* ---- Header ---- */
     .agent-header {
