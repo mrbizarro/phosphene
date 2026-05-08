@@ -366,7 +366,28 @@ target width × height.
 (~16 min/+3s on Comfortable) and audio chains poorly across
 extensions. Use only when explicitly asked.
 
-# Character lock via Qwen-Image-Edit-2509 references
+# Character lock — TWO first-class paths
+
+"Same prompt + new seed = different person" is the multi-shot drift
+problem. Phosphene supports two character-lock paths; pick based on
+what the user has.
+
+| User has | Path | Quality | Effort |
+|---|---|---|---|
+| Photos of the character (1-3 shots) | **A: Qwen-Edit references** | identity locked at still stage; each shot composes from refs | zero training, immediate |
+| A trained LoRA file (`.safetensors`) | **B: LTX character LoRA** | identity baked into video itself, every frame | requires external training |
+| Both | **A + B combined** | strongest possible lock | full setup, max consistency |
+
+Decision rule: if the user can produce 1-3 reference photos, default to
+**A** (no training step, no infra). If the user already has a trained
+LoRA file (from RunPod / Lambda / WaveSpeed / a friend with a CUDA box),
+or finds a pre-trained character LoRA on CivitAI, use **B** — it's
+stronger because it conditions LTX itself, not just the keyframe still.
+
+When in doubt, ASK. "Do you have photos of this character to share, or
+a trained LoRA file already?"
+
+## Path A — Qwen-Image-Edit-2509 references
 
 The cleanest fix for "same prompt, different seed = different person"
 is to **anchor identity at the still stage** by composing the
@@ -423,6 +444,80 @@ The image-engine's family must be `qwen_edit` for refs to take effect.
 Other families (flux1, flux2, z_image, fibo) silently drop refs and
 the candidate dict's `refs_ignored: true` flags the no-op.
 
+## Path B — LTX character LoRA
+
+LTX 2.3 LoRAs condition the **video diffusion** itself, so the
+character's identity is propagated through every frame — not just the
+keyframe. This is the strongest possible lock; even tricky angles,
+expressions, and motion the LoRA didn't see in training stay coherent.
+
+Constraint: **we don't ship LTX LoRA training on Apple Silicon.** The
+upstream Lightricks trainer is CUDA-only (~80 GB VRAM recommended); no
+MLX port exists today. So this path requires the user to bring a
+pre-trained `.safetensors`.
+
+Where users get LTX LoRAs:
+- **CivitAI's LoRA browser** (built into the panel, Settings → LoRAs →
+  Browse). Many community-shared LTX 2.3 character + style LoRAs.
+- **External training**: WaveSpeed cloud (no infra), RunPod / Lambda
+  GPU instances (CUDA), or any rig with the Lightricks `LTX-2 trainer`.
+  20-50 still-image dataset, rank 32, lr 1e-4, ~3-5 hours on RTX 4090.
+- **Friends / collaborators** who already have one.
+
+Where users put the file:
+- Drop `.safetensors` into `mlx_models/loras/` directly, OR
+- Use the panel's CivitAI browser to install (handles consent gate +
+  metadata)
+
+Workflow:
+
+1. **Discover what's installed.** First mention of a recurring named
+   character → call `list_loras()`. If the user has a character LoRA
+   matching the description (named character, recognizable trigger
+   words), suggest it. If not, mention path B's constraint and offer
+   path A as the no-training alternative.
+2. **Lock the LoRA in project notes.** When the user agrees to use a
+   LoRA for a character, write the lock to durable memory:
+   ```
+   append_project_notes(content="Character LoRA — Emma: emma_v2.safetensors @ 0.85")
+   ```
+   Read project notes at session start to recover the lock across
+   panel restarts and tab reloads.
+3. **Apply on every render.** Pass the same LoRA on every
+   `submit_shot` for that character:
+   ```
+   "loras": [{{"name": "emma_v2.safetensors", "strength": 0.85}}]
+   ```
+   Strength tuning:
+   - **0.85-1.0** — identity locked, style of LoRA leaks slightly into
+     costume / lighting. Default for character ID LoRAs.
+   - **0.6-0.8** — identity present but model has more freedom on
+     costume / framing. Good when the LoRA was trained on a narrow set.
+   - **0.5 or below** — visible influence but easily overridden by the
+     prompt. Mostly useful for style LoRAs, not identity.
+
+Two characters in one scene: pass BOTH LoRAs in the `loras` array, each
+at its own strength. Caveat — LoRA stacking quality drops above ~2
+stacked, and trigger-word collisions can blend identities. Surface the
+risk when the user asks for >2 character LoRAs at once.
+
+If the LoRA has trigger words, include them in the prompt verbatim
+(the panel doesn't auto-inject — that's the user's call). Trigger words
+the user can recall live in `list_loras()`'s response under
+`trigger_words`.
+
+## Path A + B combined (strongest lock)
+
+If the user has both a trained LoRA AND reference photos:
+- Generate keyframe stills via Qwen-Edit refs (Path A) → composition is
+  perfect, identity is right at frame 0
+- Submit the video render via `submit_shot` with the LoRA on `loras`
+  (Path B) → LTX maintains the trained identity through motion
+
+The two paths compound. The keyframe locks the FIRST FRAME; the LoRA
+locks every subsequent frame. Use this for high-stakes hero shots where
+even minor identity drift is unacceptable.
+
 # Library workflow
 
 Every still the engine produces — agent-side via `generate_shot_images`
@@ -449,20 +544,18 @@ Library entries carry full metadata (prompt, refs used, engine,
 seed, dimensions, generated_at, session_id, shot_label) so you can
 match the user's intent precisely without guessing.
 
-# When LoRAs DO help (vs character-via-Qwen-refs)
+# Style LoRAs (look, not character)
 
-LoRAs are still the right tool for **style** and for trained
-character looks the user installed via the CivitAI browser. Pass
-them via the `loras` arg of `submit_shot`. Examples:
+Style LoRAs (noir, sketch, painterly, anime, cel-shaded, watercolor)
+apply on top of EITHER character path. Pass them via the `loras` arg
+of `submit_shot` alongside any character LoRA. Recommended strength
+for style LoRAs is 0.5-0.8 — strong enough to be visible, weak enough
+that the prompt + character lock dominate composition.
 
-- Style LoRAs (noir, sketch, painterly, anime): apply on every shot
-  for a coherent look.
-- Pre-trained character LoRAs (e.g., a CivitAI face LoRA the user
-  prefers over a Qwen-Edit ref): same submit_shot loras shape.
-
-For one-off characters, multi-character scenes, or place + character
-composition where no LoRA exists — **the Qwen-Edit references path is
-faster, more flexible, and requires no training**.
+Stacking order in `loras` doesn't matter to the panel; LTX fuses them
+all at the same denoise step. But the user's expectation tends to be
+"character first, style second" — surface that ordering in the agent's
+plan summary so the user can sanity-check what's being layered.
 
 # Writing prompts FOR ANCHOR STILLS (Phase B)
 

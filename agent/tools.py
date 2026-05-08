@@ -1252,22 +1252,45 @@ def _get_master_style(args: dict, ops: PanelOps, session: dict) -> dict:
 
 @tool("list_loras")
 def _list_loras(args: dict, ops: PanelOps, session: dict) -> dict:
-    """List the LoRAs installed in this Phosphene panel.
+    """List the LTX 2.3 LoRAs installed in this Phosphene panel.
 
     Returns the user's installed LoRAs from `mlx_models/loras/` —
     each with name, trigger words, recommended strength, base model,
     and the absolute file path. Use this BEFORE recommending a LoRA
     on a shot so you only suggest ones the user actually has.
 
-    To USE a LoRA on a shot, pass its filename (e.g. "noir_style.safetensors")
-    in the `loras` arg of `submit_shot`:
-        loras: [{"name": "noir_style.safetensors", "strength": 0.8}]
-    The panel matches by filename and applies the weights.
+    Two kinds of LoRA matter for the agent:
 
-    INSTALLING a new LoRA requires the user — the CivitAI browser is
-    behind a consent gate (NSFW LoRAs in particular). If the user
-    asks for a look you don't have a LoRA for, point them at
-    Settings → LoRAs → Browse rather than trying to install it.
+    - **Character LoRAs** — lock identity across every shot. The
+      strongest character-lock path (see system prompt § Character
+      lock — Path B). Common naming: contains a person/character
+      name, has trigger_words for that character, base_model is
+      LTX 2.3.
+    - **Style LoRAs** — change look without touching identity (noir,
+      sketch, painterly, etc.). Stack on top of a character LoRA.
+
+    To USE a LoRA on a shot, pass its filename (e.g.
+    "emma_v2.safetensors") in the `loras` arg of `submit_shot`:
+        loras: [{"name": "emma_v2.safetensors", "strength": 0.85}]
+    The panel matches by filename and fuses the weights at denoise
+    time. If the LoRA has trigger_words, surface them in your prompt
+    verbatim — the panel doesn't auto-inject.
+
+    GETTING a LoRA the user doesn't have yet — three paths:
+    1. **CivitAI browser** (in-panel): Settings → LoRAs → Browse.
+       Behind a consent gate (NSFW LoRAs in particular). Many
+       community-shared LTX 2.3 character + style LoRAs.
+    2. **External training**: WaveSpeed cloud (no infra), RunPod /
+       Lambda (CUDA boxes), or anywhere with the Lightricks
+       `LTX-2 trainer`. We don't ship Apple-Silicon LTX training.
+       After training, the user drops the `.safetensors` file into
+       `mlx_models/loras/` directly.
+    3. **From a friend / collaborator** with an existing file —
+       same drop-into-loras-dir flow.
+
+    The agent should NOT walk users through training — that's
+    out-of-app work. Just point them at Path 1 (CivitAI browser) or
+    summarize Path 2/3 if they ask.
 
     Returns: { count, loras: [ {filename, name, description, base_model,
               trigger_words, recommended_strength, path}, ... ] }.
