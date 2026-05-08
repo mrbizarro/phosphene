@@ -42,6 +42,24 @@ from agent import local_server as agent_local_server
 from agent import prompts as agent_prompts
 from agent import runtime as agent_runtime
 from agent import tools as agent_tools
+# Phase 2 of the agent-layer refactor: smolagents CodeAgent in a parallel
+# runtime module. Selectable per-request via PHOSPHENE_RUNTIME=smol|legacy
+# (default: legacy). See agent/runtime_smol.py for the loop and
+# /Users/salo/.claude/plans/fancy-conjuring-lovelace.md for the plan.
+from agent import runtime_smol as agent_runtime_smol
+
+
+def _select_runtime():
+    """Pick the agent runtime for this request.
+
+    Reads PHOSPHENE_RUNTIME on every call so flipping back to legacy
+    doesn't require a panel restart — useful while we A/B these.
+    Falls back to legacy if smolagents isn't on this venv yet.
+    """
+    pick = (os.environ.get("PHOSPHENE_RUNTIME") or "legacy").strip().lower()
+    if pick == "smol" and agent_runtime_smol.is_smolagents_active():
+        return agent_runtime_smol
+    return agent_runtime
 
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
@@ -5301,15 +5319,20 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif engine_override == "qwen_edit_lightning_inline":
                 # Fast preset: Q4 + 4 steps + Lightning distillation LoRA.
-                # ~10-15 s/image, intentional softer output. Pair with the
-                # per-shot quality bump before committing a final pick.
+                # ~10-15 s/image after first-call LoRA download (~1 GB).
+                # The repo contains 4 variants (bf16/fp32 × 4-step/8-step);
+                # mflux without an explicit filename downloads all 4 and
+                # hangs on ambiguous resolution — so pin the bf16 4-step
+                # file via the `repo:filename` collection-format syntax.
                 cfg = agent_image_engine.ImageEngineConfig(
                     kind="mflux",
                     mflux_model="Qwen/Qwen-Image-Edit-2509",
                     mflux_family="qwen_edit",
                     mflux_quantize=4,
                     mflux_steps=4,
-                    mflux_lora_paths=["lightx2v/Qwen-Image-Edit-2511-Lightning"],
+                    mflux_lora_paths=[
+                        "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+                    ],
                     mflux_lora_scales=[1.0],
                 )
             elif engine_override == "qwen_edit_high_inline":
@@ -6030,6 +6053,9 @@ class Handler(BaseHTTPRequestHandler):
             ops = _build_panel_ops()
             tools_doc = agent_runtime.render_tools_doc()
             events: list[dict] = []
+            # Pick legacy or smolagents runtime per-request based on env var.
+            _runtime = _select_runtime()
+            push(f"agent: using runtime={_runtime.__name__.split('.')[-1]}")
 
             # Persist after every event so a client polling
             # /agent/sessions/<id> mid-loop sees the agent's incremental
@@ -6043,7 +6069,7 @@ class Handler(BaseHTTPRequestHandler):
                     push(f"agent: mid-loop save failed: {e}")
 
             try:
-                for ev in agent_runtime.run_turn(
+                for ev in _runtime.run_turn(
                     sess, user_msg, ops, tools_doc=tools_doc,
                     on_event=_on_event,
                 ):
