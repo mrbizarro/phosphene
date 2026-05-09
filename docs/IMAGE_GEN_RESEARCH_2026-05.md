@@ -8,6 +8,7 @@ LTX 2.3's t2v is weak; image-gen quality is the dominant lever for video output.
 - **"Flux Klein"** = **FLUX.2 [klein] 4B** by Black Forest Labs (Jan 2026). Apache 2.0, mflux-compatible at 4-bit (~4.3 GB), 4-step inference, ~12-18 s/image on Comfortable Mac. **Ship as default.**
 - **mflux 0.17.x is now multi-family.** Legacy `mflux-generate` is FLUX.1-only. New CLIs: `mflux-generate-flux2`, `mflux-generate-z-image-turbo`, `mflux-generate-fibo`, `mflux-generate-qwen`, `mflux-generate-kontext`. Panel currently calls legacy → silently misses every new family.
 - **Z-Image-Turbo (Tongyi/Alibaba, Nov 2025)** is the Compact-tier default — 6B model, ~5.9 GB at 4-bit, 8-9 steps, fits 16 GB.
+- **HiDream-O1-Image-Dev (May 2026 addition)** — 8B Qwen3-VL pixel-patch transformer, MIT licence, runs out of a separate lab venv (NOT mflux). Q8 ~10 GB, ~67 s / 1024×1024 on Comfortable+. Strong prompt fidelity across all genres tested. Available as `kind="hidream"` in `agent/image_engine.py` since commit 45cad69.
 
 ## The single default to ship
 
@@ -62,6 +63,7 @@ def _default_image_engine_for_tier(tier: str) -> dict:
 | FIBO | `briaai/FIBO` | 8B | ~10-12 | Open-RAIL-ish | 30 |
 | Qwen-Image | `filipstrand/Qwen-Image-mflux-6bit` | 20B | ~16 (6-bit) | Apache 2.0 | 25-50 |
 | Flex.1-alpha | `ostris/Flex.1-alpha` | 8B | ~9-10 | Apache 2.0 | 25 |
+| **HiDream-O1-Image-Dev** | `HiDream-ai/HiDream-O1-Image-Dev` | 8B | **~10 (Q8)** | **MIT** | 28 |
 
 ## mflux 0.17.x per-family CLIs
 
@@ -81,6 +83,36 @@ def _default_image_engine_for_tier(tier: str) -> dict:
 | `mflux-upscale-seedvr2` | seedvr2 upscaler (could replace pipersr!) |
 
 All share the same argparse mixins — `--prompt`, `--negative-prompt`, `--width`, `--height`, `--steps`, `--guidance`, `--seed`, `--quantize`, `--model`, `--base-model`, `--output`, `--metadata`, `--lora-paths`, `--lora-scales`, `--image-path`, `--image-strength`.
+
+## Beyond mflux — HiDream-O1-Image-Dev (May 2026)
+
+mflux is great but only ships diffusion-based families. **HiDream-O1-Image-Dev** is a different beast: a single 8B Qwen3-VL backbone that does pixel-level patch generation directly (no separate VAE), distilled from a 50-step teacher into a 28-step student via flow matching. License is MIT (cleaner than FLUX.2-dev's NC).
+
+The lab port lives outside Phosphene at `/Users/salo/HIDREAM-O1-MLX-LAB-active/` so its mlx-vlm dep tree doesn't fight Phosphene's ltx-2-mlx env. Phosphene shells out to the lab's python via subprocess (mirrors mflux pattern). Module path: `agent/image_engine.py`, `kind="hidream"`.
+
+### Why ship it alongside mflux
+
+- **Prompt fidelity.** Q8 nails subject + style + lighting in one shot across 10 diverse genres tested (photo, anime, painting, macro, architecture, food, action, fantasy, wildlife, text-rendering). Documented in lab's `docs/EVALUATION.md`.
+- **Licensing.** MIT — no NC restriction like FLUX.2-dev.
+- **Native non-square aspect.** Patch-aligned to 32; works at 704×1280 / 1280×704 / 2048×2048 with no separate model.
+- **No mflux dep ecosystem coupling.** Adding it doesn't expand mflux's surface area or risk breaking the existing FLUX/Z-Image presets.
+
+### Tradeoffs
+
+- **Slower** than Z-Image-Turbo (67 s vs ~30 s at 1024).
+- **Heavier** RAM (11.5 GB vs ~6 GB Q4 at 1024).
+- **Q4 ships dark.** Q4 quantisation desaturates outputs; Q8 fixes it. Lab uses Q8 only.
+- **Patch-grid artifact** in flat regions (sky, water, walls). Architectural — not fixable without retraining or an overlap-blend post-pass.
+- **No edit/multi-ref yet.** Architecture supports it; lab pipeline is text-to-image only as of May 2026. Refs continue to flow through `mflux qwen-edit`.
+
+### Tier guidance
+
+| Tier | RAM | Use HiDream? |
+|---|---|---|
+| Compact (16-32 GB) | tight | NO — not enough RAM headroom alongside LTX. Use Z-Image-Turbo. |
+| Comfortable (32-79 GB) | OK | OPTIONAL — slower than klein but better fidelity for hero shots. |
+| Roomy (80-119 GB) | YES | Routine. |
+| Studio (120 GB+) | YES | Routine; consider 2048×2048 for finals. |
 
 ## Implementation plan (20 ranked items)
 
@@ -116,3 +148,6 @@ All share the same argparse mixins — `--prompt`, `--negative-prompt`, `--width
 - [filipstrand/Z-Image-Turbo-mflux-4bit on HF (~5.9 GB)](https://huggingface.co/filipstrand/Z-Image-Turbo-mflux-4bit)
 - [filipstrand/FLUX.1-Krea-dev-mflux-4bit on HF (9.61 GB)](https://huggingface.co/filipstrand/FLUX.1-Krea-dev-mflux-4bit)
 - [Apatero — Flux on Apple Silicon performance guide](https://www.apatero.com/blog/flux-apple-silicon-m1-m2-m3-m4-complete-performance-guide-2025)
+- [HiDream-ai/HiDream-O1-Image-Dev on HF](https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev)
+- [HiDream-O1-Image source on GitHub (MIT)](https://github.com/HiDream-ai/HiDream-O1-Image)
+- [Blaizzy/mlx-vlm (qwen3_vl backbone reused)](https://github.com/Blaizzy/mlx-vlm)
