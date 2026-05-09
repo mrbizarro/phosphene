@@ -721,13 +721,40 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # raised), some seeds may not have produced an output — return the
     # ones that did rather than failing the whole batch. Order by seed
     # so candidate numbering is deterministic.
+    #
+    # mflux >=0.18 changed --output handling: even when the template
+    # already substitutes {seed}, mflux ALSO appends _seed_<seed> to the
+    # filename. So our `cand_{seed}_mflux.png` template lands on disk as
+    # `cand_<seed>_mflux_seed_<seed>.png`. Without this fallback every
+    # image-gen run since the upgrade returned an empty candidates list,
+    # which meant: no sidecar JSON written (the for-loop ran zero times),
+    # users saw thumbnails in the gallery via the library scan but had
+    # no per-image metadata to show / reproduce / debug. The candidates
+    # below are still ordered by `seeds` so n=4 batches map to consistent
+    # indices in the UI.
     results: list[dict] = []
     for i, seed in enumerate(seeds):
+        # Try the templated path first (old mflux behavior + the n=1 case).
         path = Path(output_template.format(seed=seed))
         if not path.is_file():
-            # Surface an explicit error only if zero candidates landed —
-            # partial success returns whatever we got.
-            continue
+            # Fall back to scanning the output dir for any file whose name
+            # contains the seed and ends in .png. mflux's
+            # auto-_seed_<seed> suffix lands here. Take the most recent
+            # match in case the dir has stale files.
+            seed_str = str(seed)
+            candidates = sorted(
+                (p for p in output_dir.iterdir()
+                 if p.is_file()
+                 and p.suffix.lower() == ".png"
+                 and seed_str in p.name),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                # No file → mflux really didn't produce one for this seed.
+                # Partial success: return whatever we got from other seeds.
+                continue
+            path = candidates[0]
         results.append({
             "png_path": str(path),
             "seed": seed,
