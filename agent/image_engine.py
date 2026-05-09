@@ -32,11 +32,12 @@ This module is the dispatch layer. Four backends ship today:
   - **hidream** — fully-local HiDream-O1-Image-Dev (8B Qwen3-VL-based unified
     pixel-patch transformer, MIT). Lives in its own venv outside Phosphene
     at `/Users/salo/HIDREAM-O1-MLX-LAB-active/`. Subprocess pattern, mirrors
-    mflux. Default quant **Q6** (~8.5 GB working set, 1024×1024 in ~36s) —
-    bandwidth-bound on this hardware so Q6 is twice as fast as Q8 with
-    equivalent prompt fidelity. Q4 ships dark — never use. Strong prompt
-    fidelity across photo/anime/painting/macro/architecture; faint 32-pixel
-    patch grid in flat regions (architectural).
+    mflux. Default **BF16** (~16 GB working set, 1024×1024 in ~67s) —
+    matches upstream's master-weight precision and is the only precision
+    that doesn't show patch-grid artifacts in flat regions. Q8/Q6 work
+    at square 2048×2048 but exhibit visible 32-px grid artifacts at
+    non-square trained dims. Q4 ships dark (brightness collapse). Strong
+    prompt fidelity across photo/anime/painting/macro/architecture.
 
   Recommended defaults (May 2026):
     - **Comfortable+ (32 GB+)**  → `Runpod/FLUX.2-klein-4B-mflux-4bit`
@@ -118,12 +119,12 @@ class ImageEngineConfig:
     mflux_lora_paths: list[str] = field(default_factory=list)
     mflux_lora_scales: list[float] = field(default_factory=list)
 
-    # HiDream-O1-Image-Dev (Q8 MLX) — runs out of a separate lab venv outside
+    # HiDream-O1-Image-Dev (BF16 MLX) — runs out of a separate lab venv outside
     # Phosphene's tree. Subprocess pattern; we never import mlx-vlm into
     # Phosphene's interpreter. Defaults below point at the canonical lab
     # location; override when the lab moves.
     hidream_python_path: str = ""                   # default = HIDREAM_LAB_DIR/.venv/bin/python
-    hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-q8
+    hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-bf16
     hidream_steps: int = 28                         # Dev distillation needs the full 28; don't lower
     hidream_noise_scale: float = 7.5                # FlashFlowMatch tuned default; lowering collapses the image
     hidream_noise_clip_std: float = 2.5
@@ -241,7 +242,7 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
             return False, ("HiDream lab venv not found. Install at "
                            f"{HIDREAM_DEFAULT_PY} or override hidream_python_path")
         if not model:
-            return False, (f"HiDream Q8 model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}. "
+            return False, (f"HiDream model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}. "
                            "Run the lab's converter or override hidream_model_path.")
         return True, f"HiDream ready: model={Path(model).name}, steps={config.hidream_steps}"
     return False, f"unknown engine kind: {config.kind!r}"
@@ -973,7 +974,7 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 
 
 # ---------------------------------------------------------------------------
-# HiDream-O1-Image-Dev (Q8 MLX)
+# HiDream-O1-Image-Dev (BF16 MLX)
 #
 # Lives in its own venv outside Phosphene so that mlx-vlm + Phosphene's
 # ltx-2-mlx env stay decoupled (different MLX-related dep trees historically
@@ -982,8 +983,8 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 # Lab layout:
 #   /Users/salo/HIDREAM-O1-MLX-LAB-active/
 #     .venv/bin/python            <- the interpreter we shell out to
-#     mlx_models/hidream-o1-dev-q8/
-#       model.safetensors         <- 6 GB Q8 backbone (mlx-vlm-loadable)
+#     mlx_models/hidream-o1-dev-bf16/
+#       model.safetensors         <- 17 GB BF16 backbone (mlx-vlm-loadable)
 #       extras/custom_heads.safetensors
 #       config.json (with quantization field)
 #       tokenizer.json, processor configs
@@ -998,11 +999,15 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 
 HIDREAM_LAB_DIR = Path("/Users/salo/HIDREAM-O1-MLX-LAB-active")
 HIDREAM_DEFAULT_PY = HIDREAM_LAB_DIR / ".venv" / "bin" / "python"
-# Q6 sweet spot: 2x faster than Q8 (36s vs 67s per 1024×1024) and 30% less
-# RAM (8.5 GB vs 11.5 GB) with the same prompt fidelity. mlx-vlm's quantized
-# matmul kernels are bandwidth-bound and Q6 has fewer bits per weight.
-# Q4 ships dark (brightness collapses) — never use.
-HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-q6"
+# BF16 (no quantization) is the only precision that doesn't accumulate visible
+# patch-grid artifacts. Upstream loads weights in fp32 + autocasts to bf16;
+# any per-group quantization (Q4/Q6/Q8) introduces dequant rounding that
+# compounds across 36 layers and shows as a 32-pixel grid in flat regions
+# (skies, walls, water), especially at non-square trained dimensions.
+# BF16 is 17.55 GB on disk + ~16 GB peak RAM at 1440×2560 (Comfortable+ tier).
+# Q4 corrupts brightness (ships dark) — never use.
+# Q6/Q8 work at square 2048×2048 but show grid at non-square trained dims.
+HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-bf16"
 HIDREAM_GENERATE_SCRIPT = HIDREAM_LAB_DIR / "scripts" / "hidream_o1" / "generate_hidream_o1_mlx.py"
 HIDREAM_PATCH_SIZE = 32   # HiDream operates on patch-aligned multiples; we round if asked for non-aligned
 
@@ -1039,7 +1044,7 @@ def _resolve_hidream_python(config: ImageEngineConfig) -> str | None:
 
 
 def _resolve_hidream_model(config: ImageEngineConfig) -> str | None:
-    """Return the absolute path of the converted HiDream Q8 model dir, or None."""
+    """Return the absolute path of the converted HiDream model dir, or None."""
     p = Path(config.hidream_model_path) if config.hidream_model_path else HIDREAM_DEFAULT_MODEL
     return str(p) if (p / "model.safetensors").exists() and (p / "extras" / "custom_heads.safetensors").exists() else None
 
@@ -1080,7 +1085,7 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     model = _resolve_hidream_model(config)
     if not model:
         raise FileNotFoundError(
-            f"HiDream Q8 model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}"
+            f"HiDream model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}"
         )
     script = str(HIDREAM_GENERATE_SCRIPT)
     if not Path(script).is_file():
@@ -1140,7 +1145,7 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         results.append({
             "png_path": str(png),
             "seed": seed,
-            "engine": "hidream-o1-dev-q8",
+            "engine": "hidream-o1-dev-bf16",
             "width": aligned_w,
             "height": aligned_h,
         })

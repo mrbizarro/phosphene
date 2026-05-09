@@ -5565,7 +5565,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_edit_high_inline",     None,                         0.0, 240.0),
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
-                    ("hidream_inline",             None,                         0.0,  36.0),
+                    ("hidream_inline",             None,                         0.0, 130.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
@@ -16529,7 +16529,7 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev Q6 (high-fidelity T2I, no refs &middot; ~36 s/image, 8.5 GB) [NEW]</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 (max-fidelity T2I, no refs &middot; ~67 s/image, 16 GB) [NEW]</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
