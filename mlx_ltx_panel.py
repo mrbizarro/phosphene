@@ -699,6 +699,77 @@ def _safe_loras_dir() -> Path:
     return LORAS_DIR
 
 
+# Compatibility taxonomy for LoRAs across the panel's two render lanes
+# (video via ltx_pipelines_mlx + image via mflux). The picker filters its
+# library down to LoRAs that can fire with the user's current
+# (mode, engine) selection. Source of truth is the CivitAI sidecar's
+# `base_model` field; we map that to one or more compat tags.
+#
+# Compat tag vocabulary used throughout the panel + JS picker:
+#   "video"           — LTX-Video LoRAs (any t2v / i2v / keyframe / extend)
+#   "image:flux1"     — FLUX.1 [dev] / [schnell] (mflux flux1 family)
+#   "image:flux2"     — FLUX.2 (klein-4b) base + Klein-Edit (flux2 + flux2_edit)
+#   "image:qwen"      — Qwen-Image / Qwen-Image-Edit (qwen + qwen_edit)
+#   "image:sdxl"      — SDXL 1.0 (mflux doesn't run SDXL today; flag for future)
+#   "image:z_image"   — Z-Image / Z-Image Turbo (no LoRAs known yet)
+#   "image:kontext"   — FLUX.1 Kontext-dev (image-conditioning family)
+#   "unknown"         — sidecar missing base_model, or string we can't map.
+#                       Surfaced in EVERY filter with a `?` indicator so the
+#                       user can still try it (better to show + warn than to
+#                       hide and leave the user confused).
+def _classify_lora_modes(base_model) -> list[str]:
+    """Map a CivitAI `base_model` sidecar string to compat tags.
+
+    CivitAI is wildly inconsistent on this field — different uploaders
+    write `Flux.1 D`, `flux 1 d`, `FLUX1`, `Flux1.D`, etc. for the same
+    family. We lowercase + substring-match generously rather than
+    exact-match. Returns a list because some LoRAs cover both the
+    distilled + base flavors of one family.
+
+    Anything we can't classify returns ["unknown"] so the picker can
+    still surface it (with a `?` indicator) instead of silently hiding.
+    """
+    if not base_model:
+        return ["unknown"]
+    s = str(base_model).strip().lower()
+    if not s:
+        return ["unknown"]
+    # Strip non-alphanumerics into a normalized lookup form so all of
+    # "Flux.1 D", "flux1.d", "FLUX-1-D" collapse to "flux1d".
+    norm = "".join(ch for ch in s if ch.isalnum())
+
+    tags: list[str] = []
+    # ---- Video lane (LTX-Video) ----
+    # CivitAI strings include "LTXV 2.3", "LTX-Video", "LTX-2", "LTXV2.3".
+    if "ltx" in norm:
+        tags.append("video")
+    # ---- Image lane: Qwen ----
+    # "Qwen Image", "Qwen-Image-Edit", "Qwen Image Edit 2511" → image:qwen.
+    if "qwen" in norm:
+        tags.append("image:qwen")
+    # ---- Image lane: FLUX.2 ----
+    # Match BEFORE the FLUX.1 branch so "flux2" / "flux2d" don't fall
+    # through to flux1 via the leading "flux" substring.
+    if "flux2" in norm or "flux20" in norm:
+        tags.append("image:flux2")
+    elif "kontext" in norm:
+        # FLUX.1 Kontext is its own image-conditioning model. Tag
+        # separately so the kontext_high engine can filter cleanly.
+        tags.append("image:kontext")
+    elif "flux" in norm and "flux2" not in norm:
+        # Catch flux1d, flux1s, flux1, "flux 1", "flux.1 d". The broader
+        # `"flux" in norm` is enough for the FLUX.1 family.
+        tags.append("image:flux1")
+    # ---- Image lane: SDXL ----
+    if "sdxl" in norm or "sd_xl" in norm:
+        tags.append("image:sdxl")
+    # ---- Image lane: Z-Image ----
+    if "zimage" in norm or "ztoimage" in norm:
+        tags.append("image:z_image")
+
+    return tags or ["unknown"]
+
+
 def _read_lora_sidecar(safetensors_path: Path) -> dict:
     """Read sidecar JSON next to a .safetensors LoRA. Falls back to bare
     filename + zero metadata when no sidecar is present, so users can
@@ -786,6 +857,13 @@ def list_user_loras() -> list[dict]:
             "preview_url": preview_url,
             "preview_type": preview_type,
             "base_model": meta.get("base_model"),
+            # Compat tags (see _classify_lora_modes). The picker uses
+            # this to filter the library down to LoRAs that can actually
+            # fire with the user's CURRENT (mode, engine) selection. An
+            # "unknown" tag means we couldn't classify the sidecar's
+            # base_model — surface in every filter with a `?` chip so
+            # the user can still try it.
+            "compatible_modes": _classify_lora_modes(meta.get("base_model")),
             "civitai_id": meta.get("civitai_id"),
             "civitai_version_id": meta.get("civitai_version_id"),
             "civitai_url": civitai_url,
@@ -2918,6 +2996,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "refs": list(refs),
                 "label": f("preset_label", "") or None,
                 "session_tag": f("session_tag", ""),
+                # Same `loras` form field the video branch consumes — the
+                # unified UI picker writes to a single hidden #lorasJson
+                # input regardless of mode, so the wire shape is identical.
+                # `run_image_job_inner` resolves these into mflux's
+                # --lora-paths / --lora-scales args, stacked AFTER any
+                # preset LoRAs the chosen engine_override pinned (e.g.
+                # qwen_edit_lightning_inline's Lightning LoRA stays).
+                "loras": parse_loras_from_form(form),
             },
             "command": None,
             "raw_path": None,
@@ -3227,6 +3313,44 @@ def run_image_job_inner(job: dict) -> None:
         cfg = _build_image_engine_config(engine_override)
     except ValueError as e:
         raise RuntimeError(str(e))
+
+    # User-picked LoRAs from the unified picker (same hidden #lorasJson
+    # form field the video form uses). The job's `loras` param shape is
+    # the cleaned list of {path, strength} that parse_loras_from_form()
+    # returned at make_job time. We APPEND them onto whatever LoRAs the
+    # engine_override preset already pinned (e.g. qwen_edit_lightning_inline
+    # pins Lightning at scale 1.0) — preset LoRAs FIRST so they load in
+    # the same order mflux expects, user LoRAs AFTER. Replacing instead
+    # of stacking would break the Lightning step distillation and
+    # silently produce noise. Only mflux engines accept LoRAs today; the
+    # `mock` kind ignores the field.
+    user_loras = list(p.get("loras") or [])
+    if user_loras and cfg.kind == "mflux":
+        preset_paths = list(cfg.mflux_lora_paths or [])
+        preset_scales = list(cfg.mflux_lora_scales or [])
+        # Pad scales to match paths in case a preset author forgot to set
+        # one (mflux defaults to 1.0 in that case but being explicit is
+        # safer for stacking).
+        while len(preset_scales) < len(preset_paths):
+            preset_scales.append(1.0)
+        for entry in user_loras:
+            path = (entry.get("path") or "").strip()
+            if not path:
+                continue
+            try:
+                strength = float(entry.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            preset_paths.append(path)
+            preset_scales.append(max(-2.0, min(2.0, strength)))
+        # Re-emit cfg with the merged stack. ImageEngineConfig is a
+        # dataclass — copying via __dict__ preserves all the other tuned
+        # fields the preset set (steps, guidance, quantize, etc.).
+        cfg = agent_image_engine.ImageEngineConfig(
+            **{**cfg.__dict__,
+               "mflux_lora_paths": preset_paths,
+               "mflux_lora_scales": preset_scales}
+        )
 
     # Pre-flight: refuse the job up-front when we can predict it will OOM
     # mid-Metal-render (commit bc818a5 covers the post-mortem; this short-
@@ -5541,16 +5665,34 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/loras":
             # Returns: { user: [user-installed], curated: [Lightricks
             # officials minus hdr_toggle entries], loras_dir: <abs path>,
-            # civitai_auth: bool }.
+            # civitai_auth: bool, mode_filter: <echoed> }.
             # The HDR-toggle special-case is filtered out of `curated`
             # because the UI exposes it as a plain checkbox elsewhere —
             # showing it in the picker would just confuse users.
+            #
+            # Optional `?mode=<tag>` filter (added with the unified
+            # picker — see _classify_lora_modes). Filters the user list
+            # down to LoRAs whose `compatible_modes` includes the tag
+            # OR includes "unknown" (so unclassified LoRAs show up in
+            # every filter — better than hiding them).
+            qs = parse_qs(parsed.query)
+            mode_filter = (qs.get("mode", [""])[0] or "").strip().lower()
+            user_loras = list_user_loras()
+            if mode_filter:
+                user_loras = [
+                    l for l in user_loras
+                    if mode_filter in (l.get("compatible_modes") or [])
+                    or "unknown" in (l.get("compatible_modes") or [])
+                ]
             curated = [c for c in list_curated_loras()
                        if not c.get("is_hdr_toggle")]
             self._json({
-                "user": list_user_loras(),
+                "user": user_loras,
                 "curated": curated,
                 "loras_dir": str(_safe_loras_dir()),
+                # Echo back so the JS picker can verify the server filtered
+                # by the mode it asked for (vs back-compat unfiltered).
+                "mode_filter": mode_filter or None,
                 # True iff a CivitAI key is configured. Source of truth:
                 # the saved panel settings first, falling back to the
                 # env var if a power user prefers shell-level config.
@@ -13725,57 +13867,74 @@ HTML = r"""<!doctype html>
         </label>
       </div>
 
-      <!-- LoRA picker. Collapsible because most users won't touch it on
-           a given session, and inline because hiding it behind a modal
-           makes it easy to forget. Loaded from /loras on open; the
-           "Browse CivitAI" affordance opens the search modal. -->
-      <!-- LoRAs section — visually distinct from the surrounding form so
-           users notice "oh, there's a whole controllable area here." A
-           thin separator above + bordered container + a clear chevron
-           on the summary. Default open so first-time users see what's
+      <!-- LoRA picker — UNIFIED across video form + Image Studio.
+           Lives inside #genForm by default (so the video form's FormData
+           picks up the hidden #lorasJson on submit), but on
+           setMode('image') the JS portals the visible <details> over to
+           #loraPickerStudioSlot so the SAME picker renders inside the
+           Studio composer. One source of truth: _activeLoras + the same
+           hidden #lorasJson field. The picker's library list is
+           filtered by /loras?mode=<tag> based on the current (mode +
+           engine) selection — see refreshLoras() in JS for the mapping.
+
+           Collapsible because most users won't touch it on a given
+           session, and inline because hiding it behind a modal makes
+           it easy to forget. Default open so first-time users see what's
            inside without hunting for the disclosure triangle. -->
       <div class="form-divider"></div>
-      <details id="lorasDetails" open class="loras-section">
-        <summary class="loras-summary">
-          <span class="loras-chevron" aria-hidden="true">▾</span>
-          <span class="loras-title">LoRAs</span>
-          <span class="loras-meta" id="lorasSummaryCount">none active</span>
-          <!-- Action buttons live in the header so they're visible
-               regardless of how far the user has scrolled inside the
-               LoRA list. Rescan is icon-only (the ↻ glyph reads as
-               refresh universally); Browse CivitAI is the primary CTA
-               for adding new LoRAs so it's a coloured button.
-               event.stopPropagation() keeps clicks from toggling the
-               <details> open/closed state. -->
-          <span class="loras-header-actions">
-            <button type="button" class="loras-icon-btn"
-                    title="Rescan mlx_models/loras/ for new files"
-                    onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()">↻</button>
-            <button type="button" class="loras-browse-btn"
-                    onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()">🔍 Browse CivitAI</button>
-          </span>
-        </summary>
-        <div class="loras-body" id="lorasBody">
-          <!-- Filter/search box. Shows up only when 5+ LoRAs are
-               installed; below that it's just visual noise. Filters by
-               name AND trigger words (case-insensitive substring). -->
-          <div id="lorasFilterRow" style="display:none;">
-            <input type="text" id="lorasFilter" class="lora-filter"
-                   placeholder="Filter LoRAs… (name or trigger word)"
-                   oninput="renderLorasList()">
+      <div id="loraPickerVideoSlot">
+        <details id="lorasDetails" open class="loras-section">
+          <summary class="loras-summary">
+            <span class="loras-chevron" aria-hidden="true">▾</span>
+            <span class="loras-title">LoRAs</span>
+            <span class="loras-meta" id="lorasSummaryCount">none active</span>
+            <!-- Action buttons live in the header so they're visible
+                 regardless of how far the user has scrolled inside the
+                 LoRA list. Rescan is icon-only (the ↻ glyph reads as
+                 refresh universally); Browse CivitAI is the primary CTA
+                 for adding new LoRAs so it's a coloured button.
+                 event.stopPropagation() keeps clicks from toggling the
+                 <details> open/closed state. -->
+            <span class="loras-header-actions">
+              <button type="button" class="loras-icon-btn"
+                      title="Rescan mlx_models/loras/ for new files"
+                      onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()">↻</button>
+              <button type="button" class="loras-browse-btn"
+                      onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()">🔍 Browse CivitAI</button>
+            </span>
+          </summary>
+          <div class="loras-body" id="lorasBody">
+            <!-- Mode/engine context banner — shows the active filter so
+                 the user understands why some library entries are
+                 hidden when they switch engine in Image Studio. -->
+            <div class="lora-mode-banner hint" id="loraModeBanner"
+                 style="margin: 0 0 6px 0; font-size: 11px;"></div>
+            <!-- Filter/search box. Shows up only when 5+ LoRAs are
+                 installed; below that it's just visual noise. Filters by
+                 name AND trigger words (case-insensitive substring). -->
+            <div id="lorasFilterRow" style="display:none;">
+              <input type="text" id="lorasFilter" class="lora-filter"
+                     placeholder="Filter LoRAs… (name or trigger word)"
+                     oninput="renderLorasList()">
+            </div>
+            <div class="hint" id="lorasEmpty">
+              Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
+              to use them, or click <strong>Browse CivitAI</strong> above.
+              Each LoRA picks up an optional sidecar <code>.json</code> with
+              name + trigger words + recommended strength.
+            </div>
+            <div class="loras-list" id="lorasList"></div>
           </div>
-          <div class="hint" id="lorasEmpty">
-            Drop <code>.safetensors</code> files into <code id="lorasDir">mlx_models/loras/</code>
-            to use them, or click <strong>Browse CivitAI</strong> above.
-            Each LoRA picks up an optional sidecar <code>.json</code> with
-            name + trigger words + recommended strength.
-          </div>
-          <div class="loras-list" id="lorasList"></div>
-        </div>
-      </details>
+        </details>
+      </div>
       <div class="form-divider"></div>
       <!-- Hidden field; updated by the LoRA picker JS to a JSON-encoded
-           array of {path, strength} that make_job parses. -->
+           array of {path, strength} that make_job parses. STAYS inside
+           #genForm even when the visible <details id="lorasDetails"> is
+           portaled over to the Studio slot — the video form's FormData
+           still needs to pick it up on submit. Image Studio submits go
+           through imgStudioGenerate() which reads _activeLoras directly
+           and attaches a `loras` field manually. -->
       <input type="hidden" id="lorasJson" name="loras" value="">
 
       <!-- Advanced — power-user options. We trimmed two things in cleanup:
@@ -13983,7 +14142,7 @@ HTML = r"""<!doctype html>
         <div class="studio-field studio-field-wide">
           <label class="lbl">Engine</label>
           <div class="studio-engine-row">
-            <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate()">
+            <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto" selected>Auto (use Settings)</option>
               <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2511 + Lightning (multi-ref &middot; 4-step Q6, ~10-15 s/image)</option>
               <option value="qwen_edit_inline">Qwen-Image-Edit-2511 (multi-ref &middot; 8-step Q6, ~1 min/image)</option>
@@ -14019,6 +14178,14 @@ HTML = r"""<!doctype html>
           <input type="number" id="imgStudioSeed" value="-1">
         </div>
       </div>
+
+      <!-- Slot for the unified LoRA picker. Empty by default; setMode('image')
+           portals #lorasDetails into here so the SAME picker the video form
+           uses appears tightly integrated under the Image Studio composer.
+           When the user switches engine (e.g. Qwen-Edit → FLUX.2 Klein-Edit)
+           the library auto-refilters via /loras?mode=image:flux2. Active
+           chips that don't match the current engine get a warning badge. -->
+      <div id="loraPickerStudioSlot"></div>
 
       <div class="studio-actions">
         <button class="primary studio-run-btn" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
@@ -14970,6 +15137,15 @@ function setMode(mode) {
     if (genForm) genForm.style.display = 'none';
     document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.mode === 'image'));
+    // Portal the unified LoRA picker into the Studio composer slot, so
+    // the SAME UI (one chip strip, one library, one + LoRA button) is
+    // visible under Image Studio. Re-renders with the engine-aware
+    // filter automatically (renderLorasList reads _currentLoraModeFilter
+    // every time, no separate config to thread). The hidden #lorasJson
+    // input STAYS inside #genForm — imgStudioGenerate reads
+    // _activeLoras directly when posting, so the studio submit doesn't
+    // depend on the hidden field's location.
+    _portalLoraPicker('studio');
     // Wire ref drop-zones once + refresh library on every entry
     if (typeof imgStudioWireRefSlots === 'function') imgStudioWireRefSlots();
     if (typeof imgStudioRefreshLibrary === 'function') imgStudioRefreshLibrary();
@@ -14989,6 +15165,9 @@ function setMode(mode) {
   }
   if (studio) studio.classList.remove('show');
   if (genForm) genForm.style.display = '';
+  // Portal the picker back to its video-form home so it's visible above
+  // the Generate button when the user is composing a video shot.
+  _portalLoraPicker('video');
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   // Mode → main-outputs filter auto-set (Videos for video modes).
@@ -15013,6 +15192,30 @@ function setMode(mode) {
   // the next 1.5s poll tick.
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
+
+// Move the unified LoRA picker between its two homes (Option A portal).
+// "video" → goes inside #genForm (its declared position), "studio" →
+// goes inside #studioSection. Idempotent: a re-portal to the same
+// destination is a no-op. The hidden #lorasJson input is a SEPARATE
+// element that stays inside #genForm regardless, so the video form's
+// FormData(genForm) keeps picking it up. Image Studio's submit
+// (imgStudioGenerate) reads _activeLoras directly when posting.
+function _portalLoraPicker(dest) {
+  const node = document.getElementById('lorasDetails');
+  const videoSlot = document.getElementById('loraPickerVideoSlot');
+  const studioSlot = document.getElementById('loraPickerStudioSlot');
+  if (!node) return;
+  const target = (dest === 'studio') ? studioSlot : videoSlot;
+  if (!target || node.parentElement === target) {
+    if (typeof renderLorasList === 'function') renderLorasList();
+    return;
+  }
+  target.appendChild(node);
+  // Re-render so the mode banner + library filter snap to the new
+  // (mode + engine) context immediately.
+  if (typeof renderLorasList === 'function') renderLorasList();
+}
+
 // ====== Image Studio (manual still gen) ======================================
 // State: 3 reference slots. Each slot holds {path, name} when populated.
 const IMG_STUDIO = {
@@ -15381,6 +15584,16 @@ async function imgStudioGenerate() {
     // accepts a JSON-encoded list as a form field, and make_job()
     // mode='image' parses the same shape (commit 1).
     fd.set('refs', JSON.stringify(body.refs || []));
+    // Carry user-picked LoRAs through the same `loras` form field the
+    // video form uses (parse_loras_from_form on the server is shared).
+    // imgStudioGenerate doesn't go through FormData(genForm), so we
+    // attach it explicitly from _activeLoras here. Stacks on top of any
+    // preset LoRA the chosen engine_override pinned (Lightning, etc.) —
+    // run_image_job_inner does the merge.
+    if (typeof _activeLoras !== 'undefined' && Array.isArray(_activeLoras) && _activeLoras.length) {
+      const slim = _activeLoras.map(l => ({ path: l.path, strength: l.strength }));
+      fd.set('loras', JSON.stringify(slim));
+    }
     const r = await fetch('/queue/add', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     document.getElementById('imgStudioStatus').textContent =
@@ -17912,8 +18125,52 @@ async function applySettings() {
 // On every change we mirror the list into the hidden #lorasJson field
 // so make_job's parse_loras_from_form picks them up at submit time.
 
-let _activeLoras = [];   // [{path, name, strength, trigger_words, ...}]
+let _activeLoras = [];   // [{path, name, strength, trigger_words, compatible_modes, ...}]
 let _knownUserLoras = []; // last list_user_loras() snapshot, for the picker
+
+// Resolve the compat tag the picker should filter by, based on the
+// CURRENT (mode + engine) selection. The unified picker lives in ONE
+// place but its library list re-filters when the user switches mode
+// (Manual T2V/I2V/keyframe/extend → "video") or when they pick a
+// different engine in Image Studio (Qwen-Edit → "image:qwen", FLUX.2
+// Klein-Edit → "image:flux2", etc.). Returns "" to mean "no filter,
+// show everything" — the back-compat path when we can't determine
+// the active engine.
+function _currentLoraModeFilter() {
+  const mode = (window.currentMode || document.getElementById('mode')?.value || 't2v');
+  if (mode !== 'image') {
+    // All video modes share the LTX lane.
+    return 'video';
+  }
+  // Image Studio: read the engine override + map to compat tag.
+  const eng = (document.getElementById('imgStudioEngine')?.value || 'auto').toLowerCase();
+  if (eng.startsWith('qwen_edit')) return 'image:qwen';
+  if (eng.startsWith('flux2_edit') || eng.startsWith('flux2'))  return 'image:flux2';
+  if (eng.startsWith('flux1') || eng === 'flux1_inline')        return 'image:flux1';
+  if (eng.startsWith('kontext'))   return 'image:kontext';
+  if (eng.startsWith('z_image'))   return 'image:z_image';
+  if (eng.startsWith('mock'))      return '';   // no filter for mock
+  // 'auto' → fall back to the user's saved engine. Without a server
+  // round-trip to /agent/config we don't know exactly which family
+  // they saved; show ALL image-lane LoRAs so we don't false-hide.
+  return '';
+}
+
+// Friendly label for the active filter, surfaced in the picker banner
+// so the user understands "why don't I see all my LoRAs". Mirrors the
+// _currentLoraModeFilter return values.
+function _loraFilterLabel(tag) {
+  switch (tag) {
+    case 'video':         return 'LTX-Video LoRAs (active video mode)';
+    case 'image:qwen':    return 'Qwen-Image / Qwen-Image-Edit LoRAs';
+    case 'image:flux2':   return 'FLUX.2 LoRAs';
+    case 'image:flux1':   return 'FLUX.1 LoRAs';
+    case 'image:kontext': return 'FLUX.1 Kontext LoRAs';
+    case 'image:z_image': return 'Z-Image LoRAs (none expected — most LoRAs trained for other families)';
+    case 'image:sdxl':    return 'SDXL LoRAs';
+    default:              return 'all installed LoRAs';
+  }
+}
 
 function _serializeLoras() {
   // What the helper actually needs is path + strength. Keep the rest in
@@ -17950,6 +18207,12 @@ function setLoraStrength(path, strength) {
 }
 
 async function refreshLoras() {
+  // Pull the FULL library (no mode filter) so _knownUserLoras keeps every
+  // entry — that lets refreshLoras() also serve as the "deleted on disk"
+  // garbage collector below. The visible filter is applied client-side
+  // in renderLorasList() via _currentLoraModeFilter(), which keeps the
+  // round-trip count to one and avoids re-fetching every time the
+  // user flips mode/engine.
   let data;
   try {
     data = await (await fetch('/loras')).json();
@@ -17961,6 +18224,16 @@ async function refreshLoras() {
   if (data.loras_dir) {
     const dirEl = document.getElementById('lorasDir');
     if (dirEl) dirEl.textContent = data.loras_dir;
+  }
+  // Backfill compatible_modes on any active LoRA whose entry we now
+  // have full metadata for — addLoraToActive() may have stored a sparse
+  // {path, strength, name} from a CivitAI install before /loras was
+  // refreshed.
+  for (const a of _activeLoras) {
+    if (!a.compatible_modes) {
+      const ul = _knownUserLoras.find(u => u.path === a.path);
+      if (ul) a.compatible_modes = ul.compatible_modes || ['unknown'];
+    }
   }
   // If a row was previously active but the file is gone (deleted on
   // disk), drop it from the active set so we don't submit a stale path.
@@ -17976,7 +18249,13 @@ function renderLorasList() {
   const empty = document.getElementById('lorasEmpty');
   const filterRow = document.getElementById('lorasFilterRow');
   const filterInput = document.getElementById('lorasFilter');
+  const banner = document.getElementById('loraModeBanner');
   if (!wrap) return;
+
+  // Resolve current (mode + engine) → compat tag. Drives both the
+  // library filter AND the per-active-chip "wrong family" warning.
+  const modeTag = _currentLoraModeFilter();
+
   // Combine: user-installed LoRAs (from /loras) plus any active LoRAs
   // that aren't user-installed (HF repo paths, e.g. from the HDR toggle).
   const allRows = [];
@@ -17991,6 +18270,7 @@ function renderLorasList() {
       recommended_strength: ul.recommended_strength || 1.0,
       filename: ul.filename,
       civitai_url: ul.civitai_url,
+      compatible_modes: ul.compatible_modes || ['unknown'],
       active: !!active,
       strength: active ? active.strength : (ul.recommended_strength || 1.0),
       kind: 'user',
@@ -18005,6 +18285,7 @@ function renderLorasList() {
       recommended_strength: 1.0,
       filename: null,
       civitai_url: null,
+      compatible_modes: a.compatible_modes || ['unknown'],
       active: true,
       strength: a.strength,
       kind: 'remote',
@@ -18016,18 +18297,32 @@ function renderLorasList() {
     wrap.innerHTML = '';
     if (empty) empty.style.display = '';
     if (filterRow) filterRow.style.display = 'none';
+    if (banner) banner.textContent = '';
     return;
   }
   if (empty) empty.style.display = 'none';
-  // Surface the filter input only when 5+ LoRAs are installed; below that
-  // the box is just visual noise.
-  if (filterRow) filterRow.style.display = (allRows.length >= 5) ? '' : 'none';
 
-  // Apply filter (case-insensitive substring on name + trigger words).
+  // Apply mode-aware filter FIRST (drops library entries for the wrong
+  // engine family, but always keeps active rows visible — yanking an
+  // active row when the user switches engine would be confusing). Also
+  // always keep "unknown" so unclassified LoRAs surface in every filter
+  // — the picker shows them with a `?` indicator.
   let rows = allRows;
+  if (modeTag) {
+    rows = allRows.filter(r => {
+      if (r.active) return true;
+      const tags = r.compatible_modes || ['unknown'];
+      return tags.includes(modeTag) || tags.includes('unknown');
+    });
+  }
+  // Surface the filter input only when 5+ LoRAs (post-mode-filter)
+  // remain; below that it's just visual noise.
+  if (filterRow) filterRow.style.display = (rows.length >= 5) ? '' : 'none';
+
+  // Then text filter (case-insensitive substring on name + trigger words).
   const q = (filterInput && filterInput.value || '').trim().toLowerCase();
   if (q) {
-    rows = allRows.filter(r => {
+    rows = rows.filter(r => {
       if (r.name && r.name.toLowerCase().includes(q)) return true;
       for (const t of (r.trigger_words || [])) {
         if (String(t).toLowerCase().includes(q)) return true;
@@ -18042,6 +18337,24 @@ function renderLorasList() {
     return (a.name || '').localeCompare(b.name || '');
   });
 
+  // Mode banner — explains the active filter so users grok "why don't
+  // I see all my LoRAs". Includes a count of any active chips that
+  // DON'T match the current filter (warning state).
+  if (banner) {
+    const active = allRows.filter(r => r.active);
+    const mismatched = modeTag
+      ? active.filter(r => {
+          const tags = r.compatible_modes || ['unknown'];
+          return !tags.includes(modeTag) && !tags.includes('unknown');
+        })
+      : [];
+    let bannerHtml = `Library filter: <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
+    if (mismatched.length > 0) {
+      bannerHtml += ` · <span style="color:var(--warn,#e8b341)">⚠ ${mismatched.length} active LoRA${mismatched.length === 1 ? '' : 's'} won't fire on this engine</span>`;
+    }
+    banner.innerHTML = bannerHtml;
+  }
+
   // Update header summary.
   const summary = document.getElementById('lorasSummaryCount');
   if (summary) {
@@ -18054,18 +18367,37 @@ function renderLorasList() {
     wrap.innerHTML = `<div class="hint" style="padding:8px 0;">No LoRAs match "${escapeHtml(q)}".</div>`;
     return;
   }
-  wrap.innerHTML = rows.map(r => loraRowHtml(r)).join('');
+  wrap.innerHTML = rows.map(r => loraRowHtml(r, modeTag)).join('');
 }
 
 // Build a single compact LoRA row. Inactive rows are ~36px tall (just
 // name + meta + corner actions). Active rows expand inline with the
 // strength slider and trigger chips. Click anywhere on the main row to
 // toggle activation.
-function loraRowHtml(r) {
+//
+// modeTag is the active engine compat tag (e.g. "image:qwen") — used to
+// render the per-chip warning when an ACTIVE LoRA doesn't fit the
+// current engine, and a `?` indicator for unclassified LoRAs.
+function loraRowHtml(r, modeTag) {
   const pathHtml = escapeHtml(r.path);
   const pathAttr = JSON.stringify(r.path).replace(/"/g, '&quot;');
   const nameHtml = escapeHtml(r.name);
   const nameAttr = JSON.stringify(r.name).replace(/"/g, '&quot;');
+  // Per-row family badges. `?` for unknown family (unclassified
+  // base_model), `⚠` for an ACTIVE LoRA whose compat tags don't match
+  // the current engine — clear visible signal that "this chip stays
+  // selected but won't actually fire on the engine you've chosen".
+  const tags = r.compatible_modes || ['unknown'];
+  const isUnknown = tags.length === 1 && tags[0] === 'unknown';
+  const familyMismatch = !!(modeTag && r.active
+    && !tags.includes(modeTag) && !tags.includes('unknown'));
+  const familyBadges = [];
+  if (isUnknown) {
+    familyBadges.push(`<span class="badge" title="Unknown LoRA family — sidecar didn't list a base_model. May or may not fire on this engine.">?</span>`);
+  }
+  if (familyMismatch) {
+    familyBadges.push(`<span class="badge" style="background:rgba(232,179,65,0.15);color:var(--warn,#e8b341)" title="This LoRA was trained for a different family (${tags.join(', ')}) — it will be passed to mflux but probably won't influence the output. Switch the Engine dropdown to a matching family, or remove this LoRA.">⚠</span>`);
+  }
   // Trigger summary line under the name (when not expanded). Truncated.
   const trigs = r.trigger_words || [];
   const trigSummary = trigs.length
@@ -18100,7 +18432,7 @@ function loraRowHtml(r) {
         <div class="lora-toggle-dot"></div>
         <div class="lora-text">
           <div class="lora-name" title="${pathHtml}">
-            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}
+            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${familyBadges.join('')}
           </div>
           <div class="lora-name-meta" title="${escapeHtml(trigs.join(', '))}">${escapeHtml(trigSummary)}</div>
         </div>

@@ -1090,6 +1090,19 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
                                                      no refs supported
                               "mock"                 flat colored squares,
                                                      instant (testing only)
+      loras: list[dict] = []
+                            Same shape as submit_shot's loras. Each
+                            {"name": "<filename>.safetensors",
+                            "strength": 0.7-0.9 typical}. Resolved
+                            against the installed LoRA library (drop
+                            files into mlx_models/loras/). Stacks on
+                            top of any LoRA the chosen engine_override
+                            preset has pinned (e.g. qwen_edit_lightning's
+                            Lightning LoRA stays + your character LoRA
+                            appends). Use this to anchor a character/style
+                            on the image stage — the image-side equivalent
+                            of the LTX character-LoRA path in Path B /
+                            submit_shot's loras arg.
                             **Default for photoreal stills with refs:
                             "flux2_edit_high"** (or qwen_edit_high if
                             multi-character composition is needed).
@@ -1295,6 +1308,85 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
                 f"qwen_edit | qwen_edit_lightning | qwen_edit_high | "
                 f"kontext_high | flux2 | z_image_turbo | mock"
             )
+
+    # ---- Optional user-picked LoRAs (image lane) ------------------------
+    # Image-side equivalent of submit_shot's loras arg. Same {name,
+    # strength} shape, resolved against the installed library via
+    # ops.list_loras_fn(). Stacks on top of any preset LoRAs the chosen
+    # engine_override pinned (e.g. qwen_edit_lightning's Lightning LoRA
+    # stays at scale 1.0 and the user's character LoRA appends after) —
+    # REPLACING those would silently break Lightning's step distillation
+    # and produce noise. Only mflux configs accept LoRAs; the mock kind
+    # ignores them.
+    loras_in = args.get("loras")
+    if loras_in:
+        if not isinstance(loras_in, list):
+            raise _ToolValidationError(
+                "loras must be a list of {name, strength} dicts"
+            )
+        if cfg.kind != "mflux":
+            raise _ToolValidationError(
+                f"loras require an mflux engine; current cfg.kind={cfg.kind!r}. "
+                f"Pass engine_override='qwen_edit' (or another mflux preset) "
+                f"to enable LoRA support."
+            )
+        installed: dict[str, str] = {}
+        fn = getattr(ops, "list_loras_fn", None)
+        if fn is not None:
+            try:
+                for entry in (fn() or []):
+                    fname = entry.get("filename")
+                    fpath = entry.get("path")
+                    if fname and fpath:
+                        installed[fname] = fpath
+            except Exception as e:                          # noqa: BLE001
+                raise _ToolValidationError(
+                    f"could not enumerate installed LoRAs: {e}"
+                ) from e
+        if not installed:
+            raise _ToolValidationError(
+                "loras requested but no LoRAs are installed. Drop a "
+                ".safetensors into mlx_models/loras/ or ask the user to "
+                "install one via Settings → LoRAs → Browse CivitAI."
+            )
+        # Preserve preset LoRAs (Lightning, etc.); APPEND user picks.
+        merged_paths: list[str] = list(cfg.mflux_lora_paths or [])
+        merged_scales: list[float] = list(cfg.mflux_lora_scales or [])
+        while len(merged_scales) < len(merged_paths):
+            merged_scales.append(1.0)
+        for item in loras_in:
+            if not isinstance(item, dict):
+                raise _ToolValidationError(
+                    "each lora entry must be a dict {name, strength}"
+                )
+            name = (item.get("name") or "").strip()
+            if not name:
+                raise _ToolValidationError(
+                    "each lora entry needs a 'name' (the filename returned by list_loras)"
+                )
+            if name not in installed:
+                avail = sorted(installed)[:5]
+                more = ", ..." if len(installed) > 5 else ""
+                raise _ToolValidationError(
+                    f"LoRA {name!r} not installed. Available: {avail}{more}"
+                )
+            try:
+                strength = float(item.get("strength", 1.0))
+            except (TypeError, ValueError):
+                raise _ToolValidationError(
+                    f"strength must be a number, got {item.get('strength')!r}"
+                )
+            strength = max(-2.0, min(2.0, strength))
+            merged_paths.append(installed[name])
+            merged_scales.append(strength)
+        # Re-emit cfg with the merged stack. ImageEngineConfig is a
+        # dataclass — copying via __dict__ keeps all the other tuned
+        # fields (steps, guidance, quantize, family, model) intact.
+        cfg = _image_engine.ImageEngineConfig(
+            **{**cfg.__dict__,
+               "mflux_lora_paths": merged_paths,
+               "mflux_lora_scales": merged_scales}
+        )
 
     safe_label = re.sub(r"[^a-z0-9_-]", "_", label.lower())[:40] or "untitled"
     sid = session.get("session_id") or "session"
