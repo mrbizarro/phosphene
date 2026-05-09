@@ -13024,6 +13024,15 @@ HTML = r"""<!doctype html>
       color: var(--accent-bright);
       letter-spacing: 0.06em;
     }
+    /* The RECOMMENDED badge above is sized for the legacy 4-up Quality
+       row that gave each chip plenty of headroom. The redesign's
+       compact `.quality-strip .q-chip` chips don't have room for an
+       inline badge — without this override the badge crams onto the
+       same line as the chip label, producing a "BalancedRECOMMENDED"
+       overlap that reads as a font glitch. Hide it inside the new
+       strip; the active state is already announced by background +
+       border + accent text. */
+    .quality-strip .pill-quality.active::after { content: none; }
     .pill-quality .ql-name { font-size: 13px; font-weight: 600; color: var(--text); }
     .pill-quality.active .ql-name { color: var(--text); }
     .pill-quality .ql-spec {
@@ -14080,7 +14089,7 @@ HTML = r"""<!doctype html>
       <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2511 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
     </div>
 
     <form id="genForm">
