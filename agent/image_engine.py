@@ -1006,6 +1006,30 @@ HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-q6"
 HIDREAM_GENERATE_SCRIPT = HIDREAM_LAB_DIR / "scripts" / "hidream_o1" / "generate_hidream_o1_mlx.py"
 HIDREAM_PATCH_SIZE = 32   # HiDream operates on patch-aligned multiples; we round if asked for non-aligned
 
+# HiDream-O1 was trained on a fixed list of resolutions. Generating at off-spec
+# dimensions produces visible 32-pixel patch grid artifacts because the model
+# never saw mrope position codes outside this distribution. Snap to the closest
+# trained ratio before generation. List is from upstream pipeline.py utils.py.
+HIDREAM_TRAINED_RESOLUTIONS = [
+    (2048, 2048),
+    (2304, 1728), (1728, 2304),
+    (2560, 1440), (1440, 2560),
+    (2496, 1664), (1664, 2496),
+    (3104, 1312), (1312, 3104),
+    (2304, 1792), (1792, 2304),
+]
+
+
+def _snap_to_trained_resolution(width: int, height: int) -> tuple[int, int]:
+    """Snap (w, h) to the closest aspect ratio HiDream was trained on."""
+    img_ratio = width / height
+    best, min_diff = (2048, 2048), float("inf")
+    for w, h in HIDREAM_TRAINED_RESOLUTIONS:
+        diff = abs(w / h - img_ratio)
+        if diff < min_diff:
+            min_diff, best = diff, (w, h)
+    return best
+
 
 def _resolve_hidream_python(config: ImageEngineConfig) -> str | None:
     """Return the absolute path of the HiDream venv python, or None."""
@@ -1062,11 +1086,14 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     if not Path(script).is_file():
         raise FileNotFoundError(f"HiDream generator script missing at {script}")
 
-    # Patch-align dims (HiDream needs multiples of 32).
-    aligned_w = _patch_align(width)
-    aligned_h = _patch_align(height)
-    if (aligned_w, aligned_h) != (width, height) and on_log:
-        on_log(f"[hidream] patch-aligning {width}x{height} -> {aligned_w}x{aligned_h}")
+    # Snap to trained-aspect-ratio resolution first, then patch-align.
+    # Generating off-spec produces visible 32-pixel patch grid artifacts
+    # because the model never saw those mrope position codes during training.
+    snap_w, snap_h = _snap_to_trained_resolution(width, height)
+    if (snap_w, snap_h) != (width, height) and on_log:
+        on_log(f"[hidream] snapping {width}x{height} -> {snap_w}x{snap_h} (trained dim)")
+    aligned_w = _patch_align(snap_w)
+    aligned_h = _patch_align(snap_h)
 
     results: list[dict] = []
     for i in range(n):

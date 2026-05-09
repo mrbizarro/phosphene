@@ -16,7 +16,19 @@ module.exports = {
         LTX_GEMMA: "{{cwd}}/mlx_models/gemma-3-12b-it-4bit",
         LTX_MODELS_DIR: "{{cwd}}/mlx_models",
         LTX_Q8_LOCAL: "{{cwd}}/mlx_models/ltx-2.3-mlx-q8",
-        LTX_HELPER_PYTHON: "{{cwd}}/ltx-2-mlx/env/bin/python3.11"
+        LTX_HELPER_PYTHON: "{{cwd}}/ltx-2-mlx/env/bin/python3.11",
+        // HF_HOME tells the panel + helper + mflux subprocesses to use
+        // the Pinokio-managed cache at <install>/cache/HF_HOME instead
+        // of ~/.cache/huggingface. install_qwen.js + other Pinokio
+        // installers download weights into <install>/cache/HF_HOME/hub/,
+        // but without this env the panel reads ~/.cache/huggingface/hub/
+        // and reports the weights as missing — the "Qwen models
+        // downloaded but engine reports not cached / 'mflux-generate-
+        // qwen-edit not found'" symptom Salo hit. Pinokio's global
+        // ENVIRONMENT file already sets HF_HOME=./cache/HF_HOME, but
+        // shell.run replaces the env wholesale — we have to declare
+        // it here for the panel to inherit it.
+        HF_HOME: "{{cwd}}/cache/HF_HOME"
       },
       message: ["python mlx_ltx_panel.py"],
       // SHIP-BLOCKER history: we used to have extra `/errno/i` and `/error:/i`
