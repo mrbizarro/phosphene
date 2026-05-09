@@ -18199,7 +18199,12 @@ const QUALITY_PRESETS = {
   quick:    { w: 640,  h: 480, upscale: 'off' },        // 4:3, fastest sanity check
   balanced: { w: 1024, h: 576, upscale: 'fit_720p' },   // exact 16:9 → 1280×720
   standard: { w: 1280, h: 704, upscale: 'off' },        // LTX-wide canonical render
-  high:     { w: 1280, h: 704, upscale: 'off' },        // same dims, different model (Q8)
+  // High = Q8 quality at 1024×576. Lab finding 2026-05-09: at 1024×576
+  // Q8 produces "outstanding" output at ~7:48 wall vs ~11:51 at
+  // 1280×704 — Q8's quality differentiator is per-token detail
+  // capacity, not raw pixels. User can still pick 1280×704 explicitly
+  // via the resolution chip; this preset just sets the saner default.
+  high:     { w: 1024, h: 576, upscale: 'off' },
 };
 
 function setQuality(q) {
