@@ -4201,6 +4201,29 @@ _AGENT_CONFIG_CACHE: agent_engine.EngineConfig | None = None
 # this lock is the server-side safety net.
 _IMG_STUDIO_LOCK = threading.Lock()
 
+# Per-session "turn in progress" locks. ThreadingHTTPServer means a
+# double-click on Send, a browser auto-retry, or a second tab can fire
+# two `/agent/sessions/<sid>/message` calls against the same JSON
+# session. save_session() is atomic but last-writer-wins, and both
+# turns can submit jobs into the queue. We hand out one Lock per
+# session_id and acquire it non-blocking — a concurrent turn returns
+# HTTP 409 instead of corrupting the session. _AGENT_SESSION_LOCKS_GUARD
+# only protects materialization of the dict entry; it is NOT held
+# while the agent loop runs.
+_AGENT_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_AGENT_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+def _agent_session_lock(sid: str) -> threading.Lock:
+    """Return the per-session lock, materializing it on first use."""
+    with _AGENT_SESSION_LOCKS_GUARD:
+        lk = _AGENT_SESSION_LOCKS.get(sid)
+        if lk is None:
+            lk = threading.Lock()
+            _AGENT_SESSION_LOCKS[sid] = lk
+        return lk
+
+
 _AGENT_IMAGE_CONFIG_CACHE: agent_image_engine.ImageEngineConfig | None = None
 
 
@@ -6911,182 +6934,194 @@ class Handler(BaseHTTPRequestHandler):
             sid = path[len("/agent/sessions/"):-len("/message")]
             if not agent_runtime.is_valid_session_id(sid):
                 self._json({"error": "session not found"}, 404); return
-            sess = agent_runtime.load_session(sid, STATE_DIR)
-            if sess is None:
-                self._json({"error": "session not found"}, 404); return
+            # Per-session "turn in progress" guard. Try-acquire so a
+            # concurrent send (double-click, retry, second tab) returns
+            # 409 immediately instead of running a second agent loop
+            # against the same JSON session and double-submitting jobs
+            # into the queue. Released in the finally below, AFTER the
+            # response has been sent on every code path.
+            _sess_lock = _agent_session_lock(sid)
+            if not _sess_lock.acquire(blocking=False):
+                self._json({"error": "session busy"}, 409); return
             try:
-                payload = (json.loads(body or "{}")
-                           if ctype.startswith("application/json")
-                           else {k: v[0] if v else "" for k, v in form.items()})
-            except json.JSONDecodeError as e:
-                self._json({"error": f"bad JSON: {e}"}, 400); return
-            user_msg = payload.get("message") or payload.get("content") or ""
-            user_msg = user_msg.strip()
-
-            # Validate + normalize attachments. Each path must live under
-            # UPLOADS — the client can lie about the path even though it
-            # came from a /upload response. Without this check, a malicious
-            # page could submit /etc/passwd as an attachment and the agent's
-            # tools would happily inspect it.
-            raw_atts = payload.get("attachments") or []
-            attachments: list[dict] = []
-            uploads_root = UPLOADS.resolve()
-            for a in raw_atts:
-                if not isinstance(a, dict):
-                    continue
-                p_str = (a.get("path") or "").strip()
-                if not p_str:
-                    continue
+                sess = agent_runtime.load_session(sid, STATE_DIR)
+                if sess is None:
+                    self._json({"error": "session not found"}, 404); return
                 try:
-                    p = Path(p_str).resolve()
-                except Exception:
-                    continue
-                if not p.is_relative_to(uploads_root) or not p.is_file():
-                    self._json({"error": f"attachment outside uploads dir or missing: {p_str}"}, 400)
-                    return
-                attachments.append({
-                    "path": str(p),
-                    "name": (a.get("name") or p.name)[:200],
-                    "mime": (a.get("mime") or "")[:80],
-                    "size": int(a.get("size") or 0),
-                })
-            if not user_msg and not attachments:
-                self._json({"error": "message or attachment is required"}, 400); return
+                    payload = (json.loads(body or "{}")
+                               if ctype.startswith("application/json")
+                               else {k: v[0] if v else "" for k, v in form.items()})
+                except json.JSONDecodeError as e:
+                    self._json({"error": f"bad JSON: {e}"}, 400); return
+                user_msg = payload.get("message") or payload.get("content") or ""
+                user_msg = user_msg.strip()
 
-            if attachments:
-                # Embed an <attachments> JSON block in front of the user text
-                # so the agent sees the file references inline. The renderer
-                # strips this block back out for display and exposes the
-                # parsed list as m.attachments.
-                user_msg = (
-                    "<attachments>\n"
-                    + json.dumps(attachments)
-                    + "\n</attachments>\n"
-                    + user_msg
-                )
-            # Always re-load the engine config in case the user just changed
-            # it via the settings drawer — the session keeps its own copy
-            # for record-keeping but we honor the live config for actual calls.
-            sess.engine_config = _load_agent_config()
-
-            # Auto-start the local engine on first message so the user
-            # doesn't dead-end on a connection-refused error. mlx_lm.server
-            # boots in ~1-2s; weights load lazily on the first
-            # /chat/completions call, which our run_turn timeout (300 s)
-            # accommodates. Saves a trip to Settings → Start.
-            if (sess.engine_config.kind == "phosphene_local"
-                    and not agent_local_server.is_running()):
-                # Memory guard — refuse to spawn mlx-lm when the Mac is
-                # already in swap or close to OOM. Loading a 22 GB Qwen
-                # 35B on top of a 64 GB system that's at 90%+ pressure +
-                # swap is what put Salo in a force-quit dialog last time.
-                # Bail early with an actionable error rather than silently
-                # making the system thrash.
-                mem = get_memory()
-                pressure = mem.get("pressure_pct") or 0
-                swap_gb = mem.get("swap_gb") or 0.0
-                if pressure >= 92 or swap_gb >= 8:
-                    push(f"agent: refusing to auto-start local engine "
-                         f"(memory pressure {pressure}%, swap {swap_gb:.1f} GB)")
-                    self._json({
-                        "error": (
-                            f"Memory too high to start the local engine "
-                            f"({mem.get('used_gb', 0):.1f}/"
-                            f"{mem.get('total_gb', 0):.0f} GB used, "
-                            f"swap {swap_gb:.1f} GB). "
-                            "Loading a 22 GB chat model on top of this "
-                            "would force the Mac into heavy swap. "
-                            "Either: (a) wait for current renders to "
-                            "finish, (b) switch to a smaller model in "
-                            "Settings (Gemma 12B is ~7.5 GB), or (c) "
-                            "quit other heavy apps (Claude.app, Chrome) "
-                            "and try again."
-                        ),
-                    }, 503)
-                    return
-                push("agent: auto-starting local engine for first message")
-                _agent_local_start()
-                # Wait briefly for /v1/models to respond before we proceed —
-                # avoids the very first chat call seeing a half-bound port.
-                import urllib.error
-                base = sess.engine_config.base_url.rstrip("/") + "/models"
-                deadline = time.time() + 30
-                ready = False
-                while time.time() < deadline:
+                # Validate + normalize attachments. Each path must live under
+                # UPLOADS — the client can lie about the path even though it
+                # came from a /upload response. Without this check, a malicious
+                # page could submit /etc/passwd as an attachment and the agent's
+                # tools would happily inspect it.
+                raw_atts = payload.get("attachments") or []
+                attachments: list[dict] = []
+                uploads_root = UPLOADS.resolve()
+                for a in raw_atts:
+                    if not isinstance(a, dict):
+                        continue
+                    p_str = (a.get("path") or "").strip()
+                    if not p_str:
+                        continue
                     try:
-                        with urllib.request.urlopen(base, timeout=2):
-                            ready = True
-                            break
-                    except (urllib.error.URLError, OSError):
-                        time.sleep(0.4)
-                if not ready:
-                    push("agent: local engine spawn timed out; surfacing error")
-                    last = agent_local_server.status().get("last_error") or ""
-                    self._json({
-                        "error": (
-                            "Local engine spawned but isn't responding on "
-                            f"{base}. Check the Logs tab for mlx-lm output. "
-                            + (f" Last status: {last}" if last else "")
-                        ),
-                    }, 500)
-                    return
+                        p = Path(p_str).resolve()
+                    except Exception:
+                        continue
+                    if not p.is_relative_to(uploads_root) or not p.is_file():
+                        self._json({"error": f"attachment outside uploads dir or missing: {p_str}"}, 400)
+                        return
+                    attachments.append({
+                        "path": str(p),
+                        "name": (a.get("name") or p.name)[:200],
+                        "mime": (a.get("mime") or "")[:80],
+                        "size": int(a.get("size") or 0),
+                    })
+                if not user_msg and not attachments:
+                    self._json({"error": "message or attachment is required"}, 400); return
 
-            ops = _build_panel_ops()
-            tools_doc = agent_runtime.render_tools_doc()
-            events: list[dict] = []
-            # Pick legacy or smolagents runtime per-request based on env var.
-            _runtime = _select_runtime()
-            push(f"agent: using runtime={_runtime.__name__.split('.')[-1]}")
+                if attachments:
+                    # Embed an <attachments> JSON block in front of the user text
+                    # so the agent sees the file references inline. The renderer
+                    # strips this block back out for display and exposes the
+                    # parsed list as m.attachments.
+                    user_msg = (
+                        "<attachments>\n"
+                        + json.dumps(attachments)
+                        + "\n</attachments>\n"
+                        + user_msg
+                    )
+                # Always re-load the engine config in case the user just changed
+                # it via the settings drawer — the session keeps its own copy
+                # for record-keeping but we honor the live config for actual calls.
+                sess.engine_config = _load_agent_config()
 
-            # Persist after every event so a client polling
-            # /agent/sessions/<id> mid-loop sees the agent's incremental
-            # progress (plan, tool call, tool result, next message, ...)
-            # rather than a 5-minute silence followed by a single batch.
-            # mid-loop disk writes are atomic via runtime.save_session.
-            def _on_event(ev: agent_runtime.TurnEvent) -> None:
+                # Auto-start the local engine on first message so the user
+                # doesn't dead-end on a connection-refused error. mlx_lm.server
+                # boots in ~1-2s; weights load lazily on the first
+                # /chat/completions call, which our run_turn timeout (300 s)
+                # accommodates. Saves a trip to Settings → Start.
+                if (sess.engine_config.kind == "phosphene_local"
+                        and not agent_local_server.is_running()):
+                    # Memory guard — refuse to spawn mlx-lm when the Mac is
+                    # already in swap or close to OOM. Loading a 22 GB Qwen
+                    # 35B on top of a 64 GB system that's at 90%+ pressure +
+                    # swap is what put Salo in a force-quit dialog last time.
+                    # Bail early with an actionable error rather than silently
+                    # making the system thrash.
+                    mem = get_memory()
+                    pressure = mem.get("pressure_pct") or 0
+                    swap_gb = mem.get("swap_gb") or 0.0
+                    if pressure >= 92 or swap_gb >= 8:
+                        push(f"agent: refusing to auto-start local engine "
+                             f"(memory pressure {pressure}%, swap {swap_gb:.1f} GB)")
+                        self._json({
+                            "error": (
+                                f"Memory too high to start the local engine "
+                                f"({mem.get('used_gb', 0):.1f}/"
+                                f"{mem.get('total_gb', 0):.0f} GB used, "
+                                f"swap {swap_gb:.1f} GB). "
+                                "Loading a 22 GB chat model on top of this "
+                                "would force the Mac into heavy swap. "
+                                "Either: (a) wait for current renders to "
+                                "finish, (b) switch to a smaller model in "
+                                "Settings (Gemma 12B is ~7.5 GB), or (c) "
+                                "quit other heavy apps (Claude.app, Chrome) "
+                                "and try again."
+                            ),
+                        }, 503)
+                        return
+                    push("agent: auto-starting local engine for first message")
+                    _agent_local_start()
+                    # Wait briefly for /v1/models to respond before we proceed —
+                    # avoids the very first chat call seeing a half-bound port.
+                    import urllib.error
+                    base = sess.engine_config.base_url.rstrip("/") + "/models"
+                    deadline = time.time() + 30
+                    ready = False
+                    while time.time() < deadline:
+                        try:
+                            with urllib.request.urlopen(base, timeout=2):
+                                ready = True
+                                break
+                        except (urllib.error.URLError, OSError):
+                            time.sleep(0.4)
+                    if not ready:
+                        push("agent: local engine spawn timed out; surfacing error")
+                        last = agent_local_server.status().get("last_error") or ""
+                        self._json({
+                            "error": (
+                                "Local engine spawned but isn't responding on "
+                                f"{base}. Check the Logs tab for mlx-lm output. "
+                                + (f" Last status: {last}" if last else "")
+                            ),
+                        }, 500)
+                        return
+
+                ops = _build_panel_ops()
+                tools_doc = agent_runtime.render_tools_doc()
+                events: list[dict] = []
+                # Pick legacy or smolagents runtime per-request based on env var.
+                _runtime = _select_runtime()
+                push(f"agent: using runtime={_runtime.__name__.split('.')[-1]}")
+
+                # Persist after every event so a client polling
+                # /agent/sessions/<id> mid-loop sees the agent's incremental
+                # progress (plan, tool call, tool result, next message, ...)
+                # rather than a 5-minute silence followed by a single batch.
+                # mid-loop disk writes are atomic via runtime.save_session.
+                def _on_event(ev: agent_runtime.TurnEvent) -> None:
+                    try:
+                        agent_runtime.save_session(sess, STATE_DIR)
+                    except Exception as e:                  # noqa: BLE001
+                        push(f"agent: mid-loop save failed: {e}")
+
                 try:
-                    agent_runtime.save_session(sess, STATE_DIR)
-                except Exception as e:                  # noqa: BLE001
-                    push(f"agent: mid-loop save failed: {e}")
+                    for ev in _runtime.run_turn(
+                        sess, user_msg, ops, tools_doc=tools_doc,
+                        on_event=_on_event,
+                    ):
+                        events.append({"kind": ev.kind, "payload": ev.payload})
+                except Exception as e:                       # noqa: BLE001
+                    push(f"agent: run_turn errored: {e}")
+                    self._json({"error": str(e), "events": events}, 500); return
+                agent_runtime.save_session(sess, STATE_DIR)
 
-            try:
-                for ev in _runtime.run_turn(
-                    sess, user_msg, ops, tools_doc=tools_doc,
-                    on_event=_on_event,
-                ):
-                    events.append({"kind": ev.kind, "payload": ev.payload})
-            except Exception as e:                       # noqa: BLE001
-                push(f"agent: run_turn errored: {e}")
-                self._json({"error": str(e), "events": events}, 500); return
-            agent_runtime.save_session(sess, STATE_DIR)
+                # Plan-and-sleep mode: the agent has just called `finish` which
+                # means the plan is queued and the agent is done thinking for
+                # this batch. Drop the local chat model's memory NOW so the
+                # LTX renderer has the full RAM budget for the overnight run.
+                # On a 64 GB Mac, leaving Qwen 35B (22 GB) resident alongside
+                # active renders pushes the system into swap — exactly the
+                # scenario the user wants to avoid.
+                engine_stopped = False
+                if (sess.finished
+                        and sess.engine_config.kind == "phosphene_local"
+                        and getattr(sess.engine_config, "mode", "plan_sleep") == "plan_sleep"
+                        and agent_local_server.is_running()):
+                    try:
+                        agent_local_server.stop("plan-and-sleep auto-stop after finish")
+                        engine_stopped = True
+                        push("agent: plan-and-sleep — stopped local engine to free RAM for renders")
+                    except Exception as e:                  # noqa: BLE001
+                        push(f"agent: failed to auto-stop local engine: {e}")
 
-            # Plan-and-sleep mode: the agent has just called `finish` which
-            # means the plan is queued and the agent is done thinking for
-            # this batch. Drop the local chat model's memory NOW so the
-            # LTX renderer has the full RAM budget for the overnight run.
-            # On a 64 GB Mac, leaving Qwen 35B (22 GB) resident alongside
-            # active renders pushes the system into swap — exactly the
-            # scenario the user wants to avoid.
-            engine_stopped = False
-            if (sess.finished
-                    and sess.engine_config.kind == "phosphene_local"
-                    and getattr(sess.engine_config, "mode", "plan_sleep") == "plan_sleep"
-                    and agent_local_server.is_running()):
-                try:
-                    agent_local_server.stop("plan-and-sleep auto-stop after finish")
-                    engine_stopped = True
-                    push("agent: plan-and-sleep — stopped local engine to free RAM for renders")
-                except Exception as e:                  # noqa: BLE001
-                    push(f"agent: failed to auto-stop local engine: {e}")
-
-            self._json({
-                "ok": True,
-                "events": events,
-                "session": sess.to_dict(),
-                "rendered_messages": _render_session_messages(sess),
-                "engine_stopped": engine_stopped,
-            })
-            return
+                self._json({
+                    "ok": True,
+                    "events": events,
+                    "session": sess.to_dict(),
+                    "rendered_messages": _render_session_messages(sess),
+                    "engine_stopped": engine_stopped,
+                })
+                return
+            finally:
+                _sess_lock.release()
 
         if path.startswith("/agent/sessions/") and path.endswith("/delete"):
             sid = path[len("/agent/sessions/"):-len("/delete")]
