@@ -14453,6 +14453,17 @@ HTML = r"""<!doctype html>
         <div class="ttl">Idle</div>
         <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
         <div class="meta" id="nowDetail">No job running</div>
+        <!-- Stop button lives in the Now card (bottom pane) so it's
+             reachable from EVERY form mode — the Stop button inside
+             the video #genForm is hidden when Image Studio mode is
+             active, leaving image-gen jobs uncancellable from the UI.
+             Hidden when no job is running; shown via JS when nowCard
+             leaves the .idle state. -->
+        <button type="button" class="danger now-stop-btn" id="nowStopBtn"
+                style="display:none; margin-top:10px"
+                onclick="if (confirm('Stop the current job? Partial output is discarded.')) api('/stop', 'POST').then(poll)">
+          Stop current job
+        </button>
       </div>
     </div>
     <div class="tab-content" id="tab-queue">
@@ -16196,6 +16207,12 @@ async function poll() {
   // block (e.g. mid-deploy where the server is older than the JS).
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
+  // Stop button visibility — only visible while a job is actually running.
+  // Lives in the Now card so it's reachable from EVERY form mode (the
+  // Stop button inside the video #genForm is hidden when Image Studio
+  // mode is active, leaving image-gen jobs uncancellable).
+  const nowStop = document.getElementById('nowStopBtn');
+  if (nowStop) nowStop.style.display = (s.running && s.current) ? '' : 'none';
   if (s.running && s.current) {
     nowCard.classList.remove('idle', 'failed');
     const prog = s.current.progress || null;
