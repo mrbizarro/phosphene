@@ -147,13 +147,17 @@ _TOOL_SCHEMAS: dict[str, dict[str, dict]] = {
         "clip_path": {"type": "string", "description": "Or path to a clip.", "nullable": True},
     },
     "get_selected_anchors": {},
+    # TODO: this schema dict duplicates the real signatures in
+    # agent/tools.py — they drift (P2-4 fix below). A future cleanup
+    # should derive these from one source of truth.
     "upload_image": {
-        "name": {"type": "string", "description": "Optional rename for the upload.", "nullable": True},
-        "file_path": {"type": "string", "description": "Source path on disk.", "nullable": True},
+        # Real handler: agent/tools.py:_upload_image — _required(args, "attachment_id").
+        "attachment_id": {"type": "string", "description": "Absolute path of an uploaded image (the path the chat injected via <attachments>)."},
     },
     "read_document": {
-        "file_path": {"type": "string", "description": "Path to PDF or text doc.", "nullable": True},
-        "max_chars": {"type": "integer", "description": "Truncation cap.", "nullable": True},
+        # Real handler: agent/tools.py:_read_document — _required(args, "path").
+        "path": {"type": "string", "description": "Absolute path of the attached PDF or text file (from <attachments>)."},
+        "max_chars": {"type": "integer", "description": "Truncation cap (default 80000).", "nullable": True},
     },
     "get_master_style": {
         "shot_label": {"type": "string", "description": "Label whose style to fetch.", "nullable": True},
