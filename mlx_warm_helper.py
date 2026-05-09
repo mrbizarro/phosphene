@@ -368,7 +368,25 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
     global _extend_model_dir
-    from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+    # Upstream refactor 2026-05-09 (commits d6cc3d1, 493aec2):
+    #   - TextToVideoPipeline / ImageToVideoPipeline → folded into the
+    #     DistilledPipeline (single class, two-stage half-res → upscale
+    #     → full-res refine; I2V via the image= kwarg of generate_and_save)
+    #   - ExtendPipeline → folded into RetakePipeline
+    # Try old top-level names first (pre-refactor packages still work);
+    # fall back to the new ones with aliases so the rest of this function
+    # body keeps the original symbol names. Constructor signatures are
+    # broadly compatible (model_dir, gemma_model_id, low_memory).
+    # NOTE: the new DistilledPipeline is two-stage by design — output
+    # character may differ slightly from the old single-stage T2V/I2V.
+    # If that becomes a problem, pin ltx-2-mlx to a pre-refactor commit.
+    try:
+        from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+    except ImportError:
+        from ltx_pipelines_mlx import DistilledPipeline, RetakePipeline
+        TextToVideoPipeline = DistilledPipeline
+        ImageToVideoPipeline = DistilledPipeline
+        ExtendPipeline = RetakePipeline
 
     fp = _lora_fingerprint(loras)
 
@@ -436,7 +454,17 @@ def get_hq_pipe(model_dir: str):
     (e.g. user swapped Q8 for a different quant).
     """
     global _hq_pipe, _hq_model_dir
-    from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
+    # Upstream `ltx-2-mlx` refactor 2026-05-09 (commits d6cc3d1, 493aec2,
+    # 32280b9 — `refactor!: rename pipeline classes to match upstream
+    # verbatim`) renamed TwoStageHQPipeline → TI2VidTwoStagesHQPipeline.
+    # Defensive import so the helper works against both old and new
+    # package versions. Constructor signature is unchanged.
+    try:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import (
+            TI2VidTwoStagesHQPipeline as TwoStageHQPipeline,
+        )
+    except ImportError:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
 
     with _pipe_lock:
         release_pipelines(keep_kind="hq")
