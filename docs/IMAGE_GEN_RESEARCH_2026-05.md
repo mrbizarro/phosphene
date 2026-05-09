@@ -8,7 +8,7 @@ LTX 2.3's t2v is weak; image-gen quality is the dominant lever for video output.
 - **"Flux Klein"** = **FLUX.2 [klein] 4B** by Black Forest Labs (Jan 2026). Apache 2.0, mflux-compatible at 4-bit (~4.3 GB), 4-step inference, ~12-18 s/image on Comfortable Mac. **Ship as default.**
 - **mflux 0.17.x is now multi-family.** Legacy `mflux-generate` is FLUX.1-only. New CLIs: `mflux-generate-flux2`, `mflux-generate-z-image-turbo`, `mflux-generate-fibo`, `mflux-generate-qwen`, `mflux-generate-kontext`. Panel currently calls legacy → silently misses every new family.
 - **Z-Image-Turbo (Tongyi/Alibaba, Nov 2025)** is the Compact-tier default — 6B model, ~5.9 GB at 4-bit, 8-9 steps, fits 16 GB.
-- **HiDream-O1-Image-Dev (May 2026 addition)** — 8B Qwen3-VL pixel-patch transformer, MIT licence, runs out of a separate lab venv (NOT mflux). Q8 ~10 GB, ~67 s / 1024×1024 on Comfortable+. Strong prompt fidelity across all genres tested. Available as `kind="hidream"` in `agent/image_engine.py` since commit 45cad69.
+- **HiDream-O1-Image-Dev (May 2026 addition)** — 8B Qwen3-VL pixel-patch transformer, MIT licence, runs out of a separate lab venv (NOT mflux). **Q6 default** (~8 GB, ~36 s / 1024×1024) — 2× faster than Q8 with equivalent fidelity (mlx is bandwidth-bound). Strong prompt fidelity across all genres tested. Available as `kind="hidream"` in `agent/image_engine.py` since commit 45cad69.
 
 ## The single default to ship
 
@@ -63,7 +63,7 @@ def _default_image_engine_for_tier(tier: str) -> dict:
 | FIBO | `briaai/FIBO` | 8B | ~10-12 | Open-RAIL-ish | 30 |
 | Qwen-Image | `filipstrand/Qwen-Image-mflux-6bit` | 20B | ~16 (6-bit) | Apache 2.0 | 25-50 |
 | Flex.1-alpha | `ostris/Flex.1-alpha` | 8B | ~9-10 | Apache 2.0 | 25 |
-| **HiDream-O1-Image-Dev** | `HiDream-ai/HiDream-O1-Image-Dev` | 8B | **~10 (Q8)** | **MIT** | 28 |
+| **HiDream-O1-Image-Dev** | `HiDream-ai/HiDream-O1-Image-Dev` | 8B | **~8 (Q6)** | **MIT** | 28 |
 
 ## mflux 0.17.x per-family CLIs
 
@@ -105,14 +105,14 @@ The lab port lives outside Phosphene at `/Users/salo/HIDREAM-O1-MLX-LAB-active/`
 - **Patch-grid artifact** in flat regions (sky, water, walls). Architectural — not fixable without retraining or an overlap-blend post-pass.
 - **No edit/multi-ref yet.** Architecture supports it; lab pipeline is text-to-image only as of May 2026. Refs continue to flow through `mflux qwen-edit`.
 
-### Tier guidance
+### Tier guidance (revised May 2026 after Q6 measurement)
 
 | Tier | RAM | Use HiDream? |
 |---|---|---|
-| Compact (16-32 GB) | tight | NO — not enough RAM headroom alongside LTX. Use Z-Image-Turbo. |
-| Comfortable (32-79 GB) | OK | OPTIONAL — slower than klein but better fidelity for hero shots. |
-| Roomy (80-119 GB) | YES | Routine. |
-| Studio (120 GB+) | YES | Routine; consider 2048×2048 for finals. |
+| Compact (16-32 GB) | tight | OPTIONAL at Q6 (8.5 GB) — fits but no LTX headroom. Z-Image-Turbo still safer. |
+| Comfortable (32-79 GB) | OK | YES at Q6 — 36s vs Z-Image-Turbo's 80s, lower deterministic RAM. |
+| Roomy (80-119 GB) | YES | Routine; pick Q6 for speed or Q8 for max safety margin. |
+| Studio (120 GB+) | YES | Routine; consider 2048×2048 for finals (~5 min at Q8). |
 
 ## Implementation plan (20 ranked items)
 

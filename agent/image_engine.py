@@ -32,10 +32,11 @@ This module is the dispatch layer. Four backends ship today:
   - **hidream** — fully-local HiDream-O1-Image-Dev (8B Qwen3-VL-based unified
     pixel-patch transformer, MIT). Lives in its own venv outside Phosphene
     at `/Users/salo/HIDREAM-O1-MLX-LAB-active/`. Subprocess pattern, mirrors
-    mflux. Comfortable+ tier (32 GB+) due to ~11.5 GB working set at Q8,
-    1024×1024 in ~67s. Strong prompt fidelity, recognisable subjects across
-    photo/anime/painting/macro/architecture; faint 32-pixel patch grid in
-    flat regions (architectural, not fixable without retraining).
+    mflux. Default quant **Q6** (~8.5 GB working set, 1024×1024 in ~36s) —
+    bandwidth-bound on this hardware so Q6 is twice as fast as Q8 with
+    equivalent prompt fidelity. Q4 ships dark — never use. Strong prompt
+    fidelity across photo/anime/painting/macro/architecture; faint 32-pixel
+    patch grid in flat regions (architectural).
 
   Recommended defaults (May 2026):
     - **Comfortable+ (32 GB+)**  → `Runpod/FLUX.2-klein-4B-mflux-4bit`
@@ -997,7 +998,11 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
 
 HIDREAM_LAB_DIR = Path("/Users/salo/HIDREAM-O1-MLX-LAB-active")
 HIDREAM_DEFAULT_PY = HIDREAM_LAB_DIR / ".venv" / "bin" / "python"
-HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-q8"
+# Q6 sweet spot: 2x faster than Q8 (36s vs 67s per 1024×1024) and 30% less
+# RAM (8.5 GB vs 11.5 GB) with the same prompt fidelity. mlx-vlm's quantized
+# matmul kernels are bandwidth-bound and Q6 has fewer bits per weight.
+# Q4 ships dark (brightness collapses) — never use.
+HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-q6"
 HIDREAM_GENERATE_SCRIPT = HIDREAM_LAB_DIR / "scripts" / "hidream_o1" / "generate_hidream_o1_mlx.py"
 HIDREAM_PATCH_SIZE = 32   # HiDream operates on patch-aligned multiples; we round if asked for non-aligned
 
