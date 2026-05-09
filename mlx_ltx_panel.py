@@ -7793,6 +7793,26 @@ HTML = r"""<!doctype html>
       font-size: 11px;
       margin-left: 4px;
     }
+    /* Reconnected — same banner, swapped to a calm success colorway,
+       lingers for 3s after we come back online. Gives the user a
+       chance to actually READ what just happened (Salo flagged that
+       a too-fast disappear meant he could never see the message). */
+    .panel-offline-banner.reconnected {
+      background: rgba(8, 28, 14, 0.92);
+      border-color: rgba(63, 185, 80, 0.45);
+      color: #d4f0d4;
+      box-shadow:
+        0 0 0 4px rgba(63, 185, 80, 0.06),
+        0 12px 32px rgba(0, 0, 0, 0.45);
+      transition: opacity 600ms ease 2400ms;
+      opacity: 1;
+    }
+    .panel-offline-banner.reconnected .label { color: var(--success); }
+    .panel-offline-banner.reconnected .text { color: rgba(220, 245, 220, 0.85); }
+    .panel-offline-banner.reconnected .icon {
+      filter: none;
+      animation: none;
+    }
     .pill-running { color: var(--accent-bright); border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
     /* Version pill states. Always rendered so the spot is part of the
        user's mental map — when state changes, the colour shift draws
@@ -16785,9 +16805,15 @@ let LAST_STATUS = null;
 // single transient hiccup (network blip, panel reload) doesn't flash.
 let _POLL_FAILS = 0;
 
+// Last 8 banner messages stay accessible from devtools at
+// `window._panelBannerLog` so a user who saw a flash but couldn't
+// read it can recover the message after the fact. Cheap insurance.
+window._panelBannerLog = window._panelBannerLog || [];
+
 function _setOfflineBanner(visible, msg) {
   let bar = document.getElementById('panelOfflineBanner');
   if (visible) {
+    const text = msg || "uploads, chat & renders are paused";
     if (!bar) {
       bar = document.createElement('div');
       bar.id = 'panelOfflineBanner';
@@ -16799,10 +16825,32 @@ function _setOfflineBanner(visible, msg) {
         '<span class="hint">restart from Pinokio</span>';
       document.body.appendChild(bar);
     }
-    bar.querySelector('.text').textContent =
-      msg || "uploads, chat & renders are paused";
-  } else if (bar) {
-    bar.remove();
+    bar.classList.remove('reconnected');
+    bar.querySelector('.label').textContent = 'Phosphene offline';
+    bar.querySelector('.text').textContent = text;
+    bar.querySelector('.hint').textContent = 'restart from Pinokio';
+    const entry = `${new Date().toLocaleTimeString()} offline · ${text}`;
+    window._panelBannerLog.push(entry);
+    if (window._panelBannerLog.length > 8) window._panelBannerLog.shift();
+    console.warn('[phosphene] offline banner:', text);
+  } else if (bar && !bar.classList.contains('reconnected')) {
+    // Linger for 3s in a "back online" state instead of removing
+    // instantly. Salo flagged that he saw a banner flash during a
+    // restart but couldn't read it before it disappeared — this gives
+    // the eye time to register and gives the user a chance to scroll
+    // back in window._panelBannerLog if they want details.
+    bar.classList.add('reconnected');
+    bar.querySelector('.label').textContent = 'Phosphene reconnected';
+    bar.querySelector('.text').textContent = 'queue + renders resumed';
+    bar.querySelector('.hint').textContent = '';
+    const entry = `${new Date().toLocaleTimeString()} online · reconnected`;
+    window._panelBannerLog.push(entry);
+    if (window._panelBannerLog.length > 8) window._panelBannerLog.shift();
+    console.info('[phosphene] panel reconnected');
+    setTimeout(() => {
+      const b = document.getElementById('panelOfflineBanner');
+      if (b && b.classList.contains('reconnected')) b.remove();
+    }, 3000);
   }
 }
 
