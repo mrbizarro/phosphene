@@ -4286,8 +4286,14 @@ def _auto_promote_image_engine_kind(
     Returns a new config copy with kind/family/model set to match the
     chosen family, or None if no family is installed (caller keeps mock).
     """
+    # Auto-promote uses the same Qwen-Edit version the inline presets do
+    # (qwen_edit_inline + qwen_edit_lightning_inline + qwen_edit_high_inline
+    # all point at 2511 since commit f68bfb0). Pinning at 2509 here meant a
+    # fresh install or "Reset settings" wrote a config that pulled the
+    # OLDER 54 GB model with weaker character consistency. (Code-review
+    # P2-3, 2026-05-09.)
     candidates = [
-        ("qwen_edit",     "Qwen/Qwen-Image-Edit-2509"),
+        ("qwen_edit",     "Qwen/Qwen-Image-Edit-2511"),
         ("flux2",         "Runpod/FLUX.2-klein-4B-mflux-4bit"),
         ("z_image_turbo", "filipstrand/Z-Image-Turbo-mflux-4bit"),
         ("flux1",         "krea-dev"),
@@ -14700,8 +14706,10 @@ HTML = r"""<!doctype html>
     <div class="field" id="agentMfluxModelField" style="display:none">
       <label>mflux model</label>
       <select id="agentMfluxModel" onchange="agentMfluxModelChanged()">
-        <optgroup label="Qwen-Image-Edit-2509 (Apache 2.0 · multi-reference) — character + place composition">
-          <option value="Qwen/Qwen-Image-Edit-2509">Qwen-Image-Edit-2509 — 1-3 ref images + prompt → composed still · ~22-34 GB lazy download (Q4 / Q8 picked via the quant slider below)</option>
+        <optgroup label="Qwen-Image-Edit-2511 (Apache 2.0 · multi-reference) — character + place composition">
+          <!-- 2511 supersedes 2509: stronger character consistency, mitigated multi-ref drift, built-in popular LoRAs. Same ~54 GB on disk; matches the inline presets used by Image Studio's engine dropdown. (Code-review P2-3.) -->
+          <option value="Qwen/Qwen-Image-Edit-2511">Qwen-Image-Edit-2511 — 1-3 ref images + prompt → composed still · ~22-34 GB lazy download (Q4 / Q8 picked via the quant slider below)</option>
+          <option value="Qwen/Qwen-Image-Edit-2509">Qwen-Image-Edit-2509 (legacy — prefer 2511)</option>
         </optgroup>
         <optgroup label="FLUX.2 (Apache 2.0 · 4-step) — fast text-to-image default">
           <option value="Runpod/FLUX.2-klein-4B-mflux-4bit" selected>FLUX.2 [klein] 4B — 4-bit, 4 steps · ~4.3 GB · recommended for plain T2I anchors</option>
@@ -14743,7 +14751,12 @@ HTML = r"""<!doctype html>
       <div class="field">
         <label>Quantize (bits)</label>
         <select id="agentMfluxQuantize">
-          <option value="4">4-bit (~6 GB, recommended)</option>
+          <!-- Q6 is the Apple-Silicon community sweet spot (~4-6% quality
+               loss vs full precision; Q4 is 8-12%). Matches
+               ImageEngineConfig.mflux_quantize default + every inline
+               preset. (Code-review P2-3.) -->
+          <option value="4">4-bit (~6 GB, smallest)</option>
+          <option value="6" selected>6-bit (~9 GB, recommended)</option>
           <option value="8">8-bit (~12 GB, sharper)</option>
         </select>
       </div>
@@ -21070,7 +21083,7 @@ function openAgentSettings() {
       else stepsForDisplay = 25;                 // flux1-dev/krea, z-image base
     }
     document.getElementById('agentMfluxSteps').value = stepsForDisplay;
-    document.getElementById('agentMfluxQuantize').value = String(imgCfg.mflux_quantize || 4);
+    document.getElementById('agentMfluxQuantize').value = String(imgCfg.mflux_quantize || 6);
     // BFL
     document.getElementById('agentBflModel').value = imgCfg.bfl_model || 'flux-dev';
     document.getElementById('agentBflKey').value = '';
@@ -21395,9 +21408,14 @@ function agentMfluxModelChanged() {
   const stepsInput = document.getElementById('agentMfluxSteps');
   if (stepsInput && !stepsInput.dataset.userTouched) {
     // Family-aware step picks (must stay in sync with image_engine.py
-    // MFLUX_FAMILY_DEFAULTS — flagged at the source).
+    // MFLUX_FAMILY_DEFAULTS — flagged at the source). Qwen-Edit default
+    // is 8 (matches MFLUX_FAMILY_DEFAULTS["qwen_edit"]["steps"] and the
+    // `qwen_edit_inline` preset's standard tier — was 30, which is the
+    // final-quality count and slowed every fresh user's first run by
+    // ~4x). Bump to 30/40 manually when committing a final render.
+    // (Code-review P2-3.)
     let steps = null;
-    if (/qwen-image-edit|qwen_image_edit|qwen-edit/i.test(v))      steps = 30;
+    if (/qwen-image-edit|qwen_image_edit|qwen-edit/i.test(v))      steps = 8;
     else if (/flux\.?2.*klein/i.test(v) || /flux2-klein/i.test(v)) steps = 4;
     else if (/z-image-turbo|z_image_turbo/i.test(v))               steps = 9;
     else if (/^schnell$/i.test(v))                                 steps = 4;
@@ -21520,7 +21538,7 @@ async function agentSaveSettings() {
     imgPayload.mflux_base_model = '';
   }
   imgPayload.mflux_steps = parseInt(document.getElementById('agentMfluxSteps').value || '25', 10);
-  imgPayload.mflux_quantize = parseInt(document.getElementById('agentMfluxQuantize').value || '4', 10);
+  imgPayload.mflux_quantize = parseInt(document.getElementById('agentMfluxQuantize').value || '6', 10);
   try {
     const ir = await fetch('/agent/image/config', {
       method: 'POST',

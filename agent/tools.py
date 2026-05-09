@@ -97,6 +97,16 @@ def dispatch(tool_name: str, args: dict, ops: PanelOps,
 
     Result shape: `{"ok": bool, "result": Any, "error": str|None}`.
     The caller wraps this in a <tool_result> message back to the model.
+
+    Per-turn submit budget enforcement lives HERE (not in either runtime)
+    so both the legacy ReAct loop AND the smolagents CodeAgent runtime
+    inherit the cap automatically. The counter is stored in
+    `session_state["_submits_used"]`; both runtimes call
+    `reset_submit_budget(session_state)` at the top of each `run_turn`
+    to start a fresh budget. (Security review H4 — was previously
+    enforced only in agent/runtime.py:run_turn, which left
+    runtime_smol.py exposed to the same DoS vector since its
+    `_LegacyToolWrapper.forward()` calls dispatch() directly.)
     """
     handler = TOOL_HANDLERS.get(tool_name)
     if handler is None:
@@ -108,13 +118,50 @@ def dispatch(tool_name: str, args: dict, ops: PanelOps,
                 f"Available: {sorted(TOOL_HANDLERS.keys())}"
             ),
         }
+    # Pre-dispatch submit-budget check. We refuse the call wholesale (no
+    # partial truncation of submit_shots batches) the moment it would
+    # push the running total past MAX_SUBMITS_PER_TURN. Imported lazily
+    # to avoid an agent.tools ↔ agent.runtime import cycle.
+    submit_count = 0
+    if tool_name == "submit_shot":
+        submit_count = 1
+    elif tool_name == "submit_shots":
+        shots = args.get("shots") if isinstance(args, dict) else None
+        submit_count = len(shots) if isinstance(shots, list) else 1
+    if submit_count:
+        from agent.runtime import MAX_SUBMITS_PER_TURN
+        used = int(session_state.get("_submits_used") or 0)
+        if used + submit_count > MAX_SUBMITS_PER_TURN:
+            return {
+                "ok": False,
+                "result": None,
+                "error": (
+                    f"submit cap reached: agent already queued "
+                    f"{used} shots this turn (limit "
+                    f"{MAX_SUBMITS_PER_TURN}). Use multiple turns to "
+                    f"queue more, or call finish."
+                ),
+            }
     try:
         result = handler(args, ops, session_state)
+        if submit_count:
+            session_state["_submits_used"] = (
+                int(session_state.get("_submits_used") or 0) + submit_count
+            )
         return {"ok": True, "result": result, "error": None}
     except _ToolValidationError as e:
         return {"ok": False, "result": None, "error": f"validation: {e}"}
     except Exception as e:                      # noqa: BLE001
         return {"ok": False, "result": None, "error": f"{type(e).__name__}: {e}"}
+
+
+def reset_submit_budget(session_state: dict) -> None:
+    """Clear the per-turn submit counter at the top of a run_turn() call.
+
+    Both `agent.runtime.run_turn` and `agent.runtime_smol.run_turn` call
+    this once before driving the model loop so the cap restarts fresh.
+    """
+    session_state["_submits_used"] = 0
 
 
 class _ToolValidationError(Exception):
@@ -1507,11 +1554,22 @@ def _upload_image(args: dict, ops: PanelOps, session: dict) -> dict:
     """
     p = _required(args, "attachment_id")
     p = _resolve_path(p, ops.uploads_dir)
-    pp = Path(p)
+    # Containment check — without this, a prompt-injected agent could
+    # probe arbitrary local paths (`/etc/passwd`, ~/.ssh/*, etc.) and
+    # exfil existence + size + filename via the tool result. Resolve
+    # first so symlink / `..` traversal that lands BACK inside
+    # uploads_dir is still accepted, then verify the resolved path
+    # lives under uploads_dir. (Code-review P2-1, 2026-05-09.)
+    try:
+        pp = _ensure_under(Path(p), [ops.uploads_dir])
+    except _ToolValidationError as e:
+        raise _ToolValidationError(
+            f"attachment_id must live under uploads_dir, got {p!r} ({e})"
+        ) from e
     if not pp.is_file():
         raise _ToolValidationError(f"attachment not found: {p}")
     return {
-        "absolute_path": p,
+        "absolute_path": str(pp),
         "size_bytes": pp.stat().st_size,
         "name": pp.name,
     }

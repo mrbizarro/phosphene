@@ -443,6 +443,14 @@ def run_turn(session: Session, user_message: str | None,
         session.messages.append({"role": "user", "content": user_message})
         session.finished = False
 
+    # Reset the per-turn submit budget so the cap restarts fresh on every
+    # user message. Enforcement itself lives in `tools.dispatch` — this
+    # call just zeroes the counter the centralized check reads. Without
+    # this, a smol CodeAgent could call `submit_shots` past the 8-shot
+    # cap (security review H4 — was previously enforced only inside
+    # legacy runtime's loop, leaving _LegacyToolWrapper.forward exposed).
+    tools.reset_submit_budget(session.tool_state)
+
     # 3. Build instructions = system prompt + condensed prior conversation.
     # smolagents merges this into its own ReAct system prompt template;
     # the agent sees both our LTX guidance AND smolagents' code-block

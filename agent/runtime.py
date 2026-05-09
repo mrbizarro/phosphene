@@ -357,9 +357,11 @@ def run_turn(session: Session, user_message: str | None,
         # Clear finished flag — a new user message resets the loop.
         session.finished = False
 
-    # Per-turn submit budget — see MAX_SUBMITS_PER_TURN. Local to this
-    # run_turn() call: a fresh user message always gets a fresh budget.
-    submits_used = 0
+    # Per-turn submit budget — see MAX_SUBMITS_PER_TURN. Cap enforcement
+    # itself lives in tools.dispatch() so both runtimes inherit it; we
+    # only need to clear the counter at the start of every run_turn()
+    # call so a fresh user message always gets a fresh budget.
+    tools.reset_submit_budget(session.tool_state)
 
     # 2. Drive the loop.
     for step_i in range(max_steps):
@@ -403,32 +405,11 @@ def run_turn(session: Session, user_message: str | None,
             "tool": tool_name, "args": tool_args, "step": step_i,
         }))
 
-        # Enforce the per-turn submit budget BEFORE dispatch. We refuse the
-        # call (and synthesize an error result for the agent) the moment
-        # this call would push the running total past the cap. Partial
-        # batches are not allowed: a submit_shots(shots=[a,b,c,d]) when 6
-        # have already been queued is rejected wholesale rather than
-        # silently truncated, since truncation would surprise the agent.
-        submit_count = 0
-        if tool_name == "submit_shot":
-            submit_count = 1
-        elif tool_name == "submit_shots":
-            shots = tool_args.get("shots") if isinstance(tool_args, dict) else None
-            submit_count = len(shots) if isinstance(shots, list) else 1
-
-        if submit_count and submits_used + submit_count > MAX_SUBMITS_PER_TURN:
-            result_obj = {
-                "ok": False,
-                "error": (
-                    f"submit cap reached: agent already queued "
-                    f"{submits_used} shots this turn (limit "
-                    f"{MAX_SUBMITS_PER_TURN}). Use multiple turns to "
-                    f"queue more, or call finish."
-                ),
-            }
-        else:
-            submits_used += submit_count
-            result_obj = tools.dispatch(tool_name, tool_args, panel_ops, session.tool_state)
+        # Submit-budget enforcement now lives in tools.dispatch (so both
+        # runtimes inherit it). Just call dispatch — it returns the
+        # same {"ok": false, "error": "submit cap reached..."} shape the
+        # legacy code used to synthesize inline.
+        result_obj = tools.dispatch(tool_name, tool_args, panel_ops, session.tool_state)
         yield emit(TurnEvent("tool_result", {
             "tool": tool_name, "result": result_obj, "step": step_i,
         }))

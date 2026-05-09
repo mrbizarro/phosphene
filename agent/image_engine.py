@@ -609,9 +609,18 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     # stdout and stderr to one stream so the line ordering matches what
     # mflux actually printed; tail of the stream is kept for inclusion
     # in any error message.
+    #
+    # Use select() with a poll interval so the deadline check fires even
+    # when the child goes silent (e.g. model-load hang, Metal driver
+    # deadlock, stuck weight download). Previous design used blocking
+    # `for raw in iter(readline, "")` which could block forever if mflux
+    # stopped flushing — the deadline check after each line never tripped
+    # and the queue worker hung indefinitely.
     import collections
+    import select
     last_lines: collections.deque[str] = collections.deque(maxlen=64)
     stderr_tail = ""
+    timed_out = False
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -619,30 +628,79 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         env=env,
         text=True,
         bufsize=1,
+        # Own process group so the Popen.terminate/kill below escalates
+        # to the entire mflux+MLX subtree (mflux can spawn helper procs
+        # for download / Metal init that survive a parent kill).
+        start_new_session=True,
     )
     try:
         deadline = time.time() + timeout_s
+        poll_interval = 0.5
         if proc.stdout is not None:
-            for raw in iter(proc.stdout.readline, ""):
-                line = raw.rstrip("\n")
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                last_lines.append(line)
-                if on_log is not None:
+            while True:
+                # Wait up to poll_interval for a readable line; fall
+                # through to the deadline + exit-status check otherwise.
+                ready, _, _ = select.select(
+                    [proc.stdout], [], [], poll_interval,
+                )
+                if ready:
                     try:
-                        on_log(line)
-                    except Exception:                # noqa: BLE001
-                        # A buggy logger callback must not break the gen.
-                        pass
+                        raw = proc.stdout.readline()
+                    except (OSError, ValueError):
+                        # Pipe closed — child likely exited; let the
+                        # poll() / wait() branch below handle it.
+                        raw = ""
+                    if raw == "":
+                        # EOF — readline returns "" only at end-of-stream
+                        # for text-mode pipes. Drop into the post-loop
+                        # cleanup (waits for rc).
+                        break
+                    line = raw.rstrip("\n")
+                    if line:
+                        last_lines.append(line)
+                        if on_log is not None:
+                            try:
+                                on_log(line)
+                            except Exception:        # noqa: BLE001
+                                # A buggy logger callback must not break the gen.
+                                pass
+                # Deadline check — runs every iteration whether or not
+                # the child wrote a line, so a silent stall still trips.
                 if time.time() > deadline:
-                    proc.kill()
-                    raise RuntimeError(
-                        f"{bin_name} timed out after {timeout_s}s on a batch of "
-                        f"{n} seeds. First run downloads weights — qwen_edit Q8 "
-                        f"weights are ~34 GB; give it longer or pre-pull."
-                    )
+                    timed_out = True
+                    break
+                # Child exited but we haven't seen EOF yet — flush any
+                # remaining buffered output on the next select cycle.
+                # Don't break here: select+readline above will drain
+                # the pipe to "" and end the loop cleanly.
+                if proc.poll() is not None and not ready:
+                    # No data in this slice + child gone → drain done.
+                    break
+        if timed_out:
+            # SIGTERM the whole process group, give it 2s to clean up,
+            # then SIGKILL if still alive. The except subprocess.TimeoutExpired
+            # branch below would also fire but only after proc.wait() blocks
+            # for the remaining timeout window — we skip that by killing now.
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)        # SIGTERM
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), 9)     # SIGKILL
+                except (OSError, ProcessLookupError):
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            raise RuntimeError(
+                f"{bin_name} timed out after {timeout_s}s on a batch of "
+                f"{n} seeds. First run downloads weights — qwen_edit Q8 "
+                f"weights are ~34 GB; give it longer or pre-pull."
+            )
         rc = proc.wait(timeout=max(1, deadline - time.time()))
     except subprocess.TimeoutExpired as e:
         try:
@@ -737,16 +795,20 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # Try the templated path first (old mflux behavior + the n=1 case).
         path = Path(output_template.format(seed=seed))
         if not path.is_file():
-            # Fall back to scanning the output dir for any file whose name
-            # contains the seed and ends in .png. mflux's
-            # auto-_seed_<seed> suffix lands here. Take the most recent
-            # match in case the dir has stale files.
-            seed_str = str(seed)
+            # Fall back to scanning the output dir for the EXACT filename
+            # mflux >=0.18 writes (template + auto-`_seed_<seed>` suffix).
+            # Substring matching by `seed_str in p.name` was wrong: seed
+            # 123 would also match `cand_9123_mflux.png` from a previous
+            # run in the same agent shot folder, returning the wrong PNG.
+            # Pin to the two known templates and mtime-sort defensively
+            # in case both happen to coexist. (Code-review P2-2.)
+            exact_patterns = (
+                f"cand_{seed}_mflux.png",                  # old mflux
+                f"cand_{seed}_mflux_seed_{seed}.png",      # mflux >=0.18
+            )
             candidates = sorted(
                 (p for p in output_dir.iterdir()
-                 if p.is_file()
-                 and p.suffix.lower() == ".png"
-                 and seed_str in p.name),
+                 if p.is_file() and p.name in exact_patterns),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -763,7 +825,13 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
             "model": config.mflux_model,
             "width": width, "height": height,
             "refs": refs_used,
-            "refs_ignored": (bool(refs) and fam not in ("qwen_edit", "flux2_edit")),
+            # refs_ignored derives from refs_used so kontext (which DOES
+            # consume refs[0]) no longer reports refs_ignored=True. Was
+            # checking `fam not in ("qwen_edit", "flux2_edit")`, which
+            # excluded kontext incorrectly — the panel's "this engine
+            # ignored your refs" warning lit up on every kontext sidecar.
+            # (Code-review P3, 2026-05-09.)
+            "refs_ignored": (bool(refs) and not refs_used),
             "lora_paths": list(config.mflux_lora_paths or []),
         })
 
