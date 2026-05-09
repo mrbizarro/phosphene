@@ -18302,17 +18302,30 @@ function renderLorasList() {
   }
   if (empty) empty.style.display = 'none';
 
-  // Apply mode-aware filter FIRST (drops library entries for the wrong
-  // engine family, but always keeps active rows visible — yanking an
-  // active row when the user switches engine would be confusing). Also
-  // always keep "unknown" so unclassified LoRAs surface in every filter
-  // — the picker shows them with a `?` indicator.
+  // Apply mode-aware filter FIRST. Hard-filter EVERY row (active OR not)
+  // whose compatible_modes don't intersect the active engine. This is the
+  // tight-integration version the user explicitly asked for — the prior
+  // behavior of "keep mismatched active rows visible with ⚠" was
+  // confusing ("now I see the LoRA, but there is no filtering by selected
+  // model"). Mismatched-active rows aren't deleted from `_activeLoras` —
+  // they're just hidden from this list while the engine is set this way,
+  // so flipping back to a compatible engine restores them. The "+ N from
+  // other modes" pill at the bottom of the banner is the escape hatch
+  // for the rare user who wants to manage a hidden chip without
+  // switching engines first.
+  //
+  // "unknown" compatible_modes still pass every filter — sidecar-less
+  // LoRAs need to be reachable, the picker indicator is the user's cue
+  // that the family wasn't auto-detected.
   let rows = allRows;
+  let hiddenCount = 0;
+  const showOtherModes = !!window._loraShowOtherModes;
   if (modeTag) {
     rows = allRows.filter(r => {
-      if (r.active) return true;
       const tags = r.compatible_modes || ['unknown'];
-      return tags.includes(modeTag) || tags.includes('unknown');
+      const matches = tags.includes(modeTag) || tags.includes('unknown');
+      if (!matches && !showOtherModes) hiddenCount++;
+      return matches || showOtherModes;
     });
   }
   // Surface the filter input only when 5+ LoRAs (post-mode-filter)
@@ -18338,19 +18351,21 @@ function renderLorasList() {
   });
 
   // Mode banner — explains the active filter so users grok "why don't
-  // I see all my LoRAs". Includes a count of any active chips that
-  // DON'T match the current filter (warning state).
+  // I see all my LoRAs". When mismatched LoRAs exist (active OR not),
+  // exposes a "Show N from other modes" toggle so the user has an
+  // escape hatch to manage them without switching engines first.
   if (banner) {
-    const active = allRows.filter(r => r.active);
-    const mismatched = modeTag
-      ? active.filter(r => {
-          const tags = r.compatible_modes || ['unknown'];
-          return !tags.includes(modeTag) && !tags.includes('unknown');
-        })
-      : [];
     let bannerHtml = `Library filter: <strong>${escapeHtml(_loraFilterLabel(modeTag))}</strong>`;
-    if (mismatched.length > 0) {
-      bannerHtml += ` · <span style="color:var(--warn,#e8b341)">⚠ ${mismatched.length} active LoRA${mismatched.length === 1 ? '' : 's'} won't fire on this engine</span>`;
+    if (hiddenCount > 0) {
+      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = true; renderLorasList()">Show ${hiddenCount} from other modes</a>`;
+    } else if (showOtherModes) {
+      bannerHtml += ` · <a href="#" style="color:var(--muted)" onclick="event.preventDefault(); window._loraShowOtherModes = false; renderLorasList()">Hide other modes</a>`;
+    }
+    // Empty image-mode case — when the library has zero compatible
+    // LoRAs, point users at the install path so they don't think the
+    // picker's broken.
+    if (modeTag && modeTag.startsWith('image:') && rows.length === 0 && _knownUserLoras.length > 0) {
+      bannerHtml += ` · <span style="color:var(--muted)">No image LoRAs in your library — install one via the CivitAI browser, filter by Flux / Qwen Image base models.</span>`;
     }
     banner.innerHTML = bannerHtml;
   }
