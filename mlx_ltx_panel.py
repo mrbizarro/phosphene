@@ -18171,7 +18171,11 @@ function _currentLoraModeFilter() {
   if (eng.startsWith('flux1') || eng === 'flux1_inline')        return 'image:flux1';
   if (eng.startsWith('kontext'))   return 'image:kontext';
   if (eng.startsWith('z_image'))   return 'image:z_image';
-  if (eng.startsWith('mock'))      return '';   // no filter for mock
+  // Mock engine is image-lane — narrow off LTX video LoRAs the same way
+  // 'auto' does. Returning '' here skipped the filter entirely (same bug
+  // ab50f12 fixed for 'auto'); video LTX LoRAs would re-appear in the
+  // Image Studio picker when the user picked Mock for testing.
+  if (eng.startsWith('mock'))      return 'image';
   // 'auto' → fall back to the user's saved engine. Without a server
   // round-trip to /agent/config we don't know exactly which family
   // they saved; show ALL image-lane LoRAs (image:* + unknown) but
