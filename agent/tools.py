@@ -1415,14 +1415,35 @@ def _generate_shot_images(args: dict, ops: PanelOps, session: dict) -> dict:
         take_index = 0
         out_dir = base_dir
 
+    # Serialize against the manual /image/generate path. Without this,
+    # an agent anchor run can overlap with an Image Studio click and
+    # spawn two concurrent mflux/MLX subprocesses fighting for the GPU
+    # — exactly the kind of contention that has frozen Salo's Mac.
+    # Lazy import to avoid the agent.tools ↔ mlx_ltx_panel cycle; the
+    # panel has long been the importer of agent.tools at module load.
+    # (Code-review P1-2, 2026-05-09.)
+    try:
+        from mlx_ltx_panel import _IMG_STUDIO_LOCK as _img_lock
+    except Exception:                                   # noqa: BLE001
+        _img_lock = None                                # tests / standalone use
     t0 = time.time()
-    candidates = _image_engine.generate(
-        prompt=prompt, n=n, aspect=aspect,
-        output_dir=out_dir,
-        base_seed=(seed_base if seed_base >= 0 else None),
-        refs=refs_resolved or None,
-        config=cfg,
-    )
+    if _img_lock is not None:
+        with _img_lock:
+            candidates = _image_engine.generate(
+                prompt=prompt, n=n, aspect=aspect,
+                output_dir=out_dir,
+                base_seed=(seed_base if seed_base >= 0 else None),
+                refs=refs_resolved or None,
+                config=cfg,
+            )
+    else:
+        candidates = _image_engine.generate(
+            prompt=prompt, n=n, aspect=aspect,
+            output_dir=out_dir,
+            base_seed=(seed_base if seed_base >= 0 else None),
+            refs=refs_resolved or None,
+            config=cfg,
+        )
     elapsed = round(time.time() - t0, 2)
 
     # Write a sidecar JSON next to each candidate so the library reader
