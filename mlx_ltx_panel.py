@@ -8923,14 +8923,37 @@ HTML = r"""<!doctype html>
     /* When form-pane is in agent mode, drop the sticky footer padding. */
     body[data-workflow="agent"] .form-pane { padding-bottom: 0; }
 
-    /* ===== STAGE (PLAYER + CAROUSEL) ===== */
+    /* ===== STAGE (PLAYER + CAROUSEL) — REDESIGN Y2.001 =====
+       Composer-grade right pane. The player is the hero (one elevated
+       surface with overlaid chrome instead of a black box + meta strip
+       + button row + filter rows). Carousel cards live on a quieter
+       surface so the player visually dominates the pane. */
     .stage-pane {
-      background: linear-gradient(180deg, #0a0d12 0%, var(--panel) 100%);
+      background:
+        radial-gradient(circle at 70% -10%, rgba(47,129,247,0.08) 0%, transparent 45%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+      padding: 14px 14px 0;
+      gap: 14px;
+    }
+    /* Player surface — wraps the <video>/<img> and all overlays. One
+       elevated card with rounded corners and an accent ring on focus. */
+    .player-surface {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+      border-radius: var(--r-lg);
+      overflow: hidden;
+      background: black;
+      border: 1px solid var(--border-strong);
+      box-shadow: var(--shadow-2);
+      display: flex;
     }
     .player-wrap {
-      flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+      flex: 1 1 auto;
+      display: flex; align-items: center; justify-content: center;
       background: black; min-height: 0; position: relative;
       overflow: hidden;
+      width: 100%;
     }
     .player-wrap video,
     .player-wrap img {
@@ -8938,54 +8961,287 @@ HTML = r"""<!doctype html>
       display: block;
     }
     .player-wrap.empty {
-      background: var(--panel-2); color: var(--muted); font-size: 13px;
-      flex-direction: column; gap: 6px; text-align: center;
+      background:
+        radial-gradient(circle at 50% 35%, rgba(47,129,247,0.08), transparent 55%),
+        linear-gradient(180deg, var(--panel) 0%, var(--bg-2) 100%);
+      color: var(--muted);
+      flex-direction: column;
+      gap: 0;
+      text-align: center;
+      padding: 24px;
     }
-    .player-wrap.empty .dim-icon { font-size: 36px; opacity: 0.4; }
-    .player-meta {
-      flex: 0 0 auto; padding: 10px 16px;
-      background: var(--panel); border-top: 1px solid var(--border);
-      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    /* Empty-state stack — composer-grade. Phosphene-tinted play glyph
+       above a clear title and a humanlike subtitle. */
+    .ps-empty {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 10px; max-width: 320px;
+    }
+    .ps-empty-icon {
+      color: var(--accent-bright);
+      opacity: 0.55;
+      display: inline-flex;
+      filter: drop-shadow(0 0 12px rgba(47,129,247,0.25));
+    }
+    .ps-empty-title {
+      font-size: 14px; font-weight: 600;
+      color: var(--text);
+      margin-top: 4px;
+    }
+    .ps-empty-sub {
       font-size: 12px; color: var(--muted);
+      line-height: 1.5;
     }
-    .player-meta .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .player-meta .actions-bar { display: flex; gap: 6px; flex-shrink: 0; }
-    .player-meta button { width: auto; padding: 5px 10px; font-size: 11px; background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px; }
-    .player-meta button:hover { color: var(--text); border-color: var(--accent); }
 
-    /* Carousel */
+    /* Top overlay — filename + meta. Sits above the video with a soft
+       gradient so it stays legible over either bright or dark frames.
+       Transitions opacity with the surface so it doesn't fight the
+       video for attention while playing. */
+    .player-overlay-top {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 10px 14px 18px;
+      background: linear-gradient(
+        180deg,
+        rgba(0, 4, 18, 0.78) 0%,
+        rgba(0, 4, 18, 0.45) 60%,
+        rgba(0, 4, 18, 0) 100%
+      );
+      color: var(--text);
+      pointer-events: none;
+      z-index: 2;
+      display: flex; flex-direction: column; gap: 2px;
+      opacity: 1;
+      transition: opacity var(--t-base);
+    }
+    .player-surface:hover .player-overlay-top { opacity: 1; }
+    .po-name {
+      font-size: 13px; font-weight: 600;
+      color: #fff;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      letter-spacing: -0.005em;
+    }
+    .po-meta {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.62);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      display: inline-flex; gap: 6px;
+      align-items: center;
+    }
+    .po-meta .po-dot {
+      width: 3px; height: 3px; border-radius: 50%;
+      background: rgba(255,255,255,0.35);
+      display: inline-block;
+    }
+
+    /* Top-right action cluster — icon buttons. Always visible (so users
+       don't have to discover-on-hover) but kept compact + chip-styled
+       so they read as secondary controls, not as a toolbar. Native
+       <video> controls remain available below the gradient. */
+    .player-overlay-actions {
+      position: absolute;
+      top: 10px; right: 10px;
+      z-index: 3;
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      background: rgba(8, 14, 35, 0.55);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: var(--r-md);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    }
+    .po-act {
+      width: auto; padding: 5px 9px;
+      display: inline-flex; align-items: center; gap: 5px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: rgba(255,255,255,0.82);
+      font-size: 11.5px; font-weight: 500;
+      cursor: pointer;
+      transition: var(--t-fast);
+      letter-spacing: 0;
+    }
+    .po-act:hover {
+      background: rgba(255,255,255,0.07);
+      color: #fff;
+      border-color: rgba(255,255,255,0.10);
+    }
+    .po-act:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .po-act svg {
+      flex: 0 0 auto;
+      opacity: 0.85;
+    }
+    .po-act:hover svg { opacity: 1; }
+    .po-act-label {
+      /* Keep label on regular buttons; hidden on the icon-only Hide. */
+    }
+    .po-act.po-act-danger .po-act-label { display: none; }
+    .po-act.po-act-danger:hover {
+      background: rgba(248,81,73,0.18);
+      color: #ff8b80;
+      border-color: rgba(248,81,73,0.35);
+    }
+    /* Compact mode at narrow widths — hide labels, keep icons. */
+    @media (max-width: 1100px) {
+      .po-act .po-act-label { display: none; }
+      .po-act { padding: 6px 7px; }
+    }
+
+    /* Bottom progress overlay — appears when a render is in flight.
+       Driven by JS (refreshPlayerProgressOverlay). The ring + label
+       give the player a contextual indicator instead of forcing the
+       user to look down at the bottom-pane Now tab. */
+    .player-overlay-progress {
+      position: absolute;
+      left: 12px; right: 12px; bottom: 12px;
+      z-index: 3;
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px 10px 10px;
+      background: rgba(8, 14, 35, 0.78);
+      border: 1px solid rgba(47,129,247,0.32);
+      border-radius: var(--r-md);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 6px 22px rgba(0,0,0,0.45),
+                  0 0 0 1px rgba(47,129,247,0.18) inset;
+      color: #fff;
+    }
+    .pop-ring {
+      position: relative;
+      width: 32px; height: 32px;
+      flex: 0 0 auto;
+    }
+    .pop-ring svg { display: block; }
+    .pop-ring-pct {
+      position: absolute;
+      inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9.5px;
+      font-weight: 700;
+      color: var(--accent-bright);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0;
+    }
+    .pop-body {
+      flex: 1 1 auto; min-width: 0;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .pop-title {
+      font-size: 12.5px; font-weight: 600;
+      color: #fff;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .pop-meta {
+      font-size: 10.5px;
+      color: rgba(255,255,255,0.65);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .pop-meta strong { color: #fff; font-weight: 600; }
+    .player-overlay-progress.failed {
+      border-color: rgba(248,81,73,0.45);
+      box-shadow: 0 6px 22px rgba(0,0,0,0.45),
+                  0 0 0 1px rgba(248,81,73,0.30) inset;
+    }
+    .player-overlay-progress.failed .pop-ring-pct { color: var(--danger); }
+
+    /* Hidden compatibility slot — kept in the DOM for legacy callers but
+       never visible. Real meta now lives in the top overlay. */
+    .player-meta { display: none !important; }
+
+    /* Carousel wrap — composer-card visual language. One elevated panel
+       with a section header (title + filter chips + visible/hidden
+       segment all inline), then the scrolling card row beneath. */
     .carousel-wrap {
-      flex: 0 0 auto; padding: 10px 14px 14px;
-      background: var(--panel); border-top: 1px solid var(--border);
+      flex: 0 0 auto;
+      padding: 12px 14px 14px;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-1);
     }
     .carousel-head {
-      display: flex; justify-content: space-between; align-items: center;
-      margin-bottom: 8px; gap: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
     }
     .carousel-head h3 {
       margin: 0; font-size: 11px; color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+      flex: 0 0 auto;
     }
+    .carousel-head .ch-spacer { flex: 1 1 auto; }
+    /* Segmented Visible/Hidden control — re-tuned to match the form-pane
+       quality strip so all segmented controls in the app share one
+       visual language. */
     .carousel-head .seg {
-      display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+      display: inline-flex;
+      gap: 2px;
+      padding: 3px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
     }
     .carousel-head .seg button {
-      width: auto; padding: 4px 10px; font-size: 11px; background: transparent;
-      border: 0; border-right: 1px solid var(--border); border-radius: 0;
-      color: var(--muted); font-weight: 500; cursor: pointer;
+      width: auto; padding: 4px 10px; font-size: 11px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-xs);
+      color: var(--muted);
+      font-weight: 500; cursor: pointer;
+      transition: var(--t-fast);
+      letter-spacing: 0;
     }
-    .carousel-head .seg button:last-child { border-right: 0; }
-    .carousel-head .seg button.active { background: var(--accent); color: white; }
+    .carousel-head .seg button:hover {
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+    }
+    .carousel-head .seg button.active {
+      background: var(--accent-dim);
+      color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    /* The carousel kind chips (All/Videos/Photos) inherit
+       .stage-outputs-filter from the agent-stage block — no override
+       needed, they already match the chip language. */
+
+    /* Carousel grid — multi-row when there's enough room (uses CSS
+       grid auto-fill), horizontal-scroll fallback on narrow widths.
+       Cards have 16/9 thumb so the gallery reads as a contact sheet
+       at a glance. */
     .carousel {
-      display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
-      scroll-snap-type: x proximity;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+      gap: 10px;
+      max-height: 36vh;
+      overflow-y: auto;
+      padding-right: 4px;
     }
-    .carousel::-webkit-scrollbar { height: 8px; }
-    .carousel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    .carousel::-webkit-scrollbar { width: 8px; height: 8px; }
+    .carousel::-webkit-scrollbar-thumb {
+      background: var(--border-strong);
+      border-radius: 4px;
+    }
+    .carousel::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    .carousel::-webkit-scrollbar-track { background: transparent; }
+    /* Card — quieter chrome, thumbnail-led. Filename row underneath,
+       all action chrome on hover. Active card carries a soft accent
+       ring + bumped contrast. Hidden cards are visibly faded with a
+       diagonal stripe so they read as "out of view" not just "dim". */
     .car-card {
-      flex: 0 0 168px; scroll-snap-align: start;
-      border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden;
-      background: var(--panel-2); cursor: pointer;
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      overflow: hidden;
+      background: var(--panel-2);
+      cursor: pointer;
       transition: transform var(--t-base), border-color var(--t-base),
                   box-shadow var(--t-base);
       display: flex; flex-direction: column;
@@ -8998,29 +9254,106 @@ HTML = r"""<!doctype html>
     .car-card.active {
       border-color: var(--accent-bright);
       box-shadow: 0 0 0 2px var(--accent-bright), var(--shadow-2);
+      background: var(--panel);
     }
-    .car-card.hidden-card { opacity: 0.4; }
+    /* Active-corner badge — subtle accent dot in the top-left so the
+       active selection still reads even if the user scrolls past it. */
+    .car-card.active::before {
+      content: '';
+      position: absolute;
+      top: 8px; left: 8px;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      box-shadow: 0 0 8px var(--accent-bright);
+      z-index: 4;
+    }
+    .car-card.hidden-card {
+      opacity: 0.45;
+      background-image:
+        repeating-linear-gradient(
+          135deg,
+          transparent 0,
+          transparent 6px,
+          rgba(255,255,255,0.025) 6px,
+          rgba(255,255,255,0.025) 12px
+        );
+    }
+    .car-card.hidden-card:hover { opacity: 0.85; }
     .car-card video,
-    .car-card img.car-thumb { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: black; display: block; }
-    /* ⓘ info button overlaid on the card thumbnail. Subtle until hover so
-       it doesn't compete with the video preview itself. Click → opens
-       outputInfoModal with the full sidecar data. */
-    .car-card { position: relative; }
+    .car-card img.car-thumb {
+      width: 100%; aspect-ratio: 16/9; object-fit: cover;
+      background: black; display: block;
+    }
+    /* Card chrome ribbon — bottom strip on hover with the action
+       buttons. Hidden by default so the thumbnail dominates; slides
+       up on hover. Active cards keep the ribbon visible so the user
+       always has the actions at hand. */
+    .car-card .card-chrome {
+      position: absolute;
+      left: 0; right: 0;
+      bottom: 0;
+      padding: 6px 7px;
+      background: linear-gradient(
+        180deg,
+        rgba(0, 4, 18, 0) 0%,
+        rgba(0, 4, 18, 0.82) 35%,
+        rgba(0, 4, 18, 0.92) 100%
+      );
+      display: flex;
+      gap: 4px;
+      transform: translateY(110%);
+      transition: transform var(--t-base);
+      z-index: 3;
+      pointer-events: none;
+    }
+    .car-card:hover .card-chrome,
+    .car-card.active .card-chrome {
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .car-card .card-chrome button {
+      flex: 1;
+      width: auto;
+      padding: 4px 6px;
+      font-size: 10.5px;
+      font-weight: 500;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.10);
+      color: rgba(255,255,255,0.92);
+      cursor: pointer;
+      border-radius: var(--r-xs);
+      transition: var(--t-fast);
+      letter-spacing: 0;
+    }
+    .car-card .card-chrome button:hover {
+      background: rgba(47,129,247,0.45);
+      border-color: rgba(47,129,247,0.85);
+      color: #fff;
+    }
+    /* Top-right info button — subtle until hover, then surfaces. */
     .car-card .car-info-btn {
       position: absolute; top: 6px; right: 6px;
       width: 24px; height: 24px; padding: 0;
-      border-radius: 6px;
-      border: 1px solid rgba(0,0,0,0.5);
-      background: rgba(15,18,28,0.7); backdrop-filter: blur(4px);
+      border-radius: var(--r-xs);
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(8,14,35,0.72);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
       color: rgba(255,255,255,0.85);
-      font-size: 14px; line-height: 1;
+      font-size: 13px; line-height: 1;
       display: inline-flex; align-items: center; justify-content: center;
-      cursor: pointer; opacity: 0; transition: opacity 100ms, background 100ms;
-      z-index: 2;
+      cursor: pointer; opacity: 0;
+      transition: opacity var(--t-fast), background var(--t-fast);
+      z-index: 4;
     }
     .car-card:hover .car-info-btn,
     .car-card.active .car-info-btn { opacity: 1; }
-    .car-card .car-info-btn:hover { background: rgba(20,25,40,0.92); color: #fff; }
+    .car-card .car-info-btn:hover {
+      background: rgba(47,129,247,0.55);
+      color: #fff;
+      border-color: var(--accent-bright);
+    }
 
     /* Output info modal — clean detail-pane styling. Reuses
        .models-modal scaffolding for the dim backdrop and centred card,
@@ -9132,118 +9465,347 @@ HTML = r"""<!doctype html>
       transition: background 100ms;
     }
     .oi-actions .oi-primary:hover { background: var(--accent-bright, #58a6ff); }
-    .car-card .info { padding: 6px 8px; font-size: 10px; }
-    .car-card .name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .car-card .sub { color: var(--muted); margin-top: 2px; }
-    .car-card .row-btns { display: flex; gap: 4px; padding: 0 6px 6px; }
-    .car-card .row-btns button {
-      flex: 1; padding: 3px 4px; font-size: 9px; background: transparent;
-      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 4px;
+    /* Filename strip below the thumb. Always visible (so users can scan
+       the gallery without hovering each card), denser typography. */
+    .car-card .info {
+      padding: 7px 9px 8px;
+      font-size: 10.5px;
+      display: flex; flex-direction: column; gap: 2px;
     }
-    .car-card .row-btns button:hover { color: var(--text); border-color: var(--accent); }
-    .empty-msg { color: var(--muted); font-size: 12px; padding: 12px; text-align: center; width: 100%; }
+    .car-card .name {
+      color: var(--text); font-weight: 500;
+      font-size: 11.5px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      letter-spacing: -0.005em;
+    }
+    .car-card .sub {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+    }
+    /* Legacy .row-btns (still rendered by renderCarousel) is hidden in
+       favour of .card-chrome — but kept structurally so any external
+       reference doesn't break. The new chrome row is injected by JS
+       when a card is built. */
+    .car-card .row-btns {
+      display: none;
+    }
+    .empty-msg {
+      color: var(--muted); font-size: 13px;
+      padding: 28px 16px;
+      text-align: center; width: 100%;
+      grid-column: 1 / -1;
+    }
+    .empty-msg::before {
+      content: '';
+      display: block;
+      width: 28px; height: 28px;
+      margin: 0 auto 10px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      box-shadow: 0 0 12px rgba(47,129,247,0.18);
+    }
 
-    /* ===== BOTTOM TABBED PANE ===== */
+    /* ===== BOTTOM TABBED PANE — REDESIGN Y2.001 =====
+       Reads as one cohesive footer rather than a bolted-on strip.
+       Live-dot in the leading slot communicates worker status at a
+       glance; tabs are pill-styled to match the form-pane mode bar;
+       Now card adopts the composer-card visual language. */
     .bottom-pane {
-      flex: 0 0 auto; max-height: 280px;
-      background: var(--panel); border-top: 1px solid var(--border);
+      flex: 0 0 auto;
+      max-height: 280px;
+      background: var(--bg);
+      border-top: 1px solid var(--border-strong);
       display: flex; flex-direction: column; min-height: 0;
+      transition: max-height var(--t-base);
     }
     .bottom-pane.collapsed .bottom-body { display: none; }
-    .bottom-pane.collapsed { max-height: 38px; }
+    .bottom-pane.collapsed { max-height: 36px; }
+    .bottom-pane.collapsed .tab-collapse svg {
+      transform: rotate(180deg);
+    }
     .tabs {
-      display: flex; align-items: center; gap: 0; padding: 0 12px;
-      border-bottom: 1px solid var(--border); flex-shrink: 0;
+      display: flex; align-items: center; gap: 4px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--bg);
+    }
+    /* Live dot — colour mirrors worker state. Idle = muted, running =
+       success (pulsing), failed = danger. Set by JS in poll(). */
+    .bp-live-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      opacity: 0.45;
+      flex: 0 0 auto;
+      margin-right: 4px;
+      transition: var(--t-base);
+    }
+    .bp-live-dot.live {
+      background: var(--success);
+      opacity: 1;
+      box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6);
+      animation: bp-live-pulse 1.6s ease-out infinite;
+    }
+    .bp-live-dot.failed {
+      background: var(--danger);
+      opacity: 1;
+      box-shadow: 0 0 6px rgba(248,81,73,0.55);
+    }
+    @keyframes bp-live-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.55); }
+      70%  { box-shadow: 0 0 0 8px rgba(63, 185, 80, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0); }
     }
     .tabs button {
-      width: auto; padding: 9px 14px; font-size: 12px; background: transparent;
-      border: 0; border-bottom: 2px solid transparent; border-radius: 0;
-      color: var(--muted); font-weight: 500; cursor: pointer;
+      width: auto;
+      padding: 6px 12px;
+      font-size: 12px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--muted);
+      font-weight: 500;
+      cursor: pointer;
       display: inline-flex; align-items: center; gap: 6px;
+      transition: var(--t-fast);
+      letter-spacing: 0;
     }
-    .tabs button:hover { color: var(--text); }
-    .tabs button.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
+    .tabs button:hover {
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+    }
+    .tabs button.active {
+      color: var(--accent-bright);
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
     .tabs button .badge {
-      background: var(--accent-dim); color: var(--accent-bright);
-      padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+      background: rgba(47,129,247,0.30);
+      color: #fff;
+      padding: 1px 6px;
+      border-radius: var(--r-pill);
+      font-size: 10px; font-weight: 700;
+      min-width: 18px;
+      text-align: center;
+      letter-spacing: 0;
     }
     .tabs .spacer { flex: 1; }
     .tabs .model-credit {
-      font-size: 11px; color: var(--muted); padding: 0 12px;
-      text-decoration: none; border-right: 1px solid var(--border);
-      align-self: stretch; display: inline-flex; align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      padding: 0 10px;
+      text-decoration: none;
+      align-self: stretch;
+      display: inline-flex; align-items: center;
+      border-radius: var(--r-xs);
       transition: var(--t-fast);
     }
-    .tabs .model-credit:hover { color: var(--accent-bright); }
+    .tabs .model-credit:hover {
+      color: var(--accent-bright);
+      background: rgba(255,255,255,0.03);
+    }
     .tabs .model-credit::after { content: " ↗"; opacity: 0.6; margin-left: 4px; }
     .tabs .tab-collapse {
-      width: auto; padding: 4px 8px; font-size: 11px; background: transparent;
-      border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 6px;
-      align-self: center;
+      width: 26px; height: 26px;
+      padding: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: var(--r-xs);
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: var(--t-fast);
     }
+    .tabs .tab-collapse:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+    .tabs .tab-collapse svg { transition: transform var(--t-base); }
+
     .bottom-body {
-      flex: 1 1 auto; overflow-y: auto; padding: 12px 16px; min-height: 0;
+      flex: 1 1 auto; overflow-y: auto;
+      padding: 12px 14px; min-height: 0;
+      background:
+        linear-gradient(180deg, var(--bg) 0%, rgba(0,6,26,0.92) 100%);
     }
     .tab-content { display: none; }
     .tab-content.show { display: block; }
 
-    /* Now panel */
+    /* Now panel — composer-card visual language. Elevated panel with
+       a soft accent edge when running. */
     .now-card {
-      padding: 10px 12px; border-radius: 8px; background: var(--panel-2);
-      border: 1px solid var(--border);
+      padding: 12px 14px;
+      border-radius: var(--r-md);
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      box-shadow: var(--shadow-1);
+      transition: border-color var(--t-base), background var(--t-base);
     }
-    .now-card.idle { opacity: 0.7; }
-    /* Failed-job state — kept loud instead of letting the panel drift back
-       to a sleepy "Idle". Border + background tint match the danger color
-       so the eye lands on it immediately. Stays visible until the user
-       submits a new job (next render flips us out of failed state). */
+    .now-card:not(.idle):not(.failed) {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(47,129,247,0.15) inset, var(--shadow-1);
+    }
+    .now-card.idle { opacity: 0.85; }
     .now-card.failed {
       border-color: rgba(248,81,73,0.55);
       background: rgba(248,81,73,0.06);
       opacity: 1;
     }
-    .now-card .ttl { font-weight: 600; font-size: 13px; }
-    .now-card .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
-    .progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 7px 0; }
-    .progress-bar .fill { height: 100%; background: var(--accent); transition: width var(--t-slow); }
+    .now-card .ttl {
+      font-weight: 600; font-size: 13px;
+      color: var(--text);
+      letter-spacing: -0.005em;
+    }
+    .now-card .meta {
+      margin-top: 6px; font-size: 11.5px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      line-height: 1.55;
+    }
+    .now-card .meta strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .progress-bar {
+      height: 4px;
+      background: rgba(255,255,255,0.06);
+      border-radius: var(--r-pill);
+      overflow: hidden;
+      margin: 9px 0 6px;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+      transition: width var(--t-slow);
+      border-radius: var(--r-pill);
+    }
 
-    /* Queue/recent lists */
+    /* Queue/recent lists — denser, hairline-card aesthetic. */
     .row-list { list-style: none; padding: 0; margin: 0; }
     .row-list li {
       display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px;
-      align-items: center; padding: 7px 9px; border-radius: 6px;
-      border: 1px solid var(--border); background: var(--panel-2);
-      margin-bottom: 5px; font-size: 11px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: var(--r-sm);
+      border: 1px solid var(--border);
+      background: var(--panel);
+      margin-bottom: 5px;
+      font-size: 11.5px;
+      transition: var(--t-fast);
     }
-    .row-list li .pos { color: var(--muted); font-weight: 600; min-width: 22px; }
+    .row-list li:hover {
+      border-color: var(--border-strong);
+      background: var(--panel-2);
+    }
+    .row-list li .pos {
+      color: var(--muted);
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      min-width: 26px;
+    }
     .row-list li .ttl, .row-list li .params {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .row-list li .params { color: var(--muted); font-size: 10px; }
-    /* Inline error text in failed history rows. Shown in the title slot
-       so users see the cause without reading the log. */
-    .row-list li .err-inline { color: var(--danger, #f85149); font-weight: 500; }
+    .row-list li .ttl {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .row-list li .params {
+      color: var(--muted); font-size: 10.5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .row-list li .err-inline {
+      color: var(--danger, #f85149);
+      font-weight: 500;
+    }
+    /* Status badge — solid pill, color-coded. */
     .row-list li .badge {
-      font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
-      padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
-      font-weight: 600;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 2px 7px;
+      border-radius: var(--r-pill);
+      border: 1px solid transparent;
+      font-weight: 700;
     }
-    .row-list li.done .badge { color: var(--success); }
-    .row-list li.failed .badge { color: var(--danger); }
-    .row-list li.cancelled .badge { color: var(--muted); }
+    .row-list li.done .badge {
+      color: var(--success);
+      background: rgba(63,185,80,0.12);
+      border-color: rgba(63,185,80,0.35);
+    }
+    .row-list li.failed .badge {
+      color: var(--danger);
+      background: rgba(248,81,73,0.12);
+      border-color: rgba(248,81,73,0.35);
+    }
+    .row-list li.cancelled .badge {
+      color: var(--muted);
+      background: rgba(255,255,255,0.04);
+      border-color: var(--border);
+    }
     .row-list li button {
-      width: auto; background: transparent; border: 0; color: var(--muted);
-      cursor: pointer; padding: 2px 6px; font-size: 14px; line-height: 1;
+      width: 22px; height: 22px;
+      background: transparent; border: 1px solid transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0;
+      font-size: 13px; line-height: 1;
+      border-radius: var(--r-xs);
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: var(--t-fast);
     }
-    .row-list li button:hover { color: var(--danger); }
+    .row-list li button:hover {
+      color: var(--danger);
+      background: rgba(248,81,73,0.10);
+      border-color: rgba(248,81,73,0.35);
+    }
     .row-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 
-    /* Logs */
+    /* Recent-tab type filter — chip strip matching the stage-outputs
+       filter so all three filter rows in the app share one language. */
+    .row-list-filter {
+      display: flex; gap: 6px;
+      padding: 0 0 8px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .row-list-filter button {
+      width: auto;
+      padding: 3px 10px;
+      font-size: 11px; font-weight: 500;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: var(--r-pill);
+      cursor: pointer;
+      transition: var(--t-fast);
+      letter-spacing: 0;
+    }
+    .row-list-filter button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .row-list-filter button.active {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    /* Logs — terminal feel with deeper bg and a tighter mono. */
     pre.log {
       white-space: pre-wrap; word-break: break-all;
-      background: #06080c; border: 1px solid var(--border); border-radius: 6px;
-      padding: 10px; font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
-      color: #b0b8c4; margin: 0; max-height: 220px; overflow-y: auto;
+      background: #04060e;
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 11px 13px;
+      font: 11px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+      color: #aab4c4;
+      margin: 0;
+      max-height: 220px; overflow-y: auto;
     }
 
     /* Modal — aligned with the agent settings drawer's elevation
@@ -13163,108 +13725,13 @@ HTML = r"""<!doctype html>
     button.primary:hover { background: var(--accent-bright); }
     .actions { gap: 8px; margin-top: 18px; }
 
-    /* === STAGE / PLAYER PANE (Manual mode) ===================== */
-    .stage-pane {
-      background: transparent;
-      padding: 18px;
-    }
-    .player-wrap {
-      border-radius: 10px;
-      border: 1px solid var(--ph-border-soft);
-      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
-      flex: 0 0 auto;
-      aspect-ratio: 16/9;
-      max-height: 50vh;
-    }
-    .player-wrap.empty {
-      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
-      color: var(--ph-text-faint);
-      font-size: 12px;
-    }
-    .player-meta {
-      background: transparent;
-      border: none;
-      padding: 12px 0 0;
-      font-size: 12px;
-    }
-    .player-meta .name {
-      font-family: var(--ph-font-mono);
-      font-size: 13px;
-      color: var(--text);
-    }
-    .player-meta .actions-bar button {
-      padding: 6px 10px;
-      font-size: 11.5px;
-      border-radius: 6px;
-      border: 1px solid var(--ph-border-soft);
-      background: transparent;
-      color: var(--muted);
-    }
-    .player-meta .actions-bar button:hover {
-      border-color: var(--ph-border-strong);
-      color: var(--text);
-    }
-
-    /* Carousel — hairline cards with mono filenames. */
-    .carousel-wrap {
-      padding: 18px 0 0;
-      background: transparent;
-      border-top: 1px solid var(--ph-border-soft);
-      margin-top: 18px;
-    }
-    .carousel-head h3 {
-      font-size: 10.5px;
-      font-family: var(--ph-font-mono);
-      letter-spacing: 0.08em;
-      color: var(--ph-text-faint);
-      text-transform: uppercase;
-      font-weight: 500;
-    }
-    .carousel-head .seg {
-      padding: 2px;
-      gap: 0;
-      background: rgba(140, 160, 220, 0.04);
-      border: 1px solid var(--ph-border-soft);
-      border-radius: 7px;
-      overflow: visible;
-    }
-    .carousel-head .seg button {
-      padding: 4px 10px;
-      font-size: 11.5px;
-      border: none;
-      border-radius: 5px;
-      color: var(--muted);
-    }
-    .carousel-head .seg button.active {
-      background: rgba(47, 129, 247, 0.14);
-      color: var(--accent-bright);
-      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.22);
-    }
-    .car-card {
-      flex: 0 0 220px;
-      border-radius: 10px;
-      border: 1px solid var(--ph-border-soft);
-      background: rgba(20, 26, 58, 0.4);
-      box-shadow: none;
-    }
-    .car-card:hover {
-      border-color: var(--ph-border-strong);
-      transform: none;
-      box-shadow: none;
-    }
-    .car-card.active {
-      border-color: rgba(47, 129, 247, 0.55);
-      box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.30);
-    }
-    .car-card .name {
-      font-family: var(--ph-font-mono);
-      font-size: 11.5px;
-    }
-    .car-card .sub {
-      font-family: var(--ph-font-mono);
-      font-size: 10.5px;
-      color: var(--ph-text-faint);
-    }
+    /* === STAGE / PLAYER PANE (Manual mode) =====================
+       Y2.001 — the legacy Linear-style overrides that lived here are
+       removed; the redesigned stage block above (search "STAGE
+       (PLAYER + CAROUSEL) — REDESIGN Y2.001") is the source of truth
+       and uses the canonical token set instead of the older --ph-*
+       aliases. The selectors are intentionally left blank so any
+       future regression diff stays small. */
 
     /* === AGENT PANE (Agentic Flows) ============================ */
     .agent-pane {
@@ -13629,102 +14096,11 @@ HTML = r"""<!doctype html>
       background: rgba(0, 0, 0, 0.5);
     }
 
-    /* === BOTTOM PANEL ========================================== */
-    .bottom-pane {
-      max-height: 280px;
-      background: rgba(0, 6, 26, 0.6);
-      border-top: 1px solid var(--ph-border-soft);
-    }
-    .bottom-pane.collapsed { max-height: 32px; }
-    .bottom-pane .tabs {
-      padding: 0 14px;
-      gap: 4px;
-      height: 32px;
-      flex: 0 0 32px;
-      border-bottom: 1px solid var(--ph-border-soft);
-      font-size: 11.5px;
-      color: var(--muted);
-      font-family: var(--ph-font-mono);
-    }
-    .bottom-pane .tabs button {
-      height: 22px; padding: 0 8px;
-      font-size: 11.5px;
-      border-radius: 5px;
-      border-bottom: none;
-      color: var(--ph-text-faint);
-      gap: 5px;
-      background: transparent;
-    }
-    .bottom-pane .tabs button:hover { color: var(--text); background: rgba(140, 160, 220, 0.06); }
-    .bottom-pane .tabs button.active {
-      color: var(--text);
-      background: rgba(140, 160, 220, 0.06);
-      border-bottom: none;
-    }
-    .bottom-pane .tabs button .badge {
-      font-family: var(--ph-font-mono);
-      font-size: 10px;
-      padding: 0 5px;
-      background: rgba(47, 129, 247, 0.12);
-      color: var(--accent-bright);
-      border-radius: 3px;
-    }
-    .bottom-pane .tabs .tab-collapse {
-      padding: 2px 8px;
-      font-size: 11px;
-      border-radius: 5px;
-      border: 1px solid var(--ph-border-soft);
-      color: var(--muted);
-      height: 22px;
-    }
-    .bottom-pane .tabs .tab-collapse:hover { color: var(--text); border-color: var(--ph-border-strong); }
-    .bottom-pane .tabs .model-credit {
-      font-size: 11px;
-      color: var(--ph-text-faint);
-      border-right: 1px solid var(--ph-border-soft);
-      padding: 0 12px;
-    }
-
-    /* Now-card inside bottom pane — flat hairline */
-    .bottom-pane .now-card {
-      background: rgba(20, 26, 58, 0.4);
-      border: 1px solid var(--ph-border-soft);
-      border-radius: 8px;
-      padding: 10px 12px;
-    }
-    .bottom-pane .now-card .ttl { font-size: 13px; font-weight: 500; }
-    .bottom-pane .now-card .meta {
-      font-family: var(--ph-font-mono);
-      font-size: 11px;
-      color: var(--muted);
-    }
-    .bottom-pane .progress-bar { background: rgba(140, 160, 220, 0.08); }
-    .bottom-pane .progress-bar .fill {
-      background: var(--accent-bright);
-      box-shadow: none;
-    }
-
-    /* row-list rows — flatter, hairline */
-    .bottom-pane .row-list li {
-      background: rgba(20, 26, 58, 0.4);
-      border: 1px solid var(--ph-border-soft);
-      border-radius: 6px;
-    }
-    .bottom-pane .row-list li .ttl { font-size: 12px; }
-    .bottom-pane .row-list li .params {
-      font-family: var(--ph-font-mono);
-      font-size: 10.5px;
-    }
-
-    /* Logs — match the void background */
-    .bottom-pane pre.log {
-      background: var(--ph-bg);
-      border: 1px solid var(--ph-border-soft);
-      border-radius: 6px;
-      font-family: var(--ph-font-mono);
-      font-size: 11px;
-      color: #b0b8c4;
-    }
+    /* === BOTTOM PANEL ==========================================
+       Y2.001 — the legacy --ph-* override block is removed. The
+       redesigned bottom-pane block above (search "BOTTOM TABBED PANE
+       — REDESIGN Y2.001") is the source of truth and uses the
+       canonical token set. Selectors left blank to keep diffs clean. */
 
     /* === MODELS-INLINE CARD =================================== */
     .models-inline {
@@ -14757,43 +15133,124 @@ HTML = r"""<!doctype html>
   </aside>
 
   <!-- ============== STAGE PANE: PLAYER + CAROUSEL ============== -->
+  <!-- REDESIGN — Y2.001 stage-pane.
+       Replaces the legacy "video → meta strip → header → two filter rows
+       → carousel" stack with a composer-grade layout that mirrors the
+       form-pane redesign: one elevated player surface with overlaid
+       chrome, a single combined filter row, and richer carousel cards
+       whose chrome lives on hover. All legacy IDs/handlers preserved
+       (#playerWrap, #playerMeta, #playerName, #loadParamsBtn,
+        #useAsExtendBtn, #animateBtn, #carousel, #carouselTitle,
+        #filterAll, #filterHidden, #mainOutputsFilter*) so the JS
+       layer keeps working unchanged. -->
   <section class="stage-pane">
-    <div class="player-wrap empty" id="playerWrap">
-      <div>No outputs yet</div>
-      <div style="font-size:11px;opacity:0.6">generate something on the left to begin</div>
-    </div>
-    <div class="player-meta" id="playerMeta" style="display:none">
-      <div class="name" id="playerName"></div>
-      <div class="actions-bar">
-        <button id="loadParamsBtn" onclick="loadParams()" disabled>Load params</button>
-        <button id="useAsExtendBtn" onclick="useAsExtendSource()">Use as Extend</button>
-        <button id="animateBtn" onclick="animateActive()" style="display:none">Animate</button>
-        <button onclick="hideActive()">Hide</button>
+    <!-- Player surface — the hero. Holds the <video>/<img>, the filename
+         overlay (top), the action overlay (top-right), and an inline
+         job-progress overlay (bottom) when something is rendering. The
+         #playerMeta strip is preserved as a hidden a11y/data slot so
+         legacy callers that read its IDs (selectOutput updates them)
+         still find them — but it's never shown. -->
+    <div class="player-surface">
+      <div class="player-wrap empty" id="playerWrap">
+        <div class="ps-empty">
+          <div class="ps-empty-icon" aria-hidden="true">
+            <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+              <circle cx="28" cy="28" r="22" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.35"/>
+              <path d="M23 19 L37 28 L23 37 Z" fill="currentColor" fill-opacity="0.45"/>
+            </svg>
+          </div>
+          <div class="ps-empty-title">No outputs yet</div>
+          <div class="ps-empty-sub">Generate something on the left and the result lands here.</div>
+        </div>
+      </div>
+      <!-- Top overlay: filename + relative time + size. Hidden until an
+           output is selected; shown by selectOutput(). -->
+      <div class="player-overlay-top" id="playerOverlayTop" style="display:none">
+        <div class="po-name" id="playerOverlayName"></div>
+        <div class="po-meta" id="playerOverlayMeta"></div>
+      </div>
+      <!-- Top-right action cluster. Icon buttons with tooltips replace
+           the old text-button row. Each carries a data-action attribute
+           that the old IDs alias to, so legacy code touching them keeps
+           working (loadParamsBtn.disabled, animateBtn.style.display,
+           useAsExtendBtn.style.display all still apply). -->
+      <div class="player-overlay-actions" id="playerOverlayActions" style="display:none">
+        <button id="loadParamsBtn" class="po-act" type="button"
+                onclick="loadParams()" title="Load this clip's render params back into the form" disabled>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 8 L8 13 L13 8 M8 3 L8 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="po-act-label">Params</span>
+        </button>
+        <button id="useAsExtendBtn" class="po-act" type="button"
+                onclick="useAsExtendSource()" title="Use this clip as the source for an Extend job">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 8 L13 8 M9 4 L13 8 L9 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="po-act-label">Extend</span>
+        </button>
+        <button id="animateBtn" class="po-act" type="button"
+                onclick="animateActive()" style="display:none" title="Animate this still as an i2v render">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M5 3 L13 8 L5 13 Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <span class="po-act-label">Animate</span>
+        </button>
+        <button class="po-act po-act-danger" type="button"
+                onclick="hideActive()" title="Hide this output from the gallery">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M2 8 C 4 4, 12 4, 14 8 C 12 12, 4 12, 2 8 Z M5 5 L11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Bottom overlay: live progress when a job is running. Driven by
+           refreshPlayerProgressOverlay() (called from poll). Hidden when
+           idle so the player reads as the active surface. -->
+      <div class="player-overlay-progress" id="playerOverlayProgress" style="display:none">
+        <div class="pop-ring">
+          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="16" cy="16" r="13" stroke="rgba(255,255,255,0.12)" stroke-width="2.5" fill="none"/>
+            <circle id="playerOverlayRingFill" cx="16" cy="16" r="13"
+                    stroke="var(--accent-bright)" stroke-width="2.5" fill="none"
+                    stroke-dasharray="81.68" stroke-dashoffset="81.68"
+                    stroke-linecap="round"
+                    transform="rotate(-90 16 16)"/>
+          </svg>
+          <span class="pop-ring-pct" id="playerOverlayRingPct">0%</span>
+        </div>
+        <div class="pop-body">
+          <div class="pop-title" id="playerOverlayTitle">Rendering</div>
+          <div class="pop-meta" id="playerOverlayMetaProg">starting…</div>
+        </div>
       </div>
     </div>
+    <!-- Hidden compatibility slot. selectOutput() writes #playerName here
+         and toggles display on #playerMeta — both kept so external code
+         and tests don't break. The visible name lives in playerOverlayName. -->
+    <div class="player-meta" id="playerMeta" style="display:none">
+      <div class="name" id="playerName"></div>
+      <div class="actions-bar"></div>
+    </div>
+    <!-- Combined filter + title row. One row, three regions: title +
+         count, kind chips (All/Videos/Photos), visible/hidden segmented
+         toggle on the right. Replaces the previous two-row stack. -->
     <div class="carousel-wrap">
       <div class="carousel-head">
         <h3 id="carouselTitle">Outputs</h3>
-        <div class="seg">
+        <!-- Kind chips, ID + onclick names preserved. -->
+        <div class="stage-outputs-filter" id="mainOutputsFilter">
+          <button type="button" id="mainOutputsFilterAll" class="active"
+                  onclick="setMainOutputsFilter('all')">All</button>
+          <button type="button" id="mainOutputsFilterVideos"
+                  onclick="setMainOutputsFilter('videos')">Videos</button>
+          <button type="button" id="mainOutputsFilterPhotos"
+                  onclick="setMainOutputsFilter('photos')">Photos</button>
+        </div>
+        <span class="ch-spacer"></span>
+        <div class="seg seg-vh">
           <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
           <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
         </div>
-      </div>
-      <!-- All / Videos / Photos kind filter for the main outputs gallery.
-           Lives below the visible/hidden seg-toggle so the two filters
-           stack instead of competing for the same row. Persisted to
-           localStorage['phos_main_outputs_filter'] (DIFFERENT key from
-           the agent-stage one in commit ef7f114) so the user's choice
-           sticks across reloads, AND auto-flips when the form-pane mode
-           pill switches to/from 'image' (Photos for Studio, Videos for
-           t2v/i2v/keyframe/extend). -->
-      <div class="stage-outputs-filter" id="mainOutputsFilter" style="margin: 0 0 6px;">
-        <button type="button" id="mainOutputsFilterAll" class="active"
-                onclick="setMainOutputsFilter('all')">All</button>
-        <button type="button" id="mainOutputsFilterVideos"
-                onclick="setMainOutputsFilter('videos')">Videos</button>
-        <button type="button" id="mainOutputsFilterPhotos"
-                onclick="setMainOutputsFilter('photos')">Photos</button>
       </div>
       <div class="carousel" id="carousel"></div>
     </div>
@@ -15162,14 +15619,23 @@ HTML = r"""<!doctype html>
 
 <!-- ============== BOTTOM TABBED PANE ============== -->
 <aside class="bottom-pane" id="bottomPane">
+  <!-- REDESIGN — Y2.001 bottom-pane. Tighter tab strip with leading
+       activity dot, denser Now card matching the composer-card visual
+       language, refined badges. All IDs preserved so poll() and the
+       click handlers downstream keep working. -->
   <nav class="tabs">
+    <span class="bp-live-dot" id="bpLiveDot" title="Idle"></span>
     <button data-tab="now" class="active">Now</button>
     <button data-tab="queue">Queue <span class="badge" id="queueBadge" style="display:none">0</span></button>
     <button data-tab="recent">Recent</button>
     <button data-tab="logs">Logs</button>
     <span class="spacer"></span>
     <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
-    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')">Collapse</button>
+    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')" title="Collapse this panel">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M2 7 L6 3 L10 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
   </nav>
   <div class="bottom-body">
     <div class="tab-content show" id="tab-now">
@@ -15177,10 +15643,6 @@ HTML = r"""<!doctype html>
         <div class="ttl">Idle</div>
         <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
         <div class="meta" id="nowDetail">No job running</div>
-        <!-- The Now card no longer needs its own Stop button. The Stop
-             button in the form-pane (.actions row) is now visible in
-             both video and Image Studio modes, so a parallel one here
-             is redundant. Removed in unify-studio-chrome commit. -->
       </div>
     </div>
     <div class="tab-content" id="tab-queue">
@@ -15188,11 +15650,8 @@ HTML = r"""<!doctype html>
     </div>
     <div class="tab-content" id="tab-recent">
       <!-- Type filter — image jobs and video jobs share this list now
-           that mode='image' goes through the same worker. The filter
-           is purely client-side: history is delivered whole and the
-           render hides rows that don't match. Default 'all' so users
-           don't lose their videos by selecting Photos and forgetting. -->
-      <div class="row-list-filter" style="display:flex;gap:6px;padding:6px 8px;border-bottom:1px solid var(--bd,#2a2a2a)">
+           that mode='image' goes through the same worker. -->
+      <div class="row-list-filter">
         <button id="recentFilterAll" class="active" onclick="setRecentFilter('all')">All</button>
         <button id="recentFilterVideos" onclick="setRecentFilter('videos')">Videos</button>
         <button id="recentFilterPhotos" onclick="setRecentFilter('photos')">Photos</button>
@@ -17168,6 +17627,31 @@ async function poll() {
     }
   }
 
+  // Y2.001 — bottom-pane live dot mirrors worker state. Tooltip sets
+  // a one-line status for accessibility / hover. The dot animates
+  // when running, switches red on the failed state.
+  const liveDot = document.getElementById('bpLiveDot');
+  if (liveDot) {
+    liveDot.classList.remove('live', 'failed');
+    if (s.running && s.current) {
+      liveDot.classList.add('live');
+      liveDot.title = 'Rendering';
+    } else {
+      const last = (s.history || [])[0];
+      const showFailure = last && last.status === 'failed' && !s.queue.length;
+      if (showFailure) { liveDot.classList.add('failed'); liveDot.title = 'Last job failed'; }
+      else if (s.paused) liveDot.title = 'Paused';
+      else if (s.queue.length) liveDot.title = `${s.queue.length} queued`;
+      else liveDot.title = 'Idle';
+    }
+  }
+
+  // Y2.001 — in-player progress overlay. When a job is running, surface
+  // a compact progress chip on the player surface itself so the user
+  // gets contextual progress without looking down at the bottom strip.
+  // Falls back to the same fields the now-card uses.
+  refreshPlayerProgressOverlay(s);
+
   // Logs
   const log = document.getElementById('log');
   const wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
@@ -17443,18 +17927,107 @@ function renderCarousel() {
         ? `<button class="car-info-btn" type="button" title="Show generation info"
                    onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
         : ''}
+      <div class="card-chrome">
+        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})"
+                title="${o.hidden ? 'Restore to the visible gallery' : 'Hide from the gallery'}">${o.hidden ? 'Show' : 'Hide'}</button>
+        ${secondaryBtn}
+      </div>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
         <div class="sub" title="${isPhoto ? 'File size' : 'Render time · file size'}">
           ${isPhoto ? '' : _outputDurationLabel(o) + ' · '}${o.size_mb.toFixed(1)} MB
         </div>
       </div>
-      <div class="row-btns">
+      <div class="row-btns" style="display:none">
         <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})">${o.hidden ? 'Show' : 'Hide'}</button>
         ${secondaryBtn}
       </div>
     </div>`;
   }).join('');
+}
+
+// Y2.001 — in-player progress overlay driver. Reads the same status
+// snapshot the bottom-pane Now card uses, then writes the percentage
+// + phase + remaining onto the floating chip pinned to the bottom of
+// .player-surface. Hidden when no job is running. Plays well with the
+// failed state too: turns the chip red and pins the failure summary.
+function refreshPlayerProgressOverlay(s) {
+  const chip = document.getElementById('playerOverlayProgress');
+  const ringFill = document.getElementById('playerOverlayRingFill');
+  const ringPct = document.getElementById('playerOverlayRingPct');
+  const titleEl = document.getElementById('playerOverlayTitle');
+  const metaEl = document.getElementById('playerOverlayMetaProg');
+  if (!chip) return;
+  // Ring circumference for r=13 → 2*pi*13 ≈ 81.68. Pre-set in HTML;
+  // we just sweep stroke-dashoffset between 81.68 (0%) and 0 (100%).
+  const RING_C = 81.68;
+  if (s.running && s.current) {
+    chip.classList.remove('failed');
+    chip.style.display = '';
+    const prog = s.current.progress || null;
+    let pct = 0, phaseLabel = 'Working', remaining = null;
+    if (prog) {
+      pct = Math.min(99, Math.max(0, prog.pct ?? 0));
+      phaseLabel = prog.phase_label || 'Working';
+      remaining = prog.remaining_sec != null ? prog.remaining_sec : null;
+    } else {
+      // Legacy fallback — match the now-card's elapsed/avg shape.
+      const elapsed = Math.max(0, s.server_now - s.current.started_ts);
+      const avg = s.avg_elapsed_sec || 420;
+      pct = Math.min(99, Math.round(elapsed / avg * 100));
+    }
+    ringFill.setAttribute('stroke', 'var(--accent-bright)');
+    ringFill.setAttribute('stroke-dashoffset', String(RING_C * (1 - pct / 100)));
+    ringPct.textContent = pct + '%';
+    const cur = s.current.params;
+    const label = cur.label || cur.prompt || 'Untitled';
+    titleEl.textContent = snippet(label, 60);
+    const remTxt = (remaining != null && remaining > 0)
+      ? `~${fmtMin(remaining)} left`
+      : 'estimating…';
+    metaEl.innerHTML = `<strong>${escapeHtml(phaseLabel)}</strong> · ${remTxt}`;
+    return;
+  }
+  // Surface a persistent failure chip on the player too, mirroring the
+  // now-card's policy (don't let a fail drift back to a sleepy idle).
+  const last = (s.history || [])[0];
+  const showFailure = last && last.status === 'failed' && !s.queue.length;
+  if (showFailure) {
+    chip.classList.add('failed');
+    chip.style.display = '';
+    ringFill.setAttribute('stroke', 'var(--danger)');
+    ringFill.setAttribute('stroke-dashoffset', '0');
+    ringPct.textContent = '!';
+    titleEl.textContent = 'Last render failed';
+    metaEl.textContent = snippet(last.error || 'unknown error', 80);
+    return;
+  }
+  chip.style.display = 'none';
+  ringFill.setAttribute('stroke-dashoffset', String(RING_C));
+  ringPct.textContent = '0%';
+}
+
+// Relative-time helper for the player overlay meta line. Takes the
+// server's "YYYY-MM-DD HH:MM:SS" mtime string and returns a humanlike
+// "2 min ago" / "3 h ago" / "yesterday" so the meta strip carries
+// recency info without forcing the user to do date math.
+function _relTimeFromMtime(mtime) {
+  if (!mtime) return '';
+  // Treat the server timestamp as local time (it's the panel host's
+  // wall clock). Date parses "YYYY-MM-DD HH:MM:SS" inconsistently
+  // across browsers, so re-format to ISO-with-T which all engines
+  // accept as local.
+  const iso = String(mtime).replace(' ', 'T');
+  const t = new Date(iso).getTime();
+  if (!isFinite(t)) return mtime;
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (sec < 45)    return 'just now';
+  if (sec < 90)    return '1 min ago';
+  if (sec < 3600)  return Math.round(sec / 60) + ' min ago';
+  if (sec < 5400)  return '1 h ago';
+  if (sec < 86400) return Math.round(sec / 3600) + ' h ago';
+  if (sec < 172800) return 'yesterday';
+  return Math.round(sec / 86400) + ' d ago';
 }
 
 function selectOutput(path) {
@@ -17488,22 +18061,38 @@ function selectOutput(path) {
   wrap.innerHTML = isPhoto
     ? `<img src="${playerSrc}" alt="${o ? escapeHtml(o.name) : ''}">`
     : `<video controls autoplay src="${playerSrc}"></video>`;
+
+  // Y2.001 — populate the new overlays. The legacy #playerName / #playerMeta
+  // are kept hidden but the writes still happen so any test/external code
+  // reading them gets the same data.
   document.getElementById('playerMeta').style.display = '';
-  // Meta line: photos drop the playback duration slot since there's
-  // nothing to play back. Videos keep the existing
-  // "<name> · <mtime> · <size> MB" tagline.
-  document.getElementById('playerName').innerHTML = o
-    ? `<strong>${escapeHtml(o.name)}</strong> · ${o.mtime} · ${o.size_mb.toFixed(1)} MB`
+  const legacyMetaText = o
+    ? `${o.name} · ${o.mtime} · ${o.size_mb.toFixed(1)} MB`
     : '';
+  document.getElementById('playerName').textContent = legacyMetaText;
+  // Visible top overlay — title + meta line with relative time.
+  const overlayTop = document.getElementById('playerOverlayTop');
+  const overlayActions = document.getElementById('playerOverlayActions');
+  if (overlayTop) {
+    overlayTop.style.display = '';
+    document.getElementById('playerOverlayName').textContent = o ? o.name : '';
+    const rel = o ? _relTimeFromMtime(o.mtime) : '';
+    const sizeLbl = o ? `${o.size_mb.toFixed(1)} MB` : '';
+    const kindLbl = isPhoto ? 'Photo' : 'Video';
+    document.getElementById('playerOverlayMeta').innerHTML = o
+      ? `<span>${kindLbl}</span><span class="po-dot"></span>` +
+        `<span>${escapeHtml(rel)}</span><span class="po-dot"></span>` +
+        `<span>${sizeLbl}</span>`
+      : '';
+  }
+  if (overlayActions) overlayActions.style.display = '';
+
   // Load params is video-only — image sidecars use the library@1 schema
   // which doesn't carry the i2v/t2v form fields the loader expects.
-  // Photo prompt re-use already happens through Animate (see below),
-  // which reads the prompt out of the library@1 sidecar directly.
   document.getElementById('loadParamsBtn').disabled = !(o && o.has_sidecar) || isPhoto;
   // Action button row: swap "Use as Extend" for "Animate" on photo
   // entries (Extend is video-only, but the still can be the seed for
-  // an i2v render). The DOM nodes both exist; we just toggle display
-  // so the button labels stay in their authored slot.
+  // an i2v render).
   const useExtBtn = document.getElementById('useAsExtendBtn');
   const animBtn = document.getElementById('animateBtn');
   if (useExtBtn) useExtBtn.style.display = isPhoto ? 'none' : '';
