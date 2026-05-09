@@ -14148,6 +14148,1394 @@ HTML = r"""<!doctype html>
 
     /* === FALLBACK: Hide unwanted inline icons in version pill === */
     body > header > .pill svg { width: 12px; height: 12px; }
+
+    /* ============================================================
+       AGENTIC FLOWS — CHAT REDESIGN Y2.002
+       ============================================================
+       Bold-pass overhaul of the agent chat surface to match the
+       composer-led form-pane (Y1.0) and stage-pane (Y2.001) idiom.
+       This block is the SOURCE OF TRUTH for chat chrome — it sits
+       AFTER all earlier .agent-* rules, so it wins by cascade. The
+       legacy rules above are intentionally left in place so we can
+       diff-revert any specific surface if a regression appears.
+
+       What changed:
+         1. Composer = elevated hero card, accent ring on focus,
+            38px circle send button, contextual hint strip below
+            (no more negative-bottom absolute hint).
+         2. Header = single chip strip, condensed action cluster,
+            engine pill carries inline state instead of a banner.
+         3. Empty state = centered hero with prompt suggestion grid.
+         4. Tool cards = polished, status badge, mono chips, hover
+            tint, expand chevron rotation, duration meta.
+         5. Message rows = comfortable reading column, hover-revealed
+            assistant meta (timestamp + copy).
+         6. Stage pane = elevated cards, refined activity feed,
+            outputs gallery with hover lift.
+         7. Streaming indicator = inline 3-dot pulse for assistant.
+         8. Turn summary = polished mono chip with count badges.
+       ============================================================ */
+
+    /* ---- 1. Pane wrapper — make the chat dominate the form-pane.
+       Drop the 60vh cap so the chat fills available height in regular
+       mode (it's already the only content in the agent workflow). */
+    body[data-workflow="agent"] .agent-pane {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding-top: 0;
+    }
+    body[data-workflow="agent"] .agent-pane .agent-chat-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      max-height: none;          /* override the legacy 60vh cap */
+    }
+    body[data-workflow="agent"] aside.form-pane {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    /* ---- 2. Header — condense + polish.
+       Elevated hairline strip, the engine pill is the primary
+       state surface (no separate banner needed for "engine off"),
+       action icons grouped into a polished cluster on the right. */
+    .agent-pane > .agent-header {
+      min-height: 48px;
+      padding: 0 18px;
+      gap: 8px;
+      background: linear-gradient(180deg, rgba(140,160,220,0.025), transparent);
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+    /* Sessions trigger — slightly more comfortable hit target */
+    .agent-header .asp-trigger {
+      height: 28px;
+      padding: 0 11px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: var(--r-sm);
+      background: rgba(140, 160, 220, 0.05);
+      transition: var(--t-fast);
+    }
+    .agent-header .asp-trigger:hover {
+      border-color: var(--accent);
+      color: var(--accent-bright);
+      background: rgba(47, 129, 247, 0.08);
+    }
+    .agent-header .asp-trigger svg { opacity: 0.85; }
+    .agent-header .asp-trigger-count {
+      padding: 1px 6px;
+      background: rgba(47,129,247,0.15);
+      color: var(--accent-bright);
+      border-radius: var(--r-pill);
+      font-size: 10px; font-weight: 600;
+      font-family: var(--ph-font-mono);
+    }
+    /* Engine pill — primary state. When off, carries a contextual
+       "Click to start" copy + warning glow. When live, shows model
+       name with green glow. */
+    .agent-header .engine-pill {
+      height: 28px;
+      padding: 0 11px;
+      gap: 7px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      background: rgba(140, 160, 220, 0.05);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-sm);
+      color: var(--text);
+      transition: var(--t-fast);
+      max-width: 360px;
+    }
+    .agent-header .engine-pill:hover {
+      border-color: var(--accent);
+      background: rgba(47, 129, 247, 0.08);
+    }
+    .agent-header .engine-pill .dot {
+      width: 7px; height: 7px;
+      background: var(--muted);
+      box-shadow: none;
+      transition: var(--t-base);
+    }
+    .agent-header .engine-pill .dot.live {
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgba(63,185,80,0.18),
+                  0 0 8px rgba(63,185,80,0.45);
+      animation: agent-engine-live 2.4s ease-in-out infinite;
+    }
+    @keyframes agent-engine-live {
+      0%, 100% { box-shadow: 0 0 0 3px rgba(63,185,80,0.18), 0 0 8px rgba(63,185,80,0.45); }
+      50%      { box-shadow: 0 0 0 5px rgba(63,185,80,0.06), 0 0 14px rgba(63,185,80,0.65); }
+    }
+    .agent-header .engine-pill .dot.warn { background: var(--warning); }
+    .agent-header .engine-pill .dot.bad { background: var(--danger); }
+    /* Mode pill — same chip language */
+    .agent-header .agent-mode-pill {
+      height: 28px;
+      padding: 0 11px;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      background: rgba(140, 160, 220, 0.05);
+      border-radius: var(--r-sm);
+      transition: var(--t-fast);
+    }
+    .agent-header .agent-mode-pill:hover {
+      border-color: var(--accent);
+      color: var(--accent-bright);
+      background: rgba(47, 129, 247, 0.08);
+    }
+    .agent-header .agent-mode-pill.is-interactive {
+      background: rgba(47, 129, 247, 0.14);
+      border-color: rgba(47, 129, 247, 0.32);
+      color: var(--accent-bright);
+    }
+    /* Stop engine — quieter danger affordance */
+    .agent-header .agent-engine-stop {
+      height: 28px;
+      padding: 0 11px;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: var(--r-sm);
+      background: transparent;
+      transition: var(--t-fast);
+    }
+    .agent-header .agent-engine-stop:hover {
+      color: var(--danger);
+      border-color: rgba(248, 81, 73, 0.40);
+      background: rgba(248, 81, 73, 0.08);
+    }
+    /* RAM chip */
+    .agent-header .agent-ram-chip {
+      height: 28px;
+      padding: 0 11px;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      background: rgba(140, 160, 220, 0.05);
+      border-radius: var(--r-sm);
+      font-family: var(--ph-font-mono);
+    }
+    .agent-header .agent-ram-chip .agent-ram-dot {
+      width: 7px; height: 7px;
+      box-shadow: none;
+    }
+    .agent-header .agent-ram-chip.is-roomy .agent-ram-dot {
+      background: var(--success);
+      box-shadow: 0 0 0 2px rgba(63,185,80,0.20);
+    }
+    .agent-header .agent-ram-chip.is-tight .agent-ram-dot {
+      background: var(--warning);
+      box-shadow: 0 0 0 2px rgba(210,153,34,0.20);
+    }
+    .agent-header .agent-ram-chip.is-bad .agent-ram-dot {
+      background: var(--danger);
+      box-shadow: 0 0 0 2px rgba(248,81,73,0.22);
+      animation: agent-engine-live 1.6s ease-in-out infinite;
+    }
+    /* Session title — quieter, stays centered */
+    .agent-header .session-title {
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: -0.005em;
+      text-align: right;
+      padding-left: 12px;
+    }
+    .agent-header .session-title .meta {
+      font-size: 10.5px;
+      color: var(--ph-text-faint);
+      font-family: var(--ph-font-mono);
+      margin-left: 6px;
+    }
+    /* Action icon cluster — group into a polished surface */
+    .agent-header .icon-btn {
+      width: 28px; height: 28px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--muted);
+      transition: var(--t-fast);
+    }
+    .agent-header .icon-btn:hover {
+      color: var(--accent-bright);
+      background: rgba(47, 129, 247, 0.08);
+      border-color: transparent;
+    }
+    .agent-header .icon-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    /* ---- 3. Engine readiness banner — polished, action-led */
+    body[data-workflow="agent"] #agentEngineBanner {
+      margin: 10px 18px 0 18px;
+      padding: 10px 12px 10px 14px;
+      border-radius: var(--r-md);
+      box-shadow: var(--shadow-1);
+      background: var(--panel);
+    }
+    body[data-workflow="agent"] #agentEngineBanner.warn {
+      background: linear-gradient(180deg, rgba(210,153,34,0.10), rgba(210,153,34,0.04));
+      border-color: rgba(210, 153, 34, 0.40);
+    }
+    body[data-workflow="agent"] #agentEngineBanner.err {
+      background: linear-gradient(180deg, rgba(248,81,73,0.10), rgba(248,81,73,0.04));
+      border-color: rgba(248,81,73, 0.40);
+    }
+    body[data-workflow="agent"] #agentEngineBanner.ok {
+      background: linear-gradient(180deg, rgba(63,185,80,0.10), rgba(63,185,80,0.04));
+      border-color: rgba(63,185,80,0.32);
+    }
+    body[data-workflow="agent"] .agent-engine-banner-btn {
+      padding: 5px 11px;
+      border: 1px solid currentColor;
+      border-radius: var(--r-sm);
+      font-size: 11.5px;
+      font-weight: 600;
+      opacity: 0.95;
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .agent-engine-banner-btn:hover {
+      opacity: 1;
+      background: rgba(255,255,255,0.08);
+      transform: translateY(-1px);
+    }
+
+    /* ---- 4. Chat scroll surface — comfortable reading column */
+    body[data-workflow="agent"] .agent-chat {
+      padding: 24px 18px 12px;
+      gap: 4px;
+      scroll-padding-bottom: 80px;
+    }
+    body[data-workflow="agent"] .agent-chat::-webkit-scrollbar { width: 10px; }
+    body[data-workflow="agent"] .agent-chat::-webkit-scrollbar-thumb {
+      background: rgba(140,160,220,0.14);
+      border: 2px solid transparent;
+      background-clip: padding-box;
+      border-radius: 6px;
+    }
+    body[data-workflow="agent"] .agent-chat::-webkit-scrollbar-thumb:hover {
+      background: var(--accent);
+      background-clip: padding-box;
+      border: 2px solid transparent;
+    }
+
+    /* ---- 5. Message rows — claude.ai-grade typography, hover meta */
+    body[data-workflow="agent"] .agent-msg-row {
+      gap: 12px;
+      margin-bottom: 18px;
+      max-width: 100%;
+      align-items: flex-start;
+      animation: agent-msg-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    @keyframes agent-msg-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    body[data-workflow="agent"] .agent-msg-row.user {
+      align-self: flex-end;
+      max-width: 82%;
+      flex-direction: row-reverse;
+    }
+    body[data-workflow="agent"] .agent-msg-row.assistant {
+      max-width: 100%;
+    }
+
+    /* Avatars — bigger, more refined */
+    body[data-workflow="agent"] .agent-avatar {
+      width: 28px; height: 28px;
+      border-radius: var(--r-sm);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+      box-shadow: var(--shadow-1);
+    }
+    body[data-workflow="agent"] .agent-avatar.claude {
+      background: radial-gradient(circle at 35% 30%, #2d1a4f 0%, #0a0518 80%);
+      border: 1px solid rgba(187, 89, 233, 0.30);
+      padding: 3px;
+      position: relative;
+      overflow: hidden;
+    }
+    body[data-workflow="agent"] .agent-avatar.claude::before {
+      content: '';
+      display: block;
+      width: 100%; height: 100%;
+      background: url('/assets/favicon-64.png') center/contain no-repeat;
+    }
+    /* Pulse the assistant avatar when its row is the LAST one and the
+       message is being streamed (.streaming). Subtle accent halo so
+       users see "still thinking" at a glance. */
+    body[data-workflow="agent"] .agent-msg-row.streaming .agent-avatar.claude {
+      box-shadow: 0 0 0 0 rgba(187, 89, 233, 0.5);
+      animation: agent-avatar-pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes agent-avatar-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(187, 89, 233, 0.45); }
+      50%      { box-shadow: 0 0 0 6px rgba(187, 89, 233, 0.0); }
+    }
+    body[data-workflow="agent"] .agent-avatar.user {
+      background: linear-gradient(135deg, #3a4a8a, #1d2752);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+    }
+
+    body[data-workflow="agent"] .agent-msg-body {
+      flex: 1;
+      min-width: 0;
+    }
+    body[data-workflow="agent"] .agent-msg-row.user .agent-msg-body {
+      flex: 0 1 auto;
+    }
+
+    /* Message header — name + hover-revealed timestamp + copy. */
+    body[data-workflow="agent"] .agent-msg-name {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+      letter-spacing: 0.01em;
+    }
+    body[data-workflow="agent"] .agent-msg-row.user .agent-msg-name { display: none; }
+    body[data-workflow="agent"] .agent-msg-time {
+      font-size: 10.5px;
+      font-weight: 400;
+      color: var(--ph-text-faint);
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0;
+      opacity: 0;
+      transition: opacity var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-msg-row:hover .agent-msg-time { opacity: 1; }
+    body[data-workflow="agent"] .agent-msg-actions {
+      display: inline-flex;
+      gap: 4px;
+      margin-left: auto;
+      opacity: 0;
+      transition: opacity var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-msg-row:hover .agent-msg-actions { opacity: 1; }
+    body[data-workflow="agent"] .agent-msg-action {
+      width: 22px; height: 22px;
+      border-radius: var(--r-xs);
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      cursor: pointer;
+      transition: var(--t-fast);
+      padding: 0;
+    }
+    body[data-workflow="agent"] .agent-msg-action:hover {
+      color: var(--accent-bright);
+      background: rgba(47,129,247,0.10);
+    }
+    body[data-workflow="agent"] .agent-msg-action.copied {
+      color: var(--success);
+    }
+
+    /* Message content — assistant stays naked (claude.ai pattern);
+       user gets a soft accent-tinted bubble with the chat-app radius. */
+    body[data-workflow="agent"] .agent-msg-content {
+      font-size: 14px;
+      line-height: 1.62;
+      color: var(--text);
+    }
+    body[data-workflow="agent"] .agent-msg-row.user .agent-msg-content {
+      background: linear-gradient(135deg,
+                    rgba(47, 129, 247, 0.16),
+                    rgba(47, 129, 247, 0.10));
+      border: 1px solid rgba(47, 129, 247, 0.30);
+      border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+      padding: 10px 14px;
+      box-shadow: var(--shadow-1);
+      color: var(--text);
+    }
+
+    /* Streaming dot indicator — appears inline at end of assistant
+       content while content is being streamed. */
+    body[data-workflow="agent"] .agent-streaming-dots {
+      display: inline-flex;
+      gap: 4px;
+      vertical-align: middle;
+      margin-left: 4px;
+    }
+    body[data-workflow="agent"] .agent-streaming-dots span {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      opacity: 0.4;
+      animation: agent-dot-bounce 1.2s ease-in-out infinite;
+    }
+    body[data-workflow="agent"] .agent-streaming-dots span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+    body[data-workflow="agent"] .agent-streaming-dots span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+    @keyframes agent-dot-bounce {
+      0%, 60%, 100% { opacity: 0.4; transform: translateY(0); }
+      30%           { opacity: 1;   transform: translateY(-3px); }
+    }
+
+    /* ---- 6. Markdown — polished IDE-grade code blocks. */
+    body[data-workflow="agent"] .agent-md p { margin: 9px 0; }
+    body[data-workflow="agent"] .agent-md code {
+      font-family: var(--ph-font-mono);
+      font-size: 0.88em;
+      padding: 1.5px 6px;
+      background: rgba(47,129,247,0.10);
+      border: 1px solid rgba(47,129,247,0.20);
+      border-radius: var(--r-xs);
+      color: var(--accent-bright);
+      letter-spacing: 0;
+    }
+    body[data-workflow="agent"] .agent-md pre {
+      position: relative;
+      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
+      border: 1px solid var(--ph-border-strong);
+      border-radius: var(--r-md);
+      padding: 12px 14px;
+      margin: 12px 0;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.55;
+      box-shadow: var(--shadow-1);
+    }
+    body[data-workflow="agent"] .agent-md pre code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: var(--text);
+      font-size: inherit;
+    }
+    /* Per-pre copy button — opt-in via JS hooking into renderMessage. */
+    body[data-workflow="agent"] .agent-md pre .agent-copy-pre {
+      position: absolute;
+      top: 7px; right: 7px;
+      width: 26px; height: 26px;
+      border-radius: var(--r-xs);
+      background: rgba(20, 26, 58, 0.7);
+      border: 1px solid var(--ph-border-soft);
+      color: var(--muted);
+      cursor: pointer;
+      opacity: 0;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: var(--t-fast);
+      backdrop-filter: blur(6px);
+    }
+    body[data-workflow="agent"] .agent-md pre:hover .agent-copy-pre { opacity: 1; }
+    body[data-workflow="agent"] .agent-md pre .agent-copy-pre:hover {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+    body[data-workflow="agent"] .agent-md pre .agent-copy-pre.copied {
+      color: var(--success);
+      border-color: rgba(63,185,80,0.45);
+    }
+    body[data-workflow="agent"] .agent-md blockquote {
+      margin: 12px 0;
+      padding: 8px 14px;
+      border-left: 3px solid var(--accent);
+      color: var(--muted);
+      background: rgba(47, 129, 247, 0.06);
+      border-radius: 0 var(--r-sm) var(--r-sm) 0;
+    }
+    body[data-workflow="agent"] .agent-md table {
+      border-collapse: separate;
+      border-spacing: 0;
+      margin: 12px 0;
+      font-size: 12.5px;
+      border: 1px solid var(--ph-border-strong);
+      border-radius: var(--r-sm);
+      overflow: hidden;
+    }
+    body[data-workflow="agent"] .agent-md th,
+    body[data-workflow="agent"] .agent-md td {
+      border-bottom: 1px solid var(--ph-border-soft);
+      border-right: 1px solid var(--ph-border-soft);
+      padding: 8px 12px;
+    }
+    body[data-workflow="agent"] .agent-md th:last-child,
+    body[data-workflow="agent"] .agent-md td:last-child { border-right: none; }
+    body[data-workflow="agent"] .agent-md tr:last-child td { border-bottom: none; }
+    body[data-workflow="agent"] .agent-md th {
+      background: rgba(47, 129, 247, 0.08);
+      font-weight: 600;
+      text-align: left;
+      color: var(--accent-bright);
+      letter-spacing: 0.02em;
+    }
+
+    /* ---- 7. Tool cards — claude.ai-grade. */
+    body[data-workflow="agent"] .agent-tool-card {
+      margin: 8px 0;
+      background: linear-gradient(180deg,
+                    rgba(140, 160, 220, 0.04),
+                    rgba(140, 160, 220, 0.02));
+      border: 1px solid var(--ph-border-soft);
+      border-left-width: 2px;
+      border-radius: var(--r-sm);
+      box-shadow: var(--shadow-1);
+      transition: var(--t-base);
+      overflow: hidden;
+    }
+    body[data-workflow="agent"] .agent-tool-card:hover {
+      border-color: var(--ph-border-strong);
+      background: linear-gradient(180deg,
+                    rgba(140, 160, 220, 0.06),
+                    rgba(140, 160, 220, 0.03));
+    }
+    body[data-workflow="agent"] .agent-tool-card.pending {
+      border-left-color: var(--accent);
+      animation: agent-tool-running 2.2s ease-in-out infinite;
+    }
+    @keyframes agent-tool-running {
+      0%, 100% { box-shadow: var(--shadow-1), 0 0 0 0 rgba(47,129,247,0.0); }
+      50%      { box-shadow: var(--shadow-1), 0 0 0 1px rgba(47,129,247,0.18); }
+    }
+    body[data-workflow="agent"] .agent-tool-card.success {
+      border-left-color: rgba(63, 185, 80, 0.55);
+    }
+    body[data-workflow="agent"] .agent-tool-card.error {
+      border-left-color: rgba(248, 81, 73, 0.55);
+      background: linear-gradient(180deg,
+                    rgba(248, 81, 73, 0.05),
+                    rgba(248, 81, 73, 0.02));
+    }
+    body[data-workflow="agent"] .agent-tool-card .head {
+      padding: 9px 11px 9px 12px;
+      gap: 9px;
+      font-family: inherit;
+      font-size: 12px;
+      transition: var(--t-fast);
+      align-items: center;
+    }
+    body[data-workflow="agent"] .agent-tool-card .head:hover {
+      background: rgba(255,255,255,0.025);
+    }
+    /* Status icon — circular badge */
+    body[data-workflow="agent"] .agent-tool-card .head .icon {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+      background: rgba(140,160,220,0.10);
+      color: var(--muted);
+      line-height: 1;
+    }
+    body[data-workflow="agent"] .agent-tool-card.pending .head .icon {
+      background: rgba(47, 129, 247, 0.18);
+      color: var(--accent-bright);
+    }
+    body[data-workflow="agent"] .agent-tool-card.pending .head .icon::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-bright);
+      animation: agent-tool-dot 1.2s ease-in-out infinite;
+    }
+    @keyframes agent-tool-dot {
+      0%, 100% { opacity: 0.4; transform: scale(0.85); }
+      50%      { opacity: 1;   transform: scale(1.1); }
+    }
+    body[data-workflow="agent"] .agent-tool-card.pending .head .icon-glyph { display: none; }
+    body[data-workflow="agent"] .agent-tool-card.success .head .icon {
+      background: rgba(63, 185, 80, 0.18);
+      color: var(--success);
+    }
+    body[data-workflow="agent"] .agent-tool-card.error .head .icon {
+      background: rgba(248, 81, 73, 0.18);
+      color: var(--danger);
+    }
+    /* Tool name — mono chip */
+    body[data-workflow="agent"] .agent-tool-card .head .name {
+      font-family: var(--ph-font-mono);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: 0.01em;
+      flex-shrink: 0;
+    }
+    body[data-workflow="agent"] .agent-tool-card.error .head .name { color: #f5b3ae; }
+    body[data-workflow="agent"] .agent-tool-card .head .summary {
+      color: var(--muted);
+      flex: 1; min-width: 0;
+      font-size: 11.5px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    /* Duration meta — mono, muted */
+    body[data-workflow="agent"] .agent-tool-card .head .duration {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      color: var(--ph-text-faint);
+      flex-shrink: 0;
+      letter-spacing: 0;
+    }
+    body[data-workflow="agent"] .agent-tool-card .head .chevron {
+      color: var(--muted);
+      flex-shrink: 0;
+      transition: transform var(--t-base) ease;
+      font-size: 13px;
+      line-height: 1;
+      width: 14px;
+      text-align: center;
+    }
+    body[data-workflow="agent"] .agent-tool-card.open .head .chevron {
+      transform: rotate(90deg);
+    }
+    body[data-workflow="agent"] .agent-tool-card .body {
+      border-top: 1px solid var(--ph-border-soft);
+      padding: 0 12px 12px;
+    }
+    body[data-workflow="agent"] .agent-tool-card.open .body {
+      padding-top: 10px;
+    }
+    body[data-workflow="agent"] .agent-tool-card .body pre {
+      margin: 0;
+      padding: 11px 13px;
+      background: linear-gradient(180deg, #0a1130 0%, #050920 100%);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-xs);
+      font-size: 11.5px;
+      line-height: 1.5;
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+      font-family: var(--ph-font-mono);
+    }
+
+    /* ---- 8. Reasoning disclosure — quieter polish */
+    body[data-workflow="agent"] .agent-reasoning {
+      margin: 0 0 10px 0;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-sm);
+      background: rgba(140, 160, 220, 0.025);
+      transition: var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-reasoning:hover {
+      border-color: var(--ph-border-strong);
+    }
+    body[data-workflow="agent"] .agent-reasoning > summary {
+      padding: 8px 12px;
+      font-size: 11.5px;
+      gap: 8px;
+    }
+    body[data-workflow="agent"] .agent-reasoning > summary .label {
+      font-weight: 600;
+      color: var(--text);
+    }
+    body[data-workflow="agent"] .agent-reasoning > summary .meta {
+      color: var(--ph-text-faint);
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+    }
+    body[data-workflow="agent"] .agent-reasoning .agent-reasoning-body {
+      padding: 4px 14px 12px 30px;
+      max-height: 360px;
+    }
+
+    /* ---- 9. Turn summary chip — polished */
+    body[data-workflow="agent"] .agent-turn-summary {
+      margin-top: 10px;
+      padding: 6px 11px;
+      background: linear-gradient(180deg,
+                    rgba(140, 160, 220, 0.05),
+                    rgba(140, 160, 220, 0.02));
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-pill);
+      font-size: 11px;
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .agent-turn-summary:hover {
+      border-color: var(--ph-border-strong);
+      background: linear-gradient(180deg,
+                    rgba(140, 160, 220, 0.07),
+                    rgba(140, 160, 220, 0.03));
+    }
+    body[data-workflow="agent"] .agent-turn-summary-icon {
+      color: var(--success);
+      opacity: 0.85;
+    }
+    body[data-workflow="agent"] .agent-turn-summary-text {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      color: var(--text);
+      letter-spacing: 0.01em;
+    }
+    body[data-workflow="agent"] .agent-turn-summary-text .sep {
+      color: var(--ph-text-faint);
+      opacity: 0.7;
+    }
+
+    /* ---- 10. Empty state — inviting hero */
+    body[data-workflow="agent"] .agent-empty {
+      max-width: 600px;
+      margin: 8vh auto 24px;
+      text-align: center;
+      padding: 0 18px;
+    }
+    body[data-workflow="agent"] .agent-empty-glyph {
+      width: 64px; height: 64px;
+      margin: 0 auto 18px;
+      border-radius: var(--r-lg);
+      background:
+        radial-gradient(circle at 35% 30%, rgba(187, 89, 233, 0.22), transparent 60%),
+        radial-gradient(circle at 70% 65%, rgba(47, 129, 247, 0.22), transparent 60%),
+        linear-gradient(135deg, #0a1130, #050920);
+      border: 1px solid rgba(187, 89, 233, 0.30);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 12px 36px rgba(47,129,247,0.18),
+                  0 0 0 1px rgba(187,89,233,0.10);
+      position: relative;
+      overflow: hidden;
+    }
+    body[data-workflow="agent"] .agent-empty-glyph::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: url('/assets/favicon-64.png') center/52% no-repeat;
+      filter: drop-shadow(0 0 12px rgba(187,89,233,0.45));
+    }
+    body[data-workflow="agent"] .agent-empty .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 11px;
+      border-radius: var(--r-pill);
+      background: rgba(47, 129, 247, 0.10);
+      border: 1px solid rgba(47, 129, 247, 0.30);
+      color: var(--accent-bright);
+      font-size: 10.5px; font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 18px;
+      font-family: var(--ph-font-mono);
+    }
+    body[data-workflow="agent"] .agent-empty h3 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin: 0 0 10px;
+    }
+    body[data-workflow="agent"] .agent-empty p {
+      font-size: 13.5px;
+      line-height: 1.6;
+      color: var(--muted);
+      margin: 4px 0;
+    }
+    body[data-workflow="agent"] .agent-empty .examples {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      max-width: 480px;
+      margin: 28px auto 0;
+    }
+    body[data-workflow="agent"] .agent-empty .example {
+      text-align: left;
+      padding: 12px 14px;
+      background: var(--panel);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-md);
+      cursor: pointer;
+      color: var(--text);
+      font-size: 13px;
+      transition: var(--t-base);
+      display: flex; align-items: center; gap: 12px;
+      box-shadow: var(--shadow-1);
+    }
+    body[data-workflow="agent"] .agent-empty .example:hover {
+      border-color: var(--accent);
+      background: rgba(47, 129, 247, 0.06);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(47,129,247,0.15);
+    }
+    body[data-workflow="agent"] .agent-empty .example .ex-icon {
+      width: 28px; height: 28px;
+      flex-shrink: 0;
+      border-radius: var(--r-sm);
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      display: inline-flex;
+      align-items: center; justify-content: center;
+    }
+    body[data-workflow="agent"] .agent-empty .example .ex-text {
+      flex: 1; min-width: 0;
+      font-weight: 500;
+    }
+    body[data-workflow="agent"] .agent-empty .example .arrow {
+      color: var(--muted);
+      flex-shrink: 0;
+      transition: transform var(--t-base), color var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-empty .example:hover .arrow {
+      color: var(--accent-bright);
+      transform: translateX(3px);
+    }
+
+    /* ---- 11. Composer — hero card. */
+    body[data-workflow="agent"] .agent-composer {
+      border-top: 1px solid var(--ph-border-soft);
+      padding: 12px 18px 16px;
+      background: linear-gradient(180deg,
+                    transparent,
+                    rgba(0, 6, 26, 0.4) 30%,
+                    rgba(0, 6, 26, 0.7));
+      backdrop-filter: blur(8px);
+    }
+    body[data-workflow="agent"] .agent-composer-wrap {
+      position: relative;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      padding: 0;
+      box-shadow: var(--shadow-1);
+      transition: border-color var(--t-base), box-shadow var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-composer-wrap:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim), var(--shadow-1);
+    }
+    body[data-workflow="agent"] .agent-composer textarea {
+      width: 100%;
+      min-height: 56px;
+      max-height: 240px;
+      padding: 14px 60px 14px 56px;
+      background: transparent;
+      color: var(--text);
+      border: none;
+      border-radius: var(--r-lg);
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.55;
+      resize: none;
+      outline: none;
+      box-shadow: none;
+    }
+    body[data-workflow="agent"] .agent-composer textarea:focus {
+      outline: none;
+      box-shadow: none;
+      border: none;
+      background: transparent;
+    }
+    body[data-workflow="agent"] .agent-composer textarea::placeholder {
+      color: var(--muted);
+      opacity: 0.7;
+    }
+    /* Attach button — left edge of the composer card */
+    body[data-workflow="agent"] .agent-composer .attach-btn {
+      position: absolute;
+      left: 8px; bottom: 8px;
+      width: 38px; height: 38px;
+      border-radius: var(--r-md);
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .agent-composer .attach-btn:hover {
+      background: rgba(140,160,220,0.08);
+      color: var(--accent-bright);
+      border-color: var(--ph-border-soft);
+    }
+    body[data-workflow="agent"] .agent-composer .attach-btn svg {
+      width: 18px; height: 18px;
+    }
+    body[data-workflow="agent"] .agent-composer .attach-btn .count {
+      position: absolute;
+      top: 1px; right: 1px;
+      min-width: 16px; height: 16px;
+      padding: 0 4px;
+      background: var(--accent);
+      color: white;
+      border-radius: var(--r-pill);
+      font-size: 9.5px;
+      font-weight: 700;
+      display: none;
+      align-items: center; justify-content: center;
+    }
+    body[data-workflow="agent"] .agent-composer .attach-btn.has-attach {
+      color: var(--accent-bright);
+      background: rgba(47,129,247,0.10);
+    }
+    body[data-workflow="agent"] .agent-composer .attach-btn.has-attach .count { display: inline-flex; }
+
+    /* Send button — circular, accent-bright, plane icon */
+    body[data-workflow="agent"] .agent-composer .send-btn,
+    body[data-workflow="agent"] #agentSendBtn {
+      position: absolute;
+      right: 8px; bottom: 8px;
+      width: 38px; height: 38px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: var(--t-fast);
+      box-shadow: 0 4px 14px rgba(47,129,247,0.32),
+                  0 0 0 1px rgba(255,255,255,0.05) inset;
+    }
+    body[data-workflow="agent"] .agent-composer .send-btn:hover:not(:disabled),
+    body[data-workflow="agent"] #agentSendBtn:hover:not(:disabled) {
+      background: var(--accent-bright);
+      transform: translateY(-1px) scale(1.04);
+      box-shadow: 0 8px 22px rgba(47,129,247,0.50),
+                  0 0 0 1px rgba(255,255,255,0.08) inset;
+    }
+    body[data-workflow="agent"] .agent-composer .send-btn:active:not(:disabled),
+    body[data-workflow="agent"] #agentSendBtn:active:not(:disabled) {
+      transform: translateY(0) scale(1.0);
+    }
+    body[data-workflow="agent"] .agent-composer .send-btn:disabled,
+    body[data-workflow="agent"] #agentSendBtn:disabled {
+      background: rgba(140,160,220,0.10);
+      color: rgba(255,255,255,0.30);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    body[data-workflow="agent"] .agent-composer .send-btn svg,
+    body[data-workflow="agent"] #agentSendBtn svg {
+      width: 16px; height: 16px;
+    }
+    /* Busy state — spinner instead of plane (toggled via .is-busy by JS) */
+    body[data-workflow="agent"] .agent-composer .send-btn.is-busy svg,
+    body[data-workflow="agent"] #agentSendBtn.is-busy svg {
+      animation: agent-send-spin 0.9s linear infinite;
+    }
+    @keyframes agent-send-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Composer hint strip — sits BELOW the composer card, not absolute. */
+    body[data-workflow="agent"] .agent-composer .hint {
+      position: static;
+      display: block;
+      margin: 8px 4px 0;
+      padding: 0;
+      font-size: 11px;
+      color: var(--muted);
+      opacity: 0.7;
+      letter-spacing: 0;
+      pointer-events: auto;
+      text-align: center;
+    }
+    body[data-workflow="agent"] .agent-composer .hint kbd {
+      font-family: var(--ph-font-mono);
+      font-size: 10px;
+      padding: 1px 5px;
+      margin: 0 1px;
+      background: rgba(140,160,220,0.08);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-xs);
+      color: var(--text);
+    }
+
+    /* Pending-attachment chip row — above the composer card */
+    body[data-workflow="agent"] .agent-attach-row {
+      max-width: 100%;
+      margin: 0 0 8px 0;
+      padding: 0;
+    }
+    body[data-workflow="agent"] .agent-attach-chip {
+      padding: 5px 10px 5px 5px;
+      background: var(--panel);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-md);
+      box-shadow: var(--shadow-1);
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .agent-attach-chip:hover {
+      border-color: var(--accent);
+    }
+
+    /* Reference chip (refine) — same shape as attach chip but
+       accent-tinted to read as "this affects the next message". */
+    body[data-workflow="agent"] .agent-ref-chip {
+      max-width: 100%;
+      margin: 0 0 8px 0;
+      padding: 6px 10px 6px 12px;
+      background: linear-gradient(135deg,
+                    rgba(47, 129, 247, 0.16),
+                    rgba(47, 129, 247, 0.10));
+      border: 1px solid rgba(47, 129, 247, 0.32);
+      border-radius: var(--r-md);
+      box-shadow: 0 4px 12px rgba(47,129,247,0.15);
+    }
+    body[data-workflow="agent"] .agent-ref-chip .ref-icon {
+      color: var(--accent-bright);
+      font-size: 14px;
+    }
+
+    /* Batch bar — accent-tinted action strip, polished CTA */
+    body[data-workflow="agent"] .agent-batch-bar {
+      margin: 0 0 10px 0;
+      padding: 9px 12px 9px 14px;
+      background: linear-gradient(135deg,
+                    rgba(63, 185, 80, 0.14) 0%,
+                    rgba(47, 129, 247, 0.10) 100%);
+      border: 1px solid rgba(63, 185, 80, 0.40);
+      border-radius: var(--r-md);
+      box-shadow: 0 4px 16px rgba(63,185,80,0.10);
+      height: auto;
+    }
+    body[data-workflow="agent"] .agent-batch-bar-icon {
+      font-size: 14px;
+      color: var(--success);
+    }
+    body[data-workflow="agent"] .agent-batch-bar-text {
+      color: var(--text);
+      font-size: 12.5px;
+      font-weight: 500;
+    }
+    body[data-workflow="agent"] .agent-batch-bar-btn {
+      padding: 6px 12px;
+      background: var(--success);
+      color: #04130a;
+      border-radius: var(--r-sm);
+      font-size: 12px;
+      font-weight: 600;
+      border: none;
+    }
+
+    /* ---- 12. Sessions sidebar — richer item rows */
+    body[data-workflow="agent"] .agent-sessions-panel {
+      background: var(--panel);
+      border-right: 1px solid var(--border-strong);
+      box-shadow: 14px 0 40px rgba(0, 0, 0, 0.55);
+    }
+    body[data-workflow="agent"] .asp-head {
+      padding: 16px 14px 12px;
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+    body[data-workflow="agent"] .asp-head .asp-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    body[data-workflow="agent"] .asp-search {
+      padding: 12px;
+      border-bottom: 1px solid var(--ph-border-soft);
+    }
+    body[data-workflow="agent"] .asp-search input {
+      padding: 8px 36px 8px 32px;
+      background: var(--bg-2);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-sm);
+      font-size: 12.5px;
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .asp-search input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+      background: var(--bg);
+    }
+    body[data-workflow="agent"] .asp-search-icon { left: 24px; top: 20px; }
+    body[data-workflow="agent"] .asp-kbd { right: 22px; top: 18px; }
+    body[data-workflow="agent"] .asp-section-label {
+      padding: 12px 12px 4px;
+      font-size: 9.5px;
+      font-weight: 700;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.08em;
+    }
+    body[data-workflow="agent"] .asp-item {
+      padding: 10px 12px;
+      margin: 2px 0;
+      border-radius: var(--r-sm);
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .asp-item:hover {
+      background: rgba(140,160,220,0.06);
+    }
+    body[data-workflow="agent"] .asp-item.is-active {
+      background: rgba(47, 129, 247, 0.10);
+      border: 1px solid rgba(47, 129, 247, 0.32);
+    }
+    body[data-workflow="agent"] .asp-item-title {
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: -0.005em;
+    }
+    body[data-workflow="agent"] .asp-item-time {
+      font-size: 10.5px;
+      font-family: var(--ph-font-mono);
+      color: var(--ph-text-faint);
+    }
+    body[data-workflow="agent"] .asp-item-preview {
+      font-size: 11.5px;
+      color: var(--muted);
+      margin-top: 3px;
+      line-height: 1.4;
+    }
+    body[data-workflow="agent"] .asp-chip {
+      font-family: var(--ph-font-mono);
+      font-size: 9.5px;
+      padding: 1px 6px;
+      background: rgba(140,160,220,0.06);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-pill);
+      letter-spacing: 0.02em;
+    }
+    body[data-workflow="agent"] .asp-chip-shots {
+      color: var(--accent-bright);
+      border-color: rgba(47,129,247,0.32);
+      background: rgba(47,129,247,0.10);
+    }
+
+    /* ---- 13. Agent stage pane (right side) — composer-grade.
+       Same elevated-card visual language as the player + carousel
+       in the manual stage pane. STAGE / NOW RENDERING / ACTIVITY /
+       OUTPUTS read as one cohesive session dashboard. */
+    body[data-workflow="agent"] .agent-stage-pane {
+      background:
+        radial-gradient(circle at 70% -10%, rgba(47,129,247,0.06) 0%, transparent 40%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+      border: none;
+      border-left: 1px solid var(--ph-border-soft);
+      border-radius: 0;
+      padding: 14px 14px 14px;
+      gap: 12px;
+    }
+    body[data-workflow="agent"] .agent-stage-head {
+      height: auto;
+      min-height: 36px;
+      padding: 4px 10px 6px;
+      background: transparent;
+      border-bottom: none;
+    }
+    body[data-workflow="agent"] .agent-stage-head .label {
+      font-size: 10px;
+      font-family: var(--ph-font-mono);
+      font-weight: 600;
+      letter-spacing: 0.10em;
+      color: var(--accent-bright);
+      text-transform: uppercase;
+    }
+    body[data-workflow="agent"] .agent-stage-head .live-dot {
+      width: 7px; height: 7px;
+      background: var(--muted);
+    }
+    body[data-workflow="agent"] .agent-stage-head .live-dot.live {
+      background: var(--success);
+      box-shadow: 0 0 0 3px rgba(63,185,80,0.18),
+                  0 0 8px rgba(63,185,80,0.45);
+    }
+    body[data-workflow="agent"] .agent-stage-head .session-pill {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+      padding: 2px 8px;
+      background: rgba(140, 160, 220, 0.05);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-pill);
+      color: var(--muted);
+    }
+    /* Make body a vertical stack of elevated cards instead of bordered
+       sections separated by hairlines — matches the carousel-wrap idiom. */
+    body[data-workflow="agent"] .agent-stage-body {
+      padding: 0;
+      gap: 12px;
+      display: flex;
+      flex-direction: column;
+    }
+    body[data-workflow="agent"] .agent-stage-section {
+      padding: 12px 14px;
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-1);
+      transition: var(--t-base);
+    }
+    body[data-workflow="agent"] .agent-stage-section:hover {
+      border-color: var(--ph-border-strong);
+    }
+    body[data-workflow="agent"] .agent-stage-section h4 {
+      margin: 0 0 10px;
+      font-size: 10px;
+      font-family: var(--ph-font-mono);
+      font-weight: 600;
+      letter-spacing: 0.10em;
+      color: var(--muted);
+      text-transform: uppercase;
+      display: flex; align-items: center; gap: 8px;
+    }
+    body[data-workflow="agent"] .agent-stage-section h4 .count {
+      padding: 1px 7px;
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      border-radius: var(--r-pill);
+      font-size: 9.5px;
+      font-weight: 700;
+    }
+    /* Now-rendering card — when active, becomes a 16:9 elevated frame */
+    body[data-workflow="agent"] .stage-now-card {
+      padding: 0;
+      background: linear-gradient(180deg, #0a1130, #050920);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-md);
+      aspect-ratio: 16/9;
+      position: relative;
+      overflow: hidden;
+    }
+    body[data-workflow="agent"] .stage-now-card.idle {
+      aspect-ratio: auto;
+      padding: 22px 14px;
+      background: rgba(140, 160, 220, 0.025);
+      border: 1px dashed var(--ph-border-soft);
+      color: var(--muted);
+      font-style: normal;
+      font-size: 12px;
+      font-family: var(--ph-font-mono);
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
+    body[data-workflow="agent"] .stage-progress-fill {
+      background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+      box-shadow: 0 0 12px rgba(47,129,247,0.45);
+    }
+    body[data-workflow="agent"] .stage-progress-text {
+      font-family: var(--ph-font-mono);
+      font-size: 10.5px;
+    }
+    /* Activity feed — icon avatars, smaller mono */
+    body[data-workflow="agent"] .stage-activity {
+      max-height: 220px;
+      gap: 4px;
+    }
+    body[data-workflow="agent"] .stage-activity-row {
+      padding: 5px 4px;
+      border-bottom: 1px solid rgba(140,160,220,0.04);
+      gap: 8px;
+      font-size: 11px;
+      align-items: center;
+    }
+    body[data-workflow="agent"] .stage-activity-row .icon {
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      font-size: 9px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    body[data-workflow="agent"] .stage-activity-row.ok .icon {
+      background: rgba(63,185,80,0.18);
+      color: var(--success);
+    }
+    body[data-workflow="agent"] .stage-activity-row.fail .icon {
+      background: rgba(248,81,73,0.18);
+      color: var(--danger);
+    }
+    body[data-workflow="agent"] .stage-activity-row.run .icon {
+      background: rgba(47,129,247,0.18);
+      color: var(--accent-bright);
+    }
+    body[data-workflow="agent"] .stage-activity-row .text {
+      font-family: inherit;
+      color: var(--text);
+      font-size: 11.5px;
+    }
+    body[data-workflow="agent"] .stage-activity-row .when {
+      font-family: var(--ph-font-mono);
+      font-size: 10px;
+      color: var(--ph-text-faint);
+    }
+    /* Session outputs — accent hover lift */
+    body[data-workflow="agent"] .stage-outputs {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    body[data-workflow="agent"] .stage-output-cell {
+      border: 1px solid var(--ph-border-soft);
+      border-radius: var(--r-sm);
+      background: var(--bg);
+      transition: var(--t-base);
+      box-shadow: var(--shadow-1);
+    }
+    body[data-workflow="agent"] .stage-output-cell:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(47,129,247,0.18);
+    }
+    body[data-workflow="agent"] .stage-output-cell .label {
+      font-family: var(--ph-font-mono);
+      font-size: 10px;
+      padding: 3px 6px;
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,0.78));
+    }
+    body[data-workflow="agent"] .stage-outputs-filter button {
+      padding: 4px 11px;
+      font-size: 11px;
+      font-weight: 500;
+      border-radius: var(--r-pill);
+      border: 1px solid var(--ph-border-soft);
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .stage-outputs-filter button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.06);
+    }
+    body[data-workflow="agent"] .stage-outputs-filter button.active {
+      background: rgba(47, 129, 247, 0.14);
+      color: var(--accent-bright);
+      border-color: var(--accent);
+    }
+
+    /* "↓ New messages" pill — match composer accent + a real shadow */
+    body[data-workflow="agent"] .agent-newmsgs-pill {
+      bottom: 12px;
+      padding: 6px 12px;
+      border-radius: var(--r-pill);
+      background: var(--accent);
+      color: white;
+      font-size: 11.5px;
+      font-weight: 600;
+      box-shadow: 0 8px 22px rgba(47,129,247,0.55);
+      transition: var(--t-fast);
+    }
+    body[data-workflow="agent"] .agent-newmsgs-pill:hover {
+      background: var(--accent-bright);
+      transform: translateX(-50%) translateY(-1px);
+    }
+
+    /* Drop overlay — accent-tinted with a soft glow */
+    body[data-workflow="agent"] .agent-drop-overlay {
+      background: rgba(47, 129, 247, 0.08);
+      border: 2px dashed var(--accent);
+      border-radius: var(--r-lg);
+    }
+    body[data-workflow="agent"] .agent-drop-overlay .drop-card {
+      background: var(--panel);
+      border: 1px solid var(--accent);
+      border-radius: var(--r-lg);
+      box-shadow: 0 12px 36px rgba(47,129,247,0.30);
+      padding: 22px 32px;
+    }
+    /* === END CHAT REDESIGN Y2.002 ============================== */
   </style>
 </head>
 <body>
@@ -14485,8 +15873,8 @@ HTML = r"""<!doctype html>
               <polyline points="5 12 12 5 19 12"/>
             </svg>
           </button>
-          <span class="hint">⌘ Enter to send · ⌘V to paste · drag files to attach · type /help to see what the agent can do</span>
         </div>
+        <div class="hint"><kbd>⌘</kbd><kbd>Enter</kbd> to send · <kbd>⌘V</kbd> to paste · drag files to attach · <kbd>/help</kbd> to see what the agent can do</div>
         <!-- Drag-drop overlay shown only while a drag is over the chat surface. -->
         <div class="agent-drop-overlay" id="agentDropOverlay">
           <div class="drop-card">
@@ -21618,22 +23006,45 @@ document.addEventListener('DOMContentLoaded', () => {
 function renderEmpty() {
   const wrap = document.createElement('div');
   wrap.className = 'agent-empty';
+  // Y2.002 redesign: hero glyph + polished suggestion grid with icons.
+  // Each example carries an inline icon so the row reads like a card,
+  // not a text-only list. Suggestions chosen to mirror the three most
+  // common entry points (script → shorts, planning a long-form piece,
+  // continuing an existing project).
   wrap.innerHTML = `
-    <div class="badge">Beta · Phosphene Agentic Flows</div>
+    <div class="agent-empty-glyph" aria-hidden="true"></div>
+    <div class="badge">Phosphene · Agentic Flows</div>
     <h3>Plan a film overnight</h3>
     <p>Paste a script or describe a piece. I'll plan the shots, estimate the wall time, and queue the renders.</p>
-    <p>You wake up to mp4s and a manifest.json.</p>
+    <p style="opacity:0.75">You wake up to mp4s and a manifest.json.</p>
     <div class="examples">
       <div class="example" data-prompt="I want to make a short movie. Help me plan it shot by shot, then we'll generate it together.">
-        <span>I want to make a short movie</span>
+        <span class="ex-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"></polygon>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          </svg>
+        </span>
+        <span class="ex-text">Plan a short film, shot by shot</span>
         <span class="arrow">→</span>
       </div>
       <div class="example" data-prompt="I want to make a 30-minute video. Walk me through how to break it into renderable shots given LTX 2.3's per-clip limits.">
-        <span>I want to make a 30-minute video</span>
+        <span class="ex-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </span>
+        <span class="ex-text">Break a 30-minute piece into renderable shots</span>
         <span class="arrow">→</span>
       </div>
       <div class="example" data-prompt="I want to make clips for my existing project. Ask me about the project first, then we'll plan the next batch of shots together.">
-        <span>I want to make clips for my existing project</span>
+        <span class="ex-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+        </span>
+        <span class="ex-text">Continue an existing project</span>
         <span class="arrow">→</span>
       </div>
     </div>
@@ -21651,12 +23062,69 @@ function renderEmpty() {
   return wrap;
 }
 
+// Y2.002 — relative timestamp helper for the chat. Accepts unix-seconds,
+// unix-ms, or an ISO string. Returns "just now" / "3 min ago" / "2 h ago"
+// / "5 d ago" / "Apr 24" — whatever's most readable for the gap.
+function _agentRelTime(ts) {
+  if (ts === null || ts === undefined) return '';
+  let t;
+  if (typeof ts === 'number') {
+    t = ts > 1e12 ? ts : ts * 1000;
+  } else {
+    const p = Date.parse(ts);
+    if (Number.isNaN(p)) return '';
+    t = p;
+  }
+  const diff = Math.max(0, Date.now() - t) / 1000;
+  if (diff < 30) return 'just now';
+  if (diff < 90) return '1 min ago';
+  if (diff < 3600) return Math.round(diff / 60) + ' min ago';
+  if (diff < 7200) return '1 h ago';
+  if (diff < 86400) return Math.round(diff / 3600) + ' h ago';
+  if (diff < 7 * 86400) return Math.round(diff / 86400) + ' d ago';
+  try {
+    return new Date(t).toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+  } catch (e) { return ''; }
+}
+
+// Y2.002 — install per-pre copy buttons on the rendered markdown body.
+// Called after the message content is set so we can decorate every <pre>
+// in the assistant message without touching the markdown renderer itself.
+function _installPreCopyButtons(rootEl) {
+  if (!rootEl) return;
+  const pres = rootEl.querySelectorAll('pre');
+  pres.forEach((pre) => {
+    if (pre.querySelector('.agent-copy-pre')) return;  // already decorated
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'agent-copy-pre';
+    btn.title = 'Copy code';
+    btn.setAttribute('aria-label', 'Copy code');
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const code = pre.querySelector('code') || pre;
+      try {
+        navigator.clipboard.writeText(code.textContent || '');
+        btn.classList.add('copied');
+        btn.title = 'Copied';
+        setTimeout(() => { btn.classList.remove('copied'); btn.title = 'Copy code'; }, 1400);
+      } catch (e) { /* best-effort */ }
+    });
+    pre.appendChild(btn);
+  });
+}
+
 function renderMessage(m) {
   if (m.kind === 'tool_result') return renderToolResultCard(m.result || {});
   if (m.kind === 'system_note') return renderSystemNote(m.content || '');
 
   const row = document.createElement('div');
   row.className = 'agent-msg-row ' + (m.kind === 'user' ? 'user' : 'assistant');
+  // Y2.002: tag streaming rows so the avatar gets the pulse halo while
+  // the model is mid-stream. The runtime sets m.streaming on the latest
+  // assistant turn until the response settles.
+  if (m.kind !== 'user' && m.streaming) row.classList.add('streaming');
 
   const av = document.createElement('div');
   av.className = `agent-avatar ${m.kind === 'user' ? 'user' : 'claude'}`;
@@ -21670,7 +23138,43 @@ function renderMessage(m) {
 
   const name = document.createElement('div');
   name.className = 'agent-msg-name';
-  name.textContent = m.kind === 'user' ? 'You' : 'Phosphene';
+  // Header row — name + hover-revealed timestamp + copy button. The
+  // timestamp is only shown on assistant rows (user bubbles are right-
+  // aligned and don't carry a name). Relative ("3 min ago") instead of
+  // absolute clock time so the chat reads like a conversation.
+  if (m.kind === 'user') {
+    name.textContent = 'You';
+  } else {
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = 'Phosphene';
+    name.appendChild(nameSpan);
+    if (m.timestamp || m.created_at || m.ts) {
+      const t = document.createElement('span');
+      t.className = 'agent-msg-time';
+      t.textContent = _agentRelTime(m.timestamp || m.created_at || m.ts);
+      name.appendChild(t);
+    }
+    // Copy button — appears on hover, copies the rendered message text.
+    const acts = document.createElement('span');
+    acts.className = 'agent-msg-actions';
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'agent-msg-action';
+    copyBtn.title = 'Copy message';
+    copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    copyBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const txt = m.content || '';
+      try {
+        navigator.clipboard.writeText(txt);
+        copyBtn.classList.add('copied');
+        copyBtn.title = 'Copied';
+        setTimeout(() => { copyBtn.classList.remove('copied'); copyBtn.title = 'Copy message'; }, 1400);
+      } catch (e) { /* best-effort */ }
+    });
+    acts.appendChild(copyBtn);
+    name.appendChild(acts);
+  }
 
   body.appendChild(name);
 
@@ -21688,6 +23192,16 @@ function renderMessage(m) {
   const content = document.createElement('div');
   content.className = 'agent-msg-content agent-md';
   content.innerHTML = mdToHtml(m.content || '');
+  // Y2.002 — decorate every <pre> with a hover-revealed copy button.
+  _installPreCopyButtons(content);
+  // Inline streaming dots — appended only while the message is mid-stream.
+  // Sits at the end of the content so it reads as "more is coming".
+  if (m.kind !== 'user' && m.streaming) {
+    const dots = document.createElement('span');
+    dots.className = 'agent-streaming-dots';
+    dots.innerHTML = '<span></span><span></span><span></span>';
+    content.appendChild(dots);
+  }
   body.appendChild(content);
 
   if (m.tool_call) body.appendChild(renderToolCallCard(m.tool_call));
@@ -21763,10 +23277,14 @@ function renderToolCallCard(call) {
   const head = document.createElement('div');
   head.className = 'head';
   const summary = summarizeToolCall(call);
+  // Y2.002: empty .icon for pending (the CSS ::before paints a pulsing
+  // dot); .icon-glyph holds the legacy gear so the older non-pending
+  // states still have something to fall back to.
   head.innerHTML = `
-    <span class="icon">⚙</span>
+    <span class="icon"><span class="icon-glyph">⚙</span></span>
     <span class="name">${escapeHtml(call.tool || '?')}</span>
     <span class="summary">${escapeHtml(summary)}</span>
+    <span class="duration">running…</span>
     <span class="chevron">›</span>
   `;
   const body = document.createElement('div');
@@ -21789,10 +23307,22 @@ function renderToolResultCard(result) {
   head.className = 'head';
   const inner = result.result;
   const summary = ok ? summarizeToolResult(inner) : (result.error || 'failed');
+  // Y2.002: surface duration when the runtime gives us one. Backends
+  // may stash it on result.duration_sec / .duration_ms / .elapsed_sec
+  // — be defensive and fall back to nothing when absent.
+  let dur = '';
+  const ds = (result.duration_sec ?? result.elapsed_sec
+              ?? (result.duration_ms != null ? result.duration_ms / 1000 : null));
+  if (typeof ds === 'number' && Number.isFinite(ds) && ds >= 0) {
+    if (ds < 1) dur = Math.round(ds * 1000) + ' ms';
+    else if (ds < 60) dur = ds.toFixed(ds < 10 ? 1 : 0) + ' s';
+    else dur = Math.floor(ds / 60) + 'm ' + Math.round(ds % 60) + 's';
+  }
   head.innerHTML = `
-    <span class="icon ${ok ? 'success' : 'error'}">${ok ? '✓' : '✗'}</span>
+    <span class="icon ${ok ? 'success' : 'error'}"><span class="icon-glyph">${ok ? '✓' : '✗'}</span></span>
     <span class="name">${ok ? 'result' : 'error'}</span>
     <span class="summary">${escapeHtml(summary)}</span>
+    ${dur ? `<span class="duration">${escapeHtml(dur)}</span>` : ''}
     <span class="chevron">›</span>
   `;
 
