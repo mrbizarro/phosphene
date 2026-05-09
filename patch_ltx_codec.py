@@ -561,7 +561,24 @@ def main() -> int:
     # shippable hook for the panel's explicit Long Clip Boost mode: generate
     # fewer semantic frames at 12fps, keep LTX audio duration aligned, then
     # interpolate the delivered export back to 24fps.
+    #
+    # Treat upstream drift as ADVISORY (same convention as patches 2/3/4):
+    # when dgrauet refactors `ti2vid_one_stage.py`, the anchor disappears
+    # and a hard install failure here would block every new user even
+    # though the codec patch (the only one that actually affects T2V/I2V
+    # correctness) applied. Without this patch, generation still works at
+    # the engine's native frame rate; only the panel's explicit "Long Clip
+    # Boost (12→24fps)" mode is unavailable until the patch is updated.
     fps_outcome = apply_one_stage_fps_patch(i2v_target)
+    if fps_outcome in (OUTCOME_DRIFT, OUTCOME_MISSING):
+        print(
+            "  [one-stage frame_rate] note: anchor not found — pipeline may "
+            "have been refactored upstream. T2V / I2V at native fps work fine; "
+            "the panel's Long Clip Boost (12→24fps interpolation) mode is "
+            "unavailable until the patch is updated.",
+            file=sys.stderr,
+        )
+        fps_outcome = OUTCOME_ALREADY
     outcomes.append(("one-stage frame_rate (12→24fps long clips)", fps_outcome))
 
     # (Keyframe OOM patch was removed — see NOTE in the patches block above.
