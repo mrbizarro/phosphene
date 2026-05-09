@@ -3048,8 +3048,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     quality = f("quality", "balanced")
     if quality == "quick":
         default_w, default_h = 640, 480
-    elif quality in ("standard", "high"):
+    elif quality == "standard":
         default_w, default_h = 1280, 704
+    elif quality == "high":
+        # 2026-05-09 lab finding: Q8 two-stage HQ at 1024×576 produces
+        # "outstanding" quality (user verdict on a 5-prompt sweep
+        # including a freckles-and-eyes close-up stress test) at ~7:48
+        # wall, vs ~11:51 at 1280×704. The smaller resolution still
+        # hits the model's wheelhouse for close subjects, and Q8's
+        # per-token detail capacity is the quality differentiator —
+        # not raw pixel count. Power users can still pick 1280×704
+        # explicitly via the aspect chip; this just sets a saner
+        # default that gets the 7-min experience by default.
+        default_w, default_h = 1024, 576
     else:
         default_w, default_h = 1024, 576
     upscale = f("upscale", "fit_720p" if quality == "balanced" else "off")
