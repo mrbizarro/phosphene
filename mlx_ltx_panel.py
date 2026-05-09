@@ -1891,20 +1891,51 @@ def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
     runs out of disk, or the panel crashes mid-write — corrupted queue or
     sidecar files would lose the user's work-in-progress. Atomic replace
     guarantees the file is either pre-write or fully post-write, never torn.
+
+    The temp file is born with `mode` (default 0o600) via os.open with
+    O_CREAT|O_EXCL — secrets in agent_config.json / agent_image_config.json
+    (API keys) are never momentarily world-readable, even between
+    os.replace and a follow-up chmod. Mirrors agent/runtime.save_session.
     """
     # Multiple request/worker threads can persist state close together. A
     # process-wide temp name lets one writer replace/unlink another writer's
     # temp file, producing ENOENT in the logs and risking a missed persist.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     try:
-        with tmp.open("w") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
+        # O_EXCL guarantees we don't reopen a temp file an attacker
+        # could have raced into existence with a permissive mode.
+        fd = os.open(
+            str(tmp),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_TRUNC,
+            mode,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+        except Exception:
+            # If fdopen never wrapped the descriptor, close it manually
+            # so we don't leak. Re-raise so the caller still sees the
+            # error.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        # umask on some systems can widen the kernel-set mode; chmod
+        # the temp explicitly before the rename so the renamed file is
+        # provably 0o600 (POSIX preserves source mode across replace).
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
         os.replace(tmp, path)
-        # Default 0o600 ensures secrets in state files (API keys in
-        # agent_config.json / agent_image_config.json) aren't world/group
-        # readable. umask alone leaves them at 0644 on most systems.
+        # Belt-and-braces: chmod the final path too. Cheap and protects
+        # against weird mounts that don't preserve mode across rename.
         try:
             os.chmod(path, mode)
         except OSError:
