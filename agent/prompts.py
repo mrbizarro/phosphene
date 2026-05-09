@@ -393,7 +393,7 @@ chose.
 **Engine for photorealistic stills with character refs:** default to
 `engine_override="flux2_edit_high"` (FLUX.2 Klein-Base-Edit, Q8, 25
 steps, guidance 4.0 — non-distilled, ~3-5 min/image, photographic
-output). Alternatives: `qwen_edit_high` (Qwen-Image-Edit-2509 Q8 30
+output). Alternatives: `qwen_edit_high` (Qwen-Image-Edit-2511 Q8 30
 steps — strong on multi-character composition) and `kontext_high`
 (FLUX.1 Kontext Q8 30 steps — different aesthetic). The bare
 `flux2_edit` and `qwen_edit` presets are FAST but DISTILLED — output
@@ -501,11 +501,11 @@ stronger because it conditions LTX itself, not just the keyframe still.
 When in doubt, ASK. "Do you have photos of this character to share, or
 a trained LoRA file already?"
 
-## Path A — Qwen-Image-Edit-2509 references
+## Path A — Qwen-Image-Edit-2511 references
 
 The cleanest fix for "same prompt, different seed = different person"
 is to **anchor identity at the still stage** by composing the
-character into every shot's keyframe via Qwen-Image-Edit-2509. No
+character into every shot's keyframe via Qwen-Image-Edit-2511. No
 training step, no LoRA file — just 1-3 reference images per shot.
 
 The image engine's `qwen_edit` family wraps `mflux-generate-qwen-edit`
@@ -544,7 +544,7 @@ Workflow:
    ```
    refs=["/abs/path/emma.png", "/abs/path/marcus.png", "/abs/path/kitchen.png"]
    ```
-   Qwen-Edit-2509 will compose all three. Order doesn't strictly
+   Qwen-Edit-2511 will compose all three. Order doesn't strictly
    matter but the prompt should mention each by descriptor matching
    the ref order roughly ("a young woman, a man in his fifties, in a
    sunlit kitchen") so the model knows which ref is which.
@@ -554,9 +554,13 @@ Workflow:
    `ref_image_path`, OR `mode: "keyframe"` with multiple stills (each
    already character-locked) for cross-shot continuity.
 
-The image-engine's family must be `qwen_edit` for refs to take effect.
-Other families (flux1, flux2, z_image, fibo) silently drop refs and
-the candidate dict's `refs_ignored: true` flags the no-op.
+The image-engine's family must consume reference images for refs to
+take effect. Multi-ref (1-3 images via `--image-paths`) families are
+`qwen_edit` and `flux2_edit`. The `kontext` family takes a single
+reference via `--image-path` (only the first ref is used; extras are
+silently dropped). Other families (flux1, flux2, z_image, z_image_turbo,
+fibo, qwen) drop refs entirely and the candidate dict's
+`refs_ignored: true` flags the no-op.
 
 ### When you see `refs_ignored: true` on every candidate — diagnose the engine, NOT the photo
 
@@ -567,16 +571,19 @@ that produce this:
 - `kind: "mock"` (default for fresh installs) — paints flat colored
   rectangles, ignores everything.
 - `kind: "mflux"` with `mflux_family` set to one of: flux1, flux2,
-  z_image, z_image_turbo, fibo, qwen, kontext — these are text-to-image
-  families; they don't take reference images.
+  z_image, z_image_turbo, fibo, qwen — these are text-to-image
+  families; they don't take reference images. (`kontext` accepts a
+  single ref via `--image-path`; if you passed it 2-3 refs, only the
+  first is used and the others are silently dropped — that is *not*
+  a refs_ignored=true case but worth flagging to the user.)
 - `kind: "bfl"` — cloud Flux, no multi-reference primitive in our
   client.
 
 **Correct response when refs_ignored fires:**
 
 1. Tell the user *exactly* this: "Your image-engine isn't set to
-   Qwen-Image-Edit-2509. Open Settings → Image generation, pick
-   `Qwen-Image-Edit-2509 (Apache 2.0 · multi-reference)` from the
+   Qwen-Image-Edit-2511. Open Settings → Image generation, pick
+   `Qwen-Image-Edit-2511 (Apache 2.0 · multi-reference)` from the
    mflux model dropdown, save, then I'll regenerate."
 2. Surface the install hint if `family_status.qwen_edit` is false in
    the panel — they need to click "Install Qwen-Image-Edit (multi-ref

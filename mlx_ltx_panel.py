@@ -6033,7 +6033,7 @@ class Handler(BaseHTTPRequestHandler):
             # Per-family install status — exposes which mflux-generate-*
             # binaries are present so the browser can show install hints
             # next to options the user hasn't installed yet (e.g.
-            # Qwen-Image-Edit-2509). Probing all families on every config
+            # Qwen-Image-Edit-2511). Probing all families on every config
             # fetch is cheap (a few stat() calls).
             family_status = {}
             for fam in agent_image_engine.MFLUX_FAMILY_BIN.keys():
@@ -14947,7 +14947,7 @@ HTML = r"""<!doctype html>
         <option value="__custom__">Custom HF id / local path…</option>
       </select>
       <div id="agentQwenInstallHint" class="field-help" style="display:none;margin-top:6px;padding:8px;background:rgba(207,150,34,0.08);border:1px solid rgba(207,150,34,0.4);border-radius:6px;color:var(--text);font-size:12px;line-height:1.4">
-        <b>Qwen-Image-Edit-2509 needs a one-click install</b> — open Pinokio's launcher menu and click <b>"Install Qwen-Image-Edit (multi-ref keyframes)"</b>. ~30 s for the package; weights (~22-34 GB) download lazily on first use.
+        <b>Qwen-Image-Edit-2511 needs a one-click install</b> — open Pinokio's launcher menu and click <b>"Install Qwen-Image-Edit (multi-ref keyframes)"</b>. ~30 s for the package; weights (~22-34 GB) download lazily on first use.
       </div>
     </div>
     <div class="field" id="agentMfluxCustomField" style="display:none">
