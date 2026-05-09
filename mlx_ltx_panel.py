@@ -8524,6 +8524,371 @@ HTML = r"""<!doctype html>
     details summary:hover { color: var(--text); }
     details[open] summary { margin-bottom: 6px; }
 
+    /* ============================================================
+       REDESIGN — composer-led form-pane (Y2.000)
+       Goal: collapse the noisy h2-stack into a clear hierarchy:
+         1. Mode bar (compact segmented strip, no label)
+         2. Composer card (refs + prompt + inline tools, hero element)
+         3. Quick settings strip (Quality + Duration + Seed in one row)
+         4. Customize+Advanced disclosure (folded — power users only)
+         5. LoRAs disclosure (kept)
+         6. Sticky action footer (Generate + queue chips)
+       Uses tokens; no hardcoded colors.
+       ============================================================ */
+
+    /* Mode segmented bar — replaces <h2>Mode</h2> + pill-group cols-5.
+       Sits at the top of the form. Compact, equal-weight, tactile. The
+       active chip uses the accent fill so the user always knows what mode
+       they're composing in. Subtitle text sits inside each chip — kept
+       small so the bar height stays low. */
+    .mode-bar {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+      padding: 4px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      margin-bottom: 14px;
+    }
+    .mode-bar .mode-chip {
+      width: 100%;
+      display: flex; flex-direction: column; align-items: center; gap: 1px;
+      padding: 8px 4px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--muted);
+      font-size: 12px; font-weight: 600;
+      cursor: pointer;
+      transition: var(--t-fast);
+      letter-spacing: 0;
+      text-align: center;
+    }
+    .mode-bar .mode-chip:hover {
+      color: var(--text);
+      background: rgba(255,255,255,0.03);
+    }
+    .mode-bar .mode-chip.active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent-bright);
+      box-shadow: var(--shadow-1);
+    }
+    .mode-bar .mode-chip .mc-sub {
+      font-size: 9.5px;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+      text-transform: none;
+      opacity: 0.85;
+    }
+    .mode-bar .mode-chip.active .mc-sub {
+      color: var(--accent-bright);
+      opacity: 0.7;
+    }
+
+    /* Composer card — the hero of the form. Wraps the reference picker(s)
+       (mode-conditional) + prompt textarea + an inline tools footer
+       (Enhance, HDR, No-music, Avoid disclosure). One elevated surface so
+       the prompt reads as the primary input. */
+    .composer-card {
+      background: var(--panel);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-lg);
+      padding: 12px 12px 10px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-1);
+      transition: border-color var(--t-base), box-shadow var(--t-base);
+    }
+    .composer-card:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim), var(--shadow-1);
+    }
+    /* Subtle chip-on-the-card when the prompt has content — gives the
+       user instant feedback that input is registering. The :placeholder-shown
+       trick lets us style the card while the textarea is empty without
+       any JS. */
+    .composer-card:has(textarea.composer-prompt:not(:placeholder-shown)) {
+      border-color: var(--border-strong);
+    }
+    /* Slot for reference pickers; sits above the prompt. Mode-only blocks
+       hide entirely when not relevant (T2V), so the composer card only
+       carries refs when the mode needs them. The wrapper applies a
+       bottom-margin only when at least one .mode-only.show is inside —
+       use :has() (Safari ≥ 15.4 supports it) so T2V mode collapses the
+       slot to zero with no orphan margin. */
+    .composer-refs { margin-bottom: 0; }
+    .composer-refs:has(> .mode-only.show) { margin-bottom: 12px; }
+    .composer-refs > .mode-only.show + .mode-only.show { margin-top: 8px; }
+    /* Prompt textarea inside the composer — hero treatment. Larger min
+       height, no hardcoded border (the card carries it), placeholder color
+       softer, font slightly larger so it reads as the main input. */
+    .composer-card .composer-prompt {
+      width: 100%;
+      min-height: 110px;
+      padding: 4px 4px 6px;
+      font-size: 14px; line-height: 1.5;
+      background: transparent;
+      border: 0;
+      color: var(--text);
+      resize: vertical;
+      font-family: inherit;
+    }
+    .composer-card .composer-prompt::placeholder {
+      color: var(--muted);
+      opacity: 0.7;
+    }
+    .composer-card .composer-prompt:focus { outline: none; box-shadow: none; }
+    /* Tools strip inside the composer — Enhance + toggles + Avoid
+       disclosure. Sits flush at the bottom with a hairline separator. */
+    .composer-tools {
+      margin-top: 8px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .composer-tools .ct-spacer { flex: 1 1 auto; }
+    /* Avoid disclosure — collapsed by default. When opened, the
+       textarea sits outside the composer-card (in its own panel below)
+       so the prompt stays clean. */
+    .avoid-row {
+      margin-top: 10px;
+      display: none;
+    }
+    .avoid-row.show { display: block; }
+    .avoid-row .avoid-label {
+      display: flex; align-items: center; gap: 8px;
+      margin: 0 0 5px 2px;
+      font-size: 10.5px; font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .avoid-row .avoid-label .avoid-hint {
+      font-weight: 400; font-size: 10px;
+      letter-spacing: 0; text-transform: none;
+      color: var(--muted); opacity: 0.7;
+    }
+    /* Tiny icon-style toggle inside the composer tools row. Same idiom as
+       .toggle-pill but icon-first so it stays compact. */
+    .ct-link {
+      width: auto;
+      padding: 4px 9px;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      font-size: 11px; font-weight: 500;
+      border-radius: var(--r-xs);
+      cursor: pointer;
+      transition: var(--t-fast);
+    }
+    .ct-link:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .ct-link.active {
+      color: var(--accent-bright);
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+
+    /* Quiet h2 — used inside the composer card / customize body where the
+       loud uppercase mono label would be excessive. */
+    .composer-card h2,
+    .customize-section h2,
+    .composer-refs h2 {
+      font-size: 10px;
+      margin: 0 0 6px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+
+    /* Quick-settings row — Quality picker + Duration + Seed in one strip.
+       The Quality picker shrinks to a compact 4-up segmented control; the
+       two number fields sit on the right with inline labels above them. */
+    .quick-settings {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .quick-settings .qs-label {
+      display: flex; align-items: baseline; justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .quick-settings .qs-label .qs-name {
+      font-size: 10px; font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .quick-settings .qs-label .qs-meta {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    /* Compact quality strip — looks like the mode bar but tighter, 4 cols.
+       Each chip carries a name on top of an optional secondary spec. */
+    .quality-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+      padding: 4px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+    }
+    .quality-strip .q-chip {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 7px 4px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--r-sm);
+      color: var(--muted);
+      font-size: 12px; font-weight: 600;
+      cursor: pointer;
+      transition: var(--t-fast);
+      width: 100%;
+    }
+    .quality-strip .q-chip:hover:not(.disabled) {
+      color: var(--text);
+      background: rgba(255,255,255,0.03);
+    }
+    .quality-strip .q-chip.active {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent-bright);
+    }
+    .quality-strip .q-chip.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .quality-strip .q-chip .q-spec {
+      font-size: 9.5px; font-weight: 500;
+      color: inherit; opacity: 0.7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0;
+    }
+
+    /* Inline mini-fields — Duration / Frames / Seed. Smaller padding,
+       label sits inside the field's label slot above. */
+    .mini-fields {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .mini-fields .mf-cell {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .mini-fields .mf-label {
+      font-size: 10px; font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .mini-fields input {
+      width: 100%;
+      padding: 7px 9px;
+      font-size: 13px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--text);
+    }
+    .mini-fields input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: var(--bg-2);
+      box-shadow: var(--ring);
+    }
+
+    /* Sticky action footer — Generate stays at the bottom of the form-pane
+       no matter how far the user scrolls. The form scrolls under it. The
+       queue chip strip sits ABOVE the Generate button so it's never the
+       primary touch target. */
+    .form-pane {
+      /* allow the footer to overlap the scroll content; padding keeps the
+         last form section visible above the footer. */
+      padding-bottom: 132px;
+    }
+    .form-action-footer {
+      position: sticky;
+      bottom: 0;
+      left: 0; right: 0;
+      /* break out horizontally so the footer spans edge-to-edge of the
+         form-pane (form-pane has padding 16px); vertically use auto top
+         margin so the form content above it sets natural spacing. */
+      margin: 16px -16px 0;
+      padding: 14px 16px 16px;
+      /* Soft fade into the form content above so the sticky footer
+         doesn't read as a hard bar — content scrolling under it gradually
+         becomes invisible. The transparent top + opaque bottom means
+         scrolling content fades out as it passes under the footer. */
+      background: linear-gradient(
+        180deg,
+        rgba(0, 6, 26, 0) 0%,
+        rgba(0, 6, 26, 0.85) 22%,
+        var(--bg) 50%,
+        var(--bg) 100%
+      );
+      border-top: 1px solid var(--border);
+      z-index: 5;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .form-action-footer .actions {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin: 0;
+    }
+    .form-action-footer .actions .primary {
+      padding: 12px 14px;
+      font-size: 14px; font-weight: 600;
+      border-radius: var(--r-md);
+    }
+    .form-action-footer .actions .danger {
+      padding: 12px 18px;
+      border-radius: var(--r-md);
+      width: auto;
+    }
+    /* Queue chip strip — sits ABOVE the Generate button. Compact icon-led
+       chips for batch / pause / clear so they don't compete with Generate. */
+    .form-action-footer .queue-strip {
+      display: flex; gap: 6px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .form-action-footer .queue-strip .qchip {
+      width: auto;
+      padding: 4px 10px;
+      font-size: 11px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: var(--r-pill);
+      cursor: pointer;
+      transition: var(--t-fast);
+      display: inline-flex; align-items: center; gap: 5px;
+      font-weight: 500;
+    }
+    .form-action-footer .queue-strip .qchip:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.06);
+    }
+    .form-action-footer .queue-strip .qchip-spacer { flex: 1 1 auto; }
+    .form-action-footer .queue-strip .qchip-derived {
+      font-size: 10.5px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 4px 0;
+    }
+    .form-action-footer .queue-strip .qchip-derived strong {
+      color: var(--accent-bright); font-weight: 600;
+    }
+
+    /* When form-pane is in agent mode, drop the sticky footer padding. */
+    body[data-workflow="agent"] .form-pane { padding-bottom: 0; }
+
     /* ===== STAGE (PLAYER + CAROUSEL) ===== */
     .stage-pane {
       background: linear-gradient(180deg, #0a0d12 0%, var(--panel) 100%);
@@ -13702,60 +14067,25 @@ HTML = r"""<!doctype html>
       <a class="models-inline-link" onclick="openModelsModal()">Manage all models →</a>
     </div>
 
-    <!-- Mode picker — lifted OUT of #genForm so it stays visible when
-         the user switches to Image Studio (which hides #genForm). Without
-         this, once a user clicks Studio they had no way back to T2V/I2V
-         short of refreshing. The hidden #mode input stays inside #genForm
-         (further below) so the video form's FormData picks it up.
-         Used to be inside #genForm at the top of the form. -->
-    <h2 style="margin-top:0">Mode</h2>
-    <!-- 5 mode pills on ONE row. The previous markup carried a stale
-         `cols-2` class plus an inline 4-col override, which left the
-         5th pill (Studio) on its own line and visually disconnected.
-         Switching to `cols-5` keeps all 5 pills equal-width on the
-         same row so Studio reads as a peer of T2V/I2V/FFLF/Extend. -->
-    <div class="pill-group cols-5" id="modeGroup">
-      <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
-      <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
-      <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
-      <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
-      <button type="button" class="pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)"><span>Studio</span><span class="sub">stills + library</span></button>
+    <!-- Mode bar — segmented chip strip. Lifted OUT of #genForm so it
+         stays visible when the user switches to Image Studio (which hides
+         #genForm). Without this, once a user clicks Studio they had no
+         way back to T2V/I2V short of refreshing. The hidden #mode input
+         stays inside #genForm (further below) so the video form's
+         FormData picks it up. The element keeps id=modeGroup and each
+         chip keeps data-mode + .pill-btn (alongside .mode-chip) so the
+         existing setMode() click wiring keeps working unchanged. -->
+    <div class="mode-bar pill-group" id="modeGroup">
+      <button type="button" class="mode-chip pill-btn" data-mode="t2v">Text<span class="mc-sub sub">prompt → video</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
     </div>
 
     <form id="genForm">
       <input type="hidden" name="preset_label" id="preset_label" value="">
       <input type="hidden" name="mode" id="mode" value="t2v">
-
-      <!-- Quality picker (Y1.013): one decision instead of four. Each
-           button bundles dimensions + model + step count + tier
-           recommendation, with the actual specs visible on the pill so
-           power users can read what they're getting. Aspect, custom
-           W/H, and the experimental Speed setting moved into the
-           Customize disclosure below. Beginners pick a button; power
-           users open Customize. -->
-      <h2>Quality</h2>
-      <div class="pill-group cols-2 quality-row" id="qualityGroup">
-        <button type="button" class="pill-btn pill-quality" data-quality="quick">
-          <span class="ql-name">Quick</span>
-          <span class="sub ql-spec">640×480 · ~2 min</span>
-          <span class="ql-tier">Q4 · any Mac</span>
-        </button>
-        <button type="button" class="pill-btn pill-quality active" data-quality="balanced">
-          <span class="ql-name">Balanced</span>
-          <span class="sub ql-spec">1024×576 → 720p</span>
-          <span class="ql-tier">Q4 · ~5 min · no crop</span>
-        </button>
-        <button type="button" class="pill-btn pill-quality" data-quality="standard">
-          <span class="ql-name">Standard</span>
-          <span class="sub ql-spec">1280×704 · ~7 min</span>
-          <span class="ql-tier">Q4 · standard tier+</span>
-        </button>
-        <button type="button" class="pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
-          <span class="ql-name">High</span>
-          <span class="sub ql-spec" id="highSpec">1280×704 · ~12 min</span>
-          <span class="ql-tier" id="highSub">Q8 not installed</span>
-        </button>
-      </div>
       <input type="hidden" name="quality" id="quality" value="balanced">
       <input type="hidden" name="accel" id="accel" value="off">
       <input type="hidden" name="temporal_mode" id="temporal_mode" value="native">
@@ -13763,157 +14093,220 @@ HTML = r"""<!doctype html>
 
       <div id="warnBanner" class="warn-banner"></div>
 
-      <!-- Mode-specific: image (I2V).
-           New picker: a clickable / drag-drop tile + a "Recent uploads"
-           strip below. The raw path input is gone — paths are still set
-           via the hidden field for form submission, but never typed by the
-           user. Same component is reused for FFLF Start / End below. -->
-      <div class="mode-only" id="imageSection">
-        <h2>Reference image</h2>
-        <div class="picker" data-key="image">
-          <div class="picker-drop" id="picker_drop_image">
-            <div class="picker-empty">
-              <div class="picker-icon">🖼</div>
-              <div class="picker-cta">Drop image here, or <strong>click to browse</strong></div>
-              <div class="hint">PNG / JPG / WEBP — auto cover-crop to model size</div>
+      <!-- ============== COMPOSER CARD ==============
+           Hero element of the form. Carries the reference picker(s)
+           (mode-conditional), the prompt textarea, and an inline tools
+           strip (Enhance + HDR + No-music + Avoid disclosure). One
+           elevated surface so the prompt reads as the primary input. -->
+      <div class="composer-card">
+        <!-- Slot for the mode-conditional reference pickers. Each
+             .mode-only block is shown/hidden by setMode(); when none are
+             active (T2V), the slot collapses (CSS :empty/:not(.show)). -->
+        <div class="composer-refs">
+          <!-- I2V — single image ref. -->
+          <div class="mode-only" id="imageSection">
+            <h2>Reference image</h2>
+            <div class="picker" data-key="image">
+              <div class="picker-drop" id="picker_drop_image">
+                <div class="picker-empty">
+                  <div class="picker-icon">🖼</div>
+                  <div class="picker-cta">Drop image here, or <strong>click to browse</strong></div>
+                  <div class="hint">PNG / JPG / WEBP — auto cover-crop to model size</div>
+                </div>
+                <img class="picker-preview" id="picker_preview_image" alt="" style="display:none">
+                <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none">×</button>
+              </div>
+              <input type="file" id="picker_file_image" accept="image/*" style="display:none">
+              <input type="hidden" name="image" id="image" value="">
+              <div class="picker-recent" id="picker_recent_image_wrap" style="display:none">
+                <div class="picker-recent-label">Recent uploads · click to use</div>
+                <div class="picker-recent-strip" id="picker_recent_image"></div>
+              </div>
             </div>
-            <img class="picker-preview" id="picker_preview_image" alt="" style="display:none">
-            <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none">×</button>
           </div>
-          <input type="file" id="picker_file_image" accept="image/*" style="display:none">
-          <input type="hidden" name="image" id="image" value="">
-          <div class="picker-recent" id="picker_recent_image_wrap" style="display:none">
-            <div class="picker-recent-label">Recent uploads · click to use</div>
-            <div class="picker-recent-strip" id="picker_recent_image"></div>
+
+          <!-- FFLF — start + end pickers. -->
+          <div class="mode-only" id="keyframeSection">
+            <h2>Start frame (frame 0)</h2>
+            <div class="picker" data-key="start_image">
+              <div class="picker-drop" id="picker_drop_start_image">
+                <div class="picker-empty">
+                  <div class="picker-icon">🎬</div>
+                  <div class="picker-cta">Drop the <strong>first frame</strong>, or <strong>click to browse</strong></div>
+                  <div class="hint">This image opens the clip — its aspect picks the output dimensions.</div>
+                </div>
+                <img class="picker-preview" id="picker_preview_start_image" alt="" style="display:none">
+                <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none">×</button>
+              </div>
+              <input type="file" id="picker_file_start_image" accept="image/*" style="display:none">
+              <input type="hidden" name="start_image" id="start_image" value="">
+              <div class="picker-recent" id="picker_recent_start_image_wrap" style="display:none">
+                <div class="picker-recent-label">Recent uploads · click to use</div>
+                <div class="picker-recent-strip" id="picker_recent_start_image"></div>
+              </div>
+            </div>
+
+            <h2 style="margin-top:10px">End frame (last frame)</h2>
+            <div class="picker" data-key="end_image">
+              <div class="picker-drop" id="picker_drop_end_image">
+                <div class="picker-empty">
+                  <div class="picker-icon">🎯</div>
+                  <div class="picker-cta">Drop the <strong>last frame</strong>, or <strong>click to browse</strong></div>
+                  <div class="hint">A close-up here anchors face identity through the clip.</div>
+                </div>
+                <img class="picker-preview" id="picker_preview_end_image" alt="" style="display:none">
+                <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none">×</button>
+              </div>
+              <input type="file" id="picker_file_end_image" accept="image/*" style="display:none">
+              <input type="hidden" name="end_image" id="end_image" value="">
+              <div class="picker-recent" id="picker_recent_end_image_wrap" style="display:none">
+                <div class="picker-recent-label">Recent uploads · click to use</div>
+                <div class="picker-recent-strip" id="picker_recent_end_image"></div>
+              </div>
+            </div>
+
+            <div class="hint" style="margin-top:8px">FFLF needs Q8 (auto-selects High quality). The model interpolates between the two frames you provide.</div>
           </div>
+
+          <!-- Extend — source-video select + extend-by + direction +
+               extend-mode preset. Lives inside the composer card so the
+               prompt sits below the source picker, mirroring the I2V flow. -->
+          <div class="mode-only" id="extendSection">
+            <h2>Source video</h2>
+            <select id="extendSrcSelect" onchange="document.getElementById('video_path').value=this.value"></select>
+            <input name="video_path" id="video_path" placeholder="/path/to/source.mp4" style="margin-top:6px">
+            <div class="row" style="margin-top:8px">
+              <div>
+                <label class="lbl">Extend by (seconds)</label>
+                <!-- min must align to step from value=2: with min=0.4 step=0.5 the
+                     valid sequence is 0.4, 0.9, 1.4, 1.9, 2.4… — `2` is OFF the
+                     grid. Chrome blocks the entire form submission silently when
+                     ANY input fails validation, even hidden ones in inactive
+                     modes. Generate appeared dead until cocktailpeanut diagnosed
+                     it. With min=0.5 the sequence is 0.5, 1.0, 1.5, 2.0… and
+                     value=2 is valid. -->
+                <input id="extend_seconds" type="number" value="2" min="0.5" max="10" step="0.5">
+                <input type="hidden" name="extend_frames" id="extend_frames" value="6">
+                <div class="hint" id="extendDurationHint" style="margin-top:4px">≈ 2.0 s of new content (6 latent frames × 8 video frames at 24 fps)</div>
+              </div>
+              <div>
+                <label class="lbl">Direction</label>
+                <select name="extend_direction" id="extend_direction">
+                  <option value="after" selected>After</option>
+                  <option value="before">Before</option>
+                </select>
+              </div>
+            </div>
+            <label class="lbl" style="margin-top:10px">Extend mode</label>
+            <div class="pill-group cols-2" id="extendModeGroup">
+              <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">12 steps · no CFG · 64 GB safe</span></button>
+              <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">30 steps · CFG 3.0 · 96+ GB</span></button>
+            </div>
+            <input type="hidden" name="extend_steps" id="extend_steps" value="12">
+            <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
+            <div class="hint">Each latent ≈ 8 frames (~0.33s). Quality mode runs the upstream defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Fast unless you've got more RAM.</div>
+          </div>
+        </div>
+
+        <!-- Prompt — hero textarea. No h2 (the composer-card itself
+             announces "this is where you compose"). Audio-cue placeholder
+             is the only nudge users get to describe the soundscape;
+             documented in the LTX 2.3 paper but unobvious. -->
+        <textarea name="prompt" id="prompt" class="composer-prompt"
+                  placeholder="Describe the scene AND the sound — e.g. wizard in a forest clearing, fireflies spiraling up · low whispered chant, ember crackle, distant owl. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
+
+        <!-- Tools strip — Enhance + HDR + No-music + Avoid disclosure.
+             All inline so they read as part of composing the prompt.
+             Avoid is now a toggle-disclosure (collapsed by default) — it's
+             optional and most users won't touch it. -->
+        <div class="composer-tools">
+          <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance</button>
+          <button type="button" class="ct-link" id="avoidToggleBtn" onclick="toggleAvoidRow()" title="Add 'avoid' / negative prompt — things the model should NOT generate">
+            <span id="avoidToggleLabel">Avoid +</span>
+          </button>
+          <span class="ct-spacer"></span>
+          <label class="toggle-pill" id="hdrPill"
+                 title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer. First HDR job spawns a one-time download (~120 MB) of the LoRA weights from Hugging Face, then renders share the cache.">
+            <input type="checkbox" id="hdr" name="hdr">
+            <span class="toggle-dot"></span>
+            <span>HDR</span>
+          </label>
+          <label class="toggle-pill" id="noMusicPill"
+                 title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
+            <input type="checkbox" id="noMusic" name="no_music">
+            <span class="toggle-dot"></span>
+            <span>No music</span>
+          </label>
         </div>
       </div>
 
-      <!-- Mode-specific: keyframe (FFLF). Two pickers, same component. -->
-      <div class="mode-only" id="keyframeSection">
-        <h2>Start frame (frame 0)</h2>
-        <div class="picker" data-key="start_image">
-          <div class="picker-drop" id="picker_drop_start_image">
-            <div class="picker-empty">
-              <div class="picker-icon">🎬</div>
-              <div class="picker-cta">Drop the <strong>first frame</strong>, or <strong>click to browse</strong></div>
-              <div class="hint">This image opens the clip — its aspect picks the output dimensions.</div>
-            </div>
-            <img class="picker-preview" id="picker_preview_start_image" alt="" style="display:none">
-            <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none">×</button>
-          </div>
-          <input type="file" id="picker_file_start_image" accept="image/*" style="display:none">
-          <input type="hidden" name="start_image" id="start_image" value="">
-          <div class="picker-recent" id="picker_recent_start_image_wrap" style="display:none">
-            <div class="picker-recent-label">Recent uploads · click to use</div>
-            <div class="picker-recent-strip" id="picker_recent_start_image"></div>
-          </div>
+      <!-- Avoid (negative prompt) — collapsed by default; toggled by the
+           Avoid + button inside the composer-tools strip. Lives outside
+           the composer card so the textarea has its own framed surface
+           and the composer card stays focused on the positive prompt. -->
+      <div class="avoid-row" id="avoidRow">
+        <div class="avoid-label" for="negative_prompt">
+          <span>Avoid</span>
+          <span class="avoid-hint">things the model should NOT generate</span>
         </div>
-
-        <h2>End frame (last frame)</h2>
-        <div class="picker" data-key="end_image">
-          <div class="picker-drop" id="picker_drop_end_image">
-            <div class="picker-empty">
-              <div class="picker-icon">🎯</div>
-              <div class="picker-cta">Drop the <strong>last frame</strong>, or <strong>click to browse</strong></div>
-              <div class="hint">A close-up here anchors face identity through the clip.</div>
-            </div>
-            <img class="picker-preview" id="picker_preview_end_image" alt="" style="display:none">
-            <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none">×</button>
-          </div>
-          <input type="file" id="picker_file_end_image" accept="image/*" style="display:none">
-          <input type="hidden" name="end_image" id="end_image" value="">
-          <div class="picker-recent" id="picker_recent_end_image_wrap" style="display:none">
-            <div class="picker-recent-label">Recent uploads · click to use</div>
-            <div class="picker-recent-strip" id="picker_recent_end_image"></div>
-          </div>
-        </div>
-
-        <div class="hint">FFLF needs Q8 (auto-selects High quality). The model interpolates between the two frames you provide.</div>
+        <textarea class="avoid-textarea" name="negative_prompt" id="negative_prompt" placeholder="blurry hands, distorted fingers, extra fingers, smeared face, warped text"></textarea>
       </div>
 
-      <!-- Mode-specific: extend -->
-      <div class="mode-only" id="extendSection">
-        <h2>Source video</h2>
-        <select id="extendSrcSelect" onchange="document.getElementById('video_path').value=this.value"></select>
-        <input name="video_path" id="video_path" placeholder="/path/to/source.mp4" style="margin-top:6px">
-        <div class="row" style="margin-top:8px">
-          <div>
-            <label class="lbl">Extend by (seconds)</label>
-            <!-- min must align to step from value=2: with min=0.4 step=0.5 the
-                 valid sequence is 0.4, 0.9, 1.4, 1.9, 2.4… — `2` is OFF the
-                 grid. Chrome blocks the entire form submission silently when
-                 ANY input fails validation, even hidden ones in inactive
-                 modes. Generate appeared dead until cocktailpeanut diagnosed
-                 it. With min=0.5 the sequence is 0.5, 1.0, 1.5, 2.0… and
-                 value=2 is valid. -->
-            <input id="extend_seconds" type="number" value="2" min="0.5" max="10" step="0.5">
-            <input type="hidden" name="extend_frames" id="extend_frames" value="6">
-            <div class="hint" id="extendDurationHint" style="margin-top:4px">≈ 2.0 s of new content (6 latent frames × 8 video frames at 24 fps)</div>
+      <!-- ============== QUICK SETTINGS ==============
+           Quality picker (compact 4-up segmented strip) + Duration +
+           Frames + Seed in one dense block. Everything more advanced
+           (aspect, dims, speed, long-clips, export, audio source,
+           open-when-done) is folded into the Customize disclosure below. -->
+      <div class="quick-settings">
+        <div>
+          <div class="qs-label">
+            <span class="qs-name">Quality</span>
+            <span class="qs-meta" id="qualityMeta"></span>
           </div>
-          <div>
-            <label class="lbl">Direction</label>
-            <select name="extend_direction" id="extend_direction">
-              <option value="after" selected>After</option>
-              <option value="before">Before</option>
-            </select>
+          <!-- Compact 4-col strip. Each chip carries name + a single spec
+               line. Same data-quality wiring as before so setQuality()
+               keeps working unchanged. The .pill-btn class is preserved
+               for the click handler that filters by it. -->
+          <div class="quality-strip pill-group" id="qualityGroup">
+            <button type="button" class="q-chip pill-btn pill-quality" data-quality="quick">
+              <span class="ql-name">Quick</span>
+              <span class="q-spec ql-spec sub">640×480</span>
+              <span class="ql-tier" hidden>Q4 · any Mac</span>
+            </button>
+            <button type="button" class="q-chip pill-btn pill-quality active" data-quality="balanced">
+              <span class="ql-name">Balanced</span>
+              <span class="q-spec ql-spec sub">1024×576</span>
+              <span class="ql-tier" hidden>Q4 · ~5 min · no crop</span>
+            </button>
+            <button type="button" class="q-chip pill-btn pill-quality" data-quality="standard">
+              <span class="ql-name">Standard</span>
+              <span class="q-spec ql-spec sub">1280×704</span>
+              <span class="ql-tier" hidden>Q4 · standard tier+</span>
+            </button>
+            <button type="button" class="q-chip pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
+              <span class="ql-name">High</span>
+              <span class="q-spec ql-spec sub" id="highSpec">1280×704</span>
+              <span class="ql-tier" id="highSub" hidden>Q8 not installed</span>
+            </button>
           </div>
         </div>
 
-        <!-- Speed/quality preset for extend.
-             Fast: cfg_scale=1.0 (no CFG, ~half the activation memory) +
-                   12 steps. Fits comfortably on 64 GB at 1280×704. ~3-5 min.
-             Quality: cfg_scale=3.0 + 30 steps. The upstream defaults. Will
-                   swap on 64 GB at 1280×704 (peak ~47 GB resident + 12 GB
-                   swap) — only pick this on a 96+ GB machine or below 768
-                   max-side. Pinokio 64 GB users should leave this on Fast. -->
-        <label class="lbl" style="margin-top:10px">Extend mode</label>
-        <div class="pill-group cols-2" id="extendModeGroup">
-          <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">12 steps · no CFG · 64 GB safe</span></button>
-          <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">30 steps · CFG 3.0 · 96+ GB</span></button>
+        <div class="mode-only show" id="quickMetricsRow">
+          <div class="mini-fields">
+            <div class="mf-cell">
+              <span class="mf-label">Duration (s)</span>
+              <input id="duration" value="5" type="number" min="1" max="20" step="1">
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Frames</span>
+              <input name="frames" id="frames" value="121" type="number" min="1" title="8k+1">
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Seed</span>
+              <input name="seed" id="seed" value="-1" title="-1 = random">
+            </div>
+          </div>
         </div>
-        <input type="hidden" name="extend_steps" id="extend_steps" value="12">
-        <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
-        <div class="hint">Each latent ≈ 8 frames (~0.33s). Quality mode runs the upstream defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Fast unless you've got more RAM.</div>
-      </div>
-
-      <h2>Prompt</h2>
-      <!-- Audio-guidance hint in the placeholder. LTX 2.3 generates audio
-           jointly but is CONDITIONED on prompt cues — visual-only prompts
-           produce near-silent room tone (peaks at -37 dB on test runs).
-           Most users assume "no sound" = bug. Hint nudges them to describe
-           the soundscape too. Documented in the LTX 2.3 paper but unobvious. -->
-      <textarea name="prompt" id="prompt" placeholder="Describe the scene AND the sound: e.g. 'wizard in a forest clearing, fireflies spiraling up — low whispered chant, ember crackle, distant owl'. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient."></textarea>
-      <label class="lbl" for="negative_prompt">Avoid</label>
-      <textarea class="avoid-textarea" name="negative_prompt" id="negative_prompt" placeholder="Optional: blurry hands, distorted fingers, extra fingers, smeared face, warped text"></textarea>
-      <!-- Gemma-driven prompt enhancement (upstream's `ltx-2-mlx enhance`).
-           Rewrites your prompt with the structure/keywords LTX 2.3 trained
-           on. ~12-15s on cold start (Gemma needs to load), ~5s warm.
-
-           "No music" checkbox: appends an audio constraint to the prompt
-           on submit so users can keep voice + ambient and skip the model's
-           default soundtrack tendency. Music is annoying in editing because
-           it can't be cleanly removed without affecting the dialogue track.
-           Recommended for clips you plan to score yourself in post. -->
-      <!-- Three controls on one row: Enhance button on the left, then
-           HDR + No-music toggles pushed to the right. HDR is exposed as
-           a plain toggle even though it's implemented as a curated
-           Lightricks LoRA — most users don't care that it's a LoRA, they
-           just want HDR or not. -->
-      <div class="row-actions" style="margin-top:8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
-        <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
-        <label class="toggle-pill" id="hdrPill" style="margin-left:auto"
-               title="Boost dynamic range and color depth. Implemented as the official Lightricks HDR LoRA fused into the transformer. First HDR job spawns a one-time download (~120 MB) of the LoRA weights from Hugging Face, then renders share the cache.">
-          <input type="checkbox" id="hdr" name="hdr">
-          <span class="toggle-dot"></span>
-          <span>HDR</span>
-        </label>
-        <label class="toggle-pill" id="noMusicPill"
-               title="When on, the prompt is augmented with: 'Audio: voice and ambient sounds only, no music, no soundtrack, no score.' Useful for clips you'll score yourself in post — music can't be cleanly removed afterwards.">
-          <input type="checkbox" id="noMusic" name="no_music">
-          <span class="toggle-dot"></span>
-          <span>No music</span>
-        </label>
       </div>
 
       <!-- LoRA picker — UNIFIED across video form + Image Studio.
@@ -13986,34 +14379,21 @@ HTML = r"""<!doctype html>
            and attaches a `loras` field manually. -->
       <input type="hidden" id="lorasJson" name="loras" value="">
 
-      <!-- Advanced — power-user options. We trimmed two things in cleanup:
-           1. Removed the "Enhance prompt" checkbox: it was labeled "CLI only,
-              ignored by helper" — actual dead code. The Enhance button next
-              to the prompt textarea is the real thing.
-           2. The I2V audio mode (mux external audio over LTX-generated video)
-              only applies in I2V mode; the panel auto-hides it elsewhere via
-              `.mode-only` on the wrapper. -->
-      <details>
-        <summary>Advanced</summary>
-        <div class="mode-only" id="i2vAudioModeSection">
-          <label class="lbl">I2V audio source</label>
-          <select id="i2vMode">
-            <option value="i2v" selected>Joint audio (LTX generates audio synced with the visual)</option>
-            <option value="i2v_clean_audio">Use external audio file (mux it onto LTX video)</option>
-          </select>
-          <div class="mode-only" id="audioSection">
-            <label class="lbl">Audio file path</label>
-            <input name="audio" id="audio" placeholder="/path/to/your/track.wav">
-          </div>
-        </div>
-        <label class="check" style="margin-top:6px">
-          <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done
-        </label>
-      </details>
+      <input type="hidden" name="steps" id="steps" value="8">
 
-      <!-- Sizing for non-extend modes. The headline Quality picker above
-           sets sensible defaults; this disclosure lets power users override
-           aspect, exact dimensions, and the experimental sampler speed. -->
+      <!-- ============== UNIFIED CUSTOMIZE DISCLOSURE ==============
+           Folds together the old "Customize" (aspect, dims, speed,
+           long-clips, export, method) and "Advanced" (audio source,
+           open-when-done) into ONE collapsed disclosure. Power users
+           open it; beginners ignore it. The summary line shows the
+           effective state so power users can scan at a glance.
+
+           Lives at form level (not mode-conditional) — its inner rows
+           manage their own visibility (e.g. dimsRow hides in I2V flows;
+           i2vAudioModeSection only shows for I2V; method only shows
+           when an upscale is active). The wrapping #sizingSection
+           class kept for the mode-only show/hide that still toggles
+           it for Extend (Extend supplies its own duration/etc). -->
       <div class="mode-only" id="sizingSection">
         <details id="customizeDetails" class="customize-section">
           <summary class="cz-summary">
@@ -14104,16 +14484,33 @@ HTML = r"""<!doctype html>
               </div>
               <input type="hidden" name="upscale_method" id="upscale_method" value="lanczos">
             </div>
+
+            <!-- Audio source (I2V only) — folded in from the old separate
+                 Advanced disclosure. Picker auto-hides when the current
+                 mode isn't I2V (see updateDerived's mode-aware visibility). -->
+            <div class="cz-control mode-only" id="i2vAudioModeSection">
+              <div class="cz-label">I2V audio source
+                <span class="cz-label-hint">joint or external</span>
+              </div>
+              <select id="i2vMode">
+                <option value="i2v" selected>Joint audio (LTX generates audio synced with the visual)</option>
+                <option value="i2v_clean_audio">Use external audio file (mux it onto LTX video)</option>
+              </select>
+              <div class="mode-only" id="audioSection" style="margin-top:8px">
+                <label class="lbl">Audio file path</label>
+                <input name="audio" id="audio" placeholder="/path/to/your/track.wav">
+              </div>
+            </div>
+
+            <!-- Open file when done — minor convenience. Was its own row
+                 in the old Advanced disclosure; now folded inline. -->
+            <div class="cz-control">
+              <label class="check" style="margin:0">
+                <input type="checkbox" name="open_when_done" id="open_when_done"> Open file when done
+              </label>
+            </div>
           </div>
         </details>
-
-        <div class="row3" style="margin-top:10px">
-          <div><label class="lbl">Duration (s)</label><input id="duration" value="5" type="number" min="1" max="20" step="1"></div>
-          <div><label class="lbl">Frames (8k+1)</label><input name="frames" id="frames" value="121" type="number" min="1"></div>
-          <div><label class="lbl">Seed (-1 random)</label><input name="seed" id="seed" value="-1"></div>
-        </div>
-
-        <input type="hidden" name="steps" id="steps" value="8">
 
         <div class="derived" id="derived"></div>
       </div>
@@ -14130,14 +14527,23 @@ HTML = r"""<!doctype html>
         </label>
       </div>
 
-      <div class="actions">
-        <button type="submit" class="primary" id="genBtn">Generate</button>
-        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
-      </div>
-      <div class="row-actions" style="margin-top:8px">
-        <button type="button" class="small" onclick="openBatch()">Batch paste</button>
-        <button type="button" class="small" id="pauseBtn" onclick="togglePause()">Pause queue</button>
-        <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
+      <!-- ============== STICKY ACTION FOOTER ==============
+           Generate stays anchored at the bottom of the form-pane no
+           matter how far the user scrolls. The queue chip strip sits
+           above it (Batch / Pause / Clear) — compact pills, never the
+           primary touch target. -->
+      <div class="form-action-footer" id="formActionFooter">
+        <div class="queue-strip">
+          <button type="button" class="qchip" onclick="openBatch()" title="Paste many prompts at once and queue them">⊞ Batch</button>
+          <button type="button" class="qchip" id="pauseBtn" onclick="togglePause()" title="Pause / resume the render queue">⏸ Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)">✕ Clear</button>
+          <span class="qchip-spacer"></span>
+          <span class="qchip-derived" id="derivedFooter"></span>
+        </div>
+        <div class="actions">
+          <button type="submit" class="primary" id="genBtn">Generate</button>
+          <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
+        </div>
       </div>
     </form>
 
@@ -14156,39 +14562,59 @@ HTML = r"""<!doctype html>
          download — driven by /image/engine_status (server-side cache
          probe via _repo_hf_cache_dir). -->
     <div class="mode-only studio-pane" id="studioSection">
-      <!-- The Mode picker above this <div> already announces "Studio" so
-           a separate "Image Studio" h3 just adds noise. The hint moves
-           inline as a one-liner below the prompt placeholder if needed. -->
+      <!-- ============== STUDIO COMPOSER CARD ==============
+           Same composer-card chrome as the video form. Refs (3 multi-ref
+           slots) sit at the top, the prompt is the hero, and the engine /
+           aspect / n / seed live in the Quick Settings strip below.
+           Generate sticks at the bottom (sticky footer) so it's always
+           one click away regardless of how far the user scrolls. -->
+      <div class="composer-card">
+        <div class="composer-refs">
+          <div class="show">
+            <h2>Reference images
+              <span class="h2-hint">multi-ref · Qwen-Image-Edit-2511 / FLUX.2 Klein-Edit only</span>
+            </h2>
+            <div class="studio-ref-grid" id="imgStudioRefs">
+              <div class="studio-ref-slot" data-slot="0">
+                <span class="ref-tag">Primary</span>
+              </div>
+              <div class="studio-ref-slot" data-slot="1">
+                <span class="ref-tag">Multi-ref</span>
+              </div>
+              <div class="studio-ref-slot" data-slot="2">
+                <span class="ref-tag">Multi-ref</span>
+              </div>
+            </div>
+            <!-- Mirrors the video I2V picker's "Recent uploads · click to use"
+                 strip. Click a thumb → fills the next empty ref slot. Hidden
+                 when /uploads is empty. -->
+            <div class="studio-ref-recent" id="imgStudioRecentWrap" style="display:none">
+              <div class="studio-ref-recent-label">Recent uploads · click to use</div>
+              <div class="studio-ref-recent-strip" id="imgStudioRecentStrip"></div>
+            </div>
+          </div>
+        </div>
 
-      <h2 style="margin-top:0">Prompt</h2>
-      <textarea id="imgStudioPrompt" rows="4" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
-
-      <h2>Reference images
-        <span class="h2-hint">multi-ref · Qwen-Image-Edit-2511 / FLUX.2 Klein-Edit only</span>
-      </h2>
-      <div class="studio-ref-grid" id="imgStudioRefs">
-        <div class="studio-ref-slot" data-slot="0">
-          <span class="ref-tag">Primary</span>
-        </div>
-        <div class="studio-ref-slot" data-slot="1">
-          <span class="ref-tag">Multi-ref</span>
-        </div>
-        <div class="studio-ref-slot" data-slot="2">
-          <span class="ref-tag">Multi-ref</span>
-        </div>
+        <textarea id="imgStudioPrompt" class="composer-prompt" rows="4"
+                  placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
       </div>
-      <!-- Mirrors the video I2V picker's "Recent uploads · click to use"
-           strip. Click a thumb → fills the next empty ref slot. Hidden
-           when /uploads is empty. -->
-      <div class="studio-ref-recent" id="imgStudioRecentWrap" style="display:none">
-        <div class="studio-ref-recent-label">Recent uploads · click to use</div>
-        <div class="studio-ref-recent-strip" id="imgStudioRecentStrip"></div>
+
+      <!-- Validation / status messages (e.g. "pick a ref image"). Lives
+           OUTSIDE the composer card so the card chrome stays focused on
+           composing. Empty by default. -->
+      <div class="studio-status-row" style="margin: 6px 0 -4px;">
+        <span id="imgStudioStatus" class="hint"></span>
       </div>
 
-      <h2>Settings</h2>
-      <div class="studio-field-grid">
-        <div class="studio-field studio-field-wide">
-          <label class="lbl">Engine</label>
+      <!-- Quick settings — Engine on its own row (long labels), then a
+           dense 3-up row for Aspect / Candidates / Seed. Wall-time
+           estimate sits below the strip in the muted derived style. -->
+      <div class="quick-settings">
+        <div>
+          <div class="qs-label">
+            <span class="qs-name">Engine</span>
+            <span class="qs-meta" id="imgStudioWallEstimate"></span>
+          </div>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto" selected>Auto (use Settings)</option>
@@ -14206,24 +14632,29 @@ HTML = r"""<!doctype html>
             onclick="imgStudioOnPillClick()">…</span>
           </div>
         </div>
-        <div class="studio-field">
-          <label class="lbl">Aspect</label>
-          <select id="imgStudioAspect" onchange="imgStudioUpdateEstimate()">
-            <option value="16:9" selected>16:9 — 1280×720</option>
-            <option value="4:3">4:3 — 1024×768</option>
-            <option value="1:1">1:1 — 1024×1024</option>
-            <option value="9:16">9:16 — 720×1280</option>
-            <option value="3:4">3:4 — 768×1024</option>
-            <option value="21:9">21:9 — 1280×544</option>
-          </select>
-        </div>
-        <div class="studio-field">
-          <label class="lbl">Candidates (n)</label>
-          <input type="number" id="imgStudioN" min="1" max="8" value="4" oninput="imgStudioUpdateEstimate()">
-        </div>
-        <div class="studio-field">
-          <label class="lbl">Seed (-1 random)</label>
-          <input type="number" id="imgStudioSeed" value="-1">
+
+        <div>
+          <div class="mini-fields">
+            <div class="mf-cell">
+              <span class="mf-label">Aspect</span>
+              <select id="imgStudioAspect" onchange="imgStudioUpdateEstimate()" style="padding:7px 9px;font-size:13px;">
+                <option value="16:9" selected>16:9 — 1280×720</option>
+                <option value="4:3">4:3 — 1024×768</option>
+                <option value="1:1">1:1 — 1024×1024</option>
+                <option value="9:16">9:16 — 720×1280</option>
+                <option value="3:4">3:4 — 768×1024</option>
+                <option value="21:9">21:9 — 1280×544</option>
+              </select>
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Candidates (n)</span>
+              <input type="number" id="imgStudioN" min="1" max="8" value="4" oninput="imgStudioUpdateEstimate()">
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Seed</span>
+              <input type="number" id="imgStudioSeed" value="-1" title="-1 = random">
+            </div>
+          </div>
         </div>
       </div>
 
@@ -14235,39 +14666,23 @@ HTML = r"""<!doctype html>
            chips that don't match the current engine get a warning badge. -->
       <div id="loraPickerStudioSlot"></div>
 
-      <!-- Wall-time estimate sits on its own muted line above the action
-           row, mirroring the video form's "Duration 5.00s @ 24fps · …"
-           derived row. Updated by imgStudioUpdateEstimate as the user
-           changes engine / aspect / n. -->
-      <div class="derived" id="imgStudioWallEstimateRow">
-        <span id="imgStudioWallEstimate"></span>
-      </div>
-
-      <!-- Image Studio's action row uses the EXACT same .actions grid
-           (Generate=2fr, Stop=1fr) the video form uses, so the chrome
-           reads as the same panel in two modes instead of two different
-           panels. Same /stop endpoint works for image jobs (they go
-           through the shared queue worker), so the Stop button is
-           literally identical to the video form's. -->
-      <div class="actions">
-        <button class="primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
-          <span id="imgStudioGenBtnLabel">Generate</span>
-        </button>
-        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
-      </div>
-      <!-- Same queue-action strip the video form has. Pause/Clear are
-           queue-wide so they work regardless of mode; Batch paste opens
-           the same modal. Mirrors the video form's row exactly so the
-           Studio composer doesn't lose chrome users built muscle memory
-           around. -->
-      <div class="row-actions" style="margin-top:8px">
-        <button type="button" class="small" onclick="openBatch()">Batch paste</button>
-        <button type="button" class="small" id="pauseBtnStudio" onclick="togglePause()">Pause queue</button>
-        <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
-      </div>
-
-      <div class="studio-status-row">
-        <span id="imgStudioStatus" class="hint"></span>
+      <!-- Sticky action footer — same chrome as the video form's. Generate
+           stays anchored at the bottom of the form-pane no matter how far
+           the user has scrolled. Pause/Clear/Batch live above it as compact
+           pills, never the primary touch target. -->
+      <div class="form-action-footer" id="formActionFooterStudio">
+        <div class="queue-strip">
+          <button type="button" class="qchip" onclick="openBatch()" title="Paste many prompts at once and queue them">⊞ Batch</button>
+          <button type="button" class="qchip" id="pauseBtnStudio" onclick="togglePause()" title="Pause / resume the render queue">⏸ Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)">✕ Clear</button>
+          <span class="qchip-spacer"></span>
+        </div>
+        <div class="actions">
+          <button class="primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
+            <span id="imgStudioGenBtnLabel">Generate</span>
+          </button>
+          <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
+        </div>
       </div>
 
       <!-- Submission status. Image jobs flow through the same queue as
@@ -15189,6 +15604,37 @@ function _autoMainOutputsFilterForMode(mode) {
 document.getElementById('audio').value = BOOT.default_audio;
 
 // ====== Pill-button group helpers ======
+// Avoid (negative prompt) toggle — keeps the textarea collapsed by
+// default so the prompt-and-go flow stays tight. The button label flips
+// to "Avoid −" when open so the affordance is clear. Auto-opens once
+// the user types into it (so it stays visible) — shouldn't auto-close
+// from typing-then-deleting because that would yank the field out from
+// under their next keystroke.
+function toggleAvoidRow(forceOpen) {
+  const row = document.getElementById('avoidRow');
+  const btn = document.getElementById('avoidToggleBtn');
+  const lbl = document.getElementById('avoidToggleLabel');
+  const ta = document.getElementById('negative_prompt');
+  if (!row) return;
+  const wantOpen = (forceOpen === true) ? true : !row.classList.contains('show');
+  row.classList.toggle('show', wantOpen);
+  if (btn) btn.classList.toggle('active', wantOpen);
+  if (lbl) lbl.textContent = wantOpen ? 'Avoid −' : 'Avoid +';
+  if (wantOpen && ta) {
+    try { ta.focus(); } catch (e) {}
+  }
+}
+// Auto-open the Avoid row if it has content (e.g. loaded from a sidecar
+// via loadParams). Run once at boot AND after loadParams sets values.
+function syncAvoidRowFromValue() {
+  const ta = document.getElementById('negative_prompt');
+  if (!ta) return;
+  if ((ta.value || '').trim() !== '') {
+    const row = document.getElementById('avoidRow');
+    if (row && !row.classList.contains('show')) toggleAvoidRow(true);
+  }
+}
+
 function setMode(mode) {
   currentMode = mode;
   // The Studio pill swaps the form-pane in place: hide the video form
@@ -16071,6 +16517,23 @@ function updateDerived() {
 
   document.getElementById('derived').innerHTML = `Duration <strong>${dur}s</strong> @ ${FPS}fps${temporalText} · ${finalRes} · Steps ${document.getElementById('steps').value}${accelText}`;
 
+  // Compact derived line in the sticky action footer — same info, tighter
+  // typography. Lets the user see what they're about to render WITHOUT
+  // scrolling back to the customize disclosure. Mirrors the Customize
+  // summary style (just dimensions + duration; full details stay in the
+  // expanded Customize body).
+  const derivedFooter = document.getElementById('derivedFooter');
+  if (derivedFooter) {
+    derivedFooter.innerHTML = `<strong>${dur}s</strong> · ${finalRes}${temporalText}${accelText}`;
+  }
+  // Also update the Quality strip's right-side meta line (e.g. "5s · 1024×576")
+  // so the Quality picker block reads as a self-contained summary.
+  const qualityMeta = document.getElementById('qualityMeta');
+  if (qualityMeta) {
+    const qBare = `${w}×${h}`;
+    qualityMeta.textContent = `${dur}s · ${qBare}`;
+  }
+
   const warns = [];
   if (w % 32 !== 0) warns.push(`Width ${w} isn't a multiple of 32 (closest ${Math.round(w/32)*32})`);
   if (h % 32 !== 0) warns.push(`Height ${h} isn't a multiple of 32 (closest ${Math.round(h/32)*32})`);
@@ -16092,6 +16555,11 @@ function updateDerived() {
   document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
   document.getElementById('keyframeSection').classList.toggle('show', currentMode === 'keyframe');
   document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
+  // quickMetricsRow (Duration / Frames / Seed) doesn't apply to Extend
+  // (extend_seconds drives the new content; the source video provides
+  // the rest). Hide it in extend, show otherwise.
+  const qmr = document.getElementById('quickMetricsRow');
+  if (qmr) qmr.classList.toggle('show', currentMode !== 'extend');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
   // I2V audio source picker (Advanced) — only relevant in I2V flow.
   // In T2V/Extend/FFLF the model generates audio jointly; there's nothing
@@ -17009,6 +17477,9 @@ async function loadParams() {
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);
   document.getElementById('prompt').value = p.prompt || '';
   document.getElementById('negative_prompt').value = p.negative_prompt || '';
+  // If the loaded sidecar carried an Avoid value, surface the row so the
+  // user can see it without having to click the toggle.
+  syncAvoidRowFromValue();
   if (p.frames) { document.getElementById('frames').value = p.frames; document.getElementById('duration').value = framesToDuration(p.frames); }
   if (p.steps) document.getElementById('steps').value = p.steps;
   if (p.seed != null) document.getElementById('seed').value = p.seed;
