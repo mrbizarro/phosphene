@@ -2115,7 +2115,7 @@ CAPABILITIES: dict[str, dict] = {
             "t2v_draft":     "about 2 min",
             "t2v_standard":  "about 8 min",
             "i2v_standard":  "about 8 min",
-            "high":          "about 12 min",
+            "high":          "about 7 min",
             "keyframe":      "about 6 min (at 768 px)",
             # Extend on Comfortable measured 16 min for +3 s at 768 px on
             # M-Max 64 GB (Q8 dev transformer, CFG=1.0, 12 steps). The
@@ -2128,7 +2128,9 @@ CAPABILITIES: dict[str, dict] = {
             "quick":    "~2 min",
             "balanced": "~5 min",
             "standard": "~8 min",
-            "high":     "~12 min",
+            # 2026-05-09 lab finding: Q8 at the new 1024×576 default lands
+            # at ~7:48 wall vs the old 1280×704 default's ~11:51.
+            "high":     "~7 min",
         },
     },
     "high": {
@@ -16187,7 +16189,7 @@ HTML = r"""<!doctype html>
             </button>
             <button type="button" class="q-chip pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
               <span class="ql-name">High</span>
-              <span class="q-spec ql-spec sub" id="highSpec">1280×704</span>
+              <span class="q-spec ql-spec sub" id="highSpec">1024×576</span>
               <span class="ql-tier" id="highSub" hidden>Q8 not installed</span>
             </button>
           </div>
