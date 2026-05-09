@@ -12918,10 +12918,20 @@ HTML = r"""<!doctype html>
     }
     .stage-pane,
     .agent-stage-pane { border-right: none; }
-    .form-pane { padding: 0 0 18px 0; }
+    /* padding-bottom 132px reserves space at the foot of the scroll
+       area so content (Quality strip, Duration row, LoRAs, Customize)
+       sits clear of the sticky Generate/Stop footer instead of being
+       hidden behind it. The redesign agent set this on .form-pane in
+       the global block; this Linear-style block USED to override it
+       with 18px, which is why Salo saw the Quality 4-up disappearing
+       behind the footer in I2V mode. */
+    .form-pane { padding: 0 0 132px 0; }
     body[data-workflow="agent"] main.layout {
       grid-template-columns: minmax(560px, 1fr) minmax(420px, 460px);
     }
+    /* Agent workflow doesn't have the sticky footer — drop the
+       reserved space so the chat composer sits flush at the bottom. */
+    body[data-workflow="agent"] .form-pane { padding-bottom: 0; }
 
     /* === WORKFLOW TABS =========================================
        Salo asked for these to be moved away from the centered top
