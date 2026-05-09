@@ -32,8 +32,14 @@ def build_system_prompt(*, capabilities: dict, tools_doc: str,
     tier = capabilities.get("tier", "standard")
     friendly = {"base": "Compact", "standard": "Comfortable",
                 "high": "Roomy", "pro": "Studio"}.get(tier, tier)
-    max_dim_t2v = capabilities.get("max_dim_t2v", 1280)
-    max_dim_kf = capabilities.get("max_dim_kf", 768)
+    # tier_max_dim() returns 0 for "no clamp" tiers. Rendering the
+    # literal 0 into the system prompt reads to the model as "zero
+    # pixels" instead of "no limit" — say so explicitly. /agent/config
+    # still emits the int (other consumers may key on it).
+    _t2v = capabilities.get("max_dim_t2v", 1280)
+    _kf = capabilities.get("max_dim_kf", 768)
+    max_dim_t2v = "unclamped (full 1280)" if _t2v == 0 else _t2v
+    max_dim_kf = "unclamped (full 1280)" if _kf == 0 else _kf
     has_q8 = capabilities.get("allows_q8", False)
     today = datetime.now().strftime("%Y-%m-%d")
     project_notes_block = _format_project_notes_block(project_notes)
