@@ -18174,8 +18174,16 @@ function _currentLoraModeFilter() {
   if (eng.startsWith('mock'))      return '';   // no filter for mock
   // 'auto' → fall back to the user's saved engine. Without a server
   // round-trip to /agent/config we don't know exactly which family
-  // they saved; show ALL image-lane LoRAs so we don't false-hide.
-  return '';
+  // they saved; show ALL image-lane LoRAs (image:* + unknown) but
+  // STILL hide LTX video LoRAs which can never run on mflux. Returning
+  // 'image' as a meta-tag — the row filter below treats it as a
+  // wildcard matching anything starting with `image:` plus `unknown`,
+  // so we narrow off the LTX side without false-hiding the rest.
+  // Returning '' here would (and did) skip the filter entirely
+  // because `if (modeTag)` is falsy on empty string — that's the
+  // bug the user hit when Studio + auto showed all 5 of their LTX
+  // LoRAs in the picker.
+  return 'image';
 }
 
 // Friendly label for the active filter, surfaced in the picker banner
@@ -18184,6 +18192,7 @@ function _currentLoraModeFilter() {
 function _loraFilterLabel(tag) {
   switch (tag) {
     case 'video':         return 'LTX-Video LoRAs (active video mode)';
+    case 'image':         return 'image LoRAs (any mflux family — auto engine)';
     case 'image:qwen':    return 'Qwen-Image / Qwen-Image-Edit LoRAs';
     case 'image:flux2':   return 'FLUX.2 LoRAs';
     case 'image:flux1':   return 'FLUX.1 LoRAs';
@@ -18345,7 +18354,16 @@ function renderLorasList() {
   if (modeTag) {
     rows = allRows.filter(r => {
       const tags = r.compatible_modes || ['unknown'];
-      const matches = tags.includes(modeTag) || tags.includes('unknown');
+      let matches;
+      if (modeTag === 'image') {
+        // Meta-tag: image-engine UNKNOWN (auto preset). Match any
+        // specific `image:*` tag plus `unknown`. Hides `video` so LTX
+        // LoRAs don't pollute the image picker even when we can't tell
+        // exactly which mflux family the user has saved as default.
+        matches = tags.some(t => t === 'unknown' || (typeof t === 'string' && t.startsWith('image:')));
+      } else {
+        matches = tags.includes(modeTag) || tags.includes('unknown');
+      }
       if (!matches && !showOtherModes) hiddenCount++;
       return matches || showOtherModes;
     });
