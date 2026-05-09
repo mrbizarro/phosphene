@@ -368,7 +368,32 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
     global _extend_model_dir
-    from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+    # Upstream refactor 2026-05-09 (commits d6cc3d1, 493aec2) renamed +
+    # removed several pipeline classes. Past intermediate commits had a
+    # mix of old + new names. Three import strategies in priority order:
+    #
+    #   1. ALL old names present (pre-refactor) — best, motion-friendly
+    #      single-stage I2V via `ImageToVideoPipeline.generate_from_image`.
+    #   2. Only `ImageToVideoPipeline` present (intermediate state, e.g.
+    #      32280b9 before 493aec2 removed it) — KEEP it for I2V motion;
+    #      alias the others.
+    #   3. None present (post-refactor) — alias all to new classes;
+    #      I2V goes through DistilledPipeline.generate_two_stage which
+    #      lacks CFG and locks frame 0 → no motion. Last resort.
+    try:
+        from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
+    except ImportError:
+        # Try partial — preserve real ImageToVideoPipeline if it exists.
+        try:
+            from ltx_pipelines_mlx import ImageToVideoPipeline  # motion-friendly
+            _has_real_i2v = True
+        except ImportError:
+            _has_real_i2v = False
+        from ltx_pipelines_mlx import DistilledPipeline, RetakePipeline
+        TextToVideoPipeline = DistilledPipeline
+        if not _has_real_i2v:
+            ImageToVideoPipeline = DistilledPipeline  # last-resort alias
+        ExtendPipeline = RetakePipeline
 
     fp = _lora_fingerprint(loras)
 
@@ -436,7 +461,17 @@ def get_hq_pipe(model_dir: str):
     (e.g. user swapped Q8 for a different quant).
     """
     global _hq_pipe, _hq_model_dir
-    from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
+    # Upstream `ltx-2-mlx` refactor 2026-05-09 (commits d6cc3d1, 493aec2,
+    # 32280b9 — `refactor!: rename pipeline classes to match upstream
+    # verbatim`) renamed TwoStageHQPipeline → TI2VidTwoStagesHQPipeline.
+    # Defensive import so the helper works against both old and new
+    # package versions. Constructor signature is unchanged.
+    try:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import (
+            TI2VidTwoStagesHQPipeline as TwoStageHQPipeline,
+        )
+    except ImportError:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
 
     with _pipe_lock:
         release_pipelines(keep_kind="hq")
@@ -569,8 +604,22 @@ def _free_pipe_for_decode(pipe):
 
 
 def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
-    if needs_image:
-        return pipe.generate_from_image(
+    # Pre-refactor packages: old TextToVideoPipeline.generate /
+    #   ImageToVideoPipeline.generate_from_image — single-stage Q4
+    #   path with explicit frame_rate plumbing.
+    # Post-2026-05-09 refactor: those classes are gone. Q4 lives in the
+    #   new DistilledPipeline (two-stage half-res → upscale → refine);
+    #   the unified entry point is generate_two_stage(image=optional).
+    #   It accepts **_unused_kwargs so num_steps/frame_rate are absorbed
+    #   silently rather than ValueError-ing.
+    # Detect by method presence — no class import gymnastics needed.
+    if needs_image and hasattr(pipe, "generate_from_image"):
+        # Probe whether this version of the method accepts frame_rate (the
+        # codec patch adds this kwarg post-install; rolled-back source may
+        # not have it). Skip kwargs the method doesn't accept.
+        import inspect as _inspect
+        sig = _inspect.signature(pipe.generate_from_image)
+        call_kwargs = dict(
             prompt=kwargs["prompt"],
             image=kwargs.get("image"),
             height=kwargs["height"],
@@ -578,16 +627,45 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             num_frames=kwargs["num_frames"],
             seed=kwargs["seed"],
             num_steps=kwargs["num_steps"],
-            frame_rate=kwargs.get("frame_rate", 24.0),
         )
-    return pipe.generate(
+        if "frame_rate" in sig.parameters:
+            call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
+        return pipe.generate_from_image(**call_kwargs)
+    if not needs_image and hasattr(pipe, "generate"):
+        try:
+            import inspect as _inspect
+            sig = _inspect.signature(pipe.generate)
+            call_kwargs = dict(
+                prompt=kwargs["prompt"],
+                height=kwargs["height"],
+                width=kwargs["width"],
+                num_frames=kwargs["num_frames"],
+                seed=kwargs["seed"],
+                num_steps=kwargs["num_steps"],
+            )
+            if "frame_rate" in sig.parameters:
+                call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
+            return pipe.generate(**call_kwargs)
+        except TypeError:
+            # New DistilledPipeline.generate inherits from the two-stage
+            # parent and doesn't accept frame_rate. Fall through to
+            # generate_two_stage which absorbs everything via
+            # **_unused_kwargs.
+            pass
+    # Unified new-API fallback (post-refactor packages).
+    return pipe.generate_two_stage(
         prompt=kwargs["prompt"],
+        image=kwargs.get("image") if needs_image else None,
         height=kwargs["height"],
         width=kwargs["width"],
         num_frames=kwargs["num_frames"],
         seed=kwargs["seed"],
-        num_steps=kwargs["num_steps"],
+        stage1_steps=kwargs.get("num_steps"),
+        # frame_rate / num_steps absorbed by **_unused_kwargs in the new
+        # signature — kept here so the call is identical to the old one
+        # at the source level.
         frame_rate=kwargs.get("frame_rate", 24.0),
+        num_steps=kwargs.get("num_steps"),
     )
 
 
@@ -777,7 +855,15 @@ def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float,
         steps = list(zip(sigmas[:-1], sigmas[1:]))
         iterator = samplers.tqdm(steps, desc="Denoising", disable=not show_progress)
         protected_head = min(2, len(steps))
-        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 3))) if steps else 0
+        # 2026-05-09 lab finding: with the previous tail = ceil(N/3), the
+        # 8-step distilled schedule protected only steps 5,6,7 — leaving
+        # step 4 cache-eligible. Step 4's relative MAE (~0.0245) sits
+        # between Boost's threshold (0.02) and Turbo's (0.03), so Boost
+        # protected it by chance and Turbo cached it — producing visible
+        # eye/skin artifacts on the final frame. Bumping to ceil(N/2)
+        # protects step 4 deterministically (~+13% wall, no more
+        # late-step drift).
+        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 2))) if steps else 0
 
         global _LAST_ACCEL_STATS
         stats = {
@@ -810,9 +896,9 @@ def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float,
             sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
             batch = video_x.shape[0]
             # Keep early structure and late detail refinement exact. With the
-            # standard 8-step schedule this protects steps 0, 1 and 5, 6, 7;
-            # Turbo can only cache stable middle steps where artifacts are much
-            # less likely to show up as blurry hands/faces/type.
+            # standard 8-step schedule this protects steps 0, 1 and 4, 5, 6, 7;
+            # Turbo can only cache stable middle steps (2, 3) where artifacts
+            # are much less likely to show up as blurry hands/faces/eyes.
             protected = idx < protected_head or idx >= len(steps) - protected_tail
             v_delta = _relative_mae(mx, video_x, last_video_latent)
             a_delta = _relative_mae(mx, audio_x, last_audio_latent)
