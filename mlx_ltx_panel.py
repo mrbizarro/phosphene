@@ -4582,11 +4582,19 @@ def _validate_mflux_python_path(value: str) -> str:
     the next mflux call would exec it (defense-in-depth on top of the
     CSRF gate in `_is_local_request`).
 
+    The field name is misleading — it is NOT a Python interpreter path.
+    The execution path in agent/image_engine.py runs
+    `[bin_path, "--model", ...]`, which is the mflux CLI's argv
+    convention, not python3's. Accepting `python3` here let the user
+    save a value that immediately failed at exec time. Tighten the
+    allowlist to mflux-generate* binaries only.
+
     Acceptable values:
       - "" → cleared, falls back to the panel's bundled venv
       - An absolute path that EXISTS, is a regular file, is executable
-        by the user, AND whose basename starts with `python3` /
-        `mflux-generate` (the only binaries we ever spawn).
+        by the user, AND whose basename starts with `mflux-generate`
+        (covers mflux-generate, mflux-generate-flux2,
+        mflux-generate-qwen-edit, etc.).
     Anything else raises ValueError → caller maps to HTTP 400.
     """
     s = (value or "").strip()
@@ -4595,8 +4603,9 @@ def _validate_mflux_python_path(value: str) -> str:
     p = Path(s)
     if not p.is_absolute():
         raise ValueError(
-            "mflux_python_path must be an absolute path to a python3 "
-            "or mflux-generate executable in a venv bin directory"
+            "mflux_python_path must be an absolute path to an "
+            "mflux-generate* binary (the field name is misleading; "
+            "this is the mflux CLI, not the Python interpreter)"
         )
     try:
         rp = p.resolve()
@@ -4604,14 +4613,16 @@ def _validate_mflux_python_path(value: str) -> str:
         raise ValueError(f"mflux_python_path is not resolvable: {e}")
     if not rp.is_file() or not os.access(rp, os.X_OK):
         raise ValueError(
-            "mflux_python_path must be an existing python3 executable "
-            "in a venv bin directory"
+            "mflux_python_path must point at an existing executable "
+            "mflux-generate* binary in a venv bin directory"
         )
     name = rp.name
-    if not (name.startswith("python3") or name.startswith("mflux-generate")):
+    if not name.startswith("mflux-generate"):
         raise ValueError(
-            "mflux_python_path basename must start with 'python3' or "
-            "'mflux-generate' (a venv bin entry)"
+            "mflux_python_path basename must start with 'mflux-generate' "
+            "(the field name is misleading; this is the mflux CLI, not "
+            "a Python interpreter — point it at e.g. "
+            "<venv>/bin/mflux-generate-qwen-edit)"
         )
     return str(rp)
 
