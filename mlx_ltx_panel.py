@@ -8838,9 +8838,17 @@ HTML = r"""<!doctype html>
        queue chip strip sits ABOVE the Generate button so it's never the
        primary touch target. */
     .form-pane {
-      /* allow the footer to overlap the scroll content; padding keeps the
-         last form section visible above the footer. */
-      padding-bottom: 132px;
+      /* IMPORTANT: do NOT add padding-bottom here. The sticky Generate
+         footer below uses `position: sticky; bottom: 0`, which pins to
+         the form-pane's PADDING-BOX bottom (per CSS spec). Any
+         padding-bottom on the scroll container therefore lifts the
+         footer's pin position upward by exactly that amount, leaving
+         a band of content (LoRA rows, Customize, etc.) RENDERED BELOW
+         the footer in viewport — which is the "footer is in the
+         middle of the LoRA list" bug Salo flagged.
+         The breathing room the redesign agent intended is now
+         provided by margin-top:16px on the footer itself + the natural
+         end-of-scroll, not by padding on the scroll container. */
     }
     .form-action-footer {
       position: sticky;
@@ -13480,14 +13488,14 @@ HTML = r"""<!doctype html>
     }
     .stage-pane,
     .agent-stage-pane { border-right: none; }
-    /* padding-bottom 132px reserves space at the foot of the scroll
-       area so content (Quality strip, Duration row, LoRAs, Customize)
-       sits clear of the sticky Generate/Stop footer instead of being
-       hidden behind it. The redesign agent set this on .form-pane in
-       the global block; this Linear-style block USED to override it
-       with 18px, which is why Salo saw the Quality 4-up disappearing
-       behind the footer in I2V mode. */
-    .form-pane { padding: 0 0 132px 0; }
+    /* No padding-bottom on form-pane: per CSS spec, sticky bottom:0
+       pins to the PADDING-BOX bottom of the scroll container, so
+       padding-bottom would lift the footer's pin position by exactly
+       that amount and leave content (LoRAs / Customize / Quality)
+       rendered BELOW the footer in viewport. The breathing room
+       above the sticky footer comes from the footer's own
+       margin-top:16px instead. */
+    .form-pane { padding: 0; }
     body[data-workflow="agent"] main.layout {
       grid-template-columns: minmax(560px, 1fr) minmax(420px, 460px);
     }
