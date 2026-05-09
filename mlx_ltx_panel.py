@@ -15146,6 +15146,13 @@ function setMode(mode) {
     // _activeLoras directly when posting, so the studio submit doesn't
     // depend on the hidden field's location.
     _portalLoraPicker('studio');
+    // Re-render the unified LoRA picker so its mode-aware filter
+    // (which reads `currentMode` we just set above) actually applies.
+    // Without this the picker stays on whatever filter it had under
+    // the previous mode — the symptom the user hit: clicked Studio,
+    // banner still read "LTX-Video LoRAs (active video mode)" until
+    // they jiggled the engine dropdown to force a re-render.
+    if (typeof renderLorasList === 'function') renderLorasList();
     // Wire ref drop-zones once + refresh library on every entry
     if (typeof imgStudioWireRefSlots === 'function') imgStudioWireRefSlots();
     if (typeof imgStudioRefreshLibrary === 'function') imgStudioRefreshLibrary();
@@ -15168,6 +15175,10 @@ function setMode(mode) {
   // Portal the picker back to its video-form home so it's visible above
   // the Generate button when the user is composing a video shot.
   _portalLoraPicker('video');
+  // Same re-render trigger as the image branch above — without it the
+  // picker keeps the previous mode's filter when flipping back from
+  // Studio to a video mode.
+  if (typeof renderLorasList === 'function') renderLorasList();
   document.getElementById('mode').value = mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   // Mode → main-outputs filter auto-set (Videos for video modes).
