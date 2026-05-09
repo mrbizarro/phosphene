@@ -9675,6 +9675,48 @@ HTML = r"""<!doctype html>
       border-color: rgba(248,81,73,0.55);
       background: rgba(248,81,73,0.06);
       opacity: 1;
+      position: relative;
+    }
+    /* Dismiss × on the failure card so a stuck-failed Now tab can be
+       acknowledged. Sits in the top-right corner of the card; clicking
+       sets _dismissedFailureId so the next poll tick treats this job
+       id as already-handled and the card returns to Idle. */
+    .now-card .now-card-dismiss {
+      position: absolute;
+      top: 8px; right: 8px;
+      width: 22px; height: 22px;
+      padding: 0;
+      border-radius: var(--r-xs);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font-size: 16px; line-height: 1;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+    }
+    .now-card .now-card-dismiss:hover {
+      color: var(--text);
+      border-color: rgba(248,81,73,0.45);
+      background: rgba(248,81,73,0.12);
+    }
+    /* Same idiom on the in-player failure chip — small × inline next
+       to the error line, clearable with a click. */
+    .player-progress-chip .player-progress-dismiss {
+      margin-left: 6px;
+      padding: 0 6px;
+      border-radius: var(--r-xs);
+      border: 1px solid rgba(248,81,73,0.35);
+      background: rgba(248,81,73,0.10);
+      color: rgba(255,217,214,0.95);
+      font-size: 12px; line-height: 1.4;
+      cursor: pointer;
+      transition: background var(--t-fast), border-color var(--t-fast);
+    }
+    .player-progress-chip .player-progress-dismiss:hover {
+      background: rgba(248,81,73,0.22);
+      border-color: rgba(248,81,73,0.65);
     }
     .now-card .ttl {
       font-weight: 600; font-size: 13px;
@@ -18985,7 +19027,13 @@ async function poll() {
     // We hold the failure visible until the user starts a new job.
     fill.style.width = '0%';
     const last = (s.history || [])[0];
-    const showFailure = last && last.status === 'failed' && !s.queue.length;
+    // Salo flagged that a stuck "Job failed" card with no close button
+    // is disruptive — once a render fails, the surface holds the message
+    // visible until the next job runs, with no way to acknowledge it.
+    // _dismissedFailureId remembers which job id the user chose to
+    // dismiss so we don't keep nagging. Clears on next job (id changes).
+    const showFailure = last && last.status === 'failed' && !s.queue.length
+                        && last.id !== window._dismissedFailureId;
     if (showFailure) {
       nowCard.classList.remove('idle');
       nowCard.classList.add('failed');
@@ -19023,7 +19071,10 @@ async function poll() {
         hint = raw;
       }
       nowCard.querySelector('.ttl').innerHTML =
-        `<span style="color: var(--danger, #f85149)">⚠ ${escapeHtml(friendly)}</span>`;
+        `<span style="color: var(--danger, #f85149)">⚠ ${escapeHtml(friendly)}</span>` +
+        `<button type="button" class="now-card-dismiss" title="Dismiss this failure" ` +
+        `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
+        `if (typeof poll === 'function') poll();">×</button>`;
       nowCard.querySelector('.meta').innerHTML =
         `<span style="color: var(--muted)">${escapeHtml(snippet(last.params.label || last.params.prompt, 80))}</span>` +
         ` <span style="color: var(--muted)">· ${escapeHtml(last.params.mode)} · ${last.params.width}×${last.params.height}</span>` +
@@ -19401,8 +19452,11 @@ function refreshPlayerProgressOverlay(s) {
   }
   // Surface a persistent failure chip on the player too, mirroring the
   // now-card's policy (don't let a fail drift back to a sleepy idle).
+  // Honors the same _dismissedFailureId the now-card does, so dismissing
+  // once clears both surfaces.
   const last = (s.history || [])[0];
-  const showFailure = last && last.status === 'failed' && !s.queue.length;
+  const showFailure = last && last.status === 'failed' && !s.queue.length
+                      && last.id !== window._dismissedFailureId;
   if (showFailure) {
     chip.classList.add('failed');
     chip.style.display = '';
@@ -19410,7 +19464,10 @@ function refreshPlayerProgressOverlay(s) {
     ringFill.setAttribute('stroke-dashoffset', '0');
     ringPct.textContent = '!';
     titleEl.textContent = 'Last render failed';
-    metaEl.textContent = snippet(last.error || 'unknown error', 80);
+    metaEl.innerHTML = escapeHtml(snippet(last.error || 'unknown error', 80)) +
+      ` <button type="button" class="player-progress-dismiss" title="Dismiss this failure" ` +
+      `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
+      `if (typeof poll === 'function') poll();">×</button>`;
     return;
   }
   chip.style.display = 'none';
