@@ -8526,7 +8526,14 @@ HTML = r"""<!doctype html>
     }
     .composer-card:focus-within {
       border-color: var(--accent);
-      box-shadow: var(--ring), var(--shadow-1);
+      box-shadow: 0 0 0 3px var(--accent-dim), var(--shadow-1);
+    }
+    /* Subtle chip-on-the-card when the prompt has content — gives the
+       user instant feedback that input is registering. The :placeholder-shown
+       trick lets us style the card while the textarea is empty without
+       any JS. */
+    .composer-card:has(textarea.composer-prompt:not(:placeholder-shown)) {
+      border-color: var(--border-strong);
     }
     /* Slot for reference pickers; sits above the prompt. Mode-only blocks
        hide entirely when not relevant (T2V), so the composer card only
@@ -14136,7 +14143,7 @@ HTML = r"""<!doctype html>
              Avoid is now a toggle-disclosure (collapsed by default) — it's
              optional and most users won't touch it. -->
         <div class="composer-tools">
-          <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance with Gemma</button>
+          <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance</button>
           <button type="button" class="ct-link" id="avoidToggleBtn" onclick="toggleAvoidRow()" title="Add 'avoid' / negative prompt — things the model should NOT generate">
             <span id="avoidToggleLabel">Avoid +</span>
           </button>
