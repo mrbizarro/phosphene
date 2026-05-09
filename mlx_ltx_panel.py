@@ -4569,6 +4569,14 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
             kind="mflux", mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
             mflux_family="z_image_turbo", mflux_quantize=4,
         )
+    if engine_override == "hidream_inline":
+        # HiDream-O1-Image-Dev Q8 (8B Qwen3-VL pixel-patch transformer, MIT).
+        # Lab venv at /Users/salo/HIDREAM-O1-MLX-LAB-active/. Strong prompt
+        # fidelity at the cost of slowness vs Z-Image-Turbo (~67s vs ~30s)
+        # and ~11.5 GB working set (Comfortable+ tier). Defaults are tuned
+        # for the Dev distillation; do not change noise_scale or steps without
+        # re-evaluating quality.
+        return agent_image_engine.ImageEngineConfig(kind="hidream")
     if engine_override == "mock_inline":
         return agent_image_engine.ImageEngineConfig(kind="mock")
     raise ValueError(f"unknown engine_override: {engine_override!r}")
@@ -5544,11 +5552,17 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_edit_high_inline",     None,                         0.0, 240.0),
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
+                    ("hidream_inline",             None,                         0.0,  67.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
                 for engine, repo, dl_gb, sec in ENGINES:
-                    if repo is None:
+                    if engine == "hidream_inline":
+                        # HiDream lives outside the HF cache (lab venv path).
+                        # Check the actual converted model dir, not the cache.
+                        cached = (agent_image_engine.HIDREAM_DEFAULT_MODEL / "model.safetensors").exists() and \
+                                 (agent_image_engine.HIDREAM_DEFAULT_MODEL / "extras" / "custom_heads.safetensors").exists()
+                    elif repo is None:
                         cached = True
                     else:
                         cached = _repo_hf_cache_dir(repo) is not None
@@ -15072,6 +15086,7 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev Q8 (high-fidelity T2I, no refs &middot; ~67 s/image, 11 GB) [NEW]</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"

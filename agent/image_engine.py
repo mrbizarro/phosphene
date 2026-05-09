@@ -13,7 +13,7 @@ The director-collaboration loop:
      i2v shots with each anchor as `ref_image_path`. The video model
      fills the motion between known frames; the look is locked.
 
-This module is the dispatch layer. Three backends ship today:
+This module is the dispatch layer. Four backends ship today:
 
   - **mock** — flat-colored PNGs drawn with PIL. Zero deps beyond what
     LTX already needs. Used for testing the UX without spending API
@@ -29,6 +29,13 @@ This module is the dispatch layer. Three backends ship today:
     the family from the model id and call the right binary, with
     per-family step / guidance defaults so users who just pick a model
     don't have to know it needs 4 steps vs 25.
+  - **hidream** — fully-local HiDream-O1-Image-Dev (8B Qwen3-VL-based unified
+    pixel-patch transformer, MIT). Lives in its own venv outside Phosphene
+    at `/Users/salo/HIDREAM-O1-MLX-LAB-active/`. Subprocess pattern, mirrors
+    mflux. Comfortable+ tier (32 GB+) due to ~11.5 GB working set at Q8,
+    1024×1024 in ~67s. Strong prompt fidelity, recognisable subjects across
+    photo/anime/painting/macro/architecture; faint 32-pixel patch grid in
+    flat regions (architectural, not fixable without retraining).
 
   Recommended defaults (May 2026):
     - **Comfortable+ (32 GB+)**  → `Runpod/FLUX.2-klein-4B-mflux-4bit`
@@ -67,7 +74,7 @@ class ImageEngineConfig:
     # 4-step generation). Existing configs with kind=mock get auto-
     # promoted at panel load time IF mflux is installed (see
     # _load_agent_image_config in mlx_ltx_panel.py).
-    kind: str = "mflux"                             # "mock" | "mflux" | "bfl"
+    kind: str = "mflux"                             # "mock" | "mflux" | "bfl" | "hidream"
 
     # BFL (cloud)
     bfl_api_key: str = ""
@@ -109,6 +116,16 @@ class ImageEngineConfig:
     # local file path.
     mflux_lora_paths: list[str] = field(default_factory=list)
     mflux_lora_scales: list[float] = field(default_factory=list)
+
+    # HiDream-O1-Image-Dev (Q8 MLX) — runs out of a separate lab venv outside
+    # Phosphene's tree. Subprocess pattern; we never import mlx-vlm into
+    # Phosphene's interpreter. Defaults below point at the canonical lab
+    # location; override when the lab moves.
+    hidream_python_path: str = ""                   # default = HIDREAM_LAB_DIR/.venv/bin/python
+    hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-q8
+    hidream_steps: int = 28                         # Dev distillation needs the full 28; don't lower
+    hidream_noise_scale: float = 7.5                # FlashFlowMatch tuned default; lowering collapses the image
+    hidream_noise_clip_std: float = 2.5
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -193,6 +210,8 @@ def generate(*, prompt: str, n: int, output_dir: Path,
         return _generate_mflux(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
+    if config.kind == "hidream":
+        return _generate_hidream(prompt, n, width, height, output_dir, base_seed, config, on_log=on_log)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
 
 
@@ -214,6 +233,16 @@ def health_check(config: ImageEngineConfig) -> tuple[bool, str]:
         if not config.bfl_api_key:
             return False, "BFL API key not configured"
         return True, f"BFL configured for {config.bfl_model}"
+    if config.kind == "hidream":
+        py = _resolve_hidream_python(config)
+        model = _resolve_hidream_model(config)
+        if not py:
+            return False, ("HiDream lab venv not found. Install at "
+                           f"{HIDREAM_DEFAULT_PY} or override hidream_python_path")
+        if not model:
+            return False, (f"HiDream Q8 model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}. "
+                           "Run the lab's converter or override hidream_model_path.")
+        return True, f"HiDream ready: model={Path(model).name}, steps={config.hidream_steps}"
     return False, f"unknown engine kind: {config.kind!r}"
 
 
@@ -939,4 +968,149 @@ def _generate_bfl(prompt: str, n: int, width: int, height: int,
             "png_path": str(out_path), "seed": seed_used, "engine": "bfl",
             "width": width, "height": height,
         })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# HiDream-O1-Image-Dev (Q8 MLX)
+#
+# Lives in its own venv outside Phosphene so that mlx-vlm + Phosphene's
+# ltx-2-mlx env stay decoupled (different MLX-related dep trees historically
+# fight each other on install). Subprocess pattern, mirrors mflux.
+#
+# Lab layout:
+#   /Users/salo/HIDREAM-O1-MLX-LAB-active/
+#     .venv/bin/python            <- the interpreter we shell out to
+#     mlx_models/hidream-o1-dev-q8/
+#       model.safetensors         <- 6 GB Q8 backbone (mlx-vlm-loadable)
+#       extras/custom_heads.safetensors
+#       config.json (with quantization field)
+#       tokenizer.json, processor configs
+#     scripts/hidream_o1/generate_hidream_o1_mlx.py
+#
+# That whole tree is intentionally outside ~/pinokio/ so Pinokio cleanup
+# never touches it; see the lab's README.md.
+#
+# Health check is honest about both the venv and the model dir, so the
+# settings UI can surface a precise error if either is missing.
+# ---------------------------------------------------------------------------
+
+HIDREAM_LAB_DIR = Path("/Users/salo/HIDREAM-O1-MLX-LAB-active")
+HIDREAM_DEFAULT_PY = HIDREAM_LAB_DIR / ".venv" / "bin" / "python"
+HIDREAM_DEFAULT_MODEL = HIDREAM_LAB_DIR / "mlx_models" / "hidream-o1-dev-q8"
+HIDREAM_GENERATE_SCRIPT = HIDREAM_LAB_DIR / "scripts" / "hidream_o1" / "generate_hidream_o1_mlx.py"
+HIDREAM_PATCH_SIZE = 32   # HiDream operates on patch-aligned multiples; we round if asked for non-aligned
+
+
+def _resolve_hidream_python(config: ImageEngineConfig) -> str | None:
+    """Return the absolute path of the HiDream venv python, or None."""
+    import os
+    p = Path(config.hidream_python_path) if config.hidream_python_path else HIDREAM_DEFAULT_PY
+    return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+
+
+def _resolve_hidream_model(config: ImageEngineConfig) -> str | None:
+    """Return the absolute path of the converted HiDream Q8 model dir, or None."""
+    p = Path(config.hidream_model_path) if config.hidream_model_path else HIDREAM_DEFAULT_MODEL
+    return str(p) if (p / "model.safetensors").exists() and (p / "extras" / "custom_heads.safetensors").exists() else None
+
+
+def _patch_align(value: int, patch: int = HIDREAM_PATCH_SIZE) -> int:
+    """HiDream requires width/height to be a multiple of PATCH_SIZE=32.
+
+    Aspect-ratio entries like 1280×720 don't satisfy that (720 % 32 != 0).
+    We round DOWN to the nearest multiple. Rounding up risks blowing
+    memory at the upper resolutions.
+    """
+    return max(patch, (value // patch) * patch)
+
+
+def _generate_hidream(prompt: str, n: int, width: int, height: int,
+                      output_dir: Path, base_seed: int | None,
+                      config: ImageEngineConfig,
+                      on_log: "callable | None" = None) -> list[dict]:
+    """Subprocess pattern: one call per candidate.
+
+    HiDream's generator script writes a single PNG and exits. We invoke n
+    times with seed = base_seed + i (or random if base_seed is None) so
+    candidate order is reproducible.
+
+    No multi-ref/refs support yet — this lab pass is text-to-image only.
+    Caller should not pass refs to a hidream config; the agent UI's
+    refs path goes through mflux qwen-edit per the existing convention.
+    """
+    import os
+    import random
+    import subprocess
+
+    py = _resolve_hidream_python(config)
+    if not py:
+        raise FileNotFoundError(
+            f"HiDream venv python not found at {config.hidream_python_path or HIDREAM_DEFAULT_PY}"
+        )
+    model = _resolve_hidream_model(config)
+    if not model:
+        raise FileNotFoundError(
+            f"HiDream Q8 model not found at {config.hidream_model_path or HIDREAM_DEFAULT_MODEL}"
+        )
+    script = str(HIDREAM_GENERATE_SCRIPT)
+    if not Path(script).is_file():
+        raise FileNotFoundError(f"HiDream generator script missing at {script}")
+
+    # Patch-align dims (HiDream needs multiples of 32).
+    aligned_w = _patch_align(width)
+    aligned_h = _patch_align(height)
+    if (aligned_w, aligned_h) != (width, height) and on_log:
+        on_log(f"[hidream] patch-aligning {width}x{height} -> {aligned_w}x{aligned_h}")
+
+    results: list[dict] = []
+    for i in range(n):
+        seed = (base_seed + i) if base_seed is not None else random.randint(0, 2**31 - 1)
+        png = output_dir / f"cand_{i:02d}_hidream_{int(time.time()*1000)}.png"
+
+        cmd = [
+            py, script,
+            "--model-path", model,
+            "--prompt", prompt,
+            "--width", str(aligned_w),
+            "--height", str(aligned_h),
+            "--output", str(png),
+            "--seed", str(seed),
+            "--num-inference-steps", str(config.hidream_steps),
+            "--noise-scale-start", str(config.hidream_noise_scale),
+            "--noise-scale-end", str(config.hidream_noise_scale),
+            "--noise-clip-std", str(config.hidream_noise_clip_std),
+        ]
+        if on_log:
+            on_log(f"[hidream] launching candidate {i+1}/{n} seed={seed}")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ.copy(),
+        )
+        # Stream output so the panel can surface tqdm progress lines live.
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if on_log:
+                    on_log(f"[hidream] {line}")
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"HiDream gen failed with rc={rc}")
+        if not png.exists():
+            raise RuntimeError(f"HiDream gen finished but no PNG at {png}")
+
+        results.append({
+            "png_path": str(png),
+            "seed": seed,
+            "engine": "hidream-o1-dev-q8",
+            "width": aligned_w,
+            "height": aligned_h,
+        })
+
     return results
