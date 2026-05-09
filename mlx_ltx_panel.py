@@ -17145,7 +17145,18 @@ async function poll() {
       const cands = (j.params.candidate_paths && j.params.candidate_paths.length)
         ? j.params.candidate_paths.length : 1;
       const engineLabel = escapeHtml(j.params.engine || 'image');
-      const thumbSrc = `/image?path=${encodeURIComponent(j.output_path)}&t=${Date.now()}`;
+      // Reuse the server-built mtime-versioned URL when available
+      // (currentOutputs has each entry's `&v=<mtime>` cache-bust),
+      // falling back to a plain URL otherwise. Each job's output_path
+      // is immutable post-completion, so no Date.now() bust is needed
+      // — and it WAS the source of the carousel hot-loop: this list
+      // re-renders every ~1s poll tick, so a `&t=${Date.now()}` on
+      // every photo row caused ~16 thumbnail re-fetches per tick
+      // (~50-60 req/s steady-state idle) that defeated the cache.
+      const matchedOutput = (currentOutputs || []).find(x => x.path === j.output_path);
+      const thumbSrc = matchedOutput
+        ? matchedOutput.url
+        : `/image?path=${encodeURIComponent(j.output_path)}`;
       const animateArgs = JSON.stringify({
         path: j.output_path, prompt: j.params.prompt || ''
       }).replace(/"/g, '&quot;');
