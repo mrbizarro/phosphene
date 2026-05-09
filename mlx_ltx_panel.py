@@ -7544,12 +7544,16 @@ HTML = r"""<!doctype html>
   <link rel="icon" type="image/png" sizes="256x256" href="/assets/favicon.png">
   <style>
     :root {
-      /* Phosphene void = #00061a — the canonical dark-navy backdrop the
-         brand artwork was rendered against. Body uses it as-is; elevated
-         panels lift slightly toward blue-violet so the brand color story
-         carries from the logo through every surface. */
-      --bg: #00061a; --bg-2: #050b22; --panel: #0c1330; --panel-2: #141a3a;
-      --border: #1f2547; --border-strong: #2e3658; --text: #e6edf3; --muted: #8b949e;
+      /* Phosphene void = #00061a body. Salo flagged the panel reads
+         "too dark, hard to fathom" — every surface above body bg was
+         lifted noticeably so the eye actually catches the panel /
+         input boundaries instead of squinting through the navy. New
+         scale (light → dark): text > muted > border-strong > border >
+         panel-2 > panel > bg-2 > bg. Each step ~one Lstar unit clearer
+         than before. Muted text bumped from #8b949e (4.7:1 on bg) to
+         #b6bfd1 (~7.4:1) so secondary copy stops disappearing. */
+      --bg: #00061a; --bg-2: #0a1130; --panel: #131b3f; --panel-2: #1d2752;
+      --border: #2c3563; --border-strong: #3d477a; --text: #f0f4fb; --muted: #b6bfd1;
       --accent: #2f81f7; --accent-bright: #58a6ff; --accent-dim: rgba(47,129,247,0.18);
       --success: #3fb950; --warning: #d29922; --danger: #f85149;
       --radius: 10px;
@@ -7595,12 +7599,13 @@ HTML = r"""<!doctype html>
     }
 
     /* ===== HEADER =====
-       Background uses var(--bg) which is the brand-void (#00061a) — same
-       color baked into the logo PNG so it blends seamlessly into the
-       header. Logo height 72px so the wordmark reads. */
+       Logo is a transparent-bg SVG (no painted-in dark rectangle) so
+       the wordmark reads as part of the header strip rather than
+       sitting inside a "box". Bumped to 124px (was 104) so the brand
+       holds the eye without competing with the status pills. */
     header {
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-      padding: 12px 18px; border-bottom: 1px solid var(--border);
+      padding: 10px 18px; border-bottom: 1px solid var(--border);
       background: var(--bg);
     }
     header h1 {
@@ -7608,7 +7613,7 @@ HTML = r"""<!doctype html>
       display: inline-flex; align-items: center; gap: 8px;
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
-    .brand img { height: 104px; width: auto; display: block; }
+    .brand img { height: 124px; width: auto; display: block; }
     /* DEV badge — visible only on the dev panel (PROFILE == 'dev'). Sits
        next to the Phosphene wordmark so it's the first thing you notice
        when comparing dev vs production tabs. */
@@ -7923,9 +7928,20 @@ HTML = r"""<!doctype html>
     }
     .models-inline-link:hover { color: var(--accent-bright, #93a8ff); }
 
-    /* ===== MAIN LAYOUT ===== */
+    /* ===== MAIN LAYOUT =====
+       Left form-pane is the panel's primary surface (composer, picker,
+       library) so it earns more horizontal real-estate than before. The
+       stage on the right caps at the viewport-tall × 16/9 aspect so a
+       16:9 video fills the pane without side letterboxing — the
+       leftover width flows back into the form-pane via 1fr. On
+       portrait or very-wide windows the cap still keeps the player
+       size sane while form-pane absorbs the remainder.
+       Old layout: `440px 1fr` (small form, huge letterboxed player).
+       New layout: form min 580px + stage capped at video-natural aspect
+       so empty side-bars become extra UI. */
     .layout {
-      flex: 1 1 auto; display: grid; grid-template-columns: 440px 1fr;
+      flex: 1 1 auto; display: grid;
+      grid-template-columns: minmax(580px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
       gap: 14px; padding: 14px; min-height: 0;
     }
     .form-pane, .stage-pane {
@@ -7977,6 +7993,7 @@ HTML = r"""<!doctype html>
     .pill-group.cols-2 { grid-template-columns: 1fr 1fr; }
     .pill-group.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
     .pill-group.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+    .pill-group.cols-5 { grid-template-columns: repeat(5, 1fr); }
     .pill-btn {
       width: 100%; padding: 9px 8px; border-radius: 8px;
       background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
@@ -8867,12 +8884,18 @@ HTML = r"""<!doctype html>
       background: linear-gradient(to right,
         transparent, var(--border) 18%, var(--border) 82%, transparent);
     }
-    /* Bordered container wrapping the whole <details>. Subtle accent
-       background so the section pulls the eye but doesn't shout. */
+    /* LoRA picker chrome — refreshed so it reads at the same brightness
+       as the rest of the form. The previous design used near-zero
+       rgba(255,255,255,0.015) overlays which dissolved into the panel
+       on dark bg, so the picker felt invisible until you knew to click
+       the disclosure. New version uses --panel-2 surfaces and
+       --border-strong outlines, identical to the form's input chrome,
+       so the picker reads as a peer of the textarea above it instead
+       of a forgotten subsection. */
     .loras-section {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: rgba(255,255,255,0.015);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      background: var(--panel-2);
       overflow: hidden;     /* keeps the summary's hover bg inside the radius */
     }
     /* Hide the native disclosure marker; we render our own chevron
@@ -8882,14 +8905,14 @@ HTML = r"""<!doctype html>
     .loras-summary {
       cursor: pointer; user-select: none;
       display: flex; align-items: center; gap: 10px;
-      padding: 11px 14px;
+      padding: 12px 14px;
       font-size: 13px; font-weight: 600; color: var(--text);
-      transition: background 100ms;
+      transition: background var(--t-fast);
     }
-    .loras-summary:hover { background: rgba(255,255,255,0.02); }
+    .loras-summary:hover { background: rgba(140,160,255,0.06); }
     .loras-section[open] .loras-summary {
       border-bottom: 1px solid var(--border);
-      background: rgba(255,255,255,0.025);
+      background: rgba(140,160,255,0.04);
     }
     .loras-summary .loras-chevron {
       display: inline-block; width: 14px;
@@ -8904,9 +8927,10 @@ HTML = r"""<!doctype html>
     }
     .loras-summary .loras-title {
       font-size: 13px; font-weight: 600; letter-spacing: 0.01em;
+      color: var(--text);
     }
     .loras-summary .loras-meta {
-      margin-left: auto; font-size: 11px; font-weight: 400;
+      margin-left: auto; font-size: 11px; font-weight: 500;
       color: var(--muted);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
@@ -8920,17 +8944,17 @@ HTML = r"""<!doctype html>
     .loras-summary .loras-icon-btn {
       width: 28px; height: 28px; padding: 0;
       border-radius: 6px;
-      border: 1px solid var(--border);
-      background: rgba(255,255,255,0.02);
-      color: var(--muted);
+      border: 1px solid var(--border-strong);
+      background: var(--panel);
+      color: var(--text);
       font-size: 14px; line-height: 1;
       cursor: pointer; display: inline-flex; align-items: center;
       justify-content: center;
-      transition: color 100ms, border-color 100ms, background 100ms;
+      transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
     }
     .loras-summary .loras-icon-btn:hover {
-      color: var(--text); border-color: var(--accent);
-      background: rgba(47,129,247,0.08);
+      color: var(--accent-bright); border-color: var(--accent);
+      background: rgba(47,129,247,0.14);
     }
     .loras-summary .loras-browse-btn {
       padding: 6px 12px;
@@ -8955,27 +8979,34 @@ HTML = r"""<!doctype html>
       gap: 10px; padding: 12px 14px 14px;
     }
     .lora-filter {
-      width: 100%; padding: 6px 9px; border-radius: 6px;
-      border: 1px solid var(--border); background: var(--bg-2, #0a0c14);
+      width: 100%; padding: 8px 11px; border-radius: 6px;
+      border: 1px solid var(--border-strong); background: var(--bg-2);
       color: var(--text); font-size: 12px;
       box-sizing: border-box;
     }
-    .lora-filter:focus { outline: 1px solid var(--accent); }
+    .lora-filter:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: var(--ring);
+    }
     .loras-list {
-      display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+      display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
       max-height: 340px; overflow-y: auto;
       padding-right: 2px;        /* avoid scrollbar overlap on row content */
     }
     .lora-row {
       position: relative;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--panel-2);
-      transition: border-color 100ms, background 100ms;
+      border-radius: var(--r-sm);
+      border: 1px solid var(--border-strong);
+      background: var(--panel);
+      transition: border-color var(--t-fast), background var(--t-fast);
+    }
+    .lora-row:hover {
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.05);
     }
     .lora-row.active {
-      border-color: var(--accent);
-      background: var(--accent-dim, rgba(47,129,247,0.06));
+      border-color: var(--accent-bright);
+      background: rgba(47,129,247,0.14);
     }
     .lora-row .lora-row-main {
       display: grid;
@@ -13219,7 +13250,7 @@ HTML = r"""<!doctype html>
 <body>
 
 <header>
-  <a href="/" class="brand"><img src="/assets/logo-header.png" alt="Phosphene"></a>
+  <a href="/" class="brand"><img src="/assets/phosphene_wordmark_compact_transparent.svg" alt="Phosphene"></a>
   <span class="version-badge" title="Phosphene 2.0">2.0</span>
   __PROFILE_BADGE__
   <span class="spacer"></span>
@@ -13601,7 +13632,12 @@ HTML = r"""<!doctype html>
          (further below) so the video form's FormData picks it up.
          Used to be inside #genForm at the top of the form. -->
     <h2 style="margin-top:0">Mode</h2>
-    <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+    <!-- 5 mode pills on ONE row. The previous markup carried a stale
+         `cols-2` class plus an inline 4-col override, which left the
+         5th pill (Studio) on its own line and visually disconnected.
+         Switching to `cols-5` keeps all 5 pills equal-width on the
+         same row so Studio reads as a peer of T2V/I2V/FFLF/Extend. -->
+    <div class="pill-group cols-5" id="modeGroup">
       <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
       <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
       <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
