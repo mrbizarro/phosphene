@@ -8049,76 +8049,24 @@ HTML = r"""<!doctype html>
        Generate row carries an inline wall-time estimate.
        ============================================================ */
     .studio-pane.show { display: block; }
-    .studio-head { margin-bottom: 8px; }
-    .studio-head .studio-title {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--text);
-      letter-spacing: 0;
-    }
-    .studio-head .hint {
-      margin-top: 2px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .studio-pane h2 {
-      font-size: 10.5px;
-      font-family: var(--ph-font-mono);
-      letter-spacing: 0.08em;
-      color: var(--ph-text-faint);
-      text-transform: uppercase;
-      margin: 22px 0 8px;
-      font-weight: 500;
-      display: flex;
-      align-items: baseline;
-      gap: 10px;
-    }
-    .studio-pane h2:first-of-type { margin-top: 14px; }
+    /* Inline h2-hint stays — flex baseline keeps the section label
+       and the inline subtitle on the same row. Inputs / textareas /
+       selects inherit the video form's hairline-bordered chrome from
+       the global ::input rules so the two modes read as one panel.
+       All the .studio-pane h2/textarea/input/select OVERRIDES that
+       used to live here were removed in commit "unify studio chrome";
+       they were the reason the Image Studio looked like a different
+       app from the video form even though the comment claimed they
+       mirrored it. */
     .studio-pane h2 .h2-hint {
-      font-size: 10.5px;
+      font-size: 10px;
       letter-spacing: 0;
-      color: var(--ph-text-faint);
+      color: var(--muted);
       text-transform: none;
       font-family: inherit;
       font-weight: 400;
       opacity: 0.85;
-    }
-    .studio-pane textarea,
-    .studio-pane input[type="text"],
-    .studio-pane input[type="number"],
-    .studio-pane select {
-      width: 100%;
-      background: rgba(12, 19, 48, 0.5);
-      border: 1px solid var(--ph-border-soft);
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-size: 13px;
-      color: var(--text);
-      font-family: inherit;
-    }
-    .studio-pane textarea {
-      min-height: 84px;
-      resize: vertical;
-      line-height: 1.45;
-    }
-    .studio-pane textarea:focus,
-    .studio-pane input:focus,
-    .studio-pane select:focus {
-      border-color: var(--accent);
-      background: rgba(12, 19, 48, 0.7);
-      box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.18);
-      outline: none;
-    }
-    .studio-pane .lbl {
-      display: block;
-      font-size: 10.5px;
-      font-family: var(--ph-font-mono);
-      letter-spacing: 0.04em;
-      color: var(--muted);
-      text-transform: uppercase;
-      margin-bottom: 6px;
-      font-weight: 500;
+      margin-left: 8px;
     }
     /* 2-col field grid for engine / aspect / n / seed. The engine
        dropdown spans both columns so the long option labels don't get
@@ -8308,29 +8256,11 @@ HTML = r"""<!doctype html>
       transform: translateY(-1px);
     }
     .studio-ref-recent-thumb.in-use { border-color: var(--success); }
-    /* Generate row — sits flush at the bottom of the form. The button
-       stretches to a comfortable width like video's #genBtn; the
-       wall-time estimate floats to the right and updates as the user
-       changes engine / aspect / n. */
-    .studio-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-top: 18px;
-    }
-    .studio-run-btn {
-      flex: 1 1 auto;
-      padding: 11px 16px !important;
-      font-size: 13px;
-      font-weight: 600;
-    }
-    .studio-wall-estimate {
-      flex: 0 0 auto;
-      font-size: 11.5px;
-      font-family: var(--ph-font-mono);
-      color: var(--muted);
-      white-space: nowrap;
-    }
+    /* Generate / Stop row uses the shared .actions grid (above) so it
+       reads identically to the video form. The wall-time estimate
+       lives ABOVE the action row in a .derived strip (mirrors the
+       video form's "Duration 5.00s @ 24fps · …" derived row) so the
+       Generate button has the same prominence as in the video form. */
     .studio-wall-estimate.dim { opacity: 0.55; }
     .studio-status-row {
       margin-top: 8px;
@@ -13640,41 +13570,47 @@ HTML = r"""<!doctype html>
 
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
+    <!-- Inline models card. Sits ABOVE the mode picker because for many
+         users the very first thing they need to do is download base
+         weights — burying that in a header modal hides the whole point
+         of the panel. Lives OUTSIDE #genForm so it persists across the
+         video-form ↔ Image-Studio swap. -->
+    <div id="modelsInline" class="models-inline" style="display:none">
+      <button type="button" class="models-inline-dismiss" id="modelsInlineDismiss"
+              title="Hide this card (won't show again until model state changes)"
+              onclick="dismissModelsCard()">×</button>
+      <div class="models-inline-body">
+        <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
+        <div class="models-inline-text">
+          <div class="ttl" id="modelsInlineTitle">Download required</div>
+          <div class="sub" id="modelsInlineSub">Click to start.</div>
+          <div class="models-inline-progress" id="modelsInlineProgress" style="display:none">
+            <div class="bar"><div class="fill" id="modelsInlineFill" style="width:0%"></div></div>
+            <div class="last" id="modelsInlineLast"></div>
+          </div>
+        </div>
+        <div class="models-inline-actions" id="modelsInlineActions"></div>
+      </div>
+      <a class="models-inline-link" onclick="openModelsModal()">Manage all models →</a>
+    </div>
+
+    <!-- Mode picker — lifted OUT of #genForm so it stays visible when
+         the user switches to Image Studio (which hides #genForm). Without
+         this, once a user clicks Studio they had no way back to T2V/I2V
+         short of refreshing. The hidden #mode input stays inside #genForm
+         (further below) so the video form's FormData picks it up.
+         Used to be inside #genForm at the top of the form. -->
+    <h2 style="margin-top:0">Mode</h2>
+    <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+      <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
+      <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
+      <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
+      <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
+      <button type="button" class="pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)"><span>Studio</span><span class="sub">stills + library</span></button>
+    </div>
+
     <form id="genForm">
       <input type="hidden" name="preset_label" id="preset_label" value="">
-
-      <!-- Inline models card. Sits ABOVE the mode picker because for many
-           users the very first thing they need to do is download base
-           weights — burying that in a header modal hides the whole point
-           of the panel. The card has four visual states it cycles through
-           depending on /status data; see updateModelsCard() in the JS. -->
-      <div id="modelsInline" class="models-inline" style="display:none">
-        <button type="button" class="models-inline-dismiss" id="modelsInlineDismiss"
-                title="Hide this card (won't show again until model state changes)"
-                onclick="dismissModelsCard()">×</button>
-        <div class="models-inline-body">
-          <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
-          <div class="models-inline-text">
-            <div class="ttl" id="modelsInlineTitle">Download required</div>
-            <div class="sub" id="modelsInlineSub">Click to start.</div>
-            <div class="models-inline-progress" id="modelsInlineProgress" style="display:none">
-              <div class="bar"><div class="fill" id="modelsInlineFill" style="width:0%"></div></div>
-              <div class="last" id="modelsInlineLast"></div>
-            </div>
-          </div>
-          <div class="models-inline-actions" id="modelsInlineActions"></div>
-        </div>
-        <a class="models-inline-link" onclick="openModelsModal()">Manage all models →</a>
-      </div>
-
-      <h2>Mode</h2>
-      <div class="pill-group cols-2" id="modeGroup" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
-        <button type="button" class="pill-btn" data-mode="t2v"><span>Text</span><span class="sub">prompt → video</span></button>
-        <button type="button" class="pill-btn" data-mode="i2v"><span>Image</span><span class="sub">image + prompt</span></button>
-        <button type="button" class="pill-btn" data-mode="keyframe"><span>FFLF</span><span class="sub">first + last frame</span></button>
-        <button type="button" class="pill-btn" data-mode="extend"><span>Extend</span><span class="sub">continue a clip</span></button>
-        <button type="button" class="pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2509 multi-ref + others)"><span>Studio</span><span class="sub">stills + library</span></button>
-      </div>
       <input type="hidden" name="mode" id="mode" value="t2v">
 
       <!-- Quality picker (Y1.013): one decision instead of four. Each
@@ -14107,12 +14043,11 @@ HTML = r"""<!doctype html>
          download — driven by /image/engine_status (server-side cache
          probe via _repo_hf_cache_dir). -->
     <div class="mode-only studio-pane" id="studioSection">
-      <div class="studio-head">
-        <h3 class="studio-title">Image Studio</h3>
-        <div class="hint">Generate reference stills. They land in your library and the agent can pick them up.</div>
-      </div>
+      <!-- The Mode picker above this <div> already announces "Studio" so
+           a separate "Image Studio" h3 just adds noise. The hint moves
+           inline as a one-liner below the prompt placeholder if needed. -->
 
-      <h2>Prompt</h2>
+      <h2 style="margin-top:0">Prompt</h2>
       <textarea id="imgStudioPrompt" rows="4" placeholder="A cinematic medium close-up of a woman in a sunlit kitchen, soft morning light through blinds, shallow depth of field, photorealistic"></textarea>
 
       <h2>Reference images
@@ -14187,12 +14122,37 @@ HTML = r"""<!doctype html>
            chips that don't match the current engine get a warning badge. -->
       <div id="loraPickerStudioSlot"></div>
 
-      <div class="studio-actions">
-        <button class="primary studio-run-btn" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
+      <!-- Wall-time estimate sits on its own muted line above the action
+           row, mirroring the video form's "Duration 5.00s @ 24fps · …"
+           derived row. Updated by imgStudioUpdateEstimate as the user
+           changes engine / aspect / n. -->
+      <div class="derived" id="imgStudioWallEstimateRow">
+        <span id="imgStudioWallEstimate"></span>
+      </div>
+
+      <!-- Image Studio's action row uses the EXACT same .actions grid
+           (Generate=2fr, Stop=1fr) the video form uses, so the chrome
+           reads as the same panel in two modes instead of two different
+           panels. Same /stop endpoint works for image jobs (they go
+           through the shared queue worker), so the Stop button is
+           literally identical to the video form's. -->
+      <div class="actions">
+        <button class="primary" id="imgStudioGenBtn" onclick="imgStudioGenerate()">
           <span id="imgStudioGenBtnLabel">Generate</span>
         </button>
-        <span class="studio-wall-estimate" id="imgStudioWallEstimate"></span>
+        <button type="button" class="danger" onclick="api('/stop', 'POST').then(poll)">Stop</button>
       </div>
+      <!-- Same queue-action strip the video form has. Pause/Clear are
+           queue-wide so they work regardless of mode; Batch paste opens
+           the same modal. Mirrors the video form's row exactly so the
+           Studio composer doesn't lose chrome users built muscle memory
+           around. -->
+      <div class="row-actions" style="margin-top:8px">
+        <button type="button" class="small" onclick="openBatch()">Batch paste</button>
+        <button type="button" class="small" id="pauseBtnStudio" onclick="togglePause()">Pause queue</button>
+        <button type="button" class="small" onclick="api('/queue/clear','POST').then(poll)">Clear queue</button>
+      </div>
+
       <div class="studio-status-row">
         <span id="imgStudioStatus" class="hint"></span>
       </div>
@@ -14626,17 +14586,10 @@ HTML = r"""<!doctype html>
         <div class="ttl">Idle</div>
         <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
         <div class="meta" id="nowDetail">No job running</div>
-        <!-- Stop button lives in the Now card (bottom pane) so it's
-             reachable from EVERY form mode — the Stop button inside
-             the video #genForm is hidden when Image Studio mode is
-             active, leaving image-gen jobs uncancellable from the UI.
-             Hidden when no job is running; shown via JS when nowCard
-             leaves the .idle state. -->
-        <button type="button" class="danger now-stop-btn" id="nowStopBtn"
-                style="display:none; margin-top:10px"
-                onclick="if (confirm('Stop the current job? Partial output is discarded.')) api('/stop', 'POST').then(poll)">
-          Stop current job
-        </button>
+        <!-- The Now card no longer needs its own Stop button. The Stop
+             button in the form-pane (.actions row) is now visible in
+             both video and Image Studio modes, so a parallel one here
+             is redundant. Removed in unify-studio-chrome commit. -->
       </div>
     </div>
     <div class="tab-content" id="tab-queue">
@@ -16444,12 +16397,10 @@ async function poll() {
   // block (e.g. mid-deploy where the server is older than the JS).
   const nowCard = document.getElementById('nowCard');
   const fill = document.getElementById('progressFill');
-  // Stop button visibility — only visible while a job is actually running.
-  // Lives in the Now card so it's reachable from EVERY form mode (the
-  // Stop button inside the video #genForm is hidden when Image Studio
-  // mode is active, leaving image-gen jobs uncancellable).
-  const nowStop = document.getElementById('nowStopBtn');
-  if (nowStop) nowStop.style.display = (s.running && s.current) ? '' : 'none';
+  // The Now-card Stop button is gone — both the video form's Stop and
+  // the Image Studio's Stop now live in the form-pane and stay
+  // visible across mode switches, so a Now-card duplicate is no
+  // longer needed.
   if (s.running && s.current) {
     nowCard.classList.remove('idle', 'failed');
     const prog = s.current.progress || null;
