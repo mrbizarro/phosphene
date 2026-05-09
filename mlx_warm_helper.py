@@ -597,7 +597,16 @@ def _free_pipe_for_decode(pipe):
 
 
 def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
-    if needs_image:
+    # Pre-refactor packages: old TextToVideoPipeline.generate /
+    #   ImageToVideoPipeline.generate_from_image — single-stage Q4
+    #   path with explicit frame_rate plumbing.
+    # Post-2026-05-09 refactor: those classes are gone. Q4 lives in the
+    #   new DistilledPipeline (two-stage half-res → upscale → refine);
+    #   the unified entry point is generate_two_stage(image=optional).
+    #   It accepts **_unused_kwargs so num_steps/frame_rate are absorbed
+    #   silently rather than ValueError-ing.
+    # Detect by method presence — no class import gymnastics needed.
+    if needs_image and hasattr(pipe, "generate_from_image"):
         return pipe.generate_from_image(
             prompt=kwargs["prompt"],
             image=kwargs.get("image"),
@@ -608,14 +617,37 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             num_steps=kwargs["num_steps"],
             frame_rate=kwargs.get("frame_rate", 24.0),
         )
-    return pipe.generate(
+    if not needs_image and hasattr(pipe, "generate"):
+        try:
+            return pipe.generate(
+                prompt=kwargs["prompt"],
+                height=kwargs["height"],
+                width=kwargs["width"],
+                num_frames=kwargs["num_frames"],
+                seed=kwargs["seed"],
+                num_steps=kwargs["num_steps"],
+                frame_rate=kwargs.get("frame_rate", 24.0),
+            )
+        except TypeError:
+            # New DistilledPipeline.generate inherits from the two-stage
+            # parent and doesn't accept frame_rate. Fall through to
+            # generate_two_stage which absorbs everything via
+            # **_unused_kwargs.
+            pass
+    # Unified new-API fallback (post-refactor packages).
+    return pipe.generate_two_stage(
         prompt=kwargs["prompt"],
+        image=kwargs.get("image") if needs_image else None,
         height=kwargs["height"],
         width=kwargs["width"],
         num_frames=kwargs["num_frames"],
         seed=kwargs["seed"],
-        num_steps=kwargs["num_steps"],
+        stage1_steps=kwargs.get("num_steps"),
+        # frame_rate / num_steps absorbed by **_unused_kwargs in the new
+        # signature — kept here so the call is identical to the old one
+        # at the source level.
         frame_rate=kwargs.get("frame_rate", 24.0),
+        num_steps=kwargs.get("num_steps"),
     )
 
 
