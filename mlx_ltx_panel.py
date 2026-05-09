@@ -8059,6 +8059,20 @@ HTML = r"""<!doctype html>
     body[data-workflow="agent"] .form-pane { padding: 0; }
     body[data-workflow="agent"] .stage-pane { display: none; }
     body[data-workflow="agent"] .agent-stage-pane { display: flex; }
+    /* Manual-only chrome that USED to live inside #genForm and was hidden
+       implicitly when #genForm was hidden — but the redesign lifted the
+       Mode picker (and the inline models card has always been a sibling)
+       OUT of #genForm, so they leaked into the Agentic Flows view as a
+       row of mode pills floating below the chat composer. Hide all
+       manual-only sections explicitly when the user is in the agent
+       workflow. (#genForm + #studioSection are belt-and-braces — JS
+       already hides them on workflow switch but cover here so a missed
+       toggle doesn't bleed manual chrome into the chat pane.) */
+    body[data-workflow="agent"] #modelsInline,
+    body[data-workflow="agent"] #modeGroup,
+    body[data-workflow="agent"] aside.form-pane > h2,
+    body[data-workflow="agent"] #genForm,
+    body[data-workflow="agent"] #studioSection { display: none !important; }
 
     /* ===== FORM ===== */
     h2 {
@@ -12878,11 +12892,21 @@ HTML = r"""<!doctype html>
 
     /* === MAIN LAYOUT ===========================================
        Hairline-bordered panes, no internal radius — Linear's edge
-       feel is "everything is one continuous surface". */
+       feel is "everything is one continuous surface".
+       The form-pane min width is bumped from 440 → 580 to match
+       the new composer-led redesign (which packs prompt + refs
+       + 4-up quality strip + 3-up dur/frames/seed + sticky
+       footer into the left pane). The stage cap on the right
+       still keeps the player from letterboxing into empty side
+       bars. Without this rule the two `main.layout` blocks
+       (this one + the one in the global section above) raced
+       and the more-specific selector here won, leaving the
+       form-pane stuck at 440 even after the redesign's wider
+       intent. */
     main.layout {
       gap: 0;
       padding: 0;
-      grid-template-columns: 440px 1fr;
+      grid-template-columns: minmax(580px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
     }
     .form-pane,
     .stage-pane,
