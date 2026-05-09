@@ -777,7 +777,15 @@ def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float,
         steps = list(zip(sigmas[:-1], sigmas[1:]))
         iterator = samplers.tqdm(steps, desc="Denoising", disable=not show_progress)
         protected_head = min(2, len(steps))
-        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 3))) if steps else 0
+        # 2026-05-09 lab finding: with the previous tail = ceil(N/3), the
+        # 8-step distilled schedule protected only steps 5,6,7 — leaving
+        # step 4 cache-eligible. Step 4's relative MAE (~0.0245) sits
+        # between Boost's threshold (0.02) and Turbo's (0.03), so Boost
+        # protected it by chance and Turbo cached it — producing visible
+        # eye/skin artifacts on the final frame. Bumping to ceil(N/2)
+        # protects step 4 deterministically (~+13% wall, no more
+        # late-step drift).
+        protected_tail = min(len(steps), max(2, math.ceil(len(steps) / 2))) if steps else 0
 
         global _LAST_ACCEL_STATS
         stats = {
@@ -810,9 +818,9 @@ def _build_adaptive_x0_loop(mode_name: str, max_skips: int, video_thresh: float,
             sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
             batch = video_x.shape[0]
             # Keep early structure and late detail refinement exact. With the
-            # standard 8-step schedule this protects steps 0, 1 and 5, 6, 7;
-            # Turbo can only cache stable middle steps where artifacts are much
-            # less likely to show up as blurry hands/faces/type.
+            # standard 8-step schedule this protects steps 0, 1 and 4, 5, 6, 7;
+            # Turbo can only cache stable middle steps (2, 3) where artifacts
+            # are much less likely to show up as blurry hands/faces/eyes.
             protected = idx < protected_head or idx >= len(steps) - protected_tail
             v_delta = _relative_mae(mx, video_x, last_video_latent)
             a_delta = _relative_mae(mx, audio_x, last_audio_latent)
