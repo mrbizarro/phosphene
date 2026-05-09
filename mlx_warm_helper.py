@@ -368,24 +368,31 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
     global _extend_model_dir
-    # Upstream refactor 2026-05-09 (commits d6cc3d1, 493aec2):
-    #   - TextToVideoPipeline / ImageToVideoPipeline → folded into the
-    #     DistilledPipeline (single class, two-stage half-res → upscale
-    #     → full-res refine; I2V via the image= kwarg of generate_and_save)
-    #   - ExtendPipeline → folded into RetakePipeline
-    # Try old top-level names first (pre-refactor packages still work);
-    # fall back to the new ones with aliases so the rest of this function
-    # body keeps the original symbol names. Constructor signatures are
-    # broadly compatible (model_dir, gemma_model_id, low_memory).
-    # NOTE: the new DistilledPipeline is two-stage by design — output
-    # character may differ slightly from the old single-stage T2V/I2V.
-    # If that becomes a problem, pin ltx-2-mlx to a pre-refactor commit.
+    # Upstream refactor 2026-05-09 (commits d6cc3d1, 493aec2) renamed +
+    # removed several pipeline classes. Past intermediate commits had a
+    # mix of old + new names. Three import strategies in priority order:
+    #
+    #   1. ALL old names present (pre-refactor) — best, motion-friendly
+    #      single-stage I2V via `ImageToVideoPipeline.generate_from_image`.
+    #   2. Only `ImageToVideoPipeline` present (intermediate state, e.g.
+    #      32280b9 before 493aec2 removed it) — KEEP it for I2V motion;
+    #      alias the others.
+    #   3. None present (post-refactor) — alias all to new classes;
+    #      I2V goes through DistilledPipeline.generate_two_stage which
+    #      lacks CFG and locks frame 0 → no motion. Last resort.
     try:
         from ltx_pipelines_mlx import TextToVideoPipeline, ImageToVideoPipeline, ExtendPipeline
     except ImportError:
+        # Try partial — preserve real ImageToVideoPipeline if it exists.
+        try:
+            from ltx_pipelines_mlx import ImageToVideoPipeline  # motion-friendly
+            _has_real_i2v = True
+        except ImportError:
+            _has_real_i2v = False
         from ltx_pipelines_mlx import DistilledPipeline, RetakePipeline
         TextToVideoPipeline = DistilledPipeline
-        ImageToVideoPipeline = DistilledPipeline
+        if not _has_real_i2v:
+            ImageToVideoPipeline = DistilledPipeline  # last-resort alias
         ExtendPipeline = RetakePipeline
 
     fp = _lora_fingerprint(loras)
@@ -607,7 +614,12 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
     #   silently rather than ValueError-ing.
     # Detect by method presence — no class import gymnastics needed.
     if needs_image and hasattr(pipe, "generate_from_image"):
-        return pipe.generate_from_image(
+        # Probe whether this version of the method accepts frame_rate (the
+        # codec patch adds this kwarg post-install; rolled-back source may
+        # not have it). Skip kwargs the method doesn't accept.
+        import inspect as _inspect
+        sig = _inspect.signature(pipe.generate_from_image)
+        call_kwargs = dict(
             prompt=kwargs["prompt"],
             image=kwargs.get("image"),
             height=kwargs["height"],
@@ -615,19 +627,25 @@ def _generate_latents(pipe, *, needs_image: bool, kwargs: dict):
             num_frames=kwargs["num_frames"],
             seed=kwargs["seed"],
             num_steps=kwargs["num_steps"],
-            frame_rate=kwargs.get("frame_rate", 24.0),
         )
+        if "frame_rate" in sig.parameters:
+            call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
+        return pipe.generate_from_image(**call_kwargs)
     if not needs_image and hasattr(pipe, "generate"):
         try:
-            return pipe.generate(
+            import inspect as _inspect
+            sig = _inspect.signature(pipe.generate)
+            call_kwargs = dict(
                 prompt=kwargs["prompt"],
                 height=kwargs["height"],
                 width=kwargs["width"],
                 num_frames=kwargs["num_frames"],
                 seed=kwargs["seed"],
                 num_steps=kwargs["num_steps"],
-                frame_rate=kwargs.get("frame_rate", 24.0),
             )
+            if "frame_rate" in sig.parameters:
+                call_kwargs["frame_rate"] = kwargs.get("frame_rate", 24.0)
+            return pipe.generate(**call_kwargs)
         except TypeError:
             # New DistilledPipeline.generate inherits from the two-stage
             # parent and doesn't accept frame_rate. Fall through to
