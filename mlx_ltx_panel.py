@@ -18148,7 +18148,18 @@ let _knownUserLoras = []; // last list_user_loras() snapshot, for the picker
 // show everything" — the back-compat path when we can't determine
 // the active engine.
 function _currentLoraModeFilter() {
-  const mode = (window.currentMode || document.getElementById('mode')?.value || 't2v');
+  // `currentMode` is a `let` at the top of this <script> block (line ~15016),
+  // sharing the same IIFE scope as setMode() and renderLorasList(). It is
+  // NOT a property of `window` — `let`/`const` at the script's top level
+  // are not auto-attached to globalThis in modern browsers. Reading
+  // `window.currentMode` was always undefined, falling through to the
+  // hidden #mode input which the image branch of setMode deliberately
+  // doesn't update (to avoid an accidental form submit firing a video
+  // render with stale fields). Net effect: the picker filter always
+  // saw 't2v' even after the user clicked Studio. Read currentMode
+  // directly via lexical capture so the mode-aware filter actually
+  // works.
+  const mode = (currentMode || document.getElementById('mode')?.value || 't2v');
   if (mode !== 'image') {
     // All video modes share the LTX lane.
     return 'video';
