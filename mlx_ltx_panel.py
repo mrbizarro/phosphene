@@ -3814,12 +3814,24 @@ def run_job_inner(job: dict) -> None:
     # Only the "standard" tier auto-routes: on "high"/"pro" tiers the Q4
     # Balanced is genuinely faster (~3 min on 96 GB), so substituting Q8 Fast
     # there would be a wall regression. On "base" (allows_q8=False), Q8
-    # doesn't fit. So this is a precise tier-targeted upgrade.
+    # doesn't fit.
+    #
+    # Mode + frame guards: Q8 dev memory budget on 64 GB is ~enough for T2V
+    # 121f, but I2V 121f OOMs at the upsample → stage-2 transition (image
+    # conditioning adds memory). a2v shares the T2V profile (no extra image
+    # cond memory at gen time — image is encoded once). 481f a2v also OOMs.
+    # So we route Q8 Fast only for mode/frame combos we've actually validated;
+    # everything else falls back to the legacy Q4 Balanced path so users don't
+    # see surprise OOMs on jobs that worked before.
+    Q8_FAST_OK_MODES = ("t2v", "a2v")
+    Q8_FAST_FRAMES_LIMIT = 121
     balanced_q8_fast = (
         quality == "balanced"
         and SYSTEM_TIER == "standard"
         and SYSTEM_CAPS.get("allows_q8", False)
         and not q8_missing_files()
+        and mode in Q8_FAST_OK_MODES
+        and frames <= Q8_FAST_FRAMES_LIMIT
     )
     if balanced_q8_fast:
         push(
@@ -19022,18 +19034,16 @@ async function poll() {
   }
 
   // Balanced subtitle: on the "standard" (48–79 GB) tier with Q8 installed,
-  // the Balanced chip auto-routes to Q8 Fast (safe_a config) — same wall as
-  // the legacy Q4+upscale path, but Q8 dev source pixels. Server-side
-  // routing logic lives in run_job_inner; this is the visible label so
-  // users see "Q8 Fast" and know they're getting the upgraded pipeline.
-  const balancedSub = document.getElementById('balancedSub');
-  if (balancedSub) {
-    const tierKey = (s.tier && (s.tier.key || s.tier.tier)) || '';
-    if (s.q8_available && tierKey === 'standard') {
-      balancedSub.textContent = 'Q8 Fast · 5 min';
-    } else {
-      balancedSub.textContent = 'Q4 · 5 min';
-    }
+  // the Balanced chip auto-routes to Q8 Fast (safe_a config) — but ONLY for
+  // mode ∈ {t2v, a2v} and frames ≤ 121, which is what the 64 GB memory
+  // budget actually fits. Other combos fall back to Q4 Balanced. The
+  // subtitle reflects the user's current selection so they see what they
+  // will actually get when they hit Generate. Re-evaluated on every poll
+  // and on mode/frames change (see the listener wired at DOMContentLoaded
+  // below this function).
+  window.__phosLastStatus = s;
+  if (typeof window.refreshBalancedSubtitle === 'function') {
+    window.refreshBalancedSubtitle(s);
   }
 
   // Keyframe (FFLF) and Extend both require Q8 — server enforces it (see
@@ -19328,6 +19338,45 @@ async function poll() {
     filterMode === 'hidden' ? 'Hidden outputs'
                             : `Outputs · ${_visible.length}${_kindLabel}`;
 }
+
+// Balanced chip subtitle — kept in sync with current mode + frames so the
+// label tells the truth about which pipeline a click on Balanced will run.
+// Mirrors the server-side `balanced_q8_fast` rule in run_job_inner: Q8 Fast
+// only on standard tier with Q8 installed, mode ∈ {t2v, a2v}, frames ≤ 121.
+window.refreshBalancedSubtitle = function(state) {
+  const sub = document.getElementById('balancedSub');
+  if (!sub) return;
+  const s = state || (window.__phosLastStatus || {});
+  const tierKey = (s.tier && (s.tier.key || s.tier.tier)) || '';
+  const q8Capable = !!s.q8_available && tierKey === 'standard';
+  if (!q8Capable) {
+    sub.textContent = 'Q4 · 5 min';
+    return;
+  }
+  const framesEl = document.getElementById('frames');
+  const frames = parseInt((framesEl && framesEl.value) || '121', 10);
+  const mode = (typeof currentMode !== 'undefined') ? currentMode : 't2v';
+  const eligible = (mode === 't2v' || mode === 'a2v') && frames <= 121;
+  sub.textContent = eligible
+    ? 'Q8 Fast · 5 min'
+    : 'Q4 fallback';
+};
+document.addEventListener('DOMContentLoaded', function() {
+  const framesEl = document.getElementById('frames');
+  if (framesEl && !framesEl.__balancedSubWired) {
+    framesEl.addEventListener('input', () => window.refreshBalancedSubtitle());
+    framesEl.__balancedSubWired = true;
+  }
+  // Wrap setMode() if it exists, so mode flips also re-evaluate the label.
+  if (typeof setMode === 'function' && !setMode.__balancedSubWired) {
+    const _orig = setMode;
+    window.setMode = function(m) {
+      _orig(m);
+      window.refreshBalancedSubtitle();
+    };
+    window.setMode.__balancedSubWired = true;
+  }
+});
 
 // Recent-tab type filter (All / Videos / Photos). Stored on window so
 // the value survives across renders without polluting the existing
