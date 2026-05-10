@@ -3821,15 +3821,17 @@ def run_job_inner(job: dict) -> None:
     # there would be a wall regression. On "base" (allows_q8=False), Q8
     # doesn't fit.
     #
-    # Mode + frame guards: Q8 dev memory budget on 64 GB fits T2V at 121f.
-    # I2V was tried with conditioning="off" + safe_a knobs (s1=10, thr=2.0)
-    # and it does fit memory, but the output identity drifts and artifacts
-    # appear — losing the full-res stage-2 anchor + aggressive teacache
-    # combined is too lossy for image-conditioned modes. Reverted to Q4
-    # Balanced for I2V (the yesterday-working path with no regressions).
-    # a2v shares I2V's identity-anchor concern (input image) so it's also
-    # held back from Q8 Fast for now until we wire up Codex's upscaled
-    # half-ref latent fallback.
+    # Q8 Fast covers T2V only at ≤121f on standard tier — the only mode
+    # where reduced stage1 + the calibrated TeaCache thresh holds quality.
+    #
+    # I2V/a2v at the same Q8 Fast knobs drift identity at 121f because the
+    # full-res image re-encode at stage 2 (the identity anchor per LTX docs)
+    # has to be skipped to fit memory, and stage1=10 doesn't pack enough
+    # denoising into the half-res anchor to compensate. Eye-checked twice
+    # 2026-05-10 on nurse + dinner-scene images: identity drifted both
+    # times. Real fix is plan C (upscaled half-ref latent) or low_ram block
+    # streaming — both deferred. I2V/a2v on Balanced stays on the Q4
+    # distilled + lanczos path that has worked since yesterday.
     Q8_FAST_OK_MODES = ("t2v",)
     Q8_FAST_FRAMES_LIMIT = 121
     balanced_q8_fast = (
@@ -3843,20 +3845,25 @@ def run_job_inner(job: dict) -> None:
     if balanced_q8_fast:
         push(
             f"Balanced on {SYSTEM_CAPS['label']} hardware → Q8 Fast routing "
-            f"(stage1=10, teacache=2.0; ~5 min, Q8 dev source)."
+            f"(stage1=10, teacache=1.0; ~6 min, Q8 dev source)."
         )
         quality = "high"  # reuses the existing Q8 HQ dispatch
-        # Force the safe_a knobs as defaults for this routing. Power-user
-        # form overrides (when an Advanced UI ships) can still tune these
-        # by submitting their own stage1_steps/stage2_steps/teacache_thresh
-        # — but with no explicit form values, we lock in safe_a.
+        # Q8 Fast knobs: stage1=10 (cut from 15) is the safe_a denoise win,
+        # stage2=3 is unchanged (cuts here are a quality cliff per Salo's
+        # eye-check), teacache=1.0 keeps us inside the calibrated TeaCache
+        # zone — the source comment at ti2vid_two_stages_hq.py:42-45 says
+        # 1.0 is the sweet spot (~52% skip, ~2x stage-1 speedup).
+        # Past 1.0 we're past calibration — earlier tests at 2.0 gave faster
+        # walls but visible identity drift on I2V and "weird" T2V output.
+        # Effective speedup: ~1.25× wall vs production knobs (7:42 → 6:11)
+        # with quality preserved.
         p.setdefault("stage1_steps", 10)
         if int(p.get("stage1_steps") or 10) == 15:
             p["stage1_steps"] = 10
         p.setdefault("stage2_steps", 3)
-        p.setdefault("teacache_thresh", 2.0)
-        if float(p.get("teacache_thresh") or 1.0) == 1.0:
-            p["teacache_thresh"] = 2.0
+        # No teacache_thresh override — let the upstream default of 1.0
+        # (calibrated) win unless the user explicitly asks for something
+        # else via the form.
 
     temporal_mode = (p.get("temporal_mode") or "native").strip().lower()
     if temporal_mode not in ("native", "fps12_interp24"):
@@ -19385,12 +19392,12 @@ window.refreshBalancedSubtitle = function(state) {
   const framesEl = document.getElementById('frames');
   const frames = parseInt((framesEl && framesEl.value) || '121', 10);
   const mode = (typeof currentMode !== 'undefined') ? currentMode : 't2v';
-  // Eligible modes mirror Q8_FAST_OK_MODES on the server side.
-  // T2V only for now — I2V/a2v Q8 Fast caused identity drift + artifacts
-  // when stage-2 conditioning was skipped to fit memory.
+  // T2V only — see Q8_FAST_OK_MODES on the server side.
+  // I2V/a2v Q8 Fast caused identity drift on real content; reverted until
+  // plan C (upscaled half-ref) or low_ram block streaming lands.
   const eligible = mode === 't2v' && frames <= 121;
   sub.textContent = eligible
-    ? 'Q8 Fast · 5 min'
+    ? 'Q8 Fast · 6 min'
     : 'Q4 fallback';
 };
 document.addEventListener('DOMContentLoaded', function() {
