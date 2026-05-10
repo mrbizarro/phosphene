@@ -3821,13 +3821,16 @@ def run_job_inner(job: dict) -> None:
     # there would be a wall regression. On "base" (allows_q8=False), Q8
     # doesn't fit.
     #
-    # Mode + frame guards: Q8 dev memory budget on 64 GB is enough for T2V
-    # 121f and (after the 2026-05-10 boundary reorder + auto stage-2 image
-    # conditioning skip for I2V/a2v >49f) also for I2V at 121f. 481f remains
-    # over-budget for any image-conditioned mode.
-    # Everything outside the cap falls back to the legacy Q4 Balanced path
-    # so users don't see surprise OOMs on jobs that worked before.
-    Q8_FAST_OK_MODES = ("t2v", "i2v", "i2v_clean_audio", "a2v")
+    # Mode + frame guards: Q8 dev memory budget on 64 GB fits T2V at 121f.
+    # I2V was tried with conditioning="off" + safe_a knobs (s1=10, thr=2.0)
+    # and it does fit memory, but the output identity drifts and artifacts
+    # appear — losing the full-res stage-2 anchor + aggressive teacache
+    # combined is too lossy for image-conditioned modes. Reverted to Q4
+    # Balanced for I2V (the yesterday-working path with no regressions).
+    # a2v shares I2V's identity-anchor concern (input image) so it's also
+    # held back from Q8 Fast for now until we wire up Codex's upscaled
+    # half-ref latent fallback.
+    Q8_FAST_OK_MODES = ("t2v",)
     Q8_FAST_FRAMES_LIMIT = 121
     balanced_q8_fast = (
         quality == "balanced"
@@ -19383,8 +19386,9 @@ window.refreshBalancedSubtitle = function(state) {
   const frames = parseInt((framesEl && framesEl.value) || '121', 10);
   const mode = (typeof currentMode !== 'undefined') ? currentMode : 't2v';
   // Eligible modes mirror Q8_FAST_OK_MODES on the server side.
-  const eligible =
-    (mode === 't2v' || mode === 'i2v' || mode === 'a2v') && frames <= 121;
+  // T2V only for now — I2V/a2v Q8 Fast caused identity drift + artifacts
+  // when stage-2 conditioning was skipped to fit memory.
+  const eligible = mode === 't2v' && frames <= 121;
   sub.textContent = eligible
     ? 'Q8 Fast · 5 min'
     : 'Q4 fallback';
