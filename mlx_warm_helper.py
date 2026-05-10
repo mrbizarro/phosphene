@@ -1315,6 +1315,15 @@ for line in sys.__stdin__:
                 # the cap IS the iteration count (not just a safety bound).
                 # Each iter is pure latent algebra — no model forwards.
                 bongmath_max_iter=int(p.get("bongmath_max_iter", 100)),
+                # Stage-2 image-conditioning mode for I2V (HQ).
+                # "full"  = re-encode reference at full res (upstream default)
+                # "off"   = skip the full-res re-encode; saves the biggest
+                #            single memory peak at the stage-1→2 boundary,
+                #            necessary for I2V at 121f on 64 GB. Stage 1 has
+                #            already anchored on the reference at half res.
+                stage2_image_conditioning=str(
+                    p.get("stage2_image_conditioning", "full")
+                ),
             )
             img = p.get("image")
             if img:

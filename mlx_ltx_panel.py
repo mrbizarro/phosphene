@@ -3147,6 +3147,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # (matches upstream). Lower values save latent algebra time
             # without skipping any model forwards. See helper for details.
             "bongmath_max_iter": max(0, int(f("bongmath_max_iter", "100") or 100)),
+            # Stage-2 image-conditioning mode for HQ I2V. Empty string =
+            # "let the dispatch decide" (auto-routes I2V>49f to "off" on
+            # 48-79 GB tier to dodge boundary OOM). User can override
+            # explicitly to "full" or "off" via this form field.
+            "stage2_image_conditioning": f("stage2_image_conditioning", "") or "",
         },
         "command": None,
         "raw_path": None,
@@ -3816,14 +3821,13 @@ def run_job_inner(job: dict) -> None:
     # there would be a wall regression. On "base" (allows_q8=False), Q8
     # doesn't fit.
     #
-    # Mode + frame guards: Q8 dev memory budget on 64 GB is ~enough for T2V
-    # 121f, but I2V 121f OOMs at the upsample → stage-2 transition (image
-    # conditioning adds memory). a2v shares the T2V profile (no extra image
-    # cond memory at gen time — image is encoded once). 481f a2v also OOMs.
-    # So we route Q8 Fast only for mode/frame combos we've actually validated;
-    # everything else falls back to the legacy Q4 Balanced path so users don't
-    # see surprise OOMs on jobs that worked before.
-    Q8_FAST_OK_MODES = ("t2v", "a2v")
+    # Mode + frame guards: Q8 dev memory budget on 64 GB is enough for T2V
+    # 121f and (after the 2026-05-10 boundary reorder + auto stage-2 image
+    # conditioning skip for I2V/a2v >49f) also for I2V at 121f. 481f remains
+    # over-budget for any image-conditioned mode.
+    # Everything outside the cap falls back to the legacy Q4 Balanced path
+    # so users don't see surprise OOMs on jobs that worked before.
+    Q8_FAST_OK_MODES = ("t2v", "i2v", "i2v_clean_audio", "a2v")
     Q8_FAST_FRAMES_LIMIT = 121
     balanced_q8_fast = (
         quality == "balanced"
@@ -3969,6 +3973,28 @@ def run_job_inner(job: dict) -> None:
                 "enable_teacache": True,
                 "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
                 "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
+                # Stage-2 image conditioning mode. "full" re-encodes the
+                # reference image at full res for stage 2 (upstream default,
+                # best I2V anchor quality). "off" skips that full-res VAE
+                # encode — necessary on 64 GB for I2V at 121f, where the
+                # boundary peak (LoRA-fused transformer + VAE encoder +
+                # upsampler residue + image conditioner) crosses jetsam.
+                #
+                # Auto-route: I2V at >49f gets "off" by default on 48-79 GB
+                # tier; T2V / a2v keep "full" since they don't pay the
+                # full-res re-encode cost (no input image at stage 2).
+                # Explicit form override wins if provided.
+                "stage2_image_conditioning": (
+                    p["stage2_image_conditioning"]
+                    if p.get("stage2_image_conditioning")
+                    else (
+                        "off"
+                        if (mode in ("i2v", "i2v_clean_audio")
+                            and frames > 49
+                            and SYSTEM_TIER == "standard")
+                        else "full"
+                    )
+                ),
                 "memory_policy": memory_plan["effective"],
                 "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
             },
@@ -19356,7 +19382,9 @@ window.refreshBalancedSubtitle = function(state) {
   const framesEl = document.getElementById('frames');
   const frames = parseInt((framesEl && framesEl.value) || '121', 10);
   const mode = (typeof currentMode !== 'undefined') ? currentMode : 't2v';
-  const eligible = (mode === 't2v' || mode === 'a2v') && frames <= 121;
+  // Eligible modes mirror Q8_FAST_OK_MODES on the server side.
+  const eligible =
+    (mode === 't2v' || mode === 'i2v' || mode === 'a2v') && frames <= 121;
   sub.textContent = eligible
     ? 'Q8 Fast · 5 min'
     : 'Q4 fallback';
