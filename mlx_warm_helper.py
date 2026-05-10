@@ -1309,6 +1309,12 @@ for line in sys.__stdin__:
                 stg_scale=float(p.get("stg_scale", 0.0)),
                 enable_teacache=bool(p.get("enable_teacache", True)),
                 teacache_thresh=float(p.get("teacache_thresh", 1.0)),
+                # Bongmath inner-loop cap (HQ res_2s sampler). Default 100
+                # matches upstream. Source: samplers.py:537 has a fixed
+                # `for _ in range(bongmath_max_iter)` with no early exit, so
+                # the cap IS the iteration count (not just a safety bound).
+                # Each iter is pure latent algebra — no model forwards.
+                bongmath_max_iter=int(p.get("bongmath_max_iter", 100)),
             )
             img = p.get("image")
             if img:

@@ -3143,6 +3143,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "stage2_steps": max(0, int(f("stage2_steps", "3") or 3)),
             "teacache_thresh": float(f("teacache_thresh", "1.0") or 1.0),
             "cfg_scale": float(f("cfg_scale", "3.0") or 3.0),
+            # Bongmath inner-loop cap for HQ res_2s sampler. Default 100
+            # (matches upstream). Lower values save latent algebra time
+            # without skipping any model forwards. See helper for details.
+            "bongmath_max_iter": max(0, int(f("bongmath_max_iter", "100") or 100)),
         },
         "command": None,
         "raw_path": None,
@@ -3799,6 +3803,42 @@ def run_job_inner(job: dict) -> None:
     width, height = p["width"], p["height"]
     frames = p["frames"]
     quality = p.get("quality", "standard")
+
+    # Q8 Fast routing for "Balanced" tier on the 48–79 GB ("standard") tier.
+    # Verified 2026-05-10 on M-Max 64 GB: safe_a config (stage1=10, stage2=3,
+    # teacache=2.0) delivers ~5 min wall at 1024×576 121f T2V — same wall as
+    # Q4+upscale Balanced, but with the Q8 dev transformer driving the source
+    # pixels. Quality eye-checked acceptable on dialog/close-up/medium content
+    # (the model's sweet spot per Salo's feedback).
+    #
+    # Only the "standard" tier auto-routes: on "high"/"pro" tiers the Q4
+    # Balanced is genuinely faster (~3 min on 96 GB), so substituting Q8 Fast
+    # there would be a wall regression. On "base" (allows_q8=False), Q8
+    # doesn't fit. So this is a precise tier-targeted upgrade.
+    balanced_q8_fast = (
+        quality == "balanced"
+        and SYSTEM_TIER == "standard"
+        and SYSTEM_CAPS.get("allows_q8", False)
+        and not q8_missing_files()
+    )
+    if balanced_q8_fast:
+        push(
+            f"Balanced on {SYSTEM_CAPS['label']} hardware → Q8 Fast routing "
+            f"(stage1=10, teacache=2.0; ~5 min, Q8 dev source)."
+        )
+        quality = "high"  # reuses the existing Q8 HQ dispatch
+        # Force the safe_a knobs as defaults for this routing. Power-user
+        # form overrides (when an Advanced UI ships) can still tune these
+        # by submitting their own stage1_steps/stage2_steps/teacache_thresh
+        # — but with no explicit form values, we lock in safe_a.
+        p.setdefault("stage1_steps", 10)
+        if int(p.get("stage1_steps") or 10) == 15:
+            p["stage1_steps"] = 10
+        p.setdefault("stage2_steps", 3)
+        p.setdefault("teacache_thresh", 2.0)
+        if float(p.get("teacache_thresh") or 1.0) == 1.0:
+            p["teacache_thresh"] = 2.0
+
     temporal_mode = (p.get("temporal_mode") or "native").strip().lower()
     if temporal_mode not in ("native", "fps12_interp24"):
         temporal_mode = "native"
@@ -3916,6 +3956,7 @@ def run_job_inner(job: dict) -> None:
                 "stg_scale": 0.0,
                 "enable_teacache": True,
                 "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
+                "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
                 "memory_policy": memory_plan["effective"],
                 "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
             },
@@ -18976,6 +19017,24 @@ async function poll() {
     const missing = (s.q8_missing || []).length;
     highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} files left` : 'Q8 not installed';
     if (document.getElementById('quality').value === 'high') setQuality('standard');
+  }
+
+  // Balanced label: on the "standard" (48–79 GB) tier with Q8 installed, the
+  // Balanced chip auto-routes to Q8 Fast (the safe_a config) — same wall as
+  // the legacy Q4+upscale path, but Q8 dev source. Update the chip subtitle
+  // so the user can see at a glance which pipeline they're on.
+  // Server-side routing logic lives in run_job_inner; this is purely cosmetic.
+  const balancedBtn = document.querySelector('.q-chip[data-quality="balanced"]');
+  if (balancedBtn) {
+    const balancedSub = balancedBtn.querySelector('.ql-tier');
+    if (balancedSub) {
+      const tierKey = (s.tier && (s.tier.key || s.tier.tier)) || '';
+      if (s.q8_available && tierKey === 'standard') {
+        balancedSub.textContent = 'Q8 Fast · ~5 min · no crop';
+      } else {
+        balancedSub.textContent = 'Q4 · ~5 min · no crop';
+      }
+    }
   }
 
   // Keyframe (FFLF) and Extend both require Q8 — server enforces it (see
