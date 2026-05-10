@@ -3135,6 +3135,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # it as a LoRA. The worker resolves it to the curated HDR
             # repo before submitting to the helper.
             "hdr": f("hdr", "off") == "on",
+            # Q8 HQ tuning knobs — exposed for experiments / power use.
+            # Defaults match production (stage1=15, stage2=3, teacache=1.0,
+            # cfg=3.0); the dev panel can override per render via form fields
+            # to bench Q8 speedup configs without code edits.
+            "stage1_steps": max(1, int(f("stage1_steps", "15") or 15)),
+            "stage2_steps": max(0, int(f("stage2_steps", "3") or 3)),
+            "teacache_thresh": float(f("teacache_thresh", "1.0") or 1.0),
+            "cfg_scale": float(f("cfg_scale", "3.0") or 3.0),
         },
         "command": None,
         "raw_path": None,
@@ -3893,9 +3901,12 @@ def run_job_inner(job: dict) -> None:
                 "frames": frames,
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
-                "stage1_steps": 15,
-                "stage2_steps": 3,
-                "cfg_scale": 3.0,
+                # Q8 tuning knobs honor per-job overrides from the form
+                # (defaults match production: stage1=15, stage2=3, cfg=3.0,
+                # teacache=1.0). See make_job for where these are read.
+                "stage1_steps": int(p.get("stage1_steps", 15)),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+                "cfg_scale": float(p.get("cfg_scale", 3.0)),
                 # Upstream HQ params (`LTX_2_3_HQ_PARAMS`) and the
                 # TwoStageHQPipeline signature both default stg_scale=0.0.
                 # HQ uses res_2s sampler with `stg_blocks=[]`, so STG is
@@ -3904,7 +3915,7 @@ def run_job_inner(job: dict) -> None:
                 # by mistake (copy from standard params); fixed here.
                 "stg_scale": 0.0,
                 "enable_teacache": True,
-                "teacache_thresh": 1.0,
+                "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
                 "memory_policy": memory_plan["effective"],
                 "vae_full_decode_max_frames": memory_plan["full_decode_max_frames"],
             },
