@@ -16232,7 +16232,7 @@ HTML = r"""<!doctype html>
             <button type="button" class="q-chip pill-btn pill-quality active" data-quality="balanced">
               <span class="ql-name">Balanced</span>
               <span class="q-spec ql-spec sub">1024×576</span>
-              <span class="ql-tier" hidden>Q4 · ~5 min · no crop</span>
+              <span class="ql-tier" id="balancedSub">Q4 · 5 min</span>
             </button>
             <button type="button" class="q-chip pill-btn pill-quality" data-quality="standard">
               <span class="ql-name">Standard</span>
@@ -16242,7 +16242,7 @@ HTML = r"""<!doctype html>
             <button type="button" class="q-chip pill-btn pill-quality disabled" data-quality="high" id="qualityHigh">
               <span class="ql-name">High</span>
               <span class="q-spec ql-spec sub" id="highSpec">1024×576</span>
-              <span class="ql-tier" id="highSub" hidden>Q8 not installed</span>
+              <span class="ql-tier" id="highSub">Q8 not installed</span>
             </button>
           </div>
         </div>
@@ -19006,34 +19006,33 @@ async function poll() {
 
   document.getElementById('pauseBtn').textContent = s.paused ? 'Resume queue' : 'Pause queue';
 
-  // Q8 / High enable
+  // Q8 / High enable. Subtitle shows what pipeline this chip uses; goes
+  // visible permanently (no more `hidden` attribute on the span) so users
+  // can see at a glance which engine drives each tier.
   const highBtn = document.getElementById('qualityHigh');
   const highSub = document.getElementById('highSub');
   if (s.q8_available) {
     highBtn.classList.remove('disabled');
-    highSub.textContent = 'Q8 + TeaCache';
+    highSub.textContent = 'Q8 Pro · 7 min';
   } else {
     highBtn.classList.add('disabled');
     const missing = (s.q8_missing || []).length;
-    highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} files left` : 'Q8 not installed';
+    highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} left` : 'Q8 not installed';
     if (document.getElementById('quality').value === 'high') setQuality('standard');
   }
 
-  // Balanced label: on the "standard" (48–79 GB) tier with Q8 installed, the
-  // Balanced chip auto-routes to Q8 Fast (the safe_a config) — same wall as
-  // the legacy Q4+upscale path, but Q8 dev source. Update the chip subtitle
-  // so the user can see at a glance which pipeline they're on.
-  // Server-side routing logic lives in run_job_inner; this is purely cosmetic.
-  const balancedBtn = document.querySelector('.q-chip[data-quality="balanced"]');
-  if (balancedBtn) {
-    const balancedSub = balancedBtn.querySelector('.ql-tier');
-    if (balancedSub) {
-      const tierKey = (s.tier && (s.tier.key || s.tier.tier)) || '';
-      if (s.q8_available && tierKey === 'standard') {
-        balancedSub.textContent = 'Q8 Fast · ~5 min · no crop';
-      } else {
-        balancedSub.textContent = 'Q4 · ~5 min · no crop';
-      }
+  // Balanced subtitle: on the "standard" (48–79 GB) tier with Q8 installed,
+  // the Balanced chip auto-routes to Q8 Fast (safe_a config) — same wall as
+  // the legacy Q4+upscale path, but Q8 dev source pixels. Server-side
+  // routing logic lives in run_job_inner; this is the visible label so
+  // users see "Q8 Fast" and know they're getting the upgraded pipeline.
+  const balancedSub = document.getElementById('balancedSub');
+  if (balancedSub) {
+    const tierKey = (s.tier && (s.tier.key || s.tier.tier)) || '';
+    if (s.q8_available && tierKey === 'standard') {
+      balancedSub.textContent = 'Q8 Fast · 5 min';
+    } else {
+      balancedSub.textContent = 'Q4 · 5 min';
     }
   }
 
