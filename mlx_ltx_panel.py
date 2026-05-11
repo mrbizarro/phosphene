@@ -17125,7 +17125,7 @@ HTML = r"""<!doctype html>
   <a class="creator-link" href="https://x.com/AIBizarrothe" target="_blank" rel="noopener" title="Follow Mr. Bizarro on X (the panel's creator)">
     <img src="/assets/bizarro-avatar.jpg" class="creator-avatar" alt="">
     <span>by Bizarro</span>
-    <span class="x-icon">↗ X</span>
+    <span class="x-icon"><svg class="ph" aria-hidden="true" style="margin-right:3px;vertical-align:-2px"><use href="#ph-arrow-square-out"/></svg>X</span>
   </a>
 </header>
 
@@ -17343,7 +17343,7 @@ HTML = r"""<!doctype html>
              phrasing; we just trigger it. -->
         <div class="agent-batch-bar" id="agentBatchBar" hidden>
           <div class="agent-batch-bar-text">
-            <span class="agent-batch-bar-icon">✦</span>
+            <span class="agent-batch-bar-icon"><svg class="ph" aria-hidden="true"><use href="#ph-sparkle-fill"/></svg></span>
             <span id="agentBatchBarSummary">…</span>
           </div>
           <button type="button" class="agent-batch-bar-btn"
@@ -17361,7 +17361,7 @@ HTML = r"""<!doctype html>
              agent calls inspect_clip and treats the request as a
              variation. Clear with the × button. -->
         <div class="agent-ref-chip" id="agentRefChip" style="margin-left:auto;margin-right:auto;max-width:720px">
-          <span class="ref-icon">↻</span>
+          <span class="ref-icon"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg></span>
           <span style="color:var(--muted);font-size:11px">refine</span>
           <span class="ref-label" id="agentRefChipLabel">…</span>
           <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
@@ -17421,7 +17421,7 @@ HTML = r"""<!doctype html>
               title="Hide this card (won't show again until model state changes)"
               onclick="dismissModelsCard()"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
       <div class="models-inline-body">
-        <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
+        <div class="models-inline-icon" id="modelsInlineIcon"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></div>
         <div class="models-inline-text">
           <div class="ttl" id="modelsInlineTitle">Download required</div>
           <div class="sub" id="modelsInlineSub">Click to start.</div>
@@ -17591,7 +17591,7 @@ HTML = r"""<!doctype html>
              Avoid is now a toggle-disclosure (collapsed by default) — it's
              optional and most users won't touch it. -->
         <div class="composer-tools">
-          <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on">✨ Enhance</button>
+          <button type="button" class="ghost-btn" id="enhanceBtn" onclick="enhancePrompt()" title="Use Gemma to rewrite your prompt in the style LTX 2.3 was trained on"><svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>Enhance</button>
           <button type="button" class="ct-link" id="avoidToggleBtn" onclick="toggleAvoidRow()" title="Add 'avoid' / negative prompt — things the model should NOT generate">
             <span id="avoidToggleLabel">Avoid +</span>
           </button>
@@ -17711,9 +17711,9 @@ HTML = r"""<!doctype html>
             <span class="loras-header-actions">
               <button type="button" class="loras-icon-btn"
                       title="Rescan mlx_models/loras/ for new files"
-                      onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()">↻</button>
+                      onclick="event.stopPropagation(); event.preventDefault(); refreshLoras()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
               <button type="button" class="loras-browse-btn"
-                      onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()">🔍 Browse CivitAI</button>
+                      onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-magnifying-glass"/></svg>Browse CivitAI</button>
             </span>
           </summary>
           <div class="loras-body" id="lorasBody">
@@ -20340,7 +20340,7 @@ async function trainRefreshLoraList() {
           <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v')">Use in T2V</button>
           <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','i2v')">Use in I2V</button>
           <button type="button" class="qchip" onclick="trainCopyTriggerCmd('${safeTrig}')">Copy trigger</button>
-          <button type="button" class="qchip" onclick="trainDeleteLora('${safePath}')" title="Delete .safetensors + sidecar">✕</button>
+          <button type="button" class="qchip" onclick="trainDeleteLora('${safePath}')" title="Delete .safetensors + sidecar"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
         </span>
       </div>`;
     }).join('');
@@ -21327,7 +21327,7 @@ async function poll() {
         hint = raw;
       }
       nowCard.querySelector('.ttl').innerHTML =
-        `<span style="color: var(--danger, #f85149)">⚠ ${escapeHtml(friendly)}</span>` +
+        `<span style="color: var(--danger, #f85149)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>${escapeHtml(friendly)}</span>` +
         `<button type="button" class="now-card-dismiss" title="Dismiss this failure" ` +
         `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
         `if (typeof poll === 'function') poll();"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
@@ -21709,7 +21709,7 @@ function renderCarousel() {
       ${thumbHtml}
       ${o.has_sidecar
         ? `<button class="car-info-btn" type="button" title="Show generation info"
-                   onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})">ⓘ</button>`
+                   onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info-fill"/></svg></button>`
         : ''}
       <div class="card-chrome">
         <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})"
@@ -22333,7 +22333,7 @@ function updateModelsCard(s) {
   if (!baseOk) {
     card.style.display = '';
     card.classList.add('state-missing');
-    icon.textContent = '⚠';
+    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
     title.textContent = 'Base models needed before you can render';
     const missing = (s.base_missing || []).length;
     sub.innerHTML = `Q4 (~20 GB) and Gemma (~6 GB) are required. Click below — downloads resume if interrupted.${
@@ -22362,7 +22362,7 @@ function updateModelsCard(s) {
     if (dismissed) { card.style.display = 'none'; return; }
     card.style.display = '';
     card.classList.add('state-warn', 'dismissible');
-    icon.textContent = '⬇';
+    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
     const reason = currentMode === 'keyframe' ? 'FFLF needs the Q8 model'
                 : currentMode === 'extend'    ? 'Extend needs the Q8 model'
                                               : 'High quality needs the Q8 model';
@@ -22395,7 +22395,7 @@ function updateModelsCard(s) {
   if (dismissed) { card.style.display = 'none'; return; }
   card.style.display = '';
   card.classList.add('dismissible');
-  icon.textContent = '✓';
+  icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
   const ready = s.repos_ready ?? 0;
   const total = s.repos_total ?? 0;
   title.textContent = `Models ready · ${ready}/${total}`;
@@ -22556,7 +22556,7 @@ function openTierModal() {
     ];
     document.getElementById('tierCapsList').innerHTML = items.map(it => `
       <li class="${it.on ? 'ready' : 'missing'}">
-        <span class="icon">${it.on ? '✓' : '✗'}</span>
+        <span class="icon"><svg class="ph" aria-hidden="true"><use href="${it.on ? '#ph-check-bold' : '#ph-x-circle-fill'}"/></svg></span>
         <div class="meta">
           <span class="ttl">${escapeHtml(it.title)}</span>
           <span class="sub">${escapeHtml(it.desc)}</span>
@@ -22996,7 +22996,7 @@ async function testToken(which) {
       });
       const saveData = await saveResp.json();
       if (!saveResp.ok || saveData.error) {
-        result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> ${escapeHtml(saveData.error || `HTTP ${saveResp.status}`)}`;
+        result.innerHTML = `<svg class="ph" aria-hidden="true" style="color:var(--danger,#f85149);margin-right:4px;vertical-align:-2px"><use href="#ph-x-circle-fill"/></svg>${escapeHtml(saveData.error || `HTTP ${saveResp.status}`)}`;
         return;
       }
       // Save succeeded — reflect the persisted state in the UI.
@@ -23006,7 +23006,7 @@ async function testToken(which) {
       const clearBtn = document.getElementById(clearBtnId);
       if (clearBtn) clearBtn.style.display = '';
     } catch (e) {
-      result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> Save failed: ${escapeHtml(e.message || String(e))}`;
+      result.innerHTML = `<svg class="ph" aria-hidden="true" style="color:var(--danger,#f85149);margin-right:4px;vertical-align:-2px"><use href="#ph-x-circle-fill"/></svg>Save failed: ${escapeHtml(e.message || String(e))}`;
       return;
     }
   }
@@ -23016,12 +23016,12 @@ async function testToken(which) {
     const r = await fetch(path);
     const data = await r.json();
     if (data.ok) {
-      result.innerHTML = `<strong style="color: var(--success, #3fb950)">✓</strong> ${escapeHtml(data.message)}`;
+      result.innerHTML = `<svg class="ph" aria-hidden="true" style="color:var(--success,#3fb950);margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>${escapeHtml(data.message)}`;
     } else {
-      result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> ${escapeHtml(data.error)}`;
+      result.innerHTML = `<svg class="ph" aria-hidden="true" style="color:var(--danger,#f85149);margin-right:4px;vertical-align:-2px"><use href="#ph-x-circle-fill"/></svg>${escapeHtml(data.error)}`;
     }
   } catch (e) {
-    result.innerHTML = `<strong style="color: var(--danger, #f85149)">✗</strong> Network error: ${escapeHtml(e.message || String(e))}`;
+    result.innerHTML = `<svg class="ph" aria-hidden="true" style="color:var(--danger,#f85149);margin-right:4px;vertical-align:-2px"><use href="#ph-x-circle-fill"/></svg>Network error: ${escapeHtml(e.message || String(e))}`;
   }
 }
 
@@ -23475,7 +23475,7 @@ function loraRowHtml(r, modeTag) {
     familyBadges.push(`<span class="badge" title="Unknown LoRA family — sidecar didn't list a base_model. May or may not fire on this engine.">?</span>`);
   }
   if (familyMismatch) {
-    familyBadges.push(`<span class="badge" style="background:rgba(232,179,65,0.15);color:var(--warn,#e8b341)" title="This LoRA was trained for a different family (${tags.join(', ')}) — it will be passed to mflux but probably won't influence the output. Switch the Engine dropdown to a matching family, or remove this LoRA.">⚠</span>`);
+    familyBadges.push(`<span class="badge" style="background:rgba(232,179,65,0.15);color:var(--warn,#e8b341)" title="This LoRA was trained for a different family (${tags.join(', ')}) — it will be passed to mflux but probably won't influence the output. Switch the Engine dropdown to a matching family, or remove this LoRA."><svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg></span>`);
   }
   // Trigger summary line under the name (when not expanded). Truncated.
   const trigs = r.trigger_words || [];
@@ -23485,7 +23485,7 @@ function loraRowHtml(r, modeTag) {
   // Corner actions — link to civitai page + delete (or remove for HF/remote).
   const corner = [];
   if (r.civitai_url) {
-    corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()">↗</a>`);
+    corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
   }
   if (r.kind === 'user' || r.kind === 'trained') {
     corner.push(`<button class="lora-icon-btn danger" type="button" title="Delete from disk"
@@ -23646,7 +23646,7 @@ function renderCivitaiAuthBanner(haveKey, mode) {
   if (m === 'view' && haveKey) {
     box.classList.add('set');
     box.innerHTML = `
-      <span><strong style="color:var(--success,#3fb950)">✓</strong> CivitAI API key set —
+      <span><svg class="ph" aria-hidden="true" style="color:var(--success,#3fb950);margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg><strong style="color:var(--success,#3fb950)"></strong> CivitAI API key set —
       LoRA downloads will work.</span>
       <span class="grow"></span>
       <a class="changekey" onclick="renderCivitaiAuthBanner(true,'edit')">change key</a>`;
@@ -23821,7 +23821,7 @@ function renderCivitaiGrid(items, append) {
         </div>
         ${triggers ? `<div class="meta"><span title="trigger words">trigger: ${escapeHtml(triggers)}</span></div>` : ''}
         ${it.civitai_url
-          ? `<div class="meta"><a class="civitai-source-link" href="${escapeHtml(it.civitai_url)}" target="_blank" rel="noopener" title="Open the original CivitAI page — usage notes, examples, comments">Read instructions on CivitAI ↗</a></div>`
+          ? `<div class="meta"><a class="civitai-source-link" href="${escapeHtml(it.civitai_url)}" target="_blank" rel="noopener" title="Open the original CivitAI page — usage notes, examples, comments">Read instructions on CivitAI <svg class="ph" aria-hidden="true" style="margin-left:3px;vertical-align:-2px"><use href="#ph-arrow-square-out"/></svg></a></div>`
           : ''}
       </div>
       <div class="actions">
@@ -23921,18 +23921,18 @@ async function refreshModelsModal({ silent = false } = {}) {
   const active = data.active_download;
   hint.innerHTML = data.hf_available
     ? `Each row shows what's on disk. Click <b>Download</b> to fetch missing files via <code>hf download</code>; progress streams to the log at the bottom of the page.`
-    : `<span style="color:var(--warning,#d29922)">⚠ <code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`;
+    : `<span style="color:var(--warning,#d29922)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg><code>hf</code> not found</span> — this Pinokio install doesn't have <code>huggingface_hub&gt;=1.0</code> in the venv. Run Update from Pinokio, then come back.`;
   const rows = repos.map(r => {
     let cls, icon, statusText, btnHtml;
     if (active && active.key === r.key) {
       cls = 'downloading';
-      icon = '↻';
+      icon = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
       const elapsed = Math.max(0, Math.round((Date.now()/1000) - (active.started_ts || 0)));
       const last = active.last_line ? `<div class="progress">${escapeHtml(active.last_line)}</div>` : '';
       statusText = `Downloading · ${elapsed}s${last}`;
       btnHtml = `<button class="ghost" onclick="cancelDownload()">Cancel</button>`;
     } else if (r.complete) {
-      cls = 'ready'; icon = '✓';
+      cls = 'ready'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
       // `where: 'hf_cache'` means the files were resolved from
       // ~/.cache/huggingface/ rather than the canonical mlx_models/
       // dir. Common on manual / dev installs that pre-existed Pinokio
@@ -23941,14 +23941,14 @@ async function refreshModelsModal({ silent = false } = {}) {
       statusText = `Ready · ${r.total_files} files · ~${r.size_gb || '?'} GB · ${tag}`;
       btnHtml = `<button class="ghost" disabled>Installed</button>`;
     } else if (r.present_files > 0) {
-      cls = 'partial'; icon = '◐';
+      cls = 'partial'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg>';
       const left = r.total_files - r.present_files;
       statusText = `Partial · ${r.present_files}/${r.total_files} files · ${left} missing — resume to finish`;
       btnHtml = data.hf_available
         ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Resume</button>`
         : `<button disabled>Resume</button>`;
     } else {
-      cls = 'missing'; icon = '⊘';
+      cls = 'missing'; icon = '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
       statusText = `Not installed · ~${r.size_gb || '?'} GB`;
       btnHtml = data.hf_available
         ? `<button onclick="startDownload('${escapeHtml(r.key)}')" ${active ? 'disabled' : ''}>Download</button>`
@@ -25675,7 +25675,7 @@ function renderToolCallCard(call) {
   // dot); .icon-glyph holds the legacy gear so the older non-pending
   // states still have something to fall back to.
   head.innerHTML = `
-    <span class="icon"><span class="icon-glyph">⚙</span></span>
+    <span class="icon"><svg class="ph" aria-hidden="true"><use href="#ph-gear-six"/></svg></span>
     <span class="name">${escapeHtml(call.tool || '?')}</span>
     <span class="summary">${escapeHtml(summary)}</span>
     <span class="duration">running…</span>
@@ -25713,7 +25713,7 @@ function renderToolResultCard(result) {
     else dur = Math.floor(ds / 60) + 'm ' + Math.round(ds % 60) + 's';
   }
   head.innerHTML = `
-    <span class="icon ${ok ? 'success' : 'error'}"><span class="icon-glyph">${ok ? '✓' : '✗'}</span></span>
+    <span class="icon ${ok ? 'success' : 'error'}"><svg class="ph" aria-hidden="true"><use href="${ok ? '#ph-check-bold' : '#ph-x-circle-fill'}"/></svg></span>
     <span class="name">${ok ? 'result' : 'error'}</span>
     <span class="summary">${escapeHtml(summary)}</span>
     ${dur ? `<span class="duration">${escapeHtml(dur)}</span>` : ''}
@@ -25815,7 +25815,7 @@ function renderAnchorGrid(payload) {
 
     const check = document.createElement('span');
     check.className = 'check';
-    check.textContent = '✓';
+    check.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
     cell.appendChild(check);
 
     if (typeof cand.seed === 'number' && cand.seed >= 0) {
@@ -26262,7 +26262,7 @@ async function agentSend() {
       const typing = document.getElementById('agentTypingRow');
       if (typing) {
         typing.querySelector('.agent-typing-bubble').innerHTML =
-          `<span style="color:#f49a9e">⚠ Error: ${escapeHtml(j.error || ('HTTP ' + r.status))}</span>`;
+          `<span style="color:#f49a9e"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>Error: ${escapeHtml(j.error || ('HTTP ' + r.status))}</span>`;
       }
     } else {
       agentRender(j.rendered_messages || []);
@@ -26271,7 +26271,7 @@ async function agentSend() {
     const typing = document.getElementById('agentTypingRow');
     if (typing) {
       typing.querySelector('.agent-typing-bubble').innerHTML =
-        `<span style="color:#f49a9e">⚠ Network error: ${escapeHtml(String(e))}</span>`;
+        `<span style="color:#f49a9e"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>Network error: ${escapeHtml(String(e))}</span>`;
     }
   } finally {
     clearInterval(poller);
@@ -27684,7 +27684,7 @@ function agentStageRender(status, sess) {
           refine.type = 'button';
           refine.className = 'refine-btn';
           refine.title = 'Refine this clip — start a variation in the chat';
-          refine.textContent = '↻';
+          refine.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg>';
           refine.addEventListener('click', (e) => {
             e.stopPropagation();
             agentSetRefine({jobId: o.id, label: o.label, clipPath: o.output_path});
@@ -27702,7 +27702,13 @@ function agentStageRender(status, sess) {
       }
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = failed ? 'fail' : (o.status === 'done' ? '✓' : o.status.slice(0, 4));
+      if (failed) {
+        badge.textContent = 'fail';
+      } else if (o.status === 'done') {
+        badge.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>';
+      } else {
+        badge.textContent = o.status.slice(0, 4);
+      }
       cell.appendChild(badge);
       const lbl = document.createElement('span');
       lbl.className = 'label';
@@ -27749,9 +27755,9 @@ function agentStageRender(status, sess) {
     for (const ev of events) {
       const row = document.createElement('div');
       row.className = 'stage-activity-row ' + ev.kind;
-      const icon = (ev.kind === 'ok') ? '✓' : (ev.kind === 'fail') ? '✗' : '⚙';
+      const iconRef = (ev.kind === 'ok') ? '#ph-check-bold' : (ev.kind === 'fail') ? '#ph-x-circle-fill' : '#ph-gear-six';
       row.innerHTML = `
-        <span class="icon">${icon}</span>
+        <span class="icon"><svg class="ph" aria-hidden="true"><use href="${iconRef}"/></svg></span>
         <span class="text">${escapeHtml(ev.text)}</span>
       `;
       activityEl.appendChild(row);
