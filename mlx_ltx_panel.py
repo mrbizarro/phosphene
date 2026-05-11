@@ -7690,6 +7690,61 @@ class Handler(BaseHTTPRequestHandler):
             persist_queue()
             self._json({"paused": False}); return
 
+        # ====== One-click delete: removes the file + its sidecar JSON
+        # from disk. Containment check identical to /output/hide so the
+        # endpoint can't be tricked into deleting arbitrary paths. Used
+        # by the per-card × button in the Outputs gallery.
+        if path == "/output/delete":
+            target = qs.get("path", [""])[0] or form.get("path", [""])[0]
+            if not target:
+                self._json({"error": "missing path"}, 400); return
+            try:
+                _resolved = Path(target).resolve()
+            except OSError as e:
+                self._json({"error": f"path not resolvable: {e}"}, 400); return
+            try:
+                _roots = [OUTPUT.resolve(), UPLOADS.resolve()]
+            except OSError:
+                _roots = []
+            if not any(_resolved.is_relative_to(r) for r in _roots):
+                self._json({
+                    "error": "path must resolve under outputs/ or uploads/"
+                }, 400); return
+            if not _resolved.is_file():
+                self._json({"error": "not a file"}, 404); return
+            removed = []
+            # Find related sidecars next to the media: <stem>.<media>.json
+            # is the canonical sidecar shape; also try plain <stem>.json
+            # because older flows wrote that.
+            candidates = [_resolved, Path(str(_resolved) + ".json"),
+                          _resolved.with_suffix(".json")]
+            for c in candidates:
+                try:
+                    if c.is_file():
+                        c.unlink()
+                        removed.append(str(c))
+                except OSError as e:
+                    self._json({"error": f"delete failed: {e}"}, 500); return
+            # Also drop from HIDDEN_PATHS if it was hidden (so we don't
+            # leak orphan entries into panel_hidden.json).
+            set_hidden(str(_resolved), False)
+            self._json({"ok": True, "deleted": removed})
+            return
+
+        # ====== Reveal the outputs folder in Finder (one click, no
+        # per-card duplication). Runs `open <OUTPUT>` — same subprocess
+        # pattern used elsewhere in this file for `open -a Pinokio` and
+        # `open <final_out>`. macOS-native; Phosphene is Apple Silicon
+        # only so no cross-platform branch needed.
+        if path == "/output/open_folder":
+            try:
+                target_dir = OUTPUT.resolve()
+                subprocess.run(["open", str(target_dir)], check=False)
+                self._json({"ok": True, "opened": str(target_dir)})
+            except Exception as e:
+                self._json({"error": f"open failed: {e}"}, 500)
+            return
+
         if path == "/output/hide":
             target = qs.get("path", [""])[0] or form.get("path", [""])[0]
             if not target:
@@ -10789,6 +10844,56 @@ HTML = r"""<!doctype html>
       background: rgba(47,129,247,0.45);
       border-color: rgba(47,129,247,0.85);
       color: #fff;
+    }
+    /* The two button variants used in the card chrome ribbon now:
+       .card-action-photo (Animate, photos only) reads as the non-
+       destructive primary; .card-action-danger (Delete) is a compact
+       square red chip that doesn't fight for the same flex weight. */
+    .car-card .card-chrome .card-action-photo {
+      flex: 1;
+    }
+    .car-card .card-chrome .card-action-danger {
+      flex: 0 0 auto;
+      width: 28px;
+      padding: 4px;
+      display: inline-flex;
+      align-items: center; justify-content: center;
+      background: rgba(220, 70, 80, 0.18);
+      border: 1px solid rgba(220, 70, 80, 0.45);
+      color: rgba(255, 200, 200, 0.95);
+    }
+    .car-card .card-chrome .card-action-danger:hover {
+      background: rgba(220, 70, 80, 0.55);
+      border-color: rgba(220, 70, 80, 0.85);
+      color: #fff;
+    }
+    .car-card .card-chrome .card-action-danger .ph {
+      width: 14px; height: 14px;
+    }
+
+    /* Global "Open folder" pill in the carousel header (sits between
+       the ch-spacer and where the old Visible/Hidden seg used to be).
+       Same chip language as the .qchip / .stop-btn — hairline, dark
+       fill, icon + label. */
+    .carousel-head .open-folder-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      transition: var(--t-fast);
+      font-weight: 500;
+    }
+    .carousel-head .open-folder-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.08);
+    }
+    .carousel-head .open-folder-btn .ph {
+      width: 14px; height: 14px;
     }
     /* Top-right info button — subtle until hover, then surfaces. */
     .car-card .car-info-btn {
@@ -17117,6 +17222,7 @@ HTML = r"""<!doctype html>
 <symbol id="ph-paperclip" viewBox="0 0 256 256"><path d="M160,80,76.69,164.69a16,16,0,0,0,22.63,22.62L198.63,86.63a32,32,0,0,0-45.26-45.26L54.06,142.06a48,48,0,0,0,67.88,67.88L204,128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-file-text" viewBox="0 0 256 256"><path d="M200,224H56a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h96l56,56V216A8,8,0,0,1,200,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="136" x2="160" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="168" x2="160" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-file-pdf" viewBox="0 0 256 256"><polyline points="216 152 184 152 184 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="208" y1="184" x2="184" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,192H64a20,20,0,0,0,0-40H48v56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M112,152v56h16a28,28,0,0,0,0-56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,112V40a8,8,0,0,1,8-8h96l56,56v24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-folder-simple" viewBox="0 0 256 256"><path d="M224,208H32V72a8,8,0,0,1,8-8H92.69a8,8,0,0,1,5.65,2.34L128,96h88a8,8,0,0,1,8,8V208Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
 </svg>
 
@@ -18394,10 +18500,18 @@ HTML = r"""<!doctype html>
                   onclick="setMainOutputsFilter('photos')">Photos</button>
         </div>
         <span class="ch-spacer"></span>
-        <div class="seg seg-vh">
-          <button id="filterAll" onclick="setFilter('visible')" class="active">Visible</button>
-          <button id="filterHidden" onclick="setFilter('hidden')">Hidden</button>
-        </div>
+        <button type="button" class="open-folder-btn" id="openOutputsFolderBtn"
+                title="Reveal the outputs folder in Finder"
+                onclick="openOutputsFolder()">
+          <svg class="ph" aria-hidden="true"><use href="#ph-folder-simple"/></svg>
+          Open folder
+        </button>
+        <!-- Visible/Hidden segmented control was removed: the Hide
+             functionality was confusing in practice and we replaced it
+             with a one-click per-card Delete + an in-place "Open folder"
+             reveal here. The element is left out entirely so the seg-vh
+             class loses its only consumer too (CSS still defines it for
+             other segs). -->
       </div>
       <div class="carousel" id="carousel"></div>
     </div>
@@ -21799,15 +21913,21 @@ function renderCarousel() {
     const thumbHtml = isPhoto
       ? `<img class="car-thumb" src="${o.url}" alt="${escapeHtml(o.name)}" loading="lazy">`
       : `<video src="${o.url}#t=2.5" preload="metadata" muted></video>`;
-    // Action row also branches: photos can't be Extended (Extend is
-    // video-only) so swap that secondary button to Animate, which
-    // mirrors the Recent tab's photo-row Animate button (commit 0d9c6eb).
+    // Per-card actions (revealed on hover) — kept deliberately minimal:
+    //   * Photos get a small "Animate" chip (turns the still into i2v).
+    //   * Everything gets a delete (×) chip.
+    // The previous Hide + Extend buttons were dropped per Salo:
+    //   - Hide was useless (clutter, never used in practice).
+    //   - Extend wasn't practical on Mac.
+    // Folder-reveal moved to a global button in the carousel header.
     const animateArgs = JSON.stringify({path: o.path, prompt: ''}).replace(/"/g, '&quot;');
-    const secondaryBtn = isPhoto
-      ? `<button onclick="event.stopPropagation(); animateFromPhoto(${animateArgs})">Animate</button>`
-      : `<button onclick="event.stopPropagation(); useAsExtendSourcePath(${pathAttr})">Extend</button>`;
+    const animateChip = isPhoto
+      ? `<button class="card-action card-action-photo" type="button"
+                 title="Pre-fill i2v with this image (does not auto-submit)"
+                 onclick="event.stopPropagation(); animateFromPhoto(${animateArgs})">Animate</button>`
+      : '';
     return `
-    <div class="car-card${o.hidden ? ' hidden-card' : ''}${o.path === activePath ? ' active' : ''}"
+    <div class="car-card${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
       ${thumbHtml}
       ${o.has_sidecar
@@ -21815,19 +21935,15 @@ function renderCarousel() {
                    onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info-fill"/></svg></button>`
         : ''}
       <div class="card-chrome">
-        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})"
-                title="${o.hidden ? 'Restore to the visible gallery' : 'Hide from the gallery'}">${o.hidden ? 'Show' : 'Hide'}</button>
-        ${secondaryBtn}
+        ${animateChip}
+        <button class="card-action card-action-danger" type="button" title="Delete this file from disk"
+                onclick="event.stopPropagation(); deleteOutput(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
       </div>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
         <div class="sub" title="${isPhoto ? 'File size' : 'Render time · file size'}">
           ${isPhoto ? '' : _outputDurationLabel(o) + ' · '}${o.size_mb.toFixed(1)} MB
         </div>
-      </div>
-      <div class="row-btns" style="display:none">
-        <button onclick="event.stopPropagation(); ${o.hidden ? 'unhide' : 'hide'}(${pathAttr})">${o.hidden ? 'Show' : 'Hide'}</button>
-        ${secondaryBtn}
       </div>
     </div>`;
   }).join('');
@@ -22020,6 +22136,47 @@ async function animateActive() {
 
 async function hide(path) { await fetch('/output/hide?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
 async function unhide(path) { await fetch('/output/show?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
+
+async function deleteOutput(path) {
+  // Per-card × button. Hard-deletes the media + its sidecar from disk
+  // via /output/delete. One confirmation — destructive and irreversible.
+  // Selection state resets via poll() picking up the smaller outputs
+  // list; if the user was on the deleted card, selectOutput() drops to
+  // whatever the first remaining card is.
+  if (!path) return;
+  const base = path.split('/').pop();
+  if (!confirm('Delete this file from disk?\n\n' + base + '\n\nThis cannot be undone.')) return;
+  try {
+    const fd = new URLSearchParams();
+    fd.set('path', path);
+    const r = await fetch('/output/delete', { method: 'POST', body: fd });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      alert('Delete failed: ' + (data.error || ('HTTP ' + r.status)));
+      return;
+    }
+    if (activePath === path) activePath = null;
+    currentOutputs = [];
+    poll();
+  } catch (e) {
+    alert('Delete error: ' + (e.message || 'unknown'));
+  }
+}
+
+async function openOutputsFolder() {
+  // One-click Reveal in Finder. Global, lives in the Outputs header so
+  // it isn't duplicated per-card. macOS `open <dir>` — Phosphene is
+  // Apple Silicon-only, no cross-platform branch.
+  try {
+    const r = await fetch('/output/open_folder', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      alert('Open folder failed: ' + (data.error || ('HTTP ' + r.status)));
+    }
+  } catch (e) {
+    alert('Open folder error: ' + (e.message || 'unknown'));
+  }
+}
 function hideActive() { if (activePath) hide(activePath); }
 
 function useAsExtendSourcePath(path) {
