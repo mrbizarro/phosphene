@@ -7590,6 +7590,53 @@ class Handler(BaseHTTPRequestHandler):
             self._json(result, 202)
             return
 
+        # ====== Re-submit a failed/cancelled job by id ====================
+        # The Recent tab's Retry button hits this. We look up the source
+        # job in history (and current/queue defensively), clone its params,
+        # and append a new entry to the queue. The new job gets a fresh id;
+        # the source row stays in history so the user can see they retried.
+        if path == "/queue/retry":
+            source_id = (form.get("id", [""])[0] or "").strip()
+            if not source_id:
+                self._json({"error": "id required"}, 400); return
+            source = None
+            with LOCK:
+                for j in STATE.get("history") or []:
+                    if j.get("id") == source_id:
+                        source = j; break
+                if source is None:
+                    for j in STATE.get("queue") or []:
+                        if j.get("id") == source_id:
+                            source = j; break
+                cur = STATE.get("current")
+                if source is None and cur and cur.get("id") == source_id:
+                    source = cur
+            if source is None:
+                self._json({"error": f"job {source_id!r} not found in history/queue"}, 404); return
+            src_params = source.get("params") or {}
+            # Build a fresh job — copy params verbatim, mint a new id, drop
+            # any open_when_done flag (retries are usually background; user
+            # is mid-other-work and doesn't want the OS jumping windows).
+            new_job = {
+                "id": f"j-{int(time.time() * 1000):x}-{random.randrange(0xfff):03x}",
+                "status": "queued",
+                "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "started_at": None,
+                "finished_at": None,
+                "elapsed_sec": None,
+                "params": dict(src_params),
+                "raw_path": None,
+                "output_path": None,
+                "error": None,
+            }
+            new_job["params"]["open_when_done"] = False
+            with QUEUE_COND:
+                STATE["queue"].append(new_job)
+                QUEUE_COND.notify_all()
+            persist_queue()
+            self._json({"ok": True, "id": new_job["id"], "source_id": source_id})
+            return
+
         if path == "/queue/batch":
             raw = (form.get("prompts", [""])[0] or "").strip()
             if not raw:
@@ -11133,6 +11180,28 @@ HTML = r"""<!doctype html>
       background: linear-gradient(90deg, var(--accent), var(--accent-bright));
       transition: width var(--t-slow);
       border-radius: var(--r-pill);
+    }
+
+    /* Retry button on failed/cancelled rows in the Recent tab. Matches
+       the `.qchip` aesthetic used elsewhere — hairline chip, warm orange
+       so it reads as actionable distinct from neutral chrome. */
+    .retry-btn {
+      padding: 2px 9px;
+      font-size: 10px;
+      background: rgba(255, 168, 0, 0.08);
+      border: 1px solid rgba(255, 168, 0, 0.45);
+      color: #ffb84a;
+      border-radius: var(--r-pill);
+      cursor: pointer;
+      transition: var(--t-fast);
+      letter-spacing: 0.04em;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .retry-btn:hover {
+      background: rgba(255, 168, 0, 0.18);
+      border-color: rgba(255, 168, 0, 0.7);
+      color: #ffd58e;
     }
 
     /* Queue/recent lists — denser, hairline-card aesthetic. */
@@ -21454,12 +21523,23 @@ async function poll() {
               onclick='animateFromPhoto(${animateArgs})' title="Pre-fill i2v with this image (does not auto-submit)">Animate</button></span>
       </li>`;
     }
+    // Failed jobs get a Retry button in the action column. Clicking it
+    // re-submits the same params via /queue/add so the user doesn't have
+    // to rebuild the form. Cancelled jobs get the same treatment — a
+    // cancellation often means "wrong intent, try again with edits" but
+    // sometimes "ran out of RAM, want to retry as-is."
+    const isRetryable = j.status === 'failed' || j.status === 'cancelled';
+    const actionHtml = isRetryable
+      ? `<button class="retry-btn" type="button"
+                 title="Re-submit this job with the same params"
+                 onclick='retryJob(${JSON.stringify(j.id)})'>Retry</button>`
+      : '';
     return `
     <li class="${j.status}">
       <span class="badge">${j.status}</span>
       <span class="ttl" title="${titleAttr}">${titleHtml}</span>
       <span class="params">${fmtMin(j.elapsed_sec)} · ${j.finished_at ? j.finished_at.slice(11) : ''}</span>
-      <span></span>
+      <span>${actionHtml}</span>
     </li>`;
   }).join('');
 
@@ -21624,6 +21704,30 @@ document.addEventListener('DOMContentLoaded', () => {
 // reference image and the same prompt. Does NOT auto-submit; the user
 // keeps the chance to tweak prompt/seed/quality before clicking
 // Generate. Reversible (changing the image picker resets it).
+async function retryJob(jobId) {
+  // Re-submit a failed/cancelled job by its id. Server side endpoint
+  // /queue/retry takes the original job's id, copies its params verbatim
+  // into a fresh queue entry, and returns the new id. Toast on success
+  // (the Now/Queue pane will pick the new entry up on the next poll).
+  if (!jobId) return;
+  try {
+    const fd = new URLSearchParams();
+    fd.set('id', jobId);
+    const r = await fetch('/queue/retry', { method: 'POST', body: fd });
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* keep empty */ }
+    if (!r.ok || !data.ok) {
+      alert('Retry failed: ' + (data.error || ('HTTP ' + r.status)));
+      return;
+    }
+    // Force one immediate poll so the queue badge updates without the
+    // 1.5s wait. poll() is idempotent.
+    if (typeof poll === 'function') poll();
+  } catch (e) {
+    alert('Retry error: ' + (e.message || 'unknown'));
+  }
+}
+
 function animateFromPhoto(payload) {
   if (!payload || !payload.path) return;
   // Switch to i2v mode (pill + form fields). setMode('i2v') hides the
