@@ -10671,12 +10671,15 @@ HTML = r"""<!doctype html>
     /* Carousel grid — multi-row when there's enough room (uses CSS
        grid auto-fill), horizontal-scroll fallback on narrow widths.
        Cards have 16/9 thumb so the gallery reads as a contact sheet
-       at a glance. */
+       at a glance. Height clamped so only ~1.3 rows are visible —
+       enough peek of row 2 to telegraph "scroll for more" without
+       eating the video player's real estate. Was 36vh (≈2 full rows
+       at 1080p) which made the video preview cramped; Salo's call. */
     .carousel {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
       gap: 10px;
-      max-height: 36vh;
+      max-height: max(160px, 20vh);
       overflow-y: auto;
       padding-right: 4px;
     }
