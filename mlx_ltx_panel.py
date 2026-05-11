@@ -14736,14 +14736,14 @@ HTML = r"""<!doctype html>
       text-decoration: none;
     }
     body > header .brand img {
-      content: url('/assets/favicon-64.png');
+      /* Transparent-background SVG variant of the favicon. The PNG
+         baked in a #00061a square that read as a "rectangle behind the
+         circle" sitting on the header's dark navy — circle-only SVG
+         drops the rect so the glyph floats clean. */
+      content: url('/assets/phosphene_favicon_circle.svg');
       height: 46px;
       width: 46px;
       display: block;
-      /* Lighter drop-shadow so the inner concentric circles aren't
-         washed out. Per-iteration sizing: 22 → 34 → 46px. At 46px the
-         concentric-circle glyph reads clearly without any version-badge
-         or status pill crowding it. */
       filter: drop-shadow(0 0 3px rgba(79, 214, 255, 0.35));
     }
     body > header .brand::after {
@@ -14753,7 +14753,7 @@ HTML = r"""<!doctype html>
       background-clip: text;
       color: transparent;
       font-weight: 600;
-      font-size: 15px;
+      font-size: 22px;
       letter-spacing: -0.01em;
     }
     /* Hide the existing version-badge styling and re-render it Linear-style
