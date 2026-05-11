@@ -1131,6 +1131,11 @@ def _read_lora_sidecar(safetensors_path: Path) -> dict:
         "civitai_version_id": None,
         "civitai_url": None,         # link back to source page (for "read instructions")
         "downloaded_at": None,
+        # `kind` discriminates source: "train_character" for LoRAs produced
+        # by Phosphene's in-app trainer, anything else (or absent) for
+        # CivitAI / manual installs. The picker uses this to badge trained
+        # LoRAs distinctly so users can find their own characters fast.
+        "kind": None,
     }
     if sidecar.exists():
         try:
@@ -1184,6 +1189,7 @@ def list_user_loras() -> list[dict]:
             "preview_url": preview_url,
             "preview_type": preview_type,
             "base_model": meta.get("base_model"),
+            "kind": meta.get("kind"),    # "train_character" for in-app trained LoRAs
             # Compat tags (see _classify_lora_modes). The picker uses
             # this to filter the library down to LoRAs that can actually
             # fire with the user's CURRENT (mode, engine) selection. An
@@ -11518,6 +11524,14 @@ HTML = r"""<!doctype html>
       border: 1px solid var(--accent); color: var(--accent-bright);
       vertical-align: middle;
     }
+    /* "Trained" badge for LoRAs produced by the in-app Train Character
+       workflow. Distinct color from the (HF / ?) badges so the user
+       finds their own characters without scanning. */
+    .lora-row .lora-name .badge-trained {
+      border-color: rgba(89, 200, 130, 0.55);
+      color: rgba(89, 200, 130, 1);
+      background: rgba(89, 200, 130, 0.10);
+    }
     .lora-row .lora-name-meta {
       font-size: 10px; color: var(--muted); margin-top: 1px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -20213,6 +20227,12 @@ async function trainStart() {
 async function trainRefreshLoraList() {
   const list = document.getElementById('trainLoraList');
   if (!list) return;
+  // Keep the global picker in sync. /loras scans the same directory but
+  // also rebuilds _knownUserLoras + drops stale entries from _activeLoras.
+  // Cheap (one fs scan) and harmless if it races with a render. Letting
+  // it run unconditionally so a freshly-trained LoRA appears in T2V's
+  // picker the moment the trained list updates — no manual refresh.
+  try { if (typeof refreshLoras === 'function') refreshLoras(); } catch (e) {}
   try {
     const r = await fetch('/train/list');
     const j = await r.json();
@@ -21392,6 +21412,30 @@ async function poll() {
   document.getElementById('carouselTitle').textContent =
     filterMode === 'hidden' ? 'Hidden outputs'
                             : `Outputs · ${_visible.length}${_kindLabel}`;
+
+  // Train Character integration: detect newly-completed train jobs and
+  // refresh both the trained-LoRA list AND the global LoRA picker so a
+  // freshly-trained character appears in T2V/I2V's picker without a manual
+  // reload. We watch history for entries with mode === 'train' that
+  // weren't there last poll; cheap and survives the user being on any
+  // tab/mode at the time training finishes.
+  if (Array.isArray(s.history)) {
+    const trainDoneCount = s.history.filter(h =>
+      h && h.params && h.params.mode === 'train' && h.status === 'done'
+    ).length;
+    if (typeof window._lastTrainDoneCount === 'undefined') {
+      window._lastTrainDoneCount = trainDoneCount;
+    } else if (trainDoneCount > window._lastTrainDoneCount) {
+      window._lastTrainDoneCount = trainDoneCount;
+      // New train job(s) completed since last poll — re-sync everything.
+      if (typeof refreshLoras === 'function') {
+        try { refreshLoras(); } catch (e) {}
+      }
+      if (typeof trainRefreshLoraList === 'function') {
+        try { trainRefreshLoraList(); } catch (e) {}
+      }
+    }
+  }
 }
 
 // Balanced chip subtitle — kept in sync with current mode + frames so the
@@ -23196,7 +23240,11 @@ function renderLorasList() {
       compatible_modes: ul.compatible_modes || ['unknown'],
       active: !!active,
       strength: active ? active.strength : (ul.recommended_strength || 1.0),
-      kind: 'user',
+      // 'user' = downloaded/installed (CivitAI or manual);
+      // 'trained' = produced by Phosphene's in-app Train Character pipeline
+      // ('kind' on the sidecar is 'train_character'). The picker badges
+      // these separately so the user finds their own characters fast.
+      kind: ul.kind === 'train_character' ? 'trained' : 'user',
     });
   }
   for (const a of _activeLoras) {
@@ -23355,7 +23403,7 @@ function loraRowHtml(r, modeTag) {
   if (r.civitai_url) {
     corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()">↗</a>`);
   }
-  if (r.kind === 'user') {
+  if (r.kind === 'user' || r.kind === 'trained') {
     corner.push(`<button class="lora-icon-btn danger" type="button" title="Delete from disk"
                          onclick="event.stopPropagation(); deleteLora(${pathAttr}, ${nameAttr})">×</button>`);
   } else {
@@ -23379,7 +23427,7 @@ function loraRowHtml(r, modeTag) {
         <div class="lora-toggle-dot"></div>
         <div class="lora-text">
           <div class="lora-name" title="${pathHtml}">
-            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${familyBadges.join('')}
+            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${r.kind === 'trained' ? '<span class="badge badge-trained" title="Trained in Phosphene’s Train Character workflow">Trained</span>' : ''}${familyBadges.join('')}
           </div>
           <div class="lora-name-meta" title="${escapeHtml(trigs.join(', '))}">${escapeHtml(trigSummary)}</div>
         </div>
