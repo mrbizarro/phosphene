@@ -3790,6 +3790,15 @@ def run_image_job_inner(job: dict) -> None:
     # silently produce noise. Only mflux engines accept LoRAs today; the
     # `mock` kind ignores the field.
     user_loras = list(p.get("loras") or [])
+    if user_loras and cfg.kind != "mflux":
+        # Honest warning instead of silent drop — the user picked LoRAs
+        # but the chosen engine (hidream / mock) can't apply them yet.
+        # Surfacing this in the job log keeps "patterns aren't working"
+        # diagnosable without grepping the source.
+        dropped_names = [Path(e.get("path", "")).name or "?" for e in user_loras]
+        push(f"[image] WARN: {len(user_loras)} LoRA(s) ignored — "
+             f"{cfg.kind!r} engine does not support LoRAs yet "
+             f"(dropped: {', '.join(dropped_names)})")
     if user_loras and cfg.kind == "mflux":
         preset_paths = list(cfg.mflux_lora_paths or [])
         preset_scales = list(cfg.mflux_lora_scales or [])
@@ -23582,6 +23591,7 @@ function _currentLoraModeFilter() {
   if (eng.startsWith('flux1') || eng === 'flux1_inline')        return 'image:flux1';
   if (eng.startsWith('kontext'))   return 'image:kontext';
   if (eng.startsWith('z_image'))   return 'image:z_image';
+  if (eng.startsWith('hidream'))   return 'image:hidream';
   // Mock engine is image-lane — narrow off LTX video LoRAs the same way
   // 'auto' does. Returning '' here skipped the filter entirely (same bug
   // ab50f12 fixed for 'auto'); video LTX LoRAs would re-appear in the
@@ -23614,6 +23624,7 @@ function _loraFilterLabel(tag) {
     case 'image:kontext': return 'FLUX.1 Kontext LoRAs';
     case 'image:z_image': return 'Z-Image LoRAs (none expected — most LoRAs trained for other families)';
     case 'image:sdxl':    return 'SDXL LoRAs';
+    case 'image:hidream': return 'HiDream LoRAs (LoRA support not yet implemented — picked LoRAs are ignored)';
     default:              return 'all installed LoRAs';
   }
 }
