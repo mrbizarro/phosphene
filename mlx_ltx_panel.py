@@ -17004,6 +17004,8 @@ HTML = r"""<!doctype html>
     /* For buttons that previously held a single unicode glyph
        (×, ↗, ↻, etc.). Make the SVG inherit the button's flex centering. */
     button > .ph, a > .ph { display: block; }
+    /* Spinner keyframe for refresh icons used in "checking…" pills. */
+    @keyframes phSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -17061,6 +17063,9 @@ HTML = r"""<!doctype html>
 <symbol id="ph-x-bold" viewBox="0 0 256 256"><line x1="200" y1="56" x2="56" y2="200" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="24"/><line x1="200" y1="200" x2="56" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="24"/></symbol>
 <symbol id="ph-x-circle" viewBox="0 0 256 256"><line x1="160" y1="96" x2="96" y2="160" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="96" x2="160" y2="160" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="128" cy="128" r="96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-x-circle-fill" viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm37.66,130.34a8,8,0,0,1-11.32,11.32L128,139.31l-26.34,26.35a8,8,0,0,1-11.32-11.32L116.69,128,90.34,101.66a8,8,0,0,1,11.32-11.32L128,116.69l26.34-26.35a8,8,0,0,1,11.32,11.32L139.31,128Z"/></symbol>
+<symbol id="ph-paperclip" viewBox="0 0 256 256"><path d="M160,80,76.69,164.69a16,16,0,0,0,22.63,22.62L198.63,86.63a32,32,0,0,0-45.26-45.26L54.06,142.06a48,48,0,0,0,67.88,67.88L204,128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-file-text" viewBox="0 0 256 256"><path d="M200,224H56a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h96l56,56V216A8,8,0,0,1,200,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="136" x2="160" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="168" x2="160" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-file-pdf" viewBox="0 0 256 256"><polyline points="216 152 184 152 184 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="208" y1="184" x2="184" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,192H64a20,20,0,0,0,0-40H48v56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M112,152v56h16a28,28,0,0,0,0-56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,112V40a8,8,0,0,1,8-8h96l56,56v24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
 </svg>
 
@@ -17310,7 +17315,7 @@ HTML = r"""<!doctype html>
            warn/err; auto-dismisses on green ok. -->
       <div id="agentEngineBanner" class="agent-engine-banner" hidden role="status" aria-live="polite">
         <div class="agent-engine-banner-text">
-          <span class="agent-engine-banner-icon" id="agentEngineBannerIcon">●</span>
+          <span class="agent-engine-banner-icon" id="agentEngineBannerIcon"><svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg></span>
           <span class="agent-engine-banner-title" id="agentEngineBannerTitle">Engine</span>
           <span class="agent-engine-banner-detail" id="agentEngineBannerDetail">…</span>
         </div>
@@ -17912,8 +17917,8 @@ HTML = r"""<!doctype html>
       <div class="form-action-footer" id="formActionFooter">
         <div class="queue-strip">
           <button type="button" class="qchip" onclick="openBatch()" title="Paste many prompts at once and queue them">⊞ Batch</button>
-          <button type="button" class="qchip" id="pauseBtn" onclick="togglePause()" title="Pause / resume the render queue">⏸ Pause queue</button>
-          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)">✕ Clear</button>
+          <button type="button" class="qchip" id="pauseBtn" onclick="togglePause()" title="Pause / resume the render queue"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-pause-fill"/></svg>Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear</button>
           <span class="qchip-spacer"></span>
           <span class="qchip-derived" id="derivedFooter"></span>
         </div>
@@ -18051,8 +18056,8 @@ HTML = r"""<!doctype html>
       <div class="form-action-footer" id="formActionFooterStudio">
         <div class="queue-strip">
           <button type="button" class="qchip" onclick="openBatch()" title="Paste many prompts at once and queue them">⊞ Batch</button>
-          <button type="button" class="qchip" id="pauseBtnStudio" onclick="togglePause()" title="Pause / resume the render queue">⏸ Pause queue</button>
-          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)">✕ Clear</button>
+          <button type="button" class="qchip" id="pauseBtnStudio" onclick="togglePause()" title="Pause / resume the render queue"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-pause-fill"/></svg>Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs (running job continues)"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear</button>
           <span class="qchip-spacer"></span>
         </div>
         <div class="actions">
@@ -18102,7 +18107,7 @@ HTML = r"""<!doctype html>
           <span class="train-counter" id="trainCounter">0 / 50 images</span>
           <span class="train-counter-hint" id="trainCounterHint">need at least 15 to train</span>
           <span class="qchip-spacer"></span>
-          <button type="button" class="qchip" id="trainClearAllBtn" onclick="trainClearAll()" hidden>✕ Clear all</button>
+          <button type="button" class="qchip" id="trainClearAllBtn" onclick="trainClearAll()" hidden><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear all</button>
         </div>
       </div>
 
@@ -18199,8 +18204,8 @@ HTML = r"""<!doctype html>
       <!-- Sticky action footer — same chrome as the video/studio forms. -->
       <div class="form-action-footer" id="formActionFooterTrain">
         <div class="queue-strip">
-          <button type="button" class="qchip" id="pauseBtnTrain" onclick="togglePause()" title="Pause / resume the queue">⏸ Pause queue</button>
-          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs">✕ Clear</button>
+          <button type="button" class="qchip" id="pauseBtnTrain" onclick="togglePause()" title="Pause / resume the queue"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-pause-fill"/></svg>Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear</button>
           <span class="qchip-spacer"></span>
         </div>
         <div class="actions">
@@ -19404,7 +19409,11 @@ function imgStudioUpdateValidity() {
     btn.disabled = !!invalidReason;
     btn.title = invalidReason || 'Generate (Cmd/Ctrl+Enter)';
     if (status && !status.textContent.startsWith('Generating')) {
-      status.textContent = invalidReason ? '⚠ ' + invalidReason : '';
+      if (invalidReason) {
+        status.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>' + escapeHtml(invalidReason);
+      } else {
+        status.textContent = '';
+      }
     }
   }
 }
@@ -20595,9 +20604,11 @@ async function enhancePrompt() {
   if (!original) { alert('Type a prompt before enhancing it.'); return; }
   const mode = (currentMode === 'i2v' || currentMode === 'keyframe' || currentMode === 'extend') ? 'i2v' : 't2v';
   const btn = document.getElementById('enhanceBtn');
-  const originalLabel = btn.textContent;
+  // Snapshot the FULL inner markup, not just text — the button carries
+  // an inline ph-sparkle-fill SVG that textContent would strip.
+  const originalLabel = btn.innerHTML;
   btn.disabled = true;
-  btn.textContent = '✨ Loading Gemma… (~15s on cold start)';
+  btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>Loading Gemma… (~15s on cold start)';
   let res;
   try {
     const fd = new URLSearchParams({ prompt: original, mode });
@@ -20605,10 +20616,10 @@ async function enhancePrompt() {
     res = await r.json();
   } catch (e) {
     alert('Enhance request failed: ' + (e.message || e));
-    btn.disabled = false; btn.textContent = originalLabel;
+    btn.disabled = false; btn.innerHTML = originalLabel;
     return;
   }
-  btn.disabled = false; btn.textContent = originalLabel;
+  btn.disabled = false; btn.innerHTML = originalLabel;
   if (res.error) { alert('Enhance failed: ' + res.error); return; }
   // Show diff in a confirm so the user can decide whether to accept.
   const accept = confirm(
@@ -20767,7 +20778,7 @@ function updateDerived() {
     warns.push('12→24fps is experimental; check dialogue lip-sync and fast motion');
   }
   const banner = document.getElementById('warnBanner');
-  if (warns.length) { banner.innerHTML = '⚠ ' + warns.join(' · '); banner.classList.add('show'); }
+  if (warns.length) { banner.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>' + warns.join(' · '); banner.classList.add('show'); }
   else banner.classList.remove('show');
 
   // Mode-aware visibility
@@ -22935,10 +22946,10 @@ function setTokenStatus(prefix, isSet, dirty) {
   if (!el) return;
   el.classList.remove('set', 'dirty');
   if (dirty) {
-    el.textContent = '✎ unsaved';
+    el.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-pencil-simple"/></svg>unsaved';
     el.classList.add('dirty');
   } else if (isSet) {
-    el.textContent = '✓ saved';
+    el.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>saved';
     el.classList.add('set');
   } else {
     el.textContent = 'not set';
@@ -24140,8 +24151,7 @@ async function versionPillClick() {
 async function versionDoRefresh() {
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
-  const origText = pill.textContent;
-  pill.textContent = '⟳ checking…';
+  pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>checking…';
   try {
     const r = await fetch('/version/check', { method: 'POST' });
     const data = await r.json();
@@ -24473,7 +24483,12 @@ function agentEngineBannerShow(j, opts) {
 
   if (titleEl) titleEl.textContent = title;
   if (detailEl) detailEl.textContent = detail;
-  if (iconEl) iconEl.textContent = state === 'ok' ? '●' : (state === 'warn' ? '◐' : '◯');
+  if (iconEl) {
+    const ref = state === 'ok' ? '#ph-check-bold'
+              : state === 'warn' ? '#ph-warning-fill'
+              : '#ph-x-circle-fill';
+    iconEl.innerHTML = '<svg class="ph" aria-hidden="true"><use href="' + ref + '"/></svg>';
+  }
   if (actionEl) {
     actionEl.textContent = actionLabel;
     actionEl.style.display = showAction ? '' : 'none';
@@ -25652,7 +25667,7 @@ function renderAttachmentChips(attachments) {
       thumb.src = '/image?path=' + encodeURIComponent(a.path);
       thumb.alt = a.name;
     } else {
-      thumb.textContent = agentAttachIcon(kind);
+      thumb.innerHTML = agentAttachIcon(kind);
     }
     const nameEl = document.createElement('span');
     nameEl.className = 'name';
@@ -26380,10 +26395,13 @@ function agentFmtBytes(n) {
 }
 
 function agentAttachIcon(kind) {
-  if (kind === 'image') return '🖼';
-  if (kind === 'pdf')   return '📄';
-  if (kind === 'text')  return '📝';
-  return '📎';
+  // Returns inline SVG markup (Phosphor) for attachment-chip thumbs.
+  // Callers should use .innerHTML, not .textContent.
+  const id = (kind === 'image') ? 'ph-image'
+           : (kind === 'pdf')   ? 'ph-file-pdf'
+           : (kind === 'text')  ? 'ph-file-text'
+           :                       'ph-paperclip';
+  return '<svg class="ph" aria-hidden="true"><use href="#' + id + '"/></svg>';
 }
 
 function agentRenderAttachRow() {
@@ -26409,7 +26427,7 @@ function agentRenderAttachRow() {
       thumb.src = '/image?path=' + encodeURIComponent(a.path);
       thumb.alt = a.name;
     } else {
-      thumb.textContent = agentAttachIcon(kind);
+      thumb.innerHTML = agentAttachIcon(kind);
     }
     const name = document.createElement('span');
     name.className = 'name';
@@ -27669,7 +27687,7 @@ function agentStageRender(status, sess) {
           anim.type = 'button';
           anim.className = 'refine-btn';
           anim.title = 'Animate this still — pre-fill the i2v form';
-          anim.textContent = '▶';
+          anim.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-play-fill"/></svg>';
           anim.addEventListener('click', (e) => {
             e.stopPropagation();
             if (typeof animateFromPhoto === 'function') {
