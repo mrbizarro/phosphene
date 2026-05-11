@@ -14705,15 +14705,14 @@ HTML = r"""<!doctype html>
     }
 
     /* === TOP HEADER ============================================
-       54px tall (bumped from 44px per Salo's feedback — the 44px
-       version compressed the logo too tight; the radiating-circle
-       glyph needed room to breathe). Blurred backdrop, hairline
-       bottom border. The wordmark sits on the left as a brand pill
-       (logo + gradient text + version + DEV badge). Status chips
-       cluster on the right with a vertical divider before the user
-       actions. */
+       62px tall — sized to give the 46px brand logo proper breathing
+       room (header growth track: 44 → 54 → 62px; logo growth: 22 →
+       34 → 46px). Blurred backdrop, hairline bottom border. The
+       wordmark sits on the left as a brand pill (logo + gradient text
+       + version + DEV badge). Status chips cluster on the right with
+       a vertical divider before the user actions. */
     body > header {
-      height: 54px;
+      height: 62px;
       flex: 0 0 auto;
       padding: 0 16px;
       gap: 12px;
@@ -14738,13 +14737,13 @@ HTML = r"""<!doctype html>
     }
     body > header .brand img {
       content: url('/assets/favicon-64.png');
-      height: 34px;
-      width: 34px;
+      height: 46px;
+      width: 46px;
       display: block;
       /* Lighter drop-shadow so the inner concentric circles aren't
-         washed out — the original 0 0 6px / 0.18 made the dot read as
-         a fuzzy blob at 22px. Now a tight halo that lifts the glyph
-         off the dark navy without obscuring its detail. */
+         washed out. Per-iteration sizing: 22 → 34 → 46px. At 46px the
+         concentric-circle glyph reads clearly without any version-badge
+         or status pill crowding it. */
       filter: drop-shadow(0 0 3px rgba(79, 214, 255, 0.35));
     }
     body > header .brand::after {
