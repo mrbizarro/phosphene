@@ -21232,7 +21232,13 @@ async function poll() {
     _setOfflineBanner(false);
   } catch (e) {
     _POLL_FAILS += 1;
-    if (_POLL_FAILS >= 2) _setOfflineBanner(true);
+    // Suppress the offline banner while a known long-running endpoint is
+    // in flight (e.g. /version/pull which blocks the server for ~30s on
+    // git fetch + git pull). Without this suppression the banner flashes
+    // "Phosphene offline → reconnected" at the tail of every successful
+    // Update click — looks like an error to the user when nothing is
+    // actually wrong.
+    if (_POLL_FAILS >= 2 && !window._suppressOfflineBanner) _setOfflineBanner(true);
     return;
   }
   LAST_STATUS = s;
@@ -24434,6 +24440,12 @@ async function versionDoPull() {
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
   pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>pulling…';
+  // Tell poll() not to flash the offline banner during this call —
+  // /version/pull is single-threaded server-side and blocks /status for
+  // ~30s while git fetch + git pull + remote-check run. Without this
+  // suppression the user sees an "offline → reconnected" flash at the
+  // tail of every successful Update click.
+  window._suppressOfflineBanner = true;
   try {
     const r = await fetch('/version/pull', { method: 'POST' });
     const data = await r.json();
@@ -24459,6 +24471,17 @@ async function versionDoPull() {
     pill.classList.remove('pill-busy');
     renderVersionPill();
     alert(`Pull failed: ${e.message || e}`);
+  } finally {
+    // Reset the suppression flag so future genuine outages still surface
+    // the banner. Also clear the failure counter so we don't fire on the
+    // very next legit poll because of stale state from the pull window.
+    window._suppressOfflineBanner = false;
+    _POLL_FAILS = 0;
+    // Force one immediate clean poll — also clears any latent banner
+    // that snuck through (e.g. if the page was on a slow tab and missed
+    // a couple seconds of state).
+    _setOfflineBanner(false);
+    if (typeof poll === 'function') poll();
   }
 }
 
