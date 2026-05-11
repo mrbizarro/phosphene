@@ -3882,6 +3882,10 @@ def run_image_job_inner(job: dict) -> None:
             "session_id": p.get("session_tag") or None,
             "shot_label": None,
             "take_index": None,
+            # Wall-clock seconds for the whole image job (load + n candidates).
+            # The gallery card sub-line pulls this via list_library_images and
+            # renders "Xs · YMB" the same way video cards do.
+            "elapsed_sec": elapsed,
             "generated_at": generated_at,
             "refs_ignored": c.get("refs_ignored", False),
             "source": "panel.queue.image",
@@ -13649,6 +13653,58 @@ HTML = r"""<!doctype html>
       background: var(--accent-bright);
     }
 
+    /* Expand lightbox: full-viewport image/video viewer triggered from
+       the main player's Expand button. Backdrop click + Esc both close.
+       Image scales to fit the viewport without zooming past native res. */
+    .expand-lightbox {
+      position: fixed; inset: 0;
+      background: rgba(0,2,12,0.92);
+      backdrop-filter: blur(10px);
+      z-index: 300;
+      display: flex;
+      align-items: center; justify-content: center;
+      flex-direction: column;
+      padding: 40px 40px 24px;
+      animation: expand-fade-in 0.15s ease;
+    }
+    @keyframes expand-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    .expand-lightbox .expand-stage {
+      flex: 1 1 auto;
+      display: flex; align-items: center; justify-content: center;
+      width: 100%; min-height: 0;
+    }
+    .expand-lightbox .expand-stage img,
+    .expand-lightbox .expand-stage video {
+      max-width: 100%; max-height: 100%;
+      width: auto; height: auto;
+      object-fit: contain;
+      border-radius: 10px;
+      box-shadow: 0 30px 90px rgba(0,0,0,0.7);
+    }
+    .expand-lightbox .expand-meta {
+      flex: 0 0 auto;
+      margin-top: 16px;
+      color: rgba(255,255,255,0.7);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      text-align: center;
+      max-width: 80vw;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .expand-lightbox .expand-close {
+      position: absolute;
+      top: 18px; right: 22px;
+      width: 36px; height: 36px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.12s ease;
+    }
+    .expand-lightbox .expand-close:hover { background: rgba(255,255,255,0.16); }
+
     /* ---- Composer reference chip ----
        When the user clicks Refine on a clip, a chip appears just above
        the textarea with the clip's label + a × to clear it. The chip's
@@ -18449,6 +18505,14 @@ HTML = r"""<!doctype html>
           </svg>
           <span class="po-act-label">Animate</span>
         </button>
+        <button id="expandBtn" class="po-act" type="button"
+                onclick="openExpandLightbox()" title="Expand to fullscreen (Esc to close)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 6 V3 H6 M10 3 H13 V6 M13 10 V13 H10 M6 13 H3 V10"
+                  stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="po-act-label">Expand</span>
+        </button>
         <button class="po-act po-act-danger" type="button"
                 onclick="hideActive()" title="Hide this output from the gallery">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -18476,6 +18540,20 @@ HTML = r"""<!doctype html>
           <div class="pop-meta" id="playerOverlayMetaProg">starting…</div>
         </div>
       </div>
+    </div>
+    <!-- Expand lightbox: full-viewport overlay shared by image + video.
+         Opens via the Expand button on the player overlay actions, or by
+         pressing F when an output is selected. Click outside the media or
+         press Esc to close. -->
+    <div class="expand-lightbox" id="expandLightbox" style="display:none"
+         onclick="if(event.target===this)closeExpandLightbox()">
+      <button class="expand-close" type="button" onclick="closeExpandLightbox()" title="Close (Esc)">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M5 5 L15 15 M15 5 L5 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="expand-stage" id="expandStage"></div>
+      <div class="expand-meta" id="expandMeta"></div>
     </div>
     <!-- Hidden compatibility slot. selectOutput() writes #playerName here
          and toggles display on #playerMeta — both kept so external code
@@ -21947,8 +22025,8 @@ function renderCarousel() {
       </div>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
-        <div class="sub" title="${isPhoto ? 'File size' : 'Render time · file size'}">
-          ${isPhoto ? '' : _outputDurationLabel(o) + ' · '}${o.size_mb.toFixed(1)} MB
+        <div class="sub" title="Render time · file size">
+          ${_outputDurationLabel(o)} · ${o.size_mb.toFixed(1)} MB
         </div>
       </div>
     </div>`;
@@ -22113,6 +22191,57 @@ function selectOutput(path) {
   if (useExtBtn) useExtBtn.style.display = isPhoto ? 'none' : '';
   if (animBtn) animBtn.style.display = isPhoto ? '' : 'none';
 }
+
+// Expand lightbox — full-viewport viewer for the active output. Reuses
+// the active entry's URL / kind detection so a single button works for
+// both image and video. Closed by Esc, backdrop click, or the × button.
+function openExpandLightbox() {
+  if (!activePath) return;
+  const o = currentOutputs.find(x => x.path === activePath);
+  if (!o) return;
+  const lb = document.getElementById('expandLightbox');
+  const stage = document.getElementById('expandStage');
+  const meta = document.getElementById('expandMeta');
+  if (!lb || !stage) return;
+  const isPhoto = isPhotoOutputMain(o);
+  // Build the media element fresh each time so the previous selection's
+  // <video> stops decoding immediately.
+  stage.innerHTML = isPhoto
+    ? `<img src="${o.url}" alt="${escapeHtml(o.name)}">`
+    : `<video src="${o.url}" controls autoplay></video>`;
+  if (meta) {
+    const sizeLbl = `${o.size_mb.toFixed(1)} MB`;
+    meta.textContent = `${o.name} · ${sizeLbl}`;
+  }
+  lb.style.display = 'flex';
+}
+
+function closeExpandLightbox() {
+  const lb = document.getElementById('expandLightbox');
+  const stage = document.getElementById('expandStage');
+  if (!lb) return;
+  if (stage) stage.innerHTML = '';  // stops video playback
+  lb.style.display = 'none';
+}
+
+// Esc + F shortcuts for the expand lightbox. Bound once at module init.
+(function _wireExpandLightboxKeys() {
+  document.addEventListener('keydown', (e) => {
+    const lb = document.getElementById('expandLightbox');
+    if (!lb) return;
+    const isOpen = lb.style.display === 'flex';
+    // Don't steal keystrokes from inputs/textareas.
+    const tag = (e.target && e.target.tagName) || '';
+    const inField = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+    if (e.key === 'Escape' && isOpen) {
+      closeExpandLightbox();
+      e.preventDefault();
+    } else if ((e.key === 'f' || e.key === 'F') && !isOpen && !inField && activePath) {
+      openExpandLightbox();
+      e.preventDefault();
+    }
+  });
+})();
 
 // Animate the active output (photo only). Mirrors animateFromPhoto's
 // shape — pre-fills the i2v form from the active entry's path and the
