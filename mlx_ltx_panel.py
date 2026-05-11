@@ -9666,13 +9666,15 @@ HTML = r"""<!doctype html>
       background: rgba(0, 0, 0, 0.6);
       color: var(--text);
       font-size: 12px;
-      line-height: 18px;
       cursor: pointer;
       display: none;
+      align-items: center;
+      justify-content: center;
       padding: 0;
       transition: background var(--t-fast);
     }
-    .train-thumb:hover .train-thumb-x { display: block; }
+    .train-thumb .train-thumb-x .ph { width: 11px; height: 11px; }
+    .train-thumb:hover .train-thumb-x { display: flex; }
     .train-thumb .train-thumb-x:hover { background: rgba(229, 78, 95, 0.85); }
     .train-thumb.uploading::after {
       content: "";
@@ -9858,12 +9860,13 @@ HTML = r"""<!doctype html>
     .cz-summary:hover { background: rgba(255,255,255,0.02); color: var(--text); }
     .customize-section[open] .cz-summary { color: var(--text); }
     .cz-summary .cz-chevron {
-      display: inline-block; width: 12px;
-      font-size: 10px;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 12px; height: 12px;
       transform: rotate(-90deg);
       transition: transform 140ms ease;
       color: var(--muted);
     }
+    .cz-summary .cz-chevron .ph { width: 12px; height: 12px; }
     .customize-section[open] .cz-summary .cz-chevron {
       transform: rotate(0deg);
       color: var(--accent-bright, #58a6ff);
@@ -10753,6 +10756,7 @@ HTML = r"""<!doctype html>
       transition: opacity var(--t-fast), background var(--t-fast);
       z-index: 4;
     }
+    .car-card .car-info-btn .ph { width: 14px; height: 14px; }
     .car-card:hover .car-info-btn,
     .car-card.active .car-info-btn { opacity: 1; }
     .car-card .car-info-btn:hover {
@@ -11402,12 +11406,13 @@ HTML = r"""<!doctype html>
       background: rgba(140,160,255,0.04);
     }
     .loras-summary .loras-chevron {
-      display: inline-block; width: 14px;
-      font-size: 11px; color: var(--muted);
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px;
+      color: var(--muted);
       transform: rotate(-90deg);    /* points right when collapsed */
       transition: transform 140ms ease;
-      text-align: center;
     }
+    .loras-summary .loras-chevron .ph { width: 14px; height: 14px; }
     .loras-section[open] .loras-summary .loras-chevron {
       transform: rotate(0deg);      /* points down when open */
       color: var(--accent-bright, #93a8ff);
@@ -11555,6 +11560,7 @@ HTML = r"""<!doctype html>
       cursor: pointer; display: inline-flex; align-items: center;
       justify-content: center; text-decoration: none;
     }
+    .lora-row .lora-icon-btn .ph { width: 13px; height: 13px; }
     .lora-row .lora-icon-btn:hover {
       color: var(--text); border-color: var(--border);
     }
@@ -17698,7 +17704,7 @@ HTML = r"""<!doctype html>
       <div id="loraPickerVideoSlot">
         <details id="lorasDetails" open class="loras-section">
           <summary class="loras-summary">
-            <span class="loras-chevron" aria-hidden="true">▾</span>
+            <span class="loras-chevron" aria-hidden="true"><svg class="ph"><use href="#ph-caret-down-bold"/></svg></span>
             <span class="loras-title">LoRAs</span>
             <span class="loras-meta" id="lorasSummaryCount">none active</span>
             <!-- Action buttons live in the header so they're visible
@@ -17768,7 +17774,7 @@ HTML = r"""<!doctype html>
       <div class="mode-only" id="sizingSection">
         <details id="customizeDetails" class="customize-section">
           <summary class="cz-summary">
-            <span class="cz-chevron" aria-hidden="true">▾</span>
+            <span class="cz-chevron" aria-hidden="true"><svg class="ph"><use href="#ph-caret-down-bold"/></svg></span>
             <span class="cz-title">Customize</span>
             <span class="cz-meta" id="customizeSummary">16:9 · default speed</span>
           </summary>
@@ -19504,7 +19510,7 @@ function imgStudioRenderSlot(idx) {
     slot.innerHTML = `
       <span class="ref-tag">${tag}</span>
       <div class="ref-empty">
-        <div class="ref-icon">🖼</div>
+        <div class="ref-icon"><svg class="ph" aria-hidden="true"><use href="#ph-image"/></svg></div>
         <div class="ref-cta">${cta}</div>
       </div>
     `;
