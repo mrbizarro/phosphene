@@ -36,8 +36,11 @@ This module is the dispatch layer. Four backends ship today:
     matches upstream's master-weight precision and is the only precision
     that doesn't show patch-grid artifacts in flat regions. Q8/Q6 work
     at square 2048×2048 but exhibit visible 32-px grid artifacts at
-    non-square trained dims. Q4 ships dark (brightness collapse). Strong
-    prompt fidelity across photo/anime/painting/macro/architecture.
+    non-square trained dims. Q4 ships dark (brightness collapse).
+    **Supports HiDream's native edit + multi-ref**: K=1 instruction edits
+    ("change the white jacket to red") preserve scene+pose+identity;
+    K=2-3 subject-driven personalization composes multiple references
+    into a new scene. Edit requires BF16 (quant breaks ref attention).
 
   Recommended defaults (May 2026):
     - **Comfortable+ (32 GB+)**  → `Runpod/FLUX.2-klein-4B-mflux-4bit`
@@ -213,7 +216,7 @@ def generate(*, prompt: str, n: int, output_dir: Path,
     if config.kind == "bfl":
         return _generate_bfl(prompt, n, width, height, output_dir, base_seed, config)
     if config.kind == "hidream":
-        return _generate_hidream(prompt, n, width, height, output_dir, base_seed, config, on_log=on_log)
+        return _generate_hidream(prompt, n, width, height, output_dir, base_seed, config, refs=refs, on_log=on_log)
     raise ValueError(f"unknown image engine kind: {config.kind!r}")
 
 
@@ -1062,6 +1065,7 @@ def _patch_align(value: int, patch: int = HIDREAM_PATCH_SIZE) -> int:
 def _generate_hidream(prompt: str, n: int, width: int, height: int,
                       output_dir: Path, base_seed: int | None,
                       config: ImageEngineConfig,
+                      refs: list[str] | None = None,
                       on_log: "callable | None" = None) -> list[dict]:
     """Subprocess pattern: one call per candidate.
 
@@ -1069,9 +1073,14 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     times with seed = base_seed + i (or random if base_seed is None) so
     candidate order is reproducible.
 
-    No multi-ref/refs support yet — this lab pass is text-to-image only.
-    Caller should not pass refs to a hidream config; the agent UI's
-    refs path goes through mflux qwen-edit per the existing convention.
+    Edit / multi-ref support is enabled — when `refs` is non-empty the
+    generator runs HiDream's native edit/multi-reference path at BF16
+    precision. K=1 → instruction-based edit ("change the white jacket
+    to red"); K=2-3 → subject-driven personalization (compose multiple
+    subjects in a new scene). Q6/Q8 quantization breaks edit because
+    per-group dequant noise compounds in the attention against ref
+    features, so edit ALWAYS uses BF16 even if the user picked a smaller
+    quant for text-to-image.
     """
     import os
     import random
@@ -1118,8 +1127,14 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
             "--noise-scale-end", str(config.hidream_noise_scale),
             "--noise-clip-std", str(config.hidream_noise_clip_std),
         ]
+        if refs:
+            # HiDream's native edit / multi-ref path. Supports K=1 (instruction
+            # edit) up to K=3 (subject personalization). Always forces BF16
+            # model — Q6/Q8 break ref attention.
+            cmd.extend(["--ref-images", *map(str, refs)])
         if on_log:
-            on_log(f"[hidream] launching candidate {i+1}/{n} seed={seed}")
+            on_log(f"[hidream] launching candidate {i+1}/{n} seed={seed}"
+                   + (f" with {len(refs)} ref(s)" if refs else ""))
 
         proc = subprocess.Popen(
             cmd,

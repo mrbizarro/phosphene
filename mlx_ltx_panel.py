@@ -18164,7 +18164,7 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 (max-fidelity T2I, no refs &middot; ~67 s/image, 16 GB) [NEW]</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 (max-fidelity T2I + native edit/multi-ref &middot; ~67 s/image, 16 GB) [NEW]</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
