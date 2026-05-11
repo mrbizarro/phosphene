@@ -9315,6 +9315,240 @@ HTML = r"""<!doctype html>
       margin-top: 14px;
     }
 
+    /* ============================================================
+       Train Character pane (.train-pane) — same chrome as the
+       studio + video form-pane composers. Section labels are h2
+       mono uppercase, inputs reuse the global hairline-bordered
+       input styles, action footer mirrors #formActionFooter.
+       ============================================================ */
+    .train-pane.show { display: block; }
+    .train-pane h2 .h2-hint {
+      font-size: 10px;
+      letter-spacing: 0;
+      color: var(--muted);
+      text-transform: none;
+      font-family: inherit;
+      font-weight: 400;
+      opacity: 0.85;
+      margin-left: 8px;
+    }
+    .train-pane .composer-card.train-card {
+      padding: 14px 14px 12px;
+      margin-bottom: 12px;
+    }
+    /* Drop zone — mirrors the picker-drop idiom from the video I2V
+       picker (dashed border, accent on hover) but tall enough to hold
+       a 4-column thumb grid once images are present. */
+    .train-drop {
+      border: 1.5px dashed var(--ph-border-strong);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.015);
+      transition: border-color var(--t-fast), background var(--t-fast);
+      min-height: 140px;
+      padding: 14px;
+      cursor: pointer;
+      position: relative;
+    }
+    .train-drop:hover {
+      border-color: var(--accent);
+      background: rgba(90, 124, 255, 0.04);
+    }
+    .train-drop.dragover {
+      border-color: var(--accent);
+      border-style: solid;
+      background: rgba(90, 124, 255, 0.10);
+    }
+    .train-drop.has-images { cursor: default; }
+    .train-drop-empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 18px 8px;
+      font-size: 12px;
+      pointer-events: none;       /* clicks pass through to the drop zone */
+    }
+    .train-drop-empty .picker-icon { font-size: 28px; margin-bottom: 6px; }
+    .train-drop-empty .picker-cta {
+      font-size: 13px;
+      color: var(--text);
+      opacity: 0.95;
+      margin-bottom: 4px;
+    }
+    /* Thumbnail grid — 4 columns at the form-pane's typical width,
+       drops to 3 on narrow screens. Each thumb is a 1:1 box mirroring
+       the trainer's center-crop preview. */
+    .train-thumbs {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+      gap: 6px;
+    }
+    .train-thumb {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
+      overflow: hidden;
+      background: rgba(12, 19, 48, 0.6);
+      border: 1px solid var(--ph-border-soft);
+    }
+    .train-thumb img {
+      width: 100%; height: 100%;
+      object-fit: cover;          /* the 1:1 center-crop preview */
+      object-position: center;
+      display: block;
+    }
+    .train-thumb .train-thumb-num {
+      position: absolute;
+      left: 4px; bottom: 4px;
+      font-size: 9.5px;
+      font-family: var(--ph-font-mono);
+      background: rgba(0, 0, 0, 0.55);
+      color: var(--text);
+      padding: 1px 5px;
+      border-radius: 4px;
+      letter-spacing: 0;
+    }
+    .train-thumb .train-thumb-x {
+      position: absolute;
+      top: 3px; right: 3px;
+      width: 18px; height: 18px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.6);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 18px;
+      cursor: pointer;
+      display: none;
+      padding: 0;
+      transition: background var(--t-fast);
+    }
+    .train-thumb:hover .train-thumb-x { display: block; }
+    .train-thumb .train-thumb-x:hover { background: rgba(229, 78, 95, 0.85); }
+    .train-thumb.uploading::after {
+      content: "";
+      position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(90,124,255,0.2), transparent);
+      animation: trainShimmer 1.1s linear infinite;
+    }
+    @keyframes trainShimmer { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
+    .train-counter-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    .train-counter {
+      font-family: var(--ph-font-mono);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    .train-counter.ok { color: var(--success); }
+    .train-counter.short { color: var(--warning); }
+    .train-counter-hint { color: var(--muted); font-size: 11px; }
+    /* Trigger word row — same hairline-input chrome as the rest. */
+    .train-trigger-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .train-trigger-row input {
+      flex: 1 1 auto;
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0.5px;
+    }
+    /* 3-column preset grid. Reuses .pill-group .pill-btn so the active
+       state matches the existing Quick/Balanced/Standard/High row. */
+    .train-pane .pill-group.cols-3 {
+      grid-template-columns: repeat(3, 1fr);
+    }
+    .train-pane .pill-btn .sub {
+      font-size: 10.5px;
+      letter-spacing: 0;
+      font-family: var(--ph-font-mono);
+    }
+    /* Advanced disclosure — denser than the global details look. */
+    .train-advanced {
+      margin-top: 12px;
+      border-top: 1px solid var(--ph-border-soft);
+      padding-top: 10px;
+    }
+    .train-advanced > summary {
+      cursor: pointer;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      padding: 4px 0;
+    }
+    .train-advanced[open] > summary { color: var(--text); }
+    .train-advanced-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px 12px;
+      margin-top: 8px;
+    }
+    /* Estimate strip — three labelled cells. Sits between the cards and
+       the action footer like the video form's derived hint does. */
+    .train-estimate {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 10px;
+      background: rgba(12, 19, 48, 0.35);
+      font-size: 12px;
+    }
+    .train-est-line {
+      display: inline-flex;
+      gap: 6px;
+      align-items: baseline;
+    }
+    .train-est-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 10px;
+    }
+    .train-est-value {
+      font-family: var(--ph-font-mono);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    /* Trained LoRA list — one row per finished LoRA, dense and scannable. */
+    .train-lora-list { display: flex; flex-direction: column; gap: 6px; }
+    .train-lora-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(12, 19, 48, 0.35);
+      font-size: 12px;
+    }
+    .train-lora-row .tl-name {
+      font-family: var(--ph-font-mono);
+      color: var(--text);
+      letter-spacing: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .train-lora-row .tl-trigger {
+      font-size: 10.5px;
+      color: var(--accent);
+      font-family: var(--ph-font-mono);
+    }
+    .train-lora-row .tl-size {
+      font-size: 10.5px;
+      color: var(--muted);
+      font-family: var(--ph-font-mono);
+    }
+    .train-lora-row .tl-actions { display: inline-flex; gap: 6px; }
+
     .pill-btn:disabled, .pill-btn.disabled {
       opacity: 0.45; cursor: not-allowed; pointer-events: none;
     }
@@ -16871,6 +17105,7 @@ HTML = r"""<!doctype html>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2511 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
+      <button type="button" class="mode-chip pill-btn" data-mode="train" title="Train a character LoRA from 15-50 stills — runs in the sibling lora-lab pipeline">Train<span class="mc-sub sub">character LoRA</span></button>
     </div>
 
     <form id="genForm">
@@ -17481,6 +17716,153 @@ HTML = r"""<!doctype html>
            Recent tab (with the Photos filter) along with everything else.
            This pane is just a thin "submitted" confirmation. -->
       <div id="imgStudioResults" class="studio-results"></div>
+    </div>
+
+    <!-- ============== TRAIN CHARACTER (inline, mode='train') ============== -->
+    <!-- Sibling of #genForm and #studioSection inside form-pane. Shown by
+         setMode('train'). Trains a character LoRA against 15-50 user
+         stills. Pipeline lives in the sibling lora-lab repo; this panel
+         shells out to it via /train/start. Job status surfaces through
+         the existing Now / Queue / Recent / Logs panes (training is just
+         another mode dispatch in run_job_inner). -->
+    <div class="mode-only train-pane" id="trainSection">
+
+      <!-- ============== DATASET CARD ============== -->
+      <div class="composer-card train-card">
+        <h2>Dataset
+          <span class="h2-hint">15-50 stills · drop your character into the box</span>
+        </h2>
+        <div class="train-drop" id="trainDrop">
+          <div class="train-drop-empty" id="trainDropEmpty">
+            <div class="picker-icon">📸</div>
+            <div class="picker-cta">Drop 15-50 images here, or <strong>click to browse</strong></div>
+            <div class="hint">PNG / JPG / WEBP. Each preview shows the 1:1 center-crop the trainer will see.</div>
+          </div>
+          <div class="train-thumbs" id="trainThumbs" hidden></div>
+          <input type="file" id="trainFileInput" accept="image/png,image/jpeg,image/webp" multiple style="display:none">
+        </div>
+        <div class="train-counter-row">
+          <span class="train-counter" id="trainCounter">0 / 50 images</span>
+          <span class="train-counter-hint" id="trainCounterHint">need at least 15 to train</span>
+          <span class="qchip-spacer"></span>
+          <button type="button" class="qchip" id="trainClearAllBtn" onclick="trainClearAll()" hidden>✕ Clear all</button>
+        </div>
+      </div>
+
+      <!-- ============== TRIGGER + PRESET ============== -->
+      <div class="composer-card train-card">
+        <h2>Trigger word
+          <span class="h2-hint">a rare token the model will associate with this character</span>
+        </h2>
+        <div class="train-trigger-row">
+          <input type="text" id="trainTrigger" maxlength="32" placeholder="auto-generated rare token" autocomplete="off">
+          <button type="button" class="qchip" onclick="trainSuggestTrigger()" title="Suggest a fresh rare token">↻ Suggest</button>
+        </div>
+        <div class="hint">Use the trigger word in your video prompts (e.g. <code><span id="trainTriggerExample">mrz07</span> man walking on the beach</code>).</div>
+
+        <h2 style="margin-top:14px">Quality preset
+          <span class="h2-hint">trade time for fidelity</span>
+        </h2>
+        <div class="pill-group cols-3" id="trainPresetGroup">
+          <button type="button" class="pill-btn active" data-train-preset="quick"><span>Quick</span><span class="sub" id="trainPresetQuickSub">~30 min · rank 8 · 512px</span></button>
+          <button type="button" class="pill-btn" data-train-preset="medium"><span>Medium</span><span class="sub" id="trainPresetMediumSub">~2 h · rank 16 · 576px</span></button>
+          <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~4 h · rank 32 · 768px</span></button>
+        </div>
+
+        <details class="train-advanced">
+          <summary>Advanced</summary>
+          <div class="train-advanced-grid">
+            <div class="mf-cell">
+              <span class="mf-label">Rank</span>
+              <select id="trainRank">
+                <option value="">preset default</option>
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+                <option value="64">64</option>
+              </select>
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Steps</span>
+              <input type="number" id="trainSteps" min="100" max="10000" step="100" placeholder="preset default">
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Learning rate</span>
+              <select id="trainLR">
+                <option value="">preset default</option>
+                <option value="0.00005">5e-5</option>
+                <option value="0.0001">1e-4</option>
+                <option value="0.0002">2e-4</option>
+                <option value="0.0005">5e-4</option>
+              </select>
+            </div>
+            <div class="mf-cell">
+              <span class="mf-label">Resolution</span>
+              <select id="trainResolution">
+                <option value="">preset default</option>
+                <option value="512">512²</option>
+                <option value="576">576²</option>
+                <option value="768">768²</option>
+              </select>
+            </div>
+            <div class="mf-cell" style="grid-column: 1 / -1">
+              <span class="mf-label">Caption strategy</span>
+              <select id="trainCaptionStrategy">
+                <option value="trigger_simple" selected>&lt;trigger&gt; man — dumbest-strongest default</option>
+                <option value="trigger_only">trigger only — no role hint</option>
+                <option value="qwen_vl" disabled>auto-caption via Qwen-VL — coming soon</option>
+              </select>
+            </div>
+          </div>
+          <div class="hint" style="margin-top:8px">Auto-captioning planned. For now, every image gets the same caption — the trigger does the heavy lifting.</div>
+        </details>
+      </div>
+
+      <!-- Estimate strip — wall time + RAM peak update as inputs change. -->
+      <div class="train-estimate" id="trainEstimate">
+        <span class="train-est-line">
+          <span class="train-est-label">Estimated wall time</span>
+          <span class="train-est-value" id="trainEstimateTime">—</span>
+        </span>
+        <span class="train-est-line">
+          <span class="train-est-label">Peak RAM</span>
+          <span class="train-est-value" id="trainEstimateRam">—</span>
+        </span>
+        <span class="train-est-line">
+          <span class="train-est-label">Output</span>
+          <span class="train-est-value" id="trainEstimateOut">—</span>
+        </span>
+      </div>
+
+      <!-- Validation/status messages (e.g. "need 10 more images"). -->
+      <div class="studio-status-row" style="margin: 4px 0 0;">
+        <span id="trainStatus" class="hint"></span>
+      </div>
+
+      <!-- Sticky action footer — same chrome as the video/studio forms. -->
+      <div class="form-action-footer" id="formActionFooterTrain">
+        <div class="queue-strip">
+          <button type="button" class="qchip" id="pauseBtnTrain" onclick="togglePause()" title="Pause / resume the queue">⏸ Pause queue</button>
+          <button type="button" class="qchip" onclick="api('/queue/clear','POST').then(poll)" title="Clear all queued jobs">✕ Clear</button>
+          <span class="qchip-spacer"></span>
+        </div>
+        <div class="actions">
+          <button type="button" class="primary" id="trainStartBtn" onclick="trainStart()" disabled>Start training</button>
+          <button type="button" class="danger" onclick="api('/stop','POST').then(poll)">Stop</button>
+        </div>
+      </div>
+
+      <!-- ============== TRAINED LORAs LIST ============== -->
+      <div class="composer-card train-card">
+        <h2>Trained character LoRAs
+          <span class="h2-hint">your finished runs — click to use</span>
+        </h2>
+        <div class="train-lora-list" id="trainLoraList">
+          <div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>
+        </div>
+        <div class="hint" style="margin-top:4px">Trained LoRAs land in <code id="trainLorasDir">mlx_models/loras/</code> alongside any LoRAs you've downloaded — they show up in the regular picker too.</div>
+      </div>
+
     </div>
   </aside>
 
@@ -18517,7 +18899,23 @@ function setMode(mode) {
   // value is set to a non-form value when in studio so an accidental
   // form submit doesn't trigger a video render with stale fields.
   const studio = document.getElementById('studioSection');
+  const train = document.getElementById('trainSection');
   const genForm = document.getElementById('genForm');
+  // Train mode mirrors Studio: hide #genForm, show #trainSection. Same
+  // chrome conventions, separate form (so an Enter inside the trigger
+  // input doesn't submit a video render).
+  if (mode === 'train') {
+    if (studio) studio.classList.remove('show');
+    if (train) train.classList.add('show');
+    if (genForm) genForm.style.display = 'none';
+    document.querySelectorAll('#modeGroup .pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === 'train'));
+    // Lazy initialization on first entry — wires drop zone, generates
+    // a starter trigger, refreshes the trained-LoRAs list, computes
+    // an initial wall-time estimate.
+    if (typeof trainInit === 'function') trainInit();
+    return;
+  }
   if (mode === 'image') {
     if (studio) studio.classList.add('show');
     if (genForm) genForm.style.display = 'none';
@@ -18557,6 +18955,7 @@ function setMode(mode) {
     return;
   }
   if (studio) studio.classList.remove('show');
+  if (train) train.classList.remove('show');
   if (genForm) genForm.style.display = '';
   // Portal the picker back to its video-form home so it's visible above
   // the Generate button when the user is composing a video shot.
@@ -19075,6 +19474,512 @@ function imgStudioCopyPath(path) {
   };
   if (!navigator.clipboard || !navigator.clipboard.writeText) { legacy(); return; }
   navigator.clipboard.writeText(path).then(() => flash('Path copied.')).catch(() => legacy());
+}
+
+// ====== Train Character pane ================================================
+// In-progress dataset state. The job_id is minted by the server on the FIRST
+// upload of a session and echoed back on every subsequent /train/upload so
+// the whole batch lands in one folder under state/train_character/<id>/.
+const TRAIN = {
+  jobId: null,
+  // Mirror of the server-side image list. Each: {filename, path, src}.
+  images: [],
+  preset: 'quick',
+  // Local mirror of the preset table; server has the authoritative copy in
+  // TRAIN_PRESETS but the JS-side estimator is instant — saves a /status
+  // round-trip per keystroke. Keep these in sync with TRAIN_PRESETS in py.
+  presets: {
+    quick:  { steps: 1500, rank: 8,  resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
+              label: 'Quick',  subtitle: '~30 min · rank 8 · 512px' },
+    medium: { steps: 3000, rank: 16, resolution: 576, seconds_per_step: 2.2, ram_peak_gb: 18,
+              label: 'Medium', subtitle: '~2 h · rank 16 · 576px' },
+    high:   { steps: 5000, rank: 32, resolution: 768, seconds_per_step: 3.0, ram_peak_gb: 28,
+              label: 'High',   subtitle: '~4 h · rank 32 · 768px' },
+  },
+  initialised: false,
+};
+
+const TRAIN_MIN = 15;
+const TRAIN_MAX = 50;
+
+function trainInit() {
+  // Idempotent — safe to call on every setMode('train') without re-binding
+  // the drop zone. Triggers a list refresh too so the user sees the LoRAs
+  // they trained in earlier sessions.
+  if (!TRAIN.initialised) {
+    TRAIN.initialised = true;
+    trainWireDropZone();
+    trainWirePresetButtons();
+    trainWireAdvancedFields();
+    // Initial trigger value — JS-side generator (instant); /train/suggest-trigger
+    // exists for non-JS callers.
+    const t = document.getElementById('trainTrigger');
+    if (t && !t.value) t.value = trainGenerateTriggerJS();
+    document.getElementById('trainTriggerExample').textContent =
+      (document.getElementById('trainTrigger').value || 'mrz07');
+    document.getElementById('trainTrigger').addEventListener('input', () => {
+      document.getElementById('trainTriggerExample').textContent =
+        (document.getElementById('trainTrigger').value || 'mrz07');
+      trainUpdateButtonState();
+      trainUpdateEstimate();
+    });
+  }
+  trainRefreshLoraList();
+  trainUpdateEstimate();
+  trainUpdateButtonState();
+}
+
+// Trigger generator — `<3 consonants><2 digits>` for rare/uncommon tokens.
+// Skip vowels + ambiguous letters (l, i, o → 1, 0). Mirrors the Python
+// _suggest_trigger_token; not a security boundary so the algorithms can
+// drift slightly — server has its own generator for non-JS callers.
+function trainGenerateTriggerJS() {
+  const cons = 'bcdfghjkmnpqrstvwxyz';
+  let letters = '';
+  for (let i = 0; i < 3; i++) letters += cons[Math.floor(Math.random() * cons.length)];
+  const digits = String(Math.floor(Math.random() * 100)).padStart(2, '0');
+  return letters + digits;
+}
+
+function trainSuggestTrigger() {
+  const t = document.getElementById('trainTrigger');
+  t.value = trainGenerateTriggerJS();
+  document.getElementById('trainTriggerExample').textContent = t.value;
+}
+
+function trainWireDropZone() {
+  const drop = document.getElementById('trainDrop');
+  const input = document.getElementById('trainFileInput');
+  if (!drop || !input) return;
+  drop.addEventListener('click', (e) => {
+    // Avoid re-firing the picker when the user clicks an existing thumb's
+    // controls (× / num pill).
+    if (e.target.closest('.train-thumb')) return;
+    input.click();
+  });
+  drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    drop.classList.add('dragover');
+  });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) trainUploadFiles(files);
+  });
+  input.addEventListener('change', () => {
+    if (input.files && input.files.length) trainUploadFiles(input.files);
+    input.value = '';
+  });
+}
+
+function trainWirePresetButtons() {
+  document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      TRAIN.preset = b.dataset.trainPreset;
+      document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(x =>
+        x.classList.toggle('active', x === b));
+      trainUpdateEstimate();
+    });
+  });
+}
+
+function trainWireAdvancedFields() {
+  ['trainRank', 'trainSteps', 'trainLR', 'trainResolution', 'trainCaptionStrategy']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', trainUpdateEstimate);
+      if (el) el.addEventListener('input', trainUpdateEstimate);
+    });
+}
+
+async function trainUploadFiles(fileList) {
+  const status = document.getElementById('trainStatus');
+  const files = Array.from(fileList).filter(f =>
+    /^image\/(png|jpe?g|webp)$/.test(f.type) ||
+    /\.(png|jpe?g|webp)$/i.test(f.name));
+  if (!files.length) {
+    if (status) status.textContent = 'No supported image files in that selection.';
+    return;
+  }
+  if (status) status.textContent = `Uploading 0 / ${files.length}…`;
+
+  // Optimistic UI: render placeholders for the incoming batch using
+  // FileReader to get a local data URL so the user sees the crop preview
+  // immediately. Each placeholder is replaced with the server-saved path
+  // once /train/upload returns.
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (TRAIN.images.length >= TRAIN_MAX) {
+      if (status) status.textContent = `At max ${TRAIN_MAX} images. Stopping upload.`;
+      break;
+    }
+    const localUrl = await trainFileToDataURL(f).catch(() => null);
+    const placeholderIdx = TRAIN.images.length;
+    TRAIN.images.push({
+      filename: '__uploading__' + placeholderIdx,
+      path: '',
+      src: localUrl || '',
+      uploading: true,
+    });
+    trainRenderThumbs();
+
+    try {
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      if (TRAIN.jobId) fd.append('job_id', TRAIN.jobId);
+      const r = await fetch('/train/upload', { method: 'POST', body: fd });
+      const j = await r.json();
+      if (!r.ok || !j.ok) {
+        // Remove the placeholder; surface the error.
+        TRAIN.images.splice(placeholderIdx, 1);
+        if (status) status.textContent = 'Upload error: ' + (j.error || r.status);
+        trainRenderThumbs();
+        continue;
+      }
+      TRAIN.jobId = j.job_id;
+      TRAIN.images[placeholderIdx] = {
+        filename: j.filename,
+        path: j.path,
+        src: '/train/file?job_id=' + encodeURIComponent(j.job_id) +
+             '&filename=' + encodeURIComponent(j.filename) +
+             '&v=' + Date.now(),
+        uploading: false,
+      };
+      trainRenderThumbs();
+      if (status) status.textContent = `Uploaded ${i + 1} / ${files.length}…`;
+    } catch (e) {
+      TRAIN.images.splice(placeholderIdx, 1);
+      if (status) status.textContent = 'Upload failed: ' + (e.message || 'unknown');
+      trainRenderThumbs();
+    }
+  }
+  if (status) {
+    const n = TRAIN.images.length;
+    if (n < TRAIN_MIN) status.textContent = `${n} image${n === 1 ? '' : 's'} uploaded — need ${TRAIN_MIN - n} more to train.`;
+    else status.textContent = `${n} images ready — pick a preset and start training.`;
+  }
+  trainUpdateEstimate();
+  trainUpdateButtonState();
+}
+
+function trainFileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+function trainRenderThumbs() {
+  const wrap = document.getElementById('trainThumbs');
+  const empty = document.getElementById('trainDropEmpty');
+  const drop = document.getElementById('trainDrop');
+  const clearAllBtn = document.getElementById('trainClearAllBtn');
+  if (!wrap) return;
+  if (TRAIN.images.length === 0) {
+    wrap.hidden = true;
+    if (empty) empty.style.display = '';
+    if (drop) drop.classList.remove('has-images');
+    if (clearAllBtn) clearAllBtn.hidden = true;
+    trainUpdateCounter();
+    return;
+  }
+  wrap.hidden = false;
+  if (empty) empty.style.display = 'none';
+  if (drop) drop.classList.add('has-images');
+  if (clearAllBtn) clearAllBtn.hidden = false;
+  wrap.innerHTML = TRAIN.images.map((img, idx) => {
+    const cls = 'train-thumb' + (img.uploading ? ' uploading' : '');
+    const removeAttr = img.uploading
+      ? ''
+      : `onclick="trainRemoveImage('${img.filename.replace(/'/g, "\\'")}')"`;
+    return `<div class="${cls}" data-idx="${idx}">
+      <img src="${img.src || ''}" alt="char ${idx + 1}" loading="lazy">
+      <span class="train-thumb-num">${String(idx + 1).padStart(3, '0')}</span>
+      <button type="button" class="train-thumb-x" ${removeAttr} title="Remove">×</button>
+    </div>`;
+  }).join('');
+  trainUpdateCounter();
+}
+
+function trainUpdateCounter() {
+  const counter = document.getElementById('trainCounter');
+  const hint = document.getElementById('trainCounterHint');
+  if (!counter) return;
+  const n = TRAIN.images.length;
+  counter.textContent = `${n} / ${TRAIN_MAX} images`;
+  counter.classList.toggle('ok', n >= TRAIN_MIN);
+  counter.classList.toggle('short', n > 0 && n < TRAIN_MIN);
+  if (hint) {
+    if (n === 0) hint.textContent = `need at least ${TRAIN_MIN} to train`;
+    else if (n < TRAIN_MIN) hint.textContent = `need ${TRAIN_MIN - n} more`;
+    else if (n < TRAIN_MAX) hint.textContent = `ready · up to ${TRAIN_MAX - n} more if you want variety`;
+    else hint.textContent = `at the ${TRAIN_MAX}-image limit`;
+  }
+}
+
+async function trainRemoveImage(filename) {
+  if (!TRAIN.jobId || !filename) return;
+  try {
+    const fd = new URLSearchParams();
+    fd.set('train_job_id', TRAIN.jobId);
+    fd.set('filename', filename);
+    const r = await fetch('/train/remove-image', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      console.warn('remove-image failed', j);
+      return;
+    }
+    // Server renumbers char_001…NN; re-pull the canonical list so our
+    // src URLs match the new filenames on disk.
+    await trainRefreshDataset();
+  } catch (e) {
+    console.warn('remove-image error', e);
+  }
+}
+
+async function trainClearAll() {
+  if (!TRAIN.images.length) return;
+  if (!confirm(`Remove all ${TRAIN.images.length} uploaded images?`)) return;
+  const toRemove = TRAIN.images.filter(x => !x.uploading).map(x => x.filename);
+  for (const f of toRemove) {
+    await trainRemoveImage(f);
+  }
+  TRAIN.images = [];
+  trainRenderThumbs();
+  trainUpdateEstimate();
+  trainUpdateButtonState();
+}
+
+async function trainRefreshDataset() {
+  if (!TRAIN.jobId) {
+    TRAIN.images = [];
+    trainRenderThumbs();
+    return;
+  }
+  try {
+    const r = await fetch('/train/dataset?job_id=' + encodeURIComponent(TRAIN.jobId));
+    const j = await r.json();
+    if (!j.ok) return;
+    TRAIN.images = (j.images || []).map(im => ({
+      filename: im.filename,
+      path: im.path,
+      src: '/train/file?job_id=' + encodeURIComponent(TRAIN.jobId) +
+           '&filename=' + encodeURIComponent(im.filename) + '&v=' + Date.now(),
+      uploading: false,
+    }));
+    trainRenderThumbs();
+    trainUpdateEstimate();
+    trainUpdateButtonState();
+  } catch (e) { console.warn('train dataset refresh failed', e); }
+}
+
+function trainEffectiveSteps() {
+  const v = (document.getElementById('trainSteps').value || '').trim();
+  if (!v) return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function trainUpdateEstimate() {
+  const preset = TRAIN.presets[TRAIN.preset] || TRAIN.presets.quick;
+  const stepOverride = trainEffectiveSteps();
+  const steps = stepOverride || preset.steps;
+  const n = TRAIN.images.length;
+  const sec = Math.round(3 * Math.max(0, n) + steps * preset.seconds_per_step + 30);
+  const ramRow = document.getElementById('trainEstimateRam');
+  const timeRow = document.getElementById('trainEstimateTime');
+  const outRow = document.getElementById('trainEstimateOut');
+  if (timeRow) {
+    if (n === 0) timeRow.textContent = `— (add images first)`;
+    else timeRow.textContent = trainFmtDuration(sec) + ` · ${steps} steps`;
+  }
+  if (ramRow) ramRow.textContent = `~${preset.ram_peak_gb} GB peak`;
+  if (outRow) {
+    const trig = (document.getElementById('trainTrigger').value || 'mrz07');
+    outRow.textContent = `mlx_models/loras/${(TRAIN.jobId || 'trn-<new>')}.safetensors · trigger "${trig}"`;
+  }
+}
+
+function trainFmtDuration(sec) {
+  if (sec < 60) return `${sec} s`;
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h} h ${rem} min` : `${h} h`;
+}
+
+function trainUpdateButtonState() {
+  const btn = document.getElementById('trainStartBtn');
+  if (!btn) return;
+  const n = TRAIN.images.filter(x => !x.uploading).length;
+  const trig = (document.getElementById('trainTrigger').value || '').trim();
+  const ok = n >= TRAIN_MIN && trig.length >= 3 && trig.length <= 32;
+  btn.disabled = !ok;
+  if (!ok) {
+    if (n < TRAIN_MIN) btn.title = `Need at least ${TRAIN_MIN} images (have ${n}).`;
+    else if (trig.length < 3) btn.title = 'Trigger word must be 3+ characters.';
+    else btn.title = 'Trigger word is too long (max 32).';
+  } else {
+    btn.title = 'Queue this training job.';
+  }
+}
+
+async function trainStart() {
+  const btn = document.getElementById('trainStartBtn');
+  const status = document.getElementById('trainStatus');
+  if (!TRAIN.jobId || TRAIN.images.length < TRAIN_MIN) {
+    if (status) status.textContent = `Need at least ${TRAIN_MIN} images.`;
+    return;
+  }
+  const trig = (document.getElementById('trainTrigger').value || '').trim();
+  if (!trig) {
+    if (status) status.textContent = 'Trigger word required.';
+    return;
+  }
+  const fd = new URLSearchParams();
+  fd.set('train_job_id', TRAIN.jobId);
+  fd.set('trigger', trig);
+  fd.set('preset', TRAIN.preset);
+  fd.set('image_count', String(TRAIN.images.length));
+  fd.set('caption_strategy', document.getElementById('trainCaptionStrategy').value || 'trigger_simple');
+  const rank = document.getElementById('trainRank').value;
+  if (rank) fd.set('rank', rank);
+  const stepsVal = document.getElementById('trainSteps').value;
+  if (stepsVal) fd.set('steps', stepsVal);
+  const lrVal = document.getElementById('trainLR').value;
+  if (lrVal) fd.set('lr', lrVal);
+  const resVal = document.getElementById('trainResolution').value;
+  if (resVal) fd.set('resolution', resVal);
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+  try {
+    const r = await fetch('/train/start', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent = 'Failed to enqueue: ' + (j.error || r.status);
+      if (btn) { btn.disabled = false; btn.textContent = 'Start training'; }
+      return;
+    }
+    if (status) status.textContent = `Queued · job ${j.queued_id}. Watch the Now / Queue pane for progress.`;
+    // Reset the form so the user can stage another dataset. The current
+    // job's files stay on disk — only our local mirror is cleared.
+    TRAIN.jobId = null;
+    TRAIN.images = [];
+    trainRenderThumbs();
+    trainUpdateEstimate();
+    if (btn) btn.textContent = 'Start training';
+    // Refresh queue poll immediately so the new job card appears without
+    // waiting for the next 1.5s tick.
+    if (typeof poll === 'function') poll();
+  } catch (e) {
+    if (status) status.textContent = 'Enqueue failed: ' + (e.message || 'unknown');
+    if (btn) { btn.disabled = false; btn.textContent = 'Start training'; }
+  }
+}
+
+async function trainRefreshLoraList() {
+  const list = document.getElementById('trainLoraList');
+  if (!list) return;
+  try {
+    const r = await fetch('/train/list');
+    const j = await r.json();
+    const items = (j.loras || []);
+    if (!items.length) {
+      list.innerHTML = '<div class="hint" style="padding:12px 0">No trained LoRAs yet. Start your first run above.</div>';
+      return;
+    }
+    list.innerHTML = items.map(it => {
+      const ageMs = Date.now() - (Number(it.created_at) || 0) * 1000;
+      const ageStr = trainFmtAge(ageMs);
+      const safeTrig = (it.trigger || '').replace(/[<>&"']/g, c =>
+        ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]);
+      const safePath = (it.path || '').replace(/'/g, "\\'");
+      return `<div class="train-lora-row">
+        <span class="tl-name" title="${it.filename}">${it.name || it.filename}
+          <span class="tl-trigger"> · "${safeTrig}"</span>
+          <span class="tl-size"> · ${it.size_mb} MB · ${ageStr}</span>
+        </span>
+        <span class="tl-actions">
+          <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','t2v')">Use in T2V</button>
+          <button type="button" class="qchip" onclick="trainUseInVideo('${safePath}','${safeTrig}','i2v')">Use in I2V</button>
+          <button type="button" class="qchip" onclick="trainCopyTriggerCmd('${safeTrig}')">Copy trigger</button>
+          <button type="button" class="qchip" onclick="trainDeleteLora('${safePath}')" title="Delete .safetensors + sidecar">✕</button>
+        </span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="hint">Load failed: ' + (e.message || 'unknown') + '</div>';
+  }
+}
+
+function trainFmtAge(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return 'just now';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function trainUseInVideo(loraPath, trigger, targetMode) {
+  // Switch the panel into the requested video mode + pre-fill the LoRA
+  // picker by emitting an "add" against the unified picker's state. The
+  // picker's _activeLoras list is what the form serialises into the
+  // hidden #lorasJson input on submit. Falls back to copying the path
+  // to clipboard if the picker hooks aren't present.
+  try { setMode(targetMode); } catch (e) {}
+  // Pre-fill the prompt textarea with the trigger word as a starter so
+  // the user sees how it's used.
+  const prompt = document.getElementById('prompt');
+  if (prompt && !prompt.value) {
+    prompt.value = `${trigger} man, cinematic medium shot, soft natural light`;
+  }
+  // Use the existing picker plumbing if available. _activeLoras and
+  // renderLorasList come from the unified LoRA picker module.
+  if (typeof window._activeLoras !== 'undefined' && Array.isArray(window._activeLoras)) {
+    const already = window._activeLoras.some(x => x.path === loraPath);
+    if (!already) {
+      window._activeLoras.push({ path: loraPath, strength: 1.0, name: loraPath.split('/').pop() });
+      if (typeof renderLorasList === 'function') renderLorasList();
+      if (typeof _syncLorasJsonField === 'function') _syncLorasJsonField();
+    }
+  } else {
+    // Fall back: copy the path so the user can paste it into the LoRA
+    // picker manually.
+    if (typeof imgStudioCopyPath === 'function') imgStudioCopyPath(loraPath);
+  }
+}
+
+function trainCopyTriggerCmd(trigger) {
+  if (!trigger) return;
+  const text = `${trigger} man, cinematic medium shot, soft natural light`;
+  if (typeof imgStudioCopyPath === 'function') imgStudioCopyPath(text);
+}
+
+async function trainDeleteLora(loraPath) {
+  if (!loraPath) return;
+  if (!confirm('Delete this LoRA?\n\n' + loraPath)) return;
+  try {
+    const fd = new URLSearchParams();
+    fd.set('path', loraPath);
+    const r = await fetch('/train/delete', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      alert('Delete failed: ' + (j.error || r.status));
+      return;
+    }
+    trainRefreshLoraList();
+  } catch (e) {
+    alert('Delete error: ' + (e.message || 'unknown'));
+  }
 }
 
 // Quality presets (Y1.013) — each one bundles the backend quality value
