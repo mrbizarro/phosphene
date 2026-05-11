@@ -1109,54 +1109,58 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     aligned_w = _patch_align(snap_w)
     aligned_h = _patch_align(snap_h)
 
-    results: list[dict] = []
+    # Single subprocess invocation for all n candidates so the BF16 model
+    # (~17 GB into RAM, ~45s cold load) is loaded ONCE per batch instead of n
+    # times. The lab's generator accepts multiple --seed and --output values.
+    seeds: list[int] = []
+    pngs: list[Path] = []
+    ts = int(time.time() * 1000)
     for i in range(n):
         seed = (base_seed + i) if base_seed is not None else random.randint(0, 2**31 - 1)
-        png = output_dir / f"cand_{i:02d}_hidream_{int(time.time()*1000)}.png"
+        seeds.append(seed)
+        pngs.append(output_dir / f"cand_{i:02d}_hidream_{ts}.png")
 
-        cmd = [
-            py, script,
-            "--model-path", model,
-            "--prompt", prompt,
-            "--width", str(aligned_w),
-            "--height", str(aligned_h),
-            "--output", str(png),
-            "--seed", str(seed),
-            "--num-inference-steps", str(config.hidream_steps),
-            "--noise-scale-start", str(config.hidream_noise_scale),
-            "--noise-scale-end", str(config.hidream_noise_scale),
-            "--noise-clip-std", str(config.hidream_noise_clip_std),
-        ]
-        if refs:
-            # HiDream's native edit / multi-ref path. Supports K=1 (instruction
-            # edit) up to K=3 (subject personalization). Always forces BF16
-            # model — Q6/Q8 break ref attention.
-            cmd.extend(["--ref-images", *map(str, refs)])
-        if on_log:
-            on_log(f"[hidream] launching candidate {i+1}/{n} seed={seed}"
-                   + (f" with {len(refs)} ref(s)" if refs else ""))
+    cmd = [
+        py, script,
+        "--model-path", model,
+        "--prompt", prompt,
+        "--width", str(aligned_w),
+        "--height", str(aligned_h),
+        "--output", *map(str, pngs),
+        "--seed", *map(str, seeds),
+        "--num-inference-steps", str(config.hidream_steps),
+        "--noise-scale-start", str(config.hidream_noise_scale),
+        "--noise-scale-end", str(config.hidream_noise_scale),
+        "--noise-clip-std", str(config.hidream_noise_clip_std),
+    ]
+    if refs:
+        cmd.extend(["--ref-images", *map(str, refs)])
+    if on_log:
+        on_log(f"[hidream] launching {n} candidate(s) in one process, seeds={seeds}"
+               + (f" with {len(refs)} ref(s)" if refs else ""))
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=os.environ.copy(),
-        )
-        # Stream output so the panel can surface tqdm progress lines live.
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                if on_log:
-                    on_log(f"[hidream] {line}")
-        rc = proc.wait()
-        if rc != 0:
-            raise RuntimeError(f"HiDream gen failed with rc={rc}")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=os.environ.copy(),
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            if on_log:
+                on_log(f"[hidream] {line}")
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"HiDream gen failed with rc={rc}")
+
+    results: list[dict] = []
+    for seed, png in zip(seeds, pngs):
         if not png.exists():
             raise RuntimeError(f"HiDream gen finished but no PNG at {png}")
-
         results.append({
             "png_path": str(png),
             "seed": seed,
