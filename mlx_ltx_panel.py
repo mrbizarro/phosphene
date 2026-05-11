@@ -23795,6 +23795,19 @@ function loraRowHtml(r, modeTag) {
 function toggleLora(path, on, recommended, name) {
   if (on) {
     addLoraToActive({ path, strength: recommended, name });
+    // Auto-insert the LoRA's first trigger word into the prompt so the
+    // user doesn't have to remember + retype it. The biggest source of
+    // "I activated the LoRA but it didn't fire" reports is the trigger
+    // missing from the prompt entirely. appendTriggerToPrompt is
+    // idempotent — duplicate clicks are no-ops. Skips silently if the
+    // LoRA has no trigger_words (style-only LoRAs).
+    try {
+      const meta = _knownUserLoras.find(u => u.path === path);
+      const triggers = (meta && meta.trigger_words) || [];
+      if (triggers.length) {
+        appendTriggerToPrompt(triggers[0]);
+      }
+    } catch (e) { /* picker race during boot — ignore */ }
   } else {
     removeLoraFromActive(path);
   }
