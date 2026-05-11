@@ -328,13 +328,108 @@ def _resolve_lora_path(path: str) -> str:
     return chosen
 
 
+_LORA_PATCH_INSTALLED = False
+
+
+def _install_lora_fusion_patches() -> None:
+    """Make subclass pipelines actually fuse _pending_loras during load().
+
+    Upstream `BasePipeline.load()` in `_base.py` checks `_pending_loras` and
+    fuses LoRA deltas into transformer weights before quantization. But the
+    subclasses we use here — `DistilledPipeline`, `TI2VidTwoStagesPipeline`,
+    `TI2VidOneStagePipeline`, `TI2VidTwoStagesHQPipeline` — each override
+    `load()` entirely and load the DiT via
+    `_load_transformer_with_optional_streaming` / `_load_dev_transformer`,
+    bypassing the fusion path. Without this patch, every panel render with
+    an attached LoRA silently produced LoRA-free output ("face is not him"
+    bug).
+
+    Fix: wrap each subclass's `load()` so that when `_pending_loras` is set
+    and `self.dit is None`, we pre-load+fuse+quantize the transformer
+    ourselves, set `self.dit`, then call the original `load()` which
+    short-circuits the DiT step (because `self.dit is not None`) and
+    proceeds to VAE encoder / upsampler / decoders as normal.
+
+    Idempotent — sets `_phosphene_lora_fix=True` on each class and a
+    module-level flag so repeated calls (e.g. on every `get_pipe`) are a
+    no-op. Installed lazily from `get_pipe` because the pipeline import
+    strategy is decided there (post-refactor vs. pre-refactor name
+    fallback). `TI2VidTwoStagesHQPipeline` is patched too even though
+    `get_hq_pipe` doesn't currently call `_attach_loras` — the patch is
+    inert when `_pending_loras` is absent, and this is forward-proof if
+    HQ ever gets a user-LoRA path."""
+    global _LORA_PATCH_INSTALLED
+    if _LORA_PATCH_INSTALLED:
+        return
+
+    classes = []
+    for name in ("DistilledPipeline", "TI2VidTwoStagesPipeline",
+                 "TI2VidOneStagePipeline", "TI2VidTwoStagesHQPipeline"):
+        try:
+            mod = __import__("ltx_pipelines_mlx", fromlist=[name])
+            cls = getattr(mod, name, None)
+        except ImportError:
+            cls = None
+        if cls is not None:
+            classes.append(cls)
+
+    if not classes:
+        return  # very old install — nothing to patch
+
+    from ltx_core_mlx.model.transformer.model import LTXModel
+    from ltx_core_mlx.utils.memory import aggressive_cleanup
+    from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+
+    def _resolve_tx_path(pipe):
+        # Dev-based pipelines (two-stage, one-stage, HQ) carry the dev
+        # transformer filename in `_dev_transformer`. Distilled has no such
+        # attribute and tries `transformer.safetensors` first, then
+        # `transformer-distilled.safetensors` (mirrors DistilledPipeline.load).
+        dev_name = getattr(pipe, "_dev_transformer", None)
+        if dev_name:
+            return pipe.model_dir / dev_name
+        p = pipe.model_dir / "transformer.safetensors"
+        if not p.exists():
+            p = pipe.model_dir / "transformer-distilled.safetensors"
+        return p
+
+    def _make_wrapper(orig_load):
+        def patched_load(self):
+            pending = getattr(self, "_pending_loras", None)
+            if pending and self.dit is None and not getattr(self, "_loaded", False):
+                tx_path = _resolve_tx_path(self)
+                emit({"event": "log",
+                      "line": f"Fusing {len(pending)} LoRA(s) into "
+                              f"{os.path.basename(str(tx_path))}..."})
+                weights = load_split_safetensors(tx_path, prefix="transformer.")
+                weights = self._fuse_pending_loras(weights, pending)
+                self.dit = LTXModel()
+                apply_quantization(self.dit, weights)
+                self.dit.load_weights(list(weights.items()))
+                aggressive_cleanup()
+            return orig_load(self)
+        return patched_load
+
+    for cls in classes:
+        if getattr(cls, "_phosphene_lora_fix", False):
+            continue
+        cls.load = _make_wrapper(cls.load)
+        cls._phosphene_lora_fix = True
+
+    _LORA_PATCH_INSTALLED = True
+
+
 def _attach_loras(pipe, loras: list[dict] | None) -> None:
     """Set _pending_loras on a freshly-constructed pipeline. The upstream
     base class checks this attribute inside load() and fuses the LoRA
     deltas into the transformer weights before quantization. Path on the
     wire may be a local file OR an HF repo id; we resolve HF ids to a
     local .safetensors here so the loader (mx.load) sees an absolute
-    path it can actually open."""
+    path it can actually open.
+
+    NOTE: most subclass pipelines override `load()` and skip the upstream
+    fusion path — :func:`_install_lora_fusion_patches` repairs that. It
+    runs from `get_pipe` before any pipeline instantiation."""
     if not loras:
         return
     pairs = []
@@ -394,6 +489,9 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
         if not _has_real_i2v:
             ImageToVideoPipeline = DistilledPipeline  # last-resort alias
         ExtendPipeline = RetakePipeline
+
+    # Repair the subclass-override-skips-fusion bug before any pipe is built.
+    _install_lora_fusion_patches()
 
     fp = _lora_fingerprint(loras)
 
