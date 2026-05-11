@@ -14743,15 +14743,16 @@ HTML = r"""<!doctype html>
       text-decoration: none;
     }
     body > header .brand img {
-      /* Transparent-background SVG variant of the favicon. The PNG
-         baked in a #00061a square that read as a "rectangle behind the
-         circle" sitting on the header's dark navy — circle-only SVG
-         drops the rect so the glyph floats clean. */
-      content: url('/assets/phosphene_favicon_circle.svg');
-      height: 46px;
-      width: 46px;
+      /* Phosphene brand mark — concentric radiating dashes that go
+         pink → magenta → cyan around a yellow core, on transparent
+         background. Provided by Salo (`phospene logo.png` 1254×1254
+         RGBA). Drop-shadow disabled because the mark already carries
+         its own glow via the gradient stroke colors; adding a halo
+         just muddies the dashes. */
+      content: url('/assets/phosphene_brand.png');
+      height: 48px;
+      width: 48px;
       display: block;
-      filter: drop-shadow(0 0 3px rgba(79, 214, 255, 0.35));
     }
     body > header .brand::after {
       content: 'Phosphene';
