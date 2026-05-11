@@ -17,6 +17,7 @@ import cgi
 import importlib.util
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -697,6 +698,175 @@ def _safe_loras_dir() -> Path:
     """Ensure mlx_models/loras/ exists. Idempotent."""
     LORAS_DIR.mkdir(parents=True, exist_ok=True)
     return LORAS_DIR
+
+
+# ============================================================================
+# Train Character — dataset + job-spec plumbing
+# ============================================================================
+#
+# Phosphene's panel runs the inference side; the actual LoRA training pipeline
+# lives in a sibling lab repo at /Users/salo/AI/projects/lora-lab/ — separate
+# tree, separate git, isolated dependencies (memory file: lora_lab notes).
+# This panel never imports the lab as Python. It calls the lab's training
+# entry-point as a subprocess via the lab's `scripts/run.sh` shim, which
+# selects the ltx-2-mlx venv python + sets PYTHONPATH so the training script
+# can `import ltx_pipelines_mlx` and friends. No new venv. No new service.
+#
+# Datasets are stored under state/train_character/<job_id>/ (preserved across
+# Pinokio Reset via the existing fs.link on state/, see CLAUDE.md §7). The
+# finished .safetensors is copied into mlx_models/loras/ so the existing
+# CivitAI/LoRA picker discovers it without any new picker code.
+#
+# Coordination contract with the lab agent (running in parallel):
+#   - Panel owns the dataset directory + a job-spec JSON written next to it.
+#   - Lab owns: src/lora_lab/train_character.py — accepts `--spec <path>` +
+#     `--job-id <id>`, reads the JSON, writes progress lines to stdout
+#     (`{"step": N, "total": T, "loss": f}` — one JSON object per line),
+#     emits the final .safetensors to <spec.output_dir>/<job_id>.safetensors.
+#   - Panel watches the subprocess stdout, parses progress lines into push()
+#     so the existing Now / Queue / Recent / Logs surfaces light up.
+
+TRAIN_DIR = STATE_DIR / "train_character"
+LORA_LAB_ROOT = Path("/Users/salo/AI/projects/lora-lab")
+LORA_LAB_RUN_SH = LORA_LAB_ROOT / "scripts" / "run.sh"
+
+# Quality preset → training hyperparams. The lab's train_character.py reads
+# these out of the spec JSON; the values here are the contract surface. The
+# wall-time estimate the UI shows is derived from `steps * seconds_per_step`
+# (measured 1.75 s/step at rank-8 / 512×320 on M4 Max — see lora-lab/STATE.md).
+TRAIN_PRESETS = {
+    "quick":  {"steps": 1500, "rank": 8,  "lr": 1e-4, "resolution": 512,
+               "seconds_per_step": 1.5,  "ram_peak_gb": 12,
+               "label": "Quick",
+               "subtitle": "~30 min · rank 8 · 512px",
+               "checkpoint_interval": 500},
+    "medium": {"steps": 3000, "rank": 16, "lr": 1e-4, "resolution": 576,
+               "seconds_per_step": 2.2,  "ram_peak_gb": 18,
+               "label": "Medium",
+               "subtitle": "~2 h · rank 16 · 576px",
+               "checkpoint_interval": 500},
+    "high":   {"steps": 5000, "rank": 32, "lr": 5e-5, "resolution": 768,
+               "seconds_per_step": 3.0,  "ram_peak_gb": 28,
+               "label": "High",
+               "subtitle": "~4 h · rank 32 · 768px",
+               "checkpoint_interval": 500},
+}
+
+# Dataset rules.
+TRAIN_MIN_IMAGES = 15
+TRAIN_MAX_IMAGES = 50
+TRAIN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+TRAIN_MAX_BYTES_PER_IMAGE = 32 * 1024 * 1024     # 32 MB per image upload
+
+# Counter for new training-job ids — short, sortable, unique-per-day.
+_TRAIN_COUNTER = 0
+_TRAIN_COUNTER_LOCK = threading.Lock()
+
+
+def _new_train_job_id() -> str:
+    """Return a short identifier like `trn-20260510-1430-a3` — sortable,
+    human-scannable, unique per panel run (the suffix counter avoids
+    collisions within the same minute)."""
+    global _TRAIN_COUNTER
+    with _TRAIN_COUNTER_LOCK:
+        _TRAIN_COUNTER += 1
+        n = _TRAIN_COUNTER
+    ts = time.strftime("%Y%m%d-%H%M")
+    suffix = base36 = ""
+    # Two-char base36 to keep the id terse; rolls over after ~1300 calls.
+    _v = n
+    alpha = "0123456789abcdefghijklmnopqrstuvwxyz"
+    while _v > 0 and len(base36) < 3:
+        base36 = alpha[_v % 36] + base36
+        _v //= 36
+    suffix = (base36 or "0").rjust(2, "0")
+    return f"trn-{ts}-{suffix}"
+
+
+def _train_dataset_dir(job_id: str) -> Path:
+    """Per-job dataset folder. Holds images/, captions/, spec.json."""
+    p = TRAIN_DIR / job_id
+    return p
+
+
+def _safe_job_id(job_id: str) -> str:
+    """Reject anything that isn't `^[A-Za-z0-9_-]+$`. Prevents
+    path-traversal via crafted job_id form values."""
+    if not job_id or not re.fullmatch(r"[A-Za-z0-9_\-]+", job_id):
+        raise ValueError(f"invalid job_id: {job_id!r}")
+    if len(job_id) > 64:
+        raise ValueError("job_id too long")
+    return job_id
+
+
+def _suggest_trigger_token() -> str:
+    """Generate a rare token of the form `<3-letter><2-digit>` (e.g. `mrz07`,
+    `lqx42`). Avoids English-word collisions by picking three consonants for
+    the leading run — phonotactically rare in English, almost always unique
+    across the LTX vocabulary's text encoder. The two-digit tail prevents
+    accidental clashes with existing LoRA triggers a user already has
+    installed (e.g. an `mrz` LoRA + an `mrz07` LoRA coexist fine)."""
+    # Skip vowels + ambiguous letters (l, i, o → 1, 0). Keep the set rare-in-
+    # English (no common bigrams like 'th', 'st', 'sh').
+    consonants = "bcdfghjkmnpqrstvwxyz"
+    while True:
+        letters = "".join(random.choice(consonants) for _ in range(3))
+        # Reject anything that happens to spell a common letter pattern.
+        if letters in ("the", "and", "for", "but"):
+            continue
+        digits = f"{random.randint(0, 99):02d}"
+        return letters + digits
+
+
+def _train_estimate_seconds(preset: str, image_count: int, *,
+                            steps_override: int | None = None) -> int:
+    """Wall-time estimate in seconds for a training run. The image count
+    has a small overhead for the preprocess pass (image → VAE latent
+    cache, ~3 s/image on M4 Max), then `steps * seconds_per_step` for
+    the train loop itself."""
+    cfg = TRAIN_PRESETS.get(preset) or TRAIN_PRESETS["quick"]
+    steps = steps_override if steps_override else cfg["steps"]
+    preprocess = 3.0 * max(0, image_count)
+    train = float(steps) * float(cfg["seconds_per_step"])
+    return int(preprocess + train + 30)  # +30 s for setup + checkpoint write
+
+
+def _train_list_completed() -> list[dict]:
+    """Scan mlx_models/loras/ for .safetensors with a `kind=train_character`
+    sidecar, plus the in-progress / failed entries from history. Returns
+    one dict per completed run for the UI list."""
+    out: list[dict] = []
+    if LORAS_DIR.exists():
+        for p in sorted(LORAS_DIR.iterdir(),
+                        key=lambda x: x.stat().st_mtime if x.exists() else 0,
+                        reverse=True):
+            if p.suffix.lower() != ".safetensors":
+                continue
+            sidecar = p.with_suffix(".json")
+            if not sidecar.is_file():
+                continue
+            try:
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if meta.get("kind") != "train_character":
+                continue
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            out.append({
+                "id": meta.get("job_id") or p.stem,
+                "name": meta.get("name") or p.stem,
+                "trigger": meta.get("trigger") or "",
+                "preset": meta.get("preset") or "",
+                "path": str(p),
+                "filename": p.name,
+                "size_mb": round(stat.st_size / (1024 * 1024), 1),
+                "created_at": meta.get("created_at") or stat.st_mtime,
+                "image_count": meta.get("image_count") or 0,
+            })
+    return out
 
 
 # Compatibility taxonomy for LoRAs across the panel's two render lanes
@@ -2986,6 +3156,77 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # make_job() entry point so /queue/add stays mode-agnostic; the
     # worker dispatches by params.mode in run_job_inner.
     mode_in = f("mode", "t2v")
+    if mode_in == "train":
+        # Training jobs don't render anything — they consume a pre-uploaded
+        # dataset directory (TRAIN_DIR / <job_id>) and write a .safetensors
+        # into mlx_models/loras/. Params shape mirrors the dataset + preset
+        # the /train/start endpoint built. Worker dispatches by params.mode
+        # in run_job_inner and routes to run_train_job_inner.
+        train_job_id = (f("train_job_id", "") or "").strip()
+        try:
+            train_job_id = _safe_job_id(train_job_id)
+        except ValueError:
+            train_job_id = _new_train_job_id()
+        preset = (f("preset", "quick") or "quick").lower()
+        if preset not in TRAIN_PRESETS:
+            preset = "quick"
+        trigger = (f("trigger", "") or "").strip() or _suggest_trigger_token()
+        try:
+            image_count = max(0, int(f("image_count", "0") or "0"))
+        except (TypeError, ValueError):
+            image_count = 0
+        # Allow per-form overrides for the advanced section. Empty → preset
+        # default.
+        def _int_or(name: str, default: int) -> int:
+            try:
+                return int(f(name, "") or default)
+            except (TypeError, ValueError):
+                return default
+        def _float_or(name: str, default: float) -> float:
+            try:
+                return float(f(name, "") or default)
+            except (TypeError, ValueError):
+                return default
+        cfg = TRAIN_PRESETS[preset]
+        rank = _int_or("rank", cfg["rank"])
+        steps = _int_or("steps", cfg["steps"])
+        lr = _float_or("lr", cfg["lr"])
+        resolution = _int_or("resolution", cfg["resolution"])
+        caption_strategy = (f("caption_strategy", "trigger_simple")
+                            or "trigger_simple").lower()
+        eta_sec = _train_estimate_seconds(preset, image_count,
+                                          steps_override=steps)
+        return {
+            "id": _new_job_id(),
+            "status": "queued",
+            "queued_at": iso_now(),
+            "started_at": None,
+            "started_ts": None,
+            "finished_at": None,
+            "elapsed_sec": None,
+            "params": {
+                "mode": "train",
+                "kind": "train_character",
+                "train_job_id": train_job_id,
+                "preset": preset,
+                "trigger": trigger,
+                "rank": rank,
+                "steps": steps,
+                "lr": lr,
+                "resolution": resolution,
+                "caption_strategy": caption_strategy,
+                "image_count": image_count,
+                "eta_sec": eta_sec,
+                "ram_peak_gb": cfg["ram_peak_gb"],
+                # Convenient label that surfaces in Now / Queue cards.
+                "label": f"Train · {trigger} ({preset})",
+            },
+            "command": None,
+            "raw_path": None,
+            "output_path": None,
+            "error": None,
+        }
+
     if mode_in == "image":
         prompt = override_prompt if override_prompt is not None else f("prompt", "")
         if not prompt:
@@ -3502,6 +3743,260 @@ def run_image_job_inner(job: dict) -> None:
          f"→ {out_dir}")
 
 
+_TRAIN_LOCK = threading.Lock()
+
+
+def run_train_job_inner(job: dict) -> None:
+    """Run a Train Character job. Reads the dataset that /train/upload built
+    under state/train_character/<train_job_id>/, writes a job-spec JSON the
+    lora-lab agent's train_character.py understands, and shells out to it
+    via the lab's `scripts/run.sh` shim (which selects the ltx-2-mlx venv
+    python + sets PYTHONPATH). Streams stdout JSON-line progress events
+    into `push()` so the existing Now / Queue / Logs surfaces light up.
+
+    The finished .safetensors is copied into mlx_models/loras/ with a
+    sidecar JSON tagged `kind=train_character` so:
+      a) the existing CivitAI/LoRA picker auto-discovers it (no new picker)
+      b) the Trained LoRAs list in the Train form can filter to "our" runs
+
+    The lab side (running in parallel agent) owns the actual training
+    script. If it doesn't exist yet this function fails cleanly with an
+    actionable error in the job's `error` field — the job card still
+    shows up in Recent, just marked failed.
+    """
+    p = job["params"]
+    try:
+        train_job_id = _safe_job_id(p.get("train_job_id") or "")
+    except ValueError as e:
+        raise RuntimeError(f"train job has invalid id: {e}")
+
+    dataset_dir = _train_dataset_dir(train_job_id)
+    images_dir = dataset_dir / "images"
+    captions_dir = dataset_dir / "captions"
+    if not images_dir.is_dir():
+        raise RuntimeError(
+            f"dataset images not found: {images_dir} — "
+            "/train/upload should have created this. Re-upload your dataset.")
+    image_files = [x for x in sorted(images_dir.iterdir())
+                   if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS]
+    if len(image_files) < TRAIN_MIN_IMAGES:
+        raise RuntimeError(
+            f"not enough images: {len(image_files)} (need >= {TRAIN_MIN_IMAGES}). "
+            "Re-upload more shots or drop the min in advanced settings.")
+
+    preset = p.get("preset", "quick")
+    trigger = p.get("trigger") or _suggest_trigger_token()
+    caption_strategy = p.get("caption_strategy", "trigger_simple")
+
+    # Generate captions if they aren't present. `trigger_simple` writes
+    # `<trigger> man` against every image — dumbest-strongest default,
+    # documented in the design doc. Auto-captioning via Qwen-VL is on the
+    # roadmap (the form has a hint).
+    captions_dir.mkdir(parents=True, exist_ok=True)
+    if caption_strategy == "trigger_only":
+        caption_text = trigger
+    else:
+        caption_text = f"{trigger} man"
+    for img in image_files:
+        cap = captions_dir / (img.stem + ".txt")
+        if not cap.exists():
+            try:
+                cap.write_text(caption_text, encoding="utf-8")
+            except OSError as e:
+                push(f"[train] warn: could not write caption for {img.name}: {e}")
+
+    # Output path for the trained LoRA. Going straight into
+    # mlx_models/loras/ so the existing picker scan finds it.
+    _safe_loras_dir()
+    final_lora_path = LORAS_DIR / f"{train_job_id}.safetensors"
+    final_sidecar_path = LORAS_DIR / f"{train_job_id}.json"
+
+    # Job-spec JSON — the contract surface with the lora-lab train_character
+    # script. The lab agent reads this and emits a .safetensors to
+    # output_path. Keep the field names stable; the lab side asserts them.
+    spec = {
+        "schema": "phosphene/train_character@1",
+        "job_id": train_job_id,
+        "trigger": trigger,
+        "preset": preset,
+        "rank": p.get("rank"),
+        "steps": p.get("steps"),
+        "lr": p.get("lr"),
+        "resolution": p.get("resolution"),
+        "caption_strategy": caption_strategy,
+        "images_dir": str(images_dir),
+        "captions_dir": str(captions_dir),
+        "checkpoints_dir": str(dataset_dir / "checkpoints"),
+        "output_path": str(final_lora_path),
+        "image_count": len(image_files),
+        "checkpoint_interval": TRAIN_PRESETS[preset]["checkpoint_interval"],
+    }
+    spec_path = dataset_dir / "spec.json"
+    try:
+        spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    except OSError as e:
+        raise RuntimeError(f"could not write spec.json: {e}")
+
+    if not LORA_LAB_RUN_SH.exists():
+        raise RuntimeError(
+            f"lora-lab shim not found at {LORA_LAB_RUN_SH}. "
+            "Train Character depends on the sibling lab at "
+            f"{LORA_LAB_ROOT}. Make sure it's checked out.")
+
+    # Serialise training runs against each other. We use a non-blocking
+    # acquire here because the queue worker already serialises jobs; this
+    # is just a safety net for the case where a future change lets two
+    # jobs run in parallel.
+    if not _TRAIN_LOCK.acquire(blocking=False):
+        raise RuntimeError(
+            "another training run is already in progress on this panel.")
+
+    t0 = time.time()
+    push(f"[train] {train_job_id} — preset={preset} trigger={trigger!r} "
+         f"steps={spec['steps']} rank={spec['rank']} "
+         f"images={len(image_files)} → {final_lora_path}")
+    push(f"[train] spec: {spec_path}")
+
+    cmd = [
+        str(LORA_LAB_RUN_SH), "python",
+        "-m", "lora_lab.train_character",
+        "--spec", str(spec_path),
+        "--job-id", train_job_id,
+    ]
+    push(f"[train] $ {' '.join(shlex.quote(c) for c in cmd)}")
+
+    proc: subprocess.Popen | None = None
+    last_step = 0
+    total_steps = spec["steps"]
+    last_loss = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env={**os.environ},
+        )
+        with LOCK:
+            STATE["pid"] = proc.pid
+        # Stream stdout. Each line is either JSON (a structured progress
+        # event) or plain text (forwarded as-is to the log).
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            payload = None
+            if line.lstrip().startswith("{"):
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    payload = None
+            if isinstance(payload, dict):
+                # Progress event from the lab side.
+                evt = payload.get("event") or "step"
+                if evt == "step":
+                    try:
+                        last_step = int(payload.get("step") or last_step)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        total_steps = int(payload.get("total") or total_steps)
+                    except (TypeError, ValueError):
+                        pass
+                    last_loss = payload.get("loss", last_loss)
+                    # Write progress fields the existing /status reader can
+                    # pick up — same shape as _compute_progress would emit.
+                    with LOCK:
+                        if STATE.get("current") and STATE["current"].get("id") == job["id"]:
+                            STATE["current"]["progress"] = {
+                                "phase": "denoise",
+                                "phase_label": f"Training · step {last_step} / {total_steps}",
+                                "pct": (last_step / max(1, total_steps)) * 100.0,
+                                "elapsed_sec": time.time() - t0,
+                                "eta_sec": max(0,
+                                    (total_steps - last_step) * (
+                                        (time.time() - t0) / max(1, last_step)
+                                        if last_step > 0
+                                        else TRAIN_PRESETS.get(preset, TRAIN_PRESETS["quick"])["seconds_per_step"]
+                                    )),
+                                "denoise_step": last_step,
+                                "denoise_total": total_steps,
+                            }
+                    if last_step % 50 == 0 or last_step == total_steps:
+                        push(f"[train] step {last_step}/{total_steps} loss={last_loss}")
+                elif evt == "log":
+                    push(f"[train] {payload.get('msg', '')}")
+                elif evt == "checkpoint":
+                    push(f"[train] checkpoint → {payload.get('path', '?')}")
+                elif evt == "done":
+                    push(f"[train] done · {payload.get('path', '?')}")
+                else:
+                    push(f"[train] {line}")
+            else:
+                push(f"[train] {line}")
+        rc = proc.wait()
+        proc = None
+        with LOCK:
+            STATE["pid"] = None
+        if rc != 0:
+            raise RuntimeError(
+                f"training exited with code {rc} — see Logs for stack trace")
+    finally:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            with LOCK:
+                STATE["pid"] = None
+        _TRAIN_LOCK.release()
+
+    elapsed = round(time.time() - t0, 2)
+
+    if not final_lora_path.is_file():
+        raise RuntimeError(
+            f"training finished but output .safetensors missing at {final_lora_path}")
+
+    # Write a sidecar JSON next to the LoRA — same schema the CivitAI
+    # downloader uses, plus a `kind=train_character` discriminator the
+    # Train Character UI filters on for its "Trained LoRAs" list.
+    sidecar = {
+        "schema": "phosphene/lora_sidecar@1",
+        "kind": "train_character",
+        "job_id": train_job_id,
+        "name": f"{trigger} ({preset})",
+        "description": f"Character LoRA trained in Phosphene · trigger '{trigger}' · preset {preset}.",
+        "trigger_words": [trigger],
+        "trigger": trigger,
+        "preset": preset,
+        "rank": spec["rank"],
+        "steps": spec["steps"],
+        "resolution": spec["resolution"],
+        "image_count": len(image_files),
+        "recommended_strength": 1.0,
+        "base_model": "LTXV 2.3",
+        "created_at": time.time(),
+        "elapsed_sec": elapsed,
+        "source": "phosphene.train_character",
+    }
+    try:
+        final_sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    except OSError as e:
+        push(f"[train] warn: could not write sidecar JSON: {e}")
+
+    job["output_path"] = str(final_lora_path)
+    job["raw_path"] = str(final_lora_path)
+    p["elapsed_seconds"] = elapsed
+    p["output_lora_path"] = str(final_lora_path)
+    push(f"[train] done: {final_lora_path} (elapsed {elapsed}s)")
+
+
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
@@ -3510,6 +4005,8 @@ def run_job_inner(job: dict) -> None:
     # image path before any of the video-only validation runs.
     if mode == "image":
         return run_image_job_inner(job)
+    if mode == "train":
+        return run_train_job_inner(job)
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
@@ -5894,6 +6391,99 @@ class Handler(BaseHTTPRequestHandler):
                 "hf_auth": bool(_active_hf_token()),
             })
             return
+
+        # ====== Train Character — completed LoRA list =====================
+        if parsed.path == "/train/list":
+            self._json({
+                "ok": True,
+                "loras": _train_list_completed(),
+                "loras_dir": str(_safe_loras_dir()),
+            })
+            return
+
+        # ====== Train Character — server-side suggestion for a fresh
+        # trigger token. The JS already has its own generator (so the
+        # button is instant), but this endpoint exists for agent callers
+        # and CLI users who want a hint without running JS.
+        if parsed.path == "/train/suggest-trigger":
+            self._json({"ok": True, "trigger": _suggest_trigger_token()})
+            return
+
+        # ====== Train Character — listing of the in-progress dataset
+        # (uploaded but not yet trained). Used by the UI to restore the
+        # thumbnail grid after a page reload.
+        if parsed.path == "/train/dataset":
+            qs = parse_qs(parsed.query)
+            requested = (qs.get("job_id", [""])[0] or "").strip()
+            if not requested:
+                self._json({"ok": True, "job_id": None, "images": []}); return
+            try:
+                job_id = _safe_job_id(requested)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            ds = _train_dataset_dir(job_id)
+            images_dir = ds / "images"
+            images: list[dict] = []
+            if images_dir.is_dir():
+                for p in sorted(images_dir.iterdir()):
+                    if not p.is_file() or p.suffix.lower() not in TRAIN_IMAGE_EXTS:
+                        continue
+                    try:
+                        st = p.stat()
+                    except OSError:
+                        continue
+                    images.append({
+                        "filename": p.name,
+                        "path": str(p),
+                        "size_bytes": st.st_size,
+                    })
+            self._json({
+                "ok": True,
+                "job_id": job_id,
+                "count": len(images),
+                "min": TRAIN_MIN_IMAGES,
+                "max": TRAIN_MAX_IMAGES,
+                "images": images,
+            })
+            return
+
+        # ====== Train Character — serve a dataset thumbnail (the raw
+        # uploaded image). Mirrors /file but scoped to TRAIN_DIR so the
+        # UI can render <img src="/train/file?job_id=...&filename=...">
+        # without exposing the rest of state/.
+        if parsed.path == "/train/file":
+            qs = parse_qs(parsed.query)
+            requested = (qs.get("job_id", [""])[0] or "").strip()
+            filename = (qs.get("filename", [""])[0] or "").strip()
+            if not requested or not filename:
+                self.send_error(400, "job_id + filename required"); return
+            try:
+                job_id = _safe_job_id(requested)
+            except ValueError:
+                self.send_error(400); return
+            if "/" in filename or ".." in filename:
+                self.send_error(400); return
+            ds_root = TRAIN_DIR.resolve()
+            target = (TRAIN_DIR / job_id / "images" / filename).resolve()
+            if not target.is_relative_to(ds_root) or not target.is_file():
+                self.send_error(404); return
+            ext = target.suffix.lower()
+            ctype = {
+                ".png": "image/png", ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg", ".webp": "image/webp",
+            }.get(ext, "application/octet-stream")
+            try:
+                data = target.read_bytes()
+            except OSError:
+                self.send_error(500); return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if parsed.path == "/civitai/search":
             # Proxy CivitAI's API. Filtering down to LTX-Video LoRAs by
             # baseModel ("LTXV 2.3" is the canonical string used on
@@ -6358,6 +6948,91 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"upload failed: {exc}"}, 500)
             return
 
+        # ====== Train Character — multipart dataset upload ===============
+        # POSTs one image file per request, accumulating them under
+        # state/train_character/<job_id>/images/. Same multipart shape as
+        # /upload but the field name is `file` and the response carries
+        # the running count + the saved filename. The JS client iterates a
+        # FileList client-side and fires one /train/upload per image so we
+        # get individual progress feedback in the UI (vs one fat multi-file
+        # multipart that would block the whole pane on a slow drive).
+        if path == "/train/upload" and ctype.startswith("multipart/form-data"):
+            MAX_UPLOAD_BYTES = TRAIN_MAX_BYTES_PER_IMAGE
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"error": "Content-Length required"}, 411); return
+            if clen > MAX_UPLOAD_BYTES:
+                self._json({"error": f"upload too large (max {MAX_UPLOAD_BYTES} bytes per image)"}, 413)
+                return
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile, headers=self.headers,
+                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
+                )
+                # job_id is optional — if absent, mint a fresh one for the
+                # first upload of a session. The JS client echoes the
+                # returned id back on every subsequent upload to keep the
+                # whole batch landing in one directory.
+                requested_id = (form.getvalue("job_id") or "").strip() if "job_id" in form else ""
+                if requested_id:
+                    try:
+                        train_job_id = _safe_job_id(requested_id)
+                    except ValueError as e:
+                        self._json({"error": str(e)}, 400); return
+                else:
+                    train_job_id = _new_train_job_id()
+
+                if "file" not in form:
+                    self._json({"error": "no field 'file'"}, 400); return
+                fld = form["file"]
+                if not getattr(fld, "filename", None):
+                    self._json({"error": "no filename"}, 400); return
+                ext = Path(fld.filename).suffix.lower()
+                if ext not in TRAIN_IMAGE_EXTS:
+                    self._json({
+                        "error": f"unsupported file type {ext!r}; want one of "
+                                 f"{sorted(TRAIN_IMAGE_EXTS)}"
+                    }, 400)
+                    return
+
+                ds = _train_dataset_dir(train_job_id)
+                images_dir = ds / "images"
+                images_dir.mkdir(parents=True, exist_ok=True)
+
+                existing = [x for x in images_dir.iterdir()
+                            if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS]
+                if len(existing) >= TRAIN_MAX_IMAGES:
+                    self._json({
+                        "error": f"already at {TRAIN_MAX_IMAGES} images "
+                                 "(max). Remove some before uploading more.",
+                        "job_id": train_job_id,
+                        "count": len(existing),
+                    }, 409)
+                    return
+
+                # Numeric ordering: char_001.jpg, char_002.jpg, ...
+                # Lets the lab side load them in a deterministic order.
+                next_idx = len(existing) + 1
+                saved_name = f"char_{next_idx:03d}{ext}"
+                dest = images_dir / saved_name
+                dest.write_bytes(fld.file.read())
+                count = len(existing) + 1
+                self._json({
+                    "ok": True,
+                    "job_id": train_job_id,
+                    "filename": saved_name,
+                    "path": str(dest),
+                    "count": count,
+                    "min": TRAIN_MIN_IMAGES,
+                    "max": TRAIN_MAX_IMAGES,
+                })
+            except Exception as exc:
+                self._json({"error": f"train upload failed: {exc}"}, 500)
+            return
+
         # JSON-body endpoint for the manual Image Studio. Lives BEFORE
         # the urlencoded body parsing because the body is JSON, not form
         # data. Drives `/image/generate` — the panel-side counterpart to
@@ -6612,6 +7287,117 @@ class Handler(BaseHTTPRequestHandler):
                 QUEUE_COND.notify_all()
             persist_queue()
             self._json({"ok": True, "id": job["id"]})
+            return
+
+        # ====== Train Character — start training (enqueue a mode='train' job)
+        if path == "/train/start":
+            train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
+            if not train_job_id:
+                self._json({"error": "train_job_id required"}, 400); return
+            try:
+                train_job_id = _safe_job_id(train_job_id)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            ds = _train_dataset_dir(train_job_id)
+            images_dir = ds / "images"
+            if not images_dir.is_dir():
+                self._json({"error": f"dataset not found: {images_dir}"}, 404); return
+            image_files = [x for x in images_dir.iterdir()
+                           if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS]
+            if len(image_files) < TRAIN_MIN_IMAGES:
+                self._json({
+                    "error": f"not enough images: {len(image_files)} (need >= {TRAIN_MIN_IMAGES})"
+                }, 400)
+                return
+            # Make sure the form has the canonical image_count so make_job's
+            # estimate is right even if the JS forgot to set it.
+            form["mode"] = ["train"]
+            form["train_job_id"] = [train_job_id]
+            form.setdefault("image_count", [str(len(image_files))])
+            job = make_job(form)
+            with QUEUE_COND:
+                STATE["queue"].append(job)
+                QUEUE_COND.notify_all()
+            persist_queue()
+            self._json({"ok": True, "queued_id": job["id"],
+                        "train_job_id": train_job_id,
+                        "params": job["params"]})
+            return
+
+        # Remove a single image from a pending dataset (before training has
+        # started). Re-numbers the remaining files so the lab side still
+        # sees char_001…NN.
+        if path == "/train/remove-image":
+            train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
+            filename = (form.get("filename", [""])[0] or "").strip()
+            if not train_job_id or not filename:
+                self._json({"error": "train_job_id + filename required"}, 400); return
+            try:
+                train_job_id = _safe_job_id(train_job_id)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            # Filename containment — must be a basename, no slashes.
+            if "/" in filename or ".." in filename:
+                self._json({"error": "bad filename"}, 400); return
+            ds = _train_dataset_dir(train_job_id)
+            images_dir = ds / "images"
+            target = images_dir / filename
+            if not target.is_file() or not target.resolve().is_relative_to(images_dir.resolve()):
+                self._json({"error": "image not found"}, 404); return
+            try:
+                target.unlink()
+            except OSError as e:
+                self._json({"error": f"could not delete: {e}"}, 500); return
+            # Renumber to keep the char_NNN sequence dense.
+            remaining = sorted([x for x in images_dir.iterdir()
+                                if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS])
+            for idx, p in enumerate(remaining, start=1):
+                new_name = f"char_{idx:03d}{p.suffix.lower()}"
+                if p.name != new_name:
+                    try:
+                        p.rename(p.with_name(new_name))
+                    except OSError:
+                        pass
+            self._json({"ok": True, "count": len(remaining),
+                        "job_id": train_job_id})
+            return
+
+        # Delete a trained LoRA — removes the .safetensors + sidecar from
+        # mlx_models/loras/. The Trained-LoRAs list in the form refreshes
+        # off /train/list afterwards.
+        if path == "/train/delete":
+            target_path = (form.get("path", [""])[0] or "").strip()
+            if not target_path:
+                self._json({"error": "path required"}, 400); return
+            try:
+                resolved = Path(target_path).resolve()
+            except OSError as e:
+                self._json({"error": f"unresolvable: {e}"}, 400); return
+            loras_root = _safe_loras_dir().resolve()
+            if not resolved.is_relative_to(loras_root):
+                self._json({"error": "path not under mlx_models/loras/"}, 400); return
+            if not resolved.is_file() or resolved.suffix.lower() != ".safetensors":
+                self._json({"error": "not a .safetensors file"}, 404); return
+            sidecar = resolved.with_suffix(".json")
+            try:
+                # Only allow delete on entries flagged as our train_character
+                # output — never blow away an unrelated LoRA the user
+                # downloaded from CivitAI.
+                if sidecar.is_file():
+                    try:
+                        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                    except Exception:
+                        meta = {}
+                    if meta.get("kind") != "train_character":
+                        self._json({
+                            "error": "refusing to delete: not a Phosphene-trained LoRA"
+                        }, 403)
+                        return
+                    sidecar.unlink()
+                resolved.unlink()
+            except OSError as e:
+                self._json({"error": f"delete failed: {e}"}, 500); return
+            self._json({"ok": True, "deleted": str(resolved)})
             return
 
         if path == "/queue/batch":
