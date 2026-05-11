@@ -19575,12 +19575,12 @@ function imgStudioRenderEnginePill() {
   }
   if (info.cached) {
     pill.dataset.state = 'ready';
-    pill.textContent = '✓ ready';
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>ready';
     pill.title = 'Weights are cached locally';
   } else {
     pill.dataset.state = 'missing';
     const gb = info.download_gb || 0;
-    pill.textContent = '⤓ ' + (gb > 0 ? gb.toFixed(0) + ' GB' : 'fetch');
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-download-simple"/></svg>' + (gb > 0 ? gb.toFixed(0) + ' GB' : 'fetch');
     pill.title = (gb > 0
       ? `Weights not cached — first run will download ~${gb.toFixed(0)} GB`
       : 'Weights not cached — first run will fetch');
@@ -19917,7 +19917,7 @@ async function trainCheckPreflight() {
     box.innerHTML = `
       <div class="train-preflight-card">
         <div class="train-preflight-title">
-          ⚠️ Required model${missing.length > 1 ? 's' : ''} not downloaded
+          <svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>Required model${missing.length > 1 ? 's' : ''} not downloaded
         </div>
         <div class="train-preflight-list">
           ${missing.map(m => `
@@ -24080,7 +24080,7 @@ function renderVersionPill() {
   // restart to load the new code.
   if (_versionRestartPending) {
     pill.classList.add('pill-restart');
-    pill.textContent = '↻ Restart Phosphene';
+    pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-clockwise-bold"/></svg>Restart Phosphene';
     const v = s.pull_pulled_to_version || s.pull_pulled_to_short || 'the new code';
     pill.title = s.pull_requires_full_update
       ? `Pulled ${v}. This update touched dependencies — use Pinokio's Update button (not just Stop+Start).`
@@ -24097,7 +24097,7 @@ function renderVersionPill() {
   // Behind origin/main — eye-catching action prompt.
   if (!s.error && s.checked_ts && (s.behind_by | 0) > 0) {
     pill.classList.add('pill-update');
-    pill.textContent = `↑ Update to ${remote}`;
+    pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-arrow-up"/></svg>Update to ${remote}`;
     pill.title = `You're on ${local}; latest is ${remote}. Click to pull the update.`;
     return;
   }
@@ -24111,7 +24111,7 @@ function renderVersionPill() {
   // Current with origin/main.
   if (s.checked_ts && (s.behind_by | 0) === 0) {
     pill.classList.add('pill-current');
-    pill.textContent = `✓ Up to date · ${local}`;
+    pill.innerHTML = `<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-check-bold"/></svg>Up to date · ${local}`;
     pill.title = `You're on ${local}, the latest version. Click to re-check now.`;
     return;
   }
@@ -24177,7 +24177,7 @@ async function versionDoPull() {
   if (!ok) return;
   const pill = document.getElementById('versionPill');
   pill.classList.add('pill-busy');
-  pill.textContent = '⟳ pulling…';
+  pill.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px;animation:phSpin 1.2s linear infinite"><use href="#ph-arrow-clockwise-bold"/></svg>pulling…';
   try {
     const r = await fetch('/version/pull', { method: 'POST' });
     const data = await r.json();
@@ -27762,13 +27762,13 @@ function agentStageRender(status, sess) {
       } else if (typeof inner === 'object' && 'candidates' in inner) {
         txt = `→ ${inner.candidates.length} candidates ready`;
       } else if (!ok) {
-        txt = `✗ ${(r.error || 'failed').slice(0, 80)}`;
+        txt = (r.error || 'failed').slice(0, 80);
       } else {
         txt = '→ result';
       }
       events.push({ kind: ok ? 'ok' : 'fail', text: txt });
     } else if (m.kind === 'assistant' && m.tool_call) {
-      events.push({ kind: 'run', text: '⚙ ' + m.tool_call.tool });
+      events.push({ kind: 'run', text: m.tool_call.tool });
     }
   }
   activityCountEl.textContent = events.length;
