@@ -57,11 +57,75 @@ tier-aware default table.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+
+# Active-subprocess registry — every image engine that spawns a Popen
+# registers it here so the panel's /stop endpoint can terminate the
+# whole tree. Without this the Stop button only killed the LTX video
+# HELPER and image generations ran to completion. Engines must:
+#   1. Spawn with `start_new_session=True` so kill cascades to the
+#      child's process group (mflux + Metal spawn helpers).
+#   2. Call `_register_active_proc(proc)` immediately after Popen.
+#   3. Wrap the wait in try/finally and `_unregister_active_proc(proc)`
+#      in the finally — so a normal exit doesn't leave a stale entry.
+_ACTIVE_PROC_LOCK = threading.Lock()
+_ACTIVE_PROCS: set = set()  # set[subprocess.Popen]
+
+
+class ImageJobCancelled(RuntimeError):
+    """Raised when an image-generation subprocess is killed by /stop.
+
+    Distinguishable from a real engine failure so the queue worker can
+    mark the job 'cancelled' instead of 'failed'.
+    """
+
+
+def _register_active_proc(proc) -> None:
+    with _ACTIVE_PROC_LOCK:
+        _ACTIVE_PROCS.add(proc)
+
+
+def _unregister_active_proc(proc) -> None:
+    with _ACTIVE_PROC_LOCK:
+        _ACTIVE_PROCS.discard(proc)
+
+
+def kill_active_image_procs() -> int:
+    """Terminate every in-flight image subprocess.
+
+    Returns the number of processes signaled. Called from the panel's
+    `stop_current_job` so /stop covers both video (HELPER) and image
+    (these) generation paths uniformly.
+
+    Sends SIGTERM to each proc's whole process group (which is why the
+    Popens use `start_new_session=True`). Caller is responsible for
+    handling the resulting RC/cancellation in the engine wrapper.
+    """
+    import os
+    import signal
+    with _ACTIVE_PROC_LOCK:
+        procs = list(_ACTIVE_PROCS)
+    killed = 0
+    for p in procs:
+        try:
+            pgid = os.getpgid(p.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            killed += 1
+        except (ProcessLookupError, PermissionError, OSError):
+            # Already gone or permission denied — try a direct kill as
+            # a fallback before giving up.
+            try:
+                p.terminate()
+                killed += 1
+            except Exception:        # noqa: BLE001
+                pass
+    return killed
 
 
 @dataclass
@@ -668,6 +732,8 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # for download / Metal init that survive a parent kill).
         start_new_session=True,
     )
+    # Register before the wait loop so /stop can find this proc.
+    _register_active_proc(proc)
     try:
         deadline = time.time() + timeout_s
         poll_interval = 0.5
@@ -752,8 +818,13 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
                 proc.stdout.close()
             except OSError:
                 pass
+        _unregister_active_proc(proc)
 
     stderr_tail = "\n".join(last_lines)
+    # SIGTERM/SIGKILL → user hit /stop. Surface as a typed cancellation
+    # so the queue worker marks the job 'cancelled' rather than 'failed'.
+    if rc in (-15, 143, -9, 137):
+        raise ImageJobCancelled(f"{bin_name} cancelled by /stop (rc={rc})")
     if rc != 0:
         # Detect MLX/Metal `abort()` from the GPU completion thread (issue #2:
         # @Akossimon's three crashes in 2 minutes were all this exact
@@ -1145,16 +1216,28 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         stderr=subprocess.STDOUT,
         text=True,
         env=os.environ.copy(),
+        # Own process group so /stop's killpg cascades to any
+        # child procs MLX/Metal might spawn under this generation.
+        start_new_session=True,
     )
-    if proc.stdout is not None:
-        for line in proc.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            if on_log:
-                on_log(f"[hidream] {line}")
-    rc = proc.wait()
+    _register_active_proc(proc)
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if on_log:
+                    on_log(f"[hidream] {line}")
+        rc = proc.wait()
+    finally:
+        _unregister_active_proc(proc)
     if rc != 0:
+        # SIGTERM → rc = -15 on POSIX (or 143 if the shell wrapped it).
+        # Treat that as cancellation, not failure, so the worker can mark
+        # the job 'cancelled' and the queue advances cleanly.
+        if rc in (-15, 143, -9, 137):
+            raise ImageJobCancelled(f"HiDream gen cancelled by /stop (rc={rc})")
         raise RuntimeError(f"HiDream gen failed with rc={rc}")
 
     results: list[dict] = []

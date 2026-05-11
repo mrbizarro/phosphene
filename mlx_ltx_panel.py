@@ -3283,6 +3283,17 @@ def stop_current_job(timeout: float = 5.0) -> None:
         cur["cancel_requested"] = True
     push("Stop requested — killing helper + ffmpeg post-process to abort current job.")
     HELPER.kill()
+    # Image-engine subprocesses (HiDream's BF16 helper, mflux's per-family
+    # binaries) live outside HELPER. Without this they would run to
+    # completion regardless of /stop. Each engine registers its Popen via
+    # _register_active_proc; kill_active_image_procs sends SIGTERM to the
+    # whole process group of each.
+    try:
+        n_killed = agent_image_engine.kill_active_image_procs()
+        if n_killed:
+            push(f"SIGTERM sent to {n_killed} image subprocess(es)")
+    except Exception as e:        # noqa: BLE001
+        push(f"image-kill failed: {type(e).__name__}: {e}")
     # Mux runs in its own process group outside the helper's. Kill it too,
     # otherwise ffmpeg keeps writing the (now-orphaned) output file.
     if mux_pgid:
