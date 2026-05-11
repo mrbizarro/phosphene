@@ -9171,6 +9171,18 @@ HTML = r"""<!doctype html>
     body[data-workflow="agent"] #genForm,
     body[data-workflow="agent"] #studioSection { display: none !important; }
 
+    /* Train Character is its own workflow tier alongside Manual + Agent.
+       Hide the manual-only chrome (Mode pills, models card, genForm, studio)
+       so only #trainSection is visible inside form-pane. The stage-pane
+       stays visible — training surfaces progress through the existing Now /
+       Queue / Recent / Logs panes. */
+    body[data-workflow="train"] #modelsInline,
+    body[data-workflow="train"] #modeGroup,
+    body[data-workflow="train"] aside.form-pane > h2,
+    body[data-workflow="train"] #genForm,
+    body[data-workflow="train"] #studioSection { display: none !important; }
+    body[data-workflow="train"] #trainSection { display: block; }
+
     /* ===== FORM ===== */
     h2 {
       font-size: 10px; margin: 14px 0 8px; color: var(--muted);
@@ -17030,6 +17042,7 @@ HTML = r"""<!doctype html>
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active">Manual</button>
       <button data-workflow="agent">Agentic Flows<span class="new-badge">NEW</span></button>
+      <button data-workflow="train">Train<span class="new-badge">NEW</span></button>
     </nav>
 
     <!-- ============== AGENT SESSIONS SIDEBAR ============== -->
@@ -17338,7 +17351,9 @@ HTML = r"""<!doctype html>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="image" title="Open Image Studio — generate stills (Qwen-Image-Edit-2511 multi-ref + others)">Studio<span class="mc-sub sub">stills + library</span></button>
-      <button type="button" class="mode-chip pill-btn" data-mode="train" title="Train a character LoRA from 15-50 stills — runs in the sibling lora-lab pipeline">Train<span class="mc-sub sub">character LoRA</span></button>
+      <!-- "Train" used to live here as a mode chip; it's been promoted to a
+           workflow tier (top tab strip, alongside Manual / Agentic Flows)
+           because training is a different category than rendering. -->
     </div>
 
     <form id="genForm">
@@ -24103,6 +24118,7 @@ function workflowSwitch(name) {
   const manual = document.getElementById('genForm');
   const agent = document.getElementById('agentPane');
   const studio = document.getElementById('studioSection');
+  const train = document.getElementById('trainSection');
   // Set body data attribute so CSS can switch the layout (wider form-pane,
   // show agent-stage-pane on the right).
   document.body.setAttribute('data-workflow', name);
@@ -24113,6 +24129,7 @@ function workflowSwitch(name) {
   // browser-driven audit: switching tabs while Studio was active left
   // the chat inaccessible.
   if (studio) studio.classList.remove('show');
+  if (train) train.classList.remove('show');
   if (name === 'agent') {
     if (manual) manual.style.display = 'none';
     if (agent) agent.hidden = false;
@@ -24129,6 +24146,15 @@ function workflowSwitch(name) {
       const ta = document.getElementById('agentInput');
       if (ta) { agentAutoResize(ta); ta.focus(); }
     }, 50);
+  } else if (name === 'train') {
+    // Train Character is its own workflow tier (alongside Manual and
+    // Agentic Flows). Hide the manual render form + agent chat, show
+    // the train section, run its init.
+    if (manual) manual.style.display = 'none';
+    if (agent) agent.hidden = true;
+    agentStageStop();
+    if (train) train.classList.add('show');
+    if (typeof trainInit === 'function') trainInit();
   } else {
     if (manual) manual.style.display = '';
     if (agent) agent.hidden = true;
