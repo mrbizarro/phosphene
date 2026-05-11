@@ -11314,7 +11314,8 @@ HTML = r"""<!doctype html>
       text-align: center; padding: 18px 14px; color: var(--muted);
       pointer-events: none;
     }
-    .picker-icon { font-size: 28px; margin-bottom: 6px; line-height: 1; }
+    .picker-icon { font-size: 28px; margin-bottom: 6px; line-height: 1; color: var(--accent-bright); }
+    .picker-icon .ph { width: 32px; height: 32px; opacity: 0.85; }
     .picker-cta { font-size: 13px; color: var(--fg, #d8e0ee); margin-bottom: 4px; }
     .picker-empty .hint { font-size: 11px; color: var(--muted); }
     .picker-preview {
@@ -17363,7 +17364,7 @@ HTML = r"""<!doctype html>
           <span class="ref-icon">↻</span>
           <span style="color:var(--muted);font-size:11px">refine</span>
           <span class="ref-label" id="agentRefChipLabel">…</span>
-          <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine">×</button>
+          <button type="button" class="clear" onclick="agentClearRefine()" title="Cancel refine"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
         </div>
         <!-- Pending-attachment chip row. Filled by agentAddAttachment() as the
              user picks files (paperclip / drag-drop / paste). Survives between
@@ -17418,7 +17419,7 @@ HTML = r"""<!doctype html>
     <div id="modelsInline" class="models-inline" style="display:none">
       <button type="button" class="models-inline-dismiss" id="modelsInlineDismiss"
               title="Hide this card (won't show again until model state changes)"
-              onclick="dismissModelsCard()">×</button>
+              onclick="dismissModelsCard()"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
       <div class="models-inline-body">
         <div class="models-inline-icon" id="modelsInlineIcon">⬇</div>
         <div class="models-inline-text">
@@ -17479,12 +17480,12 @@ HTML = r"""<!doctype html>
             <div class="picker" data-key="image">
               <div class="picker-drop" id="picker_drop_image">
                 <div class="picker-empty">
-                  <div class="picker-icon">🖼</div>
+                  <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
                   <div class="picker-cta">Drop image here, or <strong>click to browse</strong></div>
                   <div class="hint">PNG / JPG / WEBP — auto cover-crop to model size</div>
                 </div>
                 <img class="picker-preview" id="picker_preview_image" alt="" style="display:none">
-                <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none">×</button>
+                <button type="button" class="picker-clear" id="picker_clear_image" title="Clear" style="display:none"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
               </div>
               <input type="file" id="picker_file_image" accept="image/*" style="display:none">
               <input type="hidden" name="image" id="image" value="">
@@ -17501,12 +17502,12 @@ HTML = r"""<!doctype html>
             <div class="picker" data-key="start_image">
               <div class="picker-drop" id="picker_drop_start_image">
                 <div class="picker-empty">
-                  <div class="picker-icon">🎬</div>
+                  <div class="picker-icon"><svg class="ph"><use href="#ph-film-strip"/></svg></div>
                   <div class="picker-cta">Drop the <strong>first frame</strong>, or <strong>click to browse</strong></div>
                   <div class="hint">This image opens the clip — its aspect picks the output dimensions.</div>
                 </div>
                 <img class="picker-preview" id="picker_preview_start_image" alt="" style="display:none">
-                <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none">×</button>
+                <button type="button" class="picker-clear" id="picker_clear_start_image" title="Clear" style="display:none"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
               </div>
               <input type="file" id="picker_file_start_image" accept="image/*" style="display:none">
               <input type="hidden" name="start_image" id="start_image" value="">
@@ -17520,12 +17521,12 @@ HTML = r"""<!doctype html>
             <div class="picker" data-key="end_image">
               <div class="picker-drop" id="picker_drop_end_image">
                 <div class="picker-empty">
-                  <div class="picker-icon">🎯</div>
+                  <div class="picker-icon"><svg class="ph"><use href="#ph-target"/></svg></div>
                   <div class="picker-cta">Drop the <strong>last frame</strong>, or <strong>click to browse</strong></div>
                   <div class="hint">A close-up here anchors face identity through the clip.</div>
                 </div>
                 <img class="picker-preview" id="picker_preview_end_image" alt="" style="display:none">
-                <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none">×</button>
+                <button type="button" class="picker-clear" id="picker_clear_end_image" title="Clear" style="display:none"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
               </div>
               <input type="file" id="picker_file_end_image" accept="image/*" style="display:none">
               <input type="hidden" name="end_image" id="end_image" value="">
@@ -18084,7 +18085,7 @@ HTML = r"""<!doctype html>
         </h2>
         <div class="train-drop" id="trainDrop">
           <div class="train-drop-empty" id="trainDropEmpty">
-            <div class="picker-icon">📸</div>
+            <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
             <div class="picker-cta">Drop 15-50 images here, or <strong>click to browse</strong></div>
             <div class="hint">PNG / JPG / WEBP. Each preview shows the 1:1 center-crop the trainer will see.</div>
           </div>
@@ -19493,7 +19494,7 @@ function imgStudioRenderSlot(idx) {
     slot.innerHTML = `
       <span class="ref-tag">${tag}</span>
       <img src="/image?path=${encodeURIComponent(ref.path)}" alt="">
-      <button class="clear-x" type="button" onclick="imgStudioClearRef(${idx});event.stopPropagation()" title="Remove">×</button>
+      <button class="clear-x" type="button" onclick="imgStudioClearRef(${idx});event.stopPropagation()" title="Remove"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     `;
   } else {
     slot.classList.remove('has-image');
@@ -20124,7 +20125,7 @@ function trainRenderThumbs() {
     return `<div class="${cls}" data-idx="${idx}">
       <img src="${img.src || ''}" alt="char ${idx + 1}" loading="lazy">
       <span class="train-thumb-num">${String(idx + 1).padStart(3, '0')}</span>
-      <button type="button" class="train-thumb-x" ${removeAttr} title="Remove">×</button>
+      <button type="button" class="train-thumb-x" ${removeAttr} title="Remove"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     </div>`;
   }).join('');
   trainUpdateCounter();
@@ -21329,7 +21330,7 @@ async function poll() {
         `<span style="color: var(--danger, #f85149)">⚠ ${escapeHtml(friendly)}</span>` +
         `<button type="button" class="now-card-dismiss" title="Dismiss this failure" ` +
         `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
-        `if (typeof poll === 'function') poll();">×</button>`;
+        `if (typeof poll === 'function') poll();"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
       nowCard.querySelector('.meta').innerHTML =
         `<span style="color: var(--muted)">${escapeHtml(snippet(last.params.label || last.params.prompt, 80))}</span>` +
         ` <span style="color: var(--muted)">· ${escapeHtml(last.params.mode)} · ${last.params.width}×${last.params.height}</span>` +
@@ -21388,7 +21389,7 @@ async function poll() {
       <span class="pos">#${i+1}</span>
       <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
       <span class="params">${params}</span>
-      <button title="Remove" onclick="removeJob('${j.id}')">×</button>
+      <button title="Remove" onclick="removeJob('${j.id}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     </li>`;
   }).join('');
 
@@ -21788,7 +21789,7 @@ function refreshPlayerProgressOverlay(s) {
     metaEl.innerHTML = escapeHtml(snippet(last.error || 'unknown error', 80)) +
       ` <button type="button" class="player-progress-dismiss" title="Dismiss this failure" ` +
       `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
-      `if (typeof poll === 'function') poll();">×</button>`;
+      `if (typeof poll === 'function') poll();"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
     return;
   }
   chip.style.display = 'none';
@@ -23488,10 +23489,10 @@ function loraRowHtml(r, modeTag) {
   }
   if (r.kind === 'user' || r.kind === 'trained') {
     corner.push(`<button class="lora-icon-btn danger" type="button" title="Delete from disk"
-                         onclick="event.stopPropagation(); deleteLora(${pathAttr}, ${nameAttr})">×</button>`);
+                         onclick="event.stopPropagation(); deleteLora(${pathAttr}, ${nameAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`);
   } else {
     corner.push(`<button class="lora-icon-btn" type="button" title="Remove from active set"
-                         onclick="event.stopPropagation(); removeLoraFromActive(${pathAttr})">×</button>`);
+                         onclick="event.stopPropagation(); removeLoraFromActive(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`);
   }
   // Trigger chips for the expanded section. Same click-to-append behavior
   // as before — chips prepend the trigger to the prompt textarea.
@@ -26417,7 +26418,7 @@ function agentRenderAttachRow() {
     x.type = 'button';
     x.className = 'remove';
     x.title = 'Remove';
-    x.textContent = '×';
+    x.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg>';
     x.addEventListener('click', () => agentRemoveAttachment(a.id));
     chip.appendChild(thumb); chip.appendChild(name); chip.appendChild(meta); chip.appendChild(x);
     row.appendChild(chip);
