@@ -869,6 +869,163 @@ def _train_list_completed() -> list[dict]:
     return out
 
 
+def _train_required_models() -> list[dict]:
+    """Return the list of model files Train Character needs and whether each
+    is present locally. Surfaces missing models to the UI so the user can
+    one-click download them via the existing hf flow.
+
+    Train Character requires `transformer-dev.safetensors` from the LTX-2.3
+    Q4 repo (the dev base — distilled is structurally wrong for training:
+    different sigma schedule than the trainer's flow-matching objective).
+    The default install ships distilled but NOT dev to save ~11 GB on disk
+    for users who only run inference.
+
+    Gemma + the rest of the Q4 stack (vae, audio, etc.) are already required
+    for inference so they should already be present, but we check anyway.
+    """
+    q4_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+    q4_repo_id = "dgrauet/ltx-2.3-mlx-q4"
+    gemma_local_dir = ROOT / "mlx_models" / "gemma-3-12b-it-4bit"
+    gemma_repo_id = "mlx-community/gemma-3-12b-it-4bit"
+
+    def _file_present(local_dir: Path, repo_id: str, filename: str) -> bool:
+        p = local_dir / filename
+        try:
+            if p.exists() and p.stat().st_size >= _MIN_FILE_BYTES:
+                return True
+        except OSError:
+            pass
+        cache_dir = _repo_hf_cache_dir(repo_id)
+        if cache_dir is not None:
+            cp = cache_dir / filename
+            try:
+                if cp.exists() and cp.stat().st_size >= _MIN_FILE_BYTES:
+                    return True
+            except OSError:
+                pass
+        return False
+
+    items = [
+        {
+            "key": "ltx_dev_transformer",
+            "label": "LTX-2.3 dev transformer (training-only)",
+            "blurb": "Required for training. Standard inference uses the distilled "
+                     "transformer instead; the dev transformer has the right "
+                     "flow-matching schedule for LoRA-from-images training.",
+            "repo_id": q4_repo_id,
+            "filename": "transformer-dev.safetensors",
+            "local_dir": str(q4_local_dir),
+            "size_gb": 11.0,
+            "ready": _file_present(q4_local_dir, q4_repo_id,
+                                   "transformer-dev.safetensors"),
+        },
+        {
+            "key": "gemma_text_encoder",
+            "label": "Gemma 3 12B (text encoder)",
+            "blurb": "Encodes prompts for both inference and training. Already "
+                     "required by Phosphene's renderer, so this is usually green.",
+            "repo_id": gemma_repo_id,
+            "filename": "config.json",
+            "local_dir": str(gemma_local_dir),
+            "size_gb": 6.0,
+            "ready": _file_present(gemma_local_dir, gemma_repo_id, "config.json"),
+        },
+    ]
+    return items
+
+
+def _train_install_dev_transformer(push_log) -> dict:
+    """Trigger an hf download for just `transformer-dev.safetensors` from
+    the LTX-2.3 Q4 repo. Reuses the same `hf download` binary the existing
+    HF download flow uses; runs synchronously in a worker thread so the
+    caller can stream progress (the panel currently invokes this from a
+    /train/install endpoint that returns quickly + then polls /status).
+
+    Returns {"ok": True, "started": True, "repo_id": ...} or {"ok": False,
+    "error": "..."} if the download couldn't be started (already running,
+    binary missing, etc.).
+    """
+    import subprocess
+    if DOWNLOAD["active"]:
+        return {"ok": False,
+                "error": f"another download is already active "
+                         f"({DOWNLOAD.get('repo_id', '?')})."}
+
+    repo_id = "dgrauet/ltx-2.3-mlx-q4"
+    local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    hf_bin = HF_BIN if HF_BIN is not None else _resolve_hf()
+    if hf_bin is None:
+        return {"ok": False, "error": "hf CLI not found on PATH."}
+
+    cmd = [str(hf_bin), "download", repo_id,
+           "--include", "transformer-dev.safetensors",
+           "--local-dir", str(local_dir)]
+
+    env = dict(os.environ)
+    hf_token = _active_hf_token()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+
+    with DOWNLOAD_LOCK:
+        DOWNLOAD["active"] = True
+        DOWNLOAD["key"] = "ltx_dev_transformer"
+        DOWNLOAD["repo_id"] = repo_id
+        DOWNLOAD["started_ts"] = time.time()
+        DOWNLOAD["last_line"] = ""
+
+    def _runner():
+        try:
+            push_log(f"[hf] dev transformer download started "
+                     f"({repo_id} / transformer-dev.safetensors, ~11 GB).")
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, env=env, start_new_session=True)
+            with DOWNLOAD_LOCK:
+                DOWNLOAD["proc"] = proc
+                try:
+                    DOWNLOAD["pgid"] = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    DOWNLOAD["pgid"] = None
+            buf = ""
+            assert proc.stdout is not None
+            while True:
+                ch = proc.stdout.read(1)
+                if not ch:
+                    break
+                if ch in ("\n", "\r"):
+                    line = buf.strip()
+                    buf = ""
+                    if line:
+                        with DOWNLOAD_LOCK:
+                            DOWNLOAD["last_line"] = line[:200]
+                        push_log(f"[hf:dev] {line[:300]}")
+                else:
+                    buf += ch
+            rc = proc.wait()
+            if rc == 0:
+                push_log("[hf] dev transformer downloaded successfully.")
+            else:
+                push_log(f"[hf] dev transformer download exited with code {rc}.")
+        except Exception as exc:
+            push_log(f"[hf] dev transformer crashed: {exc}")
+        finally:
+            with DOWNLOAD_LOCK:
+                DOWNLOAD["active"] = False
+                DOWNLOAD["key"] = None
+                DOWNLOAD["repo_id"] = None
+                DOWNLOAD["started_ts"] = None
+                DOWNLOAD["last_line"] = ""
+                DOWNLOAD["proc"] = None
+                DOWNLOAD["pgid"] = None
+
+    threading.Thread(target=_runner, daemon=True, name="hf-dev-download").start()
+    return {"ok": True, "started": True, "repo_id": repo_id,
+            "filename": "transformer-dev.safetensors"}
+
+
 # Compatibility taxonomy for LoRAs across the panel's two render lanes
 # (video via ltx_pipelines_mlx + image via mflux). The picker filters its
 # library down to LoRAs that can fire with the user's current
@@ -6409,6 +6566,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "trigger": _suggest_trigger_token()})
             return
 
+        # ====== Train Character — preflight model check.
+        # required_files.json's q4 entry ships transformer-distilled only.
+        # Training needs transformer-dev (extra ~11 GB), which isn't in the
+        # default install. Surface what's missing so the UI can offer a
+        # one-click download via the existing hf flow.
+        if parsed.path == "/train/preflight":
+            req = _train_required_models()
+            self._json({"ok": True, "required": req,
+                        "all_ready": all(r["ready"] for r in req)})
+            return
+
         # ====== Train Character — listing of the in-progress dataset
         # (uploaded but not yet trained). Used by the UI to restore the
         # thumbnail grid after a page reload.
@@ -7398,6 +7566,22 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 self._json({"error": f"delete failed: {e}"}, 500); return
             self._json({"ok": True, "deleted": str(resolved)})
+            return
+
+        # ====== Train Character — install missing model on demand.
+        # Today only `ltx_dev_transformer` is downloadable here; future keys
+        # can be added by extending _train_install_dev_transformer / the
+        # preflight list. Returns 202 (Accepted) — caller polls /status's
+        # `download` block for progress (existing infra).
+        if path == "/train/install":
+            key = (form.get("key", [""])[0] or "").strip()
+            if key != "ltx_dev_transformer":
+                self._json({"error": f"unknown install key {key!r}"}, 400); return
+            result = _train_install_dev_transformer(push)
+            if not result.get("ok"):
+                self._json(result, 409 if "active" in result.get("error", "") else 500)
+                return
+            self._json(result, 202)
             return
 
         if path == "/queue/batch":
@@ -9332,6 +9516,55 @@ HTML = r"""<!doctype html>
       opacity: 0.85;
       margin-left: 8px;
     }
+    /* Preflight banner — only visible when a required model isn't on disk.
+       Same dark-card chrome as the Composer cards. */
+    .train-preflight-card {
+      background: rgba(255, 168, 0, 0.06);
+      border: 1px solid rgba(255, 168, 0, 0.35);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .train-preflight-title {
+      font-weight: 600;
+      color: #ffb84a;
+      margin-bottom: 10px;
+    }
+    .train-preflight-row {
+      padding: 8px 0;
+      border-top: 1px solid rgba(255, 168, 0, 0.15);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .train-preflight-row:first-child { border-top: 0; padding-top: 0; }
+    .train-preflight-label {
+      font-weight: 500;
+      color: #e6e6ea;
+    }
+    .train-preflight-size {
+      color: #ffb84a;
+      font-size: 12px;
+      margin-left: 6px;
+      font-weight: 400;
+    }
+    .train-preflight-blurb {
+      color: #aab;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .train-preflight-row .btn {
+      align-self: flex-start;
+      padding: 6px 14px;
+      font-size: 13px;
+    }
+    .train-preflight-foot {
+      margin-top: 12px;
+      color: #888;
+      font-size: 11px;
+      font-style: italic;
+    }
+
     .train-pane .composer-card.train-card {
       padding: 14px 14px 12px;
       margin-bottom: 12px;
@@ -17727,6 +17960,11 @@ HTML = r"""<!doctype html>
          another mode dispatch in run_job_inner). -->
     <div class="mode-only train-pane" id="trainSection">
 
+      <!-- Preflight model check — hidden by default; populated by
+           trainCheckPreflight() if any required model file is missing
+           (today: transformer-dev.safetensors which isn't in default install). -->
+      <div id="trainPreflight" style="display:none"></div>
+
       <!-- ============== DATASET CARD ============== -->
       <div class="composer-card train-card">
         <h2>Dataset
@@ -19527,6 +19765,81 @@ function trainInit() {
   trainRefreshLoraList();
   trainUpdateEstimate();
   trainUpdateButtonState();
+  trainCheckPreflight();
+}
+
+// Hits /train/preflight and surfaces a banner inside the Train form when a
+// required model is missing. Today the only on-demand download is the LTX-2.3
+// dev transformer (~11 GB) — Phosphene's default install ships the distilled
+// transformer only. Banner offers a one-click Download button that triggers
+// /train/install + redirects to /status for progress.
+async function trainCheckPreflight() {
+  const box = document.getElementById('trainPreflight');
+  if (!box) return;
+  try {
+    const r = await fetch('/train/preflight');
+    const data = await r.json();
+    if (!data || !data.ok) { box.style.display = 'none'; return; }
+    const missing = (data.required || []).filter(m => !m.ready);
+    if (missing.length === 0) {
+      box.style.display = 'none';
+      return;
+    }
+    box.style.display = 'block';
+    box.innerHTML = `
+      <div class="train-preflight-card">
+        <div class="train-preflight-title">
+          ⚠️ Required model${missing.length > 1 ? 's' : ''} not downloaded
+        </div>
+        <div class="train-preflight-list">
+          ${missing.map(m => `
+            <div class="train-preflight-row">
+              <div class="train-preflight-label">${m.label}
+                <span class="train-preflight-size">~${m.size_gb} GB</span></div>
+              <div class="train-preflight-blurb">${m.blurb}</div>
+              <button type="button" class="btn btn-primary"
+                      onclick="trainInstall('${m.key}')">Download</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="train-preflight-foot">
+          Phosphene's default install ships only the inference model. The dev
+          transformer is needed for training and is downloaded on demand to
+          keep the base install lean.
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    box.style.display = 'none';
+  }
+}
+
+async function trainInstall(key) {
+  const fd = new FormData();
+  fd.set('key', key);
+  try {
+    const r = await fetch('/train/install', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!data.ok) {
+      alert('Download failed: ' + (data.error || r.status));
+      return;
+    }
+    // Progress streams to STATUS log. Re-poll preflight every 5s; banner
+    // self-hides when the file lands.
+    const watch = setInterval(async () => {
+      try {
+        const r2 = await fetch('/train/preflight');
+        const d2 = await r2.json();
+        const stillMissing = (d2.required || []).filter(m => !m.ready).length;
+        if (stillMissing === 0) {
+          clearInterval(watch);
+          trainCheckPreflight();
+        }
+      } catch (e) { /* ignore */ }
+    }, 5000);
+  } catch (e) {
+    alert('Download request failed: ' + e.message);
+  }
 }
 
 // Trigger generator — `<3 consonants><2 digits>` for rare/uncommon tokens.
