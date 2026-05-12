@@ -22732,6 +22732,49 @@ async function queueBatch() {
 document.getElementById('genForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
+
+  // Safety net: if the prompt mentions a trigger word from a LoRA the user
+  // has installed but NOT toggled active for this render, ask before
+  // submitting. The #1 silent-failure mode is "I typed 'salotrn' but
+  // forgot to switch on the picker chip" — the render then runs without
+  // fusion, and the face/style doesn't reproduce. Compare prompt vs.
+  // (_knownUserLoras minus _activeLoras) and surface a confirm() so the
+  // mismatch isn't invisible.
+  try {
+    const promptRaw = (fd.get('prompt') || '').toString();
+    const promptLower = promptRaw.toLowerCase();
+    if (promptLower.trim() &&
+        Array.isArray(_knownUserLoras) &&
+        Array.isArray(_activeLoras)) {
+      const activePaths = new Set(_activeLoras.map(l => l.path));
+      const orphans = [];   // [{name, trigger}]
+      const wordRe = /[a-z0-9]+/g;
+      const promptTokens = new Set(promptLower.match(wordRe) || []);
+      for (const ul of _knownUserLoras) {
+        if (activePaths.has(ul.path)) continue;
+        for (const w of (ul.trigger_words || [])) {
+          if (!w) continue;
+          const wLower = String(w).toLowerCase().trim();
+          if (!wLower || wLower.length < 4) continue;   // skip 1-3 char tokens, too common
+          if (promptTokens.has(wLower)) {
+            orphans.push({ name: ul.name || ul.filename || ul.path.split('/').pop(), trigger: w });
+            break;   // one match per LoRA is enough
+          }
+        }
+      }
+      if (orphans.length) {
+        const lines = orphans.map(o => `  • "${o.trigger}" → ${o.name}`).join('\n');
+        const ok = window.confirm(
+          'Your prompt mentions trigger word(s) from LoRA(s) that are NOT attached:\n\n' +
+          lines + '\n\n' +
+          'The model will NOT reproduce these characters/styles. Toggle the LoRA on in the picker, then Generate.\n\n' +
+          'Generate without the LoRA anyway?'
+        );
+        if (!ok) return;
+      }
+    }
+  } catch (_) { /* never block submit on this check */ }
+
   const noMusic = document.getElementById('noMusic');
   if (noMusic && noMusic.checked) {
     const original = fd.get('prompt') || '';
