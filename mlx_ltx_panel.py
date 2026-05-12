@@ -4638,6 +4638,18 @@ def run_job_inner(job: dict) -> None:
                 f"{' …' if len(hq_missing) > 3 else ''}. "
                 f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
             )
+        # HQ is the only inference path that runs the dev transformer with
+        # CFG and the full sigma schedule — which is exactly what character
+        # LoRAs are trained against. Distilled inference (Quick/Standard)
+        # gives a wrong-base-fine-tune result for dev-trained LoRAs. Until
+        # 2026-05-12 the HQ job_spec dropped `loras` entirely; renders at
+        # Quality=High silently ran without fusion. Pass them through.
+        hq_loras = list(p.get("loras") or [])
+        if p.get("hdr"):
+            hq_loras.append({
+                "path": CURATED_LORAS["hdr"]["repo_id"],
+                "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
+            })
         job_spec = {
             "action": "generate_hq",
             "id": job["id"],
@@ -4651,6 +4663,7 @@ def run_job_inner(job: dict) -> None:
                 "frames": frames,
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
+                "loras": hq_loras,
                 # Q8 tuning knobs honor per-job overrides from the form
                 # (defaults match production: stage1=15, stage2=3, cfg=3.0,
                 # teacache=1.0). See make_job for where these are read.

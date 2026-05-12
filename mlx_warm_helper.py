@@ -571,14 +571,25 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
         return _t2v_pipe
 
 
-def get_hq_pipe(model_dir: str):
+_hq_lora_key: str | None = None
+
+
+def get_hq_pipe(model_dir: str, loras: list[dict] | None = None):
     """Returns the TwoStageHQPipeline lazily — Q8 model, res_2s sampler, CFG anchor.
 
     Same class handles both T2V (image=None) and I2V via the `image` kwarg of
     `generate_and_save`. We rebuild the pipe if the requested model_dir changes
-    (e.g. user swapped Q8 for a different quant).
+    (e.g. user swapped Q8 for a different quant) OR if the requested LoRA set
+    differs from the cached pipe's (fusion is a one-shot weight transform).
+
+    LoRA support added 2026-05-12: character LoRAs are trained against the dev
+    transformer (flow-matching, full sigma range), and HQ is the ONLY pipeline
+    that runs the dev transformer with CFG and >8 steps. Distilled-path renders
+    silently dropped LoRAs (fixed) but the result is still wrong because the
+    deltas were learned against dev neuron states, not distilled. Routing
+    LoRA renders to HQ is the only way to get a faithful character replay.
     """
-    global _hq_pipe, _hq_model_dir
+    global _hq_pipe, _hq_model_dir, _hq_lora_key
     # Upstream `ltx-2-mlx` refactor 2026-05-09 (commits d6cc3d1, 493aec2,
     # 32280b9 — `refactor!: rename pipeline classes to match upstream
     # verbatim`) renamed TwoStageHQPipeline → TI2VidTwoStagesHQPipeline.
@@ -591,14 +602,28 @@ def get_hq_pipe(model_dir: str):
     except ImportError:
         from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
 
+    # Reuse the same fusion-patch installer as get_pipe. Without this,
+    # TI2VidTwoStagesHQPipeline.load() would still bypass _pending_loras.
+    _install_lora_fusion_patches()
+
+    fp = _lora_fingerprint(loras)
+
     with _pipe_lock:
         release_pipelines(keep_kind="hq")
-        if _hq_pipe is None or _hq_model_dir != model_dir:
+        if (_hq_pipe is None
+                or _hq_model_dir != model_dir
+                or _hq_lora_key != fp):
+            if _hq_pipe is not None:
+                why = "LoRA set changed" if _hq_lora_key != fp else "model_dir changed"
+                emit({"event": "log", "line": f"{why}; reloading HQ pipeline."})
+                _hq_pipe = None
             emit({"event": "log", "line": f"Loading HQ pipeline (Q8 dev model — {model_dir})..."})
             _hq_pipe = TwoStageHQPipeline(
                 model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
             )
+            _attach_loras(_hq_pipe, loras)
             _hq_model_dir = model_dir
+            _hq_lora_key = fp
         return _hq_pipe
 
 
@@ -1408,7 +1433,15 @@ for line in sys.__stdin__:
         try:
             t0 = time.time()
             configure_acceleration("off")
-            pipe = get_hq_pipe(model_dir)
+            # LoRAs flow through the same wire shape as t2v/i2v. HQ is the
+            # only path where dev-base character LoRAs actually transfer
+            # cleanly (distilled inference + dev-trained LoRA = base-fine-tune
+            # mismatch).
+            hq_loras = p.get("loras") or []
+            if hq_loras:
+                emit({"event": "log",
+                      "line": f"step:get_pipe kind=hq loras={len(hq_loras)}"})
+            pipe = get_hq_pipe(model_dir, loras=hq_loras)
             # Y1.037: short-clip VAE-streaming opt-out (HQ T2V/I2V path).
             _apply_vae_streaming_decision(int(p["frames"]))
             kwargs = dict(
