@@ -5294,11 +5294,24 @@ def _auto_promote_image_engine_kind(
     for fam, model in candidates:
         probe = agent_image_engine.ImageEngineConfig(kind="mflux", mflux_family=fam)
         if agent_image_engine._resolve_mflux_bin(probe):
+            overrides: dict = {
+                "kind": "mflux",
+                "mflux_model": model,
+                "mflux_family": fam,
+            }
+            # Fresh install fast-path: bake Lightning into the qwen_edit
+            # auto-promotion so first-time "Auto" runs hit the 90-second
+            # tier instead of the 2:35 8-step path. Only applies when the
+            # user hasn't customized steps/LoRAs yet (cur.mflux_steps == 0
+            # means "use family default" and no LoRAs picked).
+            if fam == "qwen_edit" and cur.mflux_steps == 0 and not cur.mflux_lora_paths:
+                overrides["mflux_steps"] = 4
+                overrides["mflux_lora_paths"] = [
+                    "lightx2v/Qwen-Image-Edit-2511-Lightning:Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+                ]
+                overrides["mflux_lora_scales"] = [1.0]
             return agent_image_engine.ImageEngineConfig(
-                **{**cur.__dict__,
-                   "kind": "mflux",
-                   "mflux_model": model,
-                   "mflux_family": fam}
+                **{**cur.__dict__, **overrides}
             )
     return None
 
@@ -15231,6 +15244,13 @@ HTML = r"""<!doctype html>
       max-width: max-content;
     }
     .workflow-tabs button {
+      /* Override the global `button { width: 100% }` rule. Without
+         width:auto each tab stretches to fill the form-pane width, so
+         Manual + Agentic Flows + Train all rendered at ~306px each and
+         the latter two overflowed the visible nav pill off-screen —
+         that's why Salo saw Train as "hidden" unless he switched to
+         Agentic Flows. */
+      width: auto;
       flex: 0 0 auto;
       padding: 5px 14px;
       font-size: 12px; font-weight: 500;
@@ -17284,6 +17304,7 @@ HTML = r"""<!doctype html>
 <symbol id="ph-gear-six" viewBox="0 0 256 256"><circle cx="128" cy="128" r="40" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M130.05,206.11c-1.34,0-2.69,0-4,0L94,224a104.61,104.61,0,0,1-34.11-19.2l-.12-36c-.71-1.12-1.38-2.25-2-3.41L25.9,147.24a99.15,99.15,0,0,1,0-38.46l31.84-18.1c.65-1.15,1.32-2.29,2-3.41l.16-36A104.58,104.58,0,0,1,94,32l32,17.89c1.34,0,2.69,0,4,0L162,32a104.61,104.61,0,0,1,34.11,19.2l.12,36c.71,1.12,1.38,2.25,2,3.41l31.85,18.14a99.15,99.15,0,0,1,0,38.46l-31.84,18.1c-.65,1.15-1.32,2.29-2,3.41l-.16,36A104.58,104.58,0,0,1,162,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-image" viewBox="0 0 256 256"><rect x="32" y="48" width="192" height="160" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="156" cy="100" r="12"/><path d="M147.31,164,173,138.34a8,8,0,0,1,11.31,0L224,178.06" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,168.69l54.34-54.35a8,8,0,0,1,11.32,0L191.31,208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-info-fill" viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm-4,48a12,12,0,1,1-12,12A12,12,0,0,1,124,72Zm12,112a16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40a8,8,0,0,1,0,16Z"/></symbol>
+<symbol id="ph-info" viewBox="0 0 256 256"><circle cx="128" cy="128" r="96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="120 120 128 120 128 172 136 172" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="126" cy="84" r="10" fill="currentColor"/></symbol>
 <symbol id="ph-magnifying-glass" viewBox="0 0 256 256"><circle cx="112" cy="112" r="80" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="168.57" y1="168.57" x2="224" y2="224" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-pause-fill" viewBox="0 0 256 256"><path d="M216,48V208a16,16,0,0,1-16,16H160a16,16,0,0,1-16-16V48a16,16,0,0,1,16-16h40A16,16,0,0,1,216,48ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Z"/></symbol>
 <symbol id="ph-pencil-simple" viewBox="0 0 256 256"><path d="M92.69,216H48a8,8,0,0,1-8-8V163.31a8,8,0,0,1,2.34-5.65L165.66,34.34a8,8,0,0,1,11.31,0L221.66,79a8,8,0,0,1,0,11.31L98.34,213.66A8,8,0,0,1,92.69,216Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="136" y1="64" x2="192" y2="120" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
@@ -18235,10 +18256,10 @@ HTML = r"""<!doctype html>
           </div>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
-              <option value="auto" selected>Auto (use Settings)</option>
-              <option value="qwen_edit_lightning_inline">Qwen-Image-Edit-2511 + Lightning (multi-ref &middot; 4-step Q6, ~10-15 s/image)</option>
-              <option value="qwen_edit_inline">Qwen-Image-Edit-2511 (multi-ref &middot; 8-step Q6, ~1 min/image)</option>
-              <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 high quality (multi-ref &middot; 40-step Q8, ~5 min/image)</option>
+              <option value="auto">Auto (use Settings)</option>
+              <option value="qwen_edit_lightning_inline" selected>Qwen-Image-Edit-2511 + Lightning &mdash; FAST (multi-ref &middot; 4-step Q6, ~90 s/image @ 1024)</option>
+              <option value="qwen_edit_inline">Qwen-Image-Edit-2511 &mdash; polished (multi-ref &middot; 8-step Q6, ~2:35 /image @ 1024)</option>
+              <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 &mdash; best (multi-ref &middot; 40-step Q8, ~5 min/image @ 1024)</option>
               <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q6, ~30 s/image)</option>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
@@ -22020,15 +22041,17 @@ function renderCarousel() {
     return `
     <div class="car-card${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
-      ${thumbHtml}
-      ${o.has_sidecar
-        ? `<button class="car-info-btn" type="button" title="Show generation info"
-                   onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info-fill"/></svg></button>`
-        : ''}
-      <div class="card-chrome">
-        ${animateChip}
-        <button class="card-action card-action-danger" type="button" title="Delete this file from disk"
-                onclick="event.stopPropagation(); deleteOutput(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
+      <div class="car-thumb-wrap">
+        ${thumbHtml}
+        ${o.has_sidecar
+          ? `<button class="car-info-btn" type="button" title="Show generation info"
+                     onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info"/></svg></button>`
+          : ''}
+        <div class="card-chrome">
+          ${animateChip}
+          <button class="card-action card-action-danger" type="button" title="Delete this file from disk"
+                  onclick="event.stopPropagation(); deleteOutput(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
+        </div>
       </div>
       <div class="info">
         <div class="name" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</div>
