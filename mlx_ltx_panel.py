@@ -17914,10 +17914,10 @@ HTML = r"""<!doctype html>
            the composer card so the textarea has its own framed surface
            and the composer card stays focused on the positive prompt. -->
       <div class="avoid-row" id="avoidRow">
-        <div class="avoid-label" for="negative_prompt">
+        <label class="avoid-label" for="negative_prompt">
           <span>Avoid</span>
           <span class="avoid-hint">things the model should NOT generate</span>
-        </div>
+        </label>
         <textarea class="avoid-textarea" name="negative_prompt" id="negative_prompt" placeholder="blurry hands, distorted fingers, extra fingers, smeared face, warped text"></textarea>
       </div>
 
@@ -18527,8 +18527,9 @@ HTML = r"""<!doctype html>
        whose chrome lives on hover. All legacy IDs/handlers preserved
        (#playerWrap, #playerMeta, #playerName, #loadParamsBtn,
         #useAsExtendBtn, #animateBtn, #carousel, #carouselTitle,
-        #filterAll, #filterHidden, #mainOutputsFilter*) so the JS
-       layer keeps working unchanged. -->
+        #mainOutputsFilter*) so the JS layer keeps working unchanged.
+       (#filterAll/#filterHidden retired with the Visible/Hidden
+       segmented control — orphan textContent/setFilter calls removed.) -->
   <section class="stage-pane">
     <!-- Player surface — the hero. Holds the <video>/<img>, the filename
          overlay (top), the action overlay (top-right), and an inline
@@ -18736,10 +18737,11 @@ HTML = r"""<!doctype html>
      the grid and /civitai/download to fetch a selected LoRA into
      mlx_models/loras/ with a sidecar JSON capturing the metadata. -->
 <div id="civitaiModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="civitaiModalTitle"
      onclick="if(event.target===this) closeCivitaiModal()">
   <div class="models-card" style="width: min(960px, 96vw)">
     <div class="models-head">
-      <h2>Browse CivitAI for LTX 2.3 LoRAs</h2>
+      <h2 id="civitaiModalTitle">Browse CivitAI for LTX 2.3 LoRAs</h2>
       <button class="ghost-btn" onclick="closeCivitaiModal()">Close</button>
     </div>
     <div class="models-hint">
@@ -18783,10 +18785,11 @@ HTML = r"""<!doctype html>
      Persisted to panel_settings.json; the helper subprocess restarts on
      codec change so the new ffmpeg args take effect on next job. -->
 <div id="settingsModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle"
      onclick="if(event.target===this) closeSettingsModal()">
   <div class="models-card">
     <div class="models-head">
-      <h2>Settings</h2>
+      <h2 id="settingsModalTitle">Settings</h2>
       <button class="ghost-btn" onclick="closeSettingsModal()">Close</button>
     </div>
     <div class="models-hint">
@@ -18937,7 +18940,9 @@ HTML = r"""<!doctype html>
 <!-- Opened by the "tier" pill in the header. Renders the detected
      hardware tier + what it allows. Helps users understand WHY some
      options are disabled instead of just hitting a wall mid-flow. -->
-<div id="tierModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeTierModal()">
+<div id="tierModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="tierModalTitle"
+     onclick="if(event.target===this) closeTierModal()">
   <div class="models-card">
     <div class="models-head">
       <h2 id="tierModalTitle">Hardware tier</h2>
@@ -18956,10 +18961,12 @@ HTML = r"""<!doctype html>
 <!-- Opened by the "models" pill in the header. Shows per-repo download
      status from /models, with a Download button per row. Active downloads
      stream into the existing log at the bottom of the page. -->
-<div id="modelsModal" class="models-modal" style="display:none" onclick="if(event.target===this) closeModelsModal()">
+<div id="modelsModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="modelsModalTitle"
+     onclick="if(event.target===this) closeModelsModal()">
   <div class="models-card">
     <div class="models-head">
-      <h2>Models</h2>
+      <h2 id="modelsModalTitle">Models</h2>
       <button class="ghost-btn" onclick="closeModelsModal()">Close</button>
     </div>
     <div class="models-hint" id="modelsHint">Loading…</div>
@@ -18979,6 +18986,7 @@ HTML = r"""<!doctype html>
      elapsed time, queue id, model. Plus copy-buttons for prompt + seed
      so users can easily re-use them. -->
 <div id="outputInfoModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="outputInfoTitle"
      onclick="if(event.target===this) closeOutputInfoModal()">
   <div class="models-card" style="width: min(720px, 96vw)">
     <div class="models-head">
@@ -18999,10 +19007,11 @@ HTML = r"""<!doctype html>
      and we're done. Optional crash-report zip lives in /tmp for the user
      to drag onto the issue. -->
 <div id="bugModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="bugModalTitle"
      onclick="if(event.target===this) closeBugModal()">
   <div class="models-card" style="width: min(720px, 96vw)">
     <div class="models-head">
-      <h2>Report a bug</h2>
+      <h2 id="bugModalTitle">Report a bug</h2>
       <button class="ghost-btn" onclick="closeBugModal()">Close</button>
     </div>
     <div class="models-hint">
@@ -20102,32 +20111,6 @@ async function imgStudioGenerate() {
 async function imgStudioRefreshLibrary() {
   // intentionally empty: replaced by the unified Recent tab.
   return;
-}
-
-// Disabled stub so the old Library renderer path stays inert.
-async function _imgStudioRefreshLibraryLegacy() {
-  const grid = document.getElementById('imgStudioLibrary');
-  if (!grid) return;
-  const q = (document.getElementById('imgStudioLibrarySearch').value || '').trim();
-  try {
-    const url = '/library/images?limit=48' + (q ? '&contains=' + encodeURIComponent(q) : '');
-    const r = await fetch(url);
-    const j = await r.json();
-    const items = (j.images || []);
-    if (items.length === 0) {
-      grid.innerHTML = '<div class="hint">No images yet. Generate one to fill the library.</div>';
-      return;
-    }
-    grid.innerHTML = items.map(it => {
-      const p = (it.prompt || '').slice(0, 80).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-      return `<div class="lib-tile" onclick="imgStudioCopyPath('${(it.png_path || '').replace(/'/g, "\\'")}')" title="${p}">
-        <img src="/image?path=${encodeURIComponent(it.png_path)}" alt="" loading="lazy">
-        <div class="lib-meta">${p}</div>
-      </div>`;
-    }).join('');
-  } catch (e) {
-    grid.innerHTML = '<div class="hint">Library load failed: ' + (e.message || 'unknown') + '</div>';
-  }
 }
 
 function imgStudioCopyPath(path) {
@@ -21841,7 +21824,10 @@ async function poll() {
     sel.innerHTML = '<option value="">— pick an output below or paste a path —</option>' +
       videoOutputs.slice(0, 40).map(o => `<option value="${escapeHtml(o.path)}">${escapeHtml(o.name)}</option>`).join('');
   }
-  document.getElementById('filterHidden').textContent = `Hidden${s.hidden_count ? ' ('+s.hidden_count+')' : ''}`;
+  // (The old "Hidden (N)" pill that lived here was retired with the
+  // Visible/Hidden segmented control — the carousel-head comment above
+  // documents the removal. Setting textContent on the missing element
+  // was firing a TypeError every poll cycle.)
   // Title: count is post-filter so the badge agrees with the rendered
   // cells. "Outputs · 23 photos" when Photos is active, plain "Outputs · N"
   // when All. Hidden override stays unchanged.
@@ -22029,13 +22015,6 @@ function animateFromPhoto(payload) {
   if (formPane) formPane.scrollTop = 0;
   if (typeof updateDerived === 'function') updateDerived();
   if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
-}
-
-function setFilter(mode) {
-  filterMode = mode;
-  document.getElementById('filterAll').classList.toggle('active', mode === 'visible');
-  document.getElementById('filterHidden').classList.toggle('active', mode === 'hidden');
-  poll();
 }
 
 // Format render duration for the gallery card sub-line. Falls back to
@@ -22776,6 +22755,14 @@ document.getElementById('genForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
 
+  // Disable the Generate button while we POST to /queue/add so a fast
+  // double-click doesn't queue the same job twice. The button is
+  // re-enabled after poll() returns (or on error). Keep this ABOVE the
+  // LoRA-orphan confirm() so a user who cancels the confirm doesn't
+  // leave the button stuck disabled.
+  const genBtn = document.getElementById('genBtn');
+  const reenable = () => { if (genBtn) genBtn.disabled = false; };
+
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before
   // submitting. The #1 silent-failure mode is "I typed 'salotrn' but
@@ -22813,10 +22800,12 @@ document.getElementById('genForm').addEventListener('submit', async e => {
           'The model will NOT reproduce these characters/styles. Toggle the LoRA on in the picker, then Generate.\n\n' +
           'Generate without the LoRA anyway?'
         );
-        if (!ok) return;
+        if (!ok) { reenable(); return; }
       }
     }
   } catch (_) { /* never block submit on this check */ }
+
+  if (genBtn) genBtn.disabled = true;
 
   const noMusic = document.getElementById('noMusic');
   if (noMusic && noMusic.checked) {
@@ -22826,7 +22815,14 @@ document.getElementById('genForm').addEventListener('submit', async e => {
       fd.set('prompt', original.trim() + constraint);
     }
   }
-  await api('/queue/add','POST',fd);
+  try {
+    await api('/queue/add','POST',fd);
+  } finally {
+    // Re-enable on the next event-loop tick so the button visibly
+    // bounces rather than feeling "stuck on click". poll() refreshes
+    // the queue right after, picking up the new job in the next ~1.5s.
+    setTimeout(reenable, 200);
+  }
   poll();
 });
 
@@ -24773,7 +24769,14 @@ setTimeout(refreshVersionPill, 2000);
 setInterval(refreshVersionPill, 5 * 60 * 1000);
 
 // ====== Init ======
-setInterval(poll, 1500);
+// Skip poll when the tab is backgrounded — at 1.5s cadence with a fan-
+// spinning render in the background, every saved request matters. Pinokio
+// users park the panel in a tab and switch to other apps for the 5–20 min
+// a render takes; nothing in the UI needs updating until they come back.
+// `visibilitychange` fires immediately when the user returns so the chrome
+// catches up on the first frame.
+setInterval(() => { if (!document.hidden) poll(); }, 1500);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 poll();
 setMode('t2v');
 setAspect('landscape');         // sets aspect first so the default preset orients correctly
