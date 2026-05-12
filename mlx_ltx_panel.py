@@ -10824,16 +10824,28 @@ HTML = r"""<!doctype html>
         );
     }
     .car-card.hidden-card:hover { opacity: 0.85; }
+    /* Thumb wrapper — scopes the absolute-positioned overlays (info
+       button + hover chrome ribbon) so they overlay the thumbnail
+       only, not the filename caption underneath. Pre-wrap, the chrome
+       at `bottom: 0` covered .info on hover and hid the filename;
+       Salo flagged this as the #1 carousel-card frustration. */
+    .car-thumb-wrap {
+      position: relative;
+      width: 100%;
+      overflow: hidden;
+      border-top-left-radius: inherit;
+      border-top-right-radius: inherit;
+    }
     .car-card video,
     .car-card img.car-thumb {
       width: 100%; aspect-ratio: 16/9; object-fit: cover;
       background: black; display: block;
     }
     /* Card chrome ribbon — bottom strip on hover with the action
-       buttons. Hidden by default so the thumbnail dominates; slides
-       up on hover. Active cards keep the ribbon visible so the user
-       always has the actions at hand. */
-    .car-card .card-chrome {
+       buttons. Scoped to .car-thumb-wrap so the caption stays fully
+       visible underneath. Slides up on hover; pinned visible on the
+       active card so the user always has the actions at hand. */
+    .car-thumb-wrap .card-chrome {
       position: absolute;
       left: 0; right: 0;
       bottom: 0;
@@ -10841,8 +10853,8 @@ HTML = r"""<!doctype html>
       background: linear-gradient(
         180deg,
         rgba(0, 4, 18, 0) 0%,
-        rgba(0, 4, 18, 0.82) 35%,
-        rgba(0, 4, 18, 0.92) 100%
+        rgba(0, 4, 18, 0.55) 50%,
+        rgba(0, 4, 18, 0.80) 100%
       );
       display: flex;
       gap: 4px;
@@ -10862,8 +10874,8 @@ HTML = r"""<!doctype html>
       padding: 4px 6px;
       font-size: 10.5px;
       font-weight: 500;
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.18);
       color: rgba(255,255,255,0.92);
       cursor: pointer;
       border-radius: var(--r-xs);
@@ -10875,10 +10887,10 @@ HTML = r"""<!doctype html>
       border-color: rgba(47,129,247,0.85);
       color: #fff;
     }
-    /* The two button variants used in the card chrome ribbon now:
-       .card-action-photo (Animate, photos only) reads as the non-
-       destructive primary; .card-action-danger (Delete) is a compact
-       square red chip that doesn't fight for the same flex weight. */
+    /* Variants — Animate (photos only) is the primary; Delete is a
+       compact icon chip with a NEUTRAL default (white-ghost) that only
+       turns red on hover. Pre-fix it was always-red, which Salo flagged
+       as visually loud in the gallery's neutral grid. */
     .car-card .card-chrome .card-action-photo {
       flex: 1;
     }
@@ -10888,9 +10900,9 @@ HTML = r"""<!doctype html>
       padding: 4px;
       display: inline-flex;
       align-items: center; justify-content: center;
-      background: rgba(220, 70, 80, 0.18);
-      border: 1px solid rgba(220, 70, 80, 0.45);
-      color: rgba(255, 200, 200, 0.95);
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: rgba(255,255,255,0.85);
     }
     .car-card .card-chrome .card-action-danger:hover {
       background: rgba(220, 70, 80, 0.55);
@@ -10924,29 +10936,35 @@ HTML = r"""<!doctype html>
     .carousel-head .open-folder-btn .ph {
       width: 14px; height: 14px;
     }
-    /* Top-right info button — subtle until hover, then surfaces. */
+    /* Top-right info "i" — a clean white glyph on a transparent
+       backdrop. Salo flagged the prior pill (dark navy fill + heavy
+       border) as "ugly + intrusive". Now it's a thin outline icon in
+       pure white at 60% opacity by default, surfacing to 100% on
+       card-hover, with a faint dark scrim only on direct hover so the
+       click target reads clearly without a permanent box around it. */
     .car-card .car-info-btn {
       position: absolute; top: 6px; right: 6px;
-      width: 24px; height: 24px; padding: 0;
+      width: 22px; height: 22px; padding: 0;
       border-radius: var(--r-xs);
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(8,14,35,0.72);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      color: rgba(255,255,255,0.85);
+      border: none;
+      background: transparent;
+      color: #fff;
       font-size: 13px; line-height: 1;
       display: inline-flex; align-items: center; justify-content: center;
       cursor: pointer; opacity: 0;
-      transition: opacity var(--t-fast), background var(--t-fast);
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+      transition: opacity var(--t-fast), background var(--t-fast),
+                  color var(--t-fast), transform var(--t-fast);
       z-index: 4;
     }
-    .car-card .car-info-btn .ph { width: 14px; height: 14px; }
+    .car-card .car-info-btn .ph { width: 16px; height: 16px; }
     .car-card:hover .car-info-btn,
-    .car-card.active .car-info-btn { opacity: 1; }
+    .car-card.active .car-info-btn { opacity: 0.85; }
     .car-card .car-info-btn:hover {
-      background: rgba(47,129,247,0.55);
-      color: #fff;
-      border-color: var(--accent-bright);
+      opacity: 1;
+      background: rgba(0, 0, 0, 0.35);
+      color: var(--accent-bright);
+      transform: scale(1.05);
     }
 
     /* Output info modal — clean detail-pane styling. Reuses
