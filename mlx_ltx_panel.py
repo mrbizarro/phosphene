@@ -10686,63 +10686,9 @@ HTML = r"""<!doctype html>
       .po-act { padding: 6px 7px; }
     }
 
-    /* Bottom progress overlay — appears when a render is in flight.
-       Driven by JS (refreshPlayerProgressOverlay). The ring + label
-       give the player a contextual indicator instead of forcing the
-       user to look down at the bottom-pane Now tab. */
-    .player-overlay-progress {
-      position: absolute;
-      left: 12px; right: 12px; bottom: 12px;
-      z-index: 3;
-      display: flex; align-items: center; gap: 12px;
-      padding: 10px 14px 10px 10px;
-      background: rgba(8, 14, 35, 0.78);
-      border: 1px solid rgba(47,129,247,0.32);
-      border-radius: var(--r-md);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      box-shadow: 0 6px 22px rgba(0,0,0,0.45),
-                  0 0 0 1px rgba(47,129,247,0.18) inset;
-      color: #fff;
-    }
-    .pop-ring {
-      position: relative;
-      width: 32px; height: 32px;
-      flex: 0 0 auto;
-    }
-    .pop-ring svg { display: block; }
-    .pop-ring-pct {
-      position: absolute;
-      inset: 0;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 9.5px;
-      font-weight: 700;
-      color: var(--accent-bright);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: 0;
-    }
-    .pop-body {
-      flex: 1 1 auto; min-width: 0;
-      display: flex; flex-direction: column; gap: 2px;
-    }
-    .pop-title {
-      font-size: 12.5px; font-weight: 600;
-      color: #fff;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .pop-meta {
-      font-size: 10.5px;
-      color: rgba(255,255,255,0.65);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
-    .pop-meta strong { color: #fff; font-weight: 600; }
-    .player-overlay-progress.failed {
-      border-color: rgba(248,81,73,0.45);
-      box-shadow: 0 6px 22px rgba(0,0,0,0.45),
-                  0 0 0 1px rgba(248,81,73,0.30) inset;
-    }
-    .player-overlay-progress.failed .pop-ring-pct { color: var(--danger); }
+    /* (Bottom progress overlay CSS removed 2026-05-12 — the in-player
+       chip duplicated the bottom-pane Now card AND covered the playing
+       video. Bottom strip is now the single source for progress.) */
 
     /* Hidden compatibility slot — kept in the DOM for legacy callers but
        never visible. Real meta now lives in the top overlay. */
@@ -10853,18 +10799,6 @@ HTML = r"""<!doctype html>
       box-shadow: 0 0 0 2px var(--accent-bright), var(--shadow-2);
       background: var(--panel);
     }
-    /* Active-corner badge — subtle accent dot in the top-left so the
-       active selection still reads even if the user scrolls past it. */
-    .car-card.active::before {
-      content: '';
-      position: absolute;
-      top: 8px; left: 8px;
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: var(--accent-bright);
-      box-shadow: 0 0 8px var(--accent-bright);
-      z-index: 4;
-    }
     .car-card.hidden-card {
       opacity: 0.45;
       background-image:
@@ -10954,21 +10888,20 @@ HTML = r"""<!doctype html>
       width: 14px; height: 14px;
     }
 
-    /* Global "Open folder" pill in the carousel header (sits between
-       the ch-spacer and where the old Visible/Hidden seg used to be).
-       Same chip language as the .qchip / .stop-btn — hairline, dark
-       fill, icon + label. */
+    /* Open-outputs-folder corner icon. Square 28×28 chip pinned to the
+       right edge of the carousel-head — Salo flagged that the previous
+       wide pill ("📁 Open folder") was eating row width for a low-
+       frequency action. Icon-only, title attribute carries the label. */
     .carousel-head .open-folder-btn {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px;
-      font-size: 11px;
+      width: 28px; height: 28px;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0;
       background: rgba(255,255,255,0.04);
       border: 1px solid var(--border);
       color: var(--muted);
       border-radius: var(--r-sm);
       cursor: pointer;
       transition: var(--t-fast);
-      font-weight: 500;
     }
     .carousel-head .open-folder-btn:hover {
       color: var(--text);
@@ -11167,11 +11100,8 @@ HTML = r"""<!doctype html>
       display: flex; flex-direction: column; min-height: 0;
       transition: max-height var(--t-base);
     }
-    .bottom-pane.collapsed .bottom-body { display: none; }
-    .bottom-pane.collapsed { max-height: 36px; }
-    .bottom-pane.collapsed .tab-collapse svg {
-      transform: rotate(180deg);
-    }
+    /* (.bottom-pane.collapsed + .tab-collapse rules removed 2026-05-12
+       with the collapse button.) */
     .tabs {
       display: flex; align-items: center; gap: 4px;
       padding: 6px 12px;
@@ -11255,23 +11185,7 @@ HTML = r"""<!doctype html>
       background: rgba(255,255,255,0.03);
     }
     .tabs .model-credit::after { content: " ↗"; opacity: 0.6; margin-left: 4px; }
-    .tabs .tab-collapse {
-      width: 26px; height: 26px;
-      padding: 0;
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--muted);
-      cursor: pointer;
-      border-radius: var(--r-xs);
-      display: inline-flex; align-items: center; justify-content: center;
-      transition: var(--t-fast);
-    }
-    .tabs .tab-collapse:hover {
-      color: var(--text);
-      border-color: var(--accent);
-      background: var(--accent-dim);
-    }
-    .tabs .tab-collapse svg { transition: transform var(--t-base); }
+    /* (.tab-collapse CSS removed 2026-05-12 with the button.) */
 
     .bottom-body {
       flex: 1 1 auto; overflow-y: auto;
@@ -11327,23 +11241,8 @@ HTML = r"""<!doctype html>
       border-color: rgba(248,81,73,0.45);
       background: rgba(248,81,73,0.12);
     }
-    /* Same idiom on the in-player failure chip — small × inline next
-       to the error line, clearable with a click. */
-    .player-progress-chip .player-progress-dismiss {
-      margin-left: 6px;
-      padding: 0 6px;
-      border-radius: var(--r-xs);
-      border: 1px solid rgba(248,81,73,0.35);
-      background: rgba(248,81,73,0.10);
-      color: rgba(255,217,214,0.95);
-      font-size: 12px; line-height: 1.4;
-      cursor: pointer;
-      transition: background var(--t-fast), border-color var(--t-fast);
-    }
-    .player-progress-chip .player-progress-dismiss:hover {
-      background: rgba(248,81,73,0.22);
-      border-color: rgba(248,81,73,0.65);
-    }
+    /* (.player-progress-chip .player-progress-dismiss CSS removed
+       2026-05-12 with the in-player failure overlay.) */
     .now-card .ttl {
       font-weight: 600; font-size: 13px;
       color: var(--text);
@@ -15024,17 +14923,15 @@ HTML = r"""<!doctype html>
     }
 
     /* === TOP HEADER ============================================
-       62px tall — sized to give the 46px brand logo proper breathing
-       room (header growth track: 44 → 54 → 62px; logo growth: 22 →
-       34 → 46px). Blurred backdrop, hairline bottom border. The
-       wordmark sits on the left as a brand pill (logo + gradient text
-       + version + DEV badge). Status chips cluster on the right with
-       a vertical divider before the user actions. */
+       80px tall (was 62) — Salo flagged the chrome was reading too
+       small and the brand was getting lost. Logo bumped 48 → 64,
+       wordmark 22 → 28, plus a soft halo glow behind the mark so it
+       lifts off the void. */
     body > header {
-      height: 62px;
+      height: 80px;
       flex: 0 0 auto;
-      padding: 0 16px;
-      gap: 12px;
+      padding: 0 20px;
+      gap: 14px;
       flex-wrap: nowrap;
       align-items: center;
       border-bottom: 1px solid var(--ph-border-soft);
@@ -15043,14 +14940,10 @@ HTML = r"""<!doctype html>
       -webkit-backdrop-filter: blur(12px);
       overflow: hidden;
     }
-    /* Replace the legacy 104px banner image with the circular logo +
-       gradient wordmark. The brand <a> wraps both as one click target.
-       Logo bumped from 22→34px so the radiating concentric-circle
-       glyph reads clearly (the "circle" Salo couldn't see at 22px). */
     body > header .brand {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
       flex-shrink: 0;
       text-decoration: none;
     }
@@ -15058,13 +14951,17 @@ HTML = r"""<!doctype html>
       /* Phosphene brand mark — concentric radiating dashes that go
          pink → magenta → cyan around a yellow core, on transparent
          background. Provided by Salo (`phospene logo.png` 1254×1254
-         RGBA). Drop-shadow disabled because the mark already carries
-         its own glow via the gradient stroke colors; adding a halo
-         just muddies the dashes. */
+         RGBA). Glow re-enabled 2026-05-12 — a soft brand-pink halo
+         that lifts the mark off the navy void without muddying the
+         dashes (uses drop-shadow filter so transparent regions stay
+         transparent). */
       content: url('/assets/phosphene_brand.png');
-      height: 48px;
-      width: 48px;
+      height: 64px;
+      width: 64px;
       display: block;
+      filter:
+        drop-shadow(0 0 14px rgba(255, 95, 168, 0.55))
+        drop-shadow(0 0 6px rgba(79, 214, 255, 0.35));
     }
     body > header .brand::after {
       content: 'Phosphene';
@@ -15072,33 +14969,40 @@ HTML = r"""<!doctype html>
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
-      font-weight: 600;
-      font-size: 22px;
-      letter-spacing: -0.01em;
+      font-weight: 700;
+      font-size: 28px;
+      letter-spacing: -0.015em;
+      /* Subtle text shadow to give the wordmark the same lifted feel
+         as the icon. Sits behind the gradient via the painted text
+         color being transparent — the shadow shows through the
+         transparent glyphs as a faint halo. */
+      text-shadow:
+        0 0 18px rgba(255, 95, 168, 0.28),
+        0 0 6px rgba(79, 214, 255, 0.18);
     }
     /* Hide the existing version-badge styling and re-render it Linear-style
        (mono "v2.0" in a chip). Keep the element so the JS doesn't break. */
     body > header .version-badge {
       margin: 0;
-      padding: 2px 6px;
-      font-size: 10px;
+      padding: 3px 8px;
+      font-size: 11px;
       font-family: var(--ph-font-mono);
       color: var(--muted);
       background: rgba(140, 160, 220, 0.06);
       border: 1px solid var(--ph-border-soft);
-      border-radius: 5px;
+      border-radius: 6px;
       letter-spacing: 0.02em;
       font-weight: 500;
       text-transform: none;
     }
     body > header .profile-badge {
       margin: 0 0 0 4px;
-      padding: 2px 6px;
-      font-size: 9px;
+      padding: 3px 8px;
+      font-size: 10px;
       font-family: var(--ph-font-mono);
       letter-spacing: 0.08em;
       font-weight: 600;
-      border-radius: 5px;
+      border-radius: 6px;
     }
     body > header .spacer { flex: 1 1 auto; }
 
@@ -15107,14 +15011,14 @@ HTML = r"""<!doctype html>
     body > header > .pill {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      height: 24px;
-      padding: 0 9px;
-      border-radius: 6px;
+      gap: 7px;
+      height: 28px;
+      padding: 0 11px;
+      border-radius: 7px;
       background: rgba(140, 160, 220, 0.04);
       border: 1px solid var(--ph-border-soft);
       color: var(--muted);
-      font-size: 12px;
+      font-size: 12.5px;
       font-weight: 500;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
@@ -18603,26 +18507,10 @@ HTML = r"""<!doctype html>
           </svg>
         </button>
       </div>
-      <!-- Bottom overlay: live progress when a job is running. Driven by
-           refreshPlayerProgressOverlay() (called from poll). Hidden when
-           idle so the player reads as the active surface. -->
-      <div class="player-overlay-progress" id="playerOverlayProgress" style="display:none">
-        <div class="pop-ring">
-          <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
-            <circle cx="16" cy="16" r="13" stroke="rgba(255,255,255,0.12)" stroke-width="2.5" fill="none"/>
-            <circle id="playerOverlayRingFill" cx="16" cy="16" r="13"
-                    stroke="var(--accent-bright)" stroke-width="2.5" fill="none"
-                    stroke-dasharray="81.68" stroke-dashoffset="81.68"
-                    stroke-linecap="round"
-                    transform="rotate(-90 16 16)"/>
-          </svg>
-          <span class="pop-ring-pct" id="playerOverlayRingPct">0%</span>
-        </div>
-        <div class="pop-body">
-          <div class="pop-title" id="playerOverlayTitle">Rendering</div>
-          <div class="pop-meta" id="playerOverlayMetaProg">starting…</div>
-        </div>
-      </div>
+      <!-- (Salo 2026-05-12: the in-player progress chip was redundant
+           with the bottom Now strip, AND it covered the playing video.
+           Removed entirely; bottom-pane Now card is the single source of
+           truth for live + failed job state.) -->
     </div>
     <!-- Expand lightbox: full-viewport overlay shared by image + video.
          Opens via the Expand button on the player overlay actions, or by
@@ -18663,9 +18551,9 @@ HTML = r"""<!doctype html>
         <span class="ch-spacer"></span>
         <button type="button" class="open-folder-btn" id="openOutputsFolderBtn"
                 title="Reveal the outputs folder in Finder"
+                aria-label="Reveal the outputs folder in Finder"
                 onclick="openOutputsFolder()">
           <svg class="ph" aria-hidden="true"><use href="#ph-folder-simple"/></svg>
-          Open folder
         </button>
         <!-- Visible/Hidden segmented control was removed: the Hide
              functionality was confusing in practice and we replaced it
@@ -19061,11 +18949,10 @@ HTML = r"""<!doctype html>
     <button data-tab="logs">Logs</button>
     <span class="spacer"></span>
     <a class="model-credit" id="modelTag" href="https://github.com/dgrauet/ltx-2-mlx" target="_blank" rel="noopener" title="MLX port by @dgrauet"></a>
-    <button class="tab-collapse" onclick="document.getElementById('bottomPane').classList.toggle('collapsed')" title="Collapse this panel">
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-        <path d="M2 7 L6 3 L10 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </button>
+    <!-- (Collapse-this-panel button removed 2026-05-12 — Salo flagged
+         it hid important data (active job progress, queue) and the
+         "down arrow that goes up" affordance read as confusing. The
+         bottom pane is always visible at its natural height now.) -->
   </nav>
   <div class="bottom-body">
     <div class="tab-content show" id="tab-now">
@@ -21695,11 +21582,9 @@ async function poll() {
     }
   }
 
-  // Y2.001 — in-player progress overlay. When a job is running, surface
-  // a compact progress chip on the player surface itself so the user
-  // gets contextual progress without looking down at the bottom strip.
-  // Falls back to the same fields the now-card uses.
-  refreshPlayerProgressOverlay(s);
+  // (The in-player progress overlay used to be wired here; it was
+  // removed 2026-05-12 because it duplicated the bottom Now strip and
+  // covered the playing video. Bottom strip is the single source.)
 
   // Logs
   const log = document.getElementById('log');
@@ -22092,73 +21977,6 @@ function renderCarousel() {
       </div>
     </div>`;
   }).join('');
-}
-
-// Y2.001 — in-player progress overlay driver. Reads the same status
-// snapshot the bottom-pane Now card uses, then writes the percentage
-// + phase + remaining onto the floating chip pinned to the bottom of
-// .player-surface. Hidden when no job is running. Plays well with the
-// failed state too: turns the chip red and pins the failure summary.
-function refreshPlayerProgressOverlay(s) {
-  const chip = document.getElementById('playerOverlayProgress');
-  const ringFill = document.getElementById('playerOverlayRingFill');
-  const ringPct = document.getElementById('playerOverlayRingPct');
-  const titleEl = document.getElementById('playerOverlayTitle');
-  const metaEl = document.getElementById('playerOverlayMetaProg');
-  if (!chip) return;
-  // Ring circumference for r=13 → 2*pi*13 ≈ 81.68. Pre-set in HTML;
-  // we just sweep stroke-dashoffset between 81.68 (0%) and 0 (100%).
-  const RING_C = 81.68;
-  if (s.running && s.current) {
-    chip.classList.remove('failed');
-    chip.style.display = '';
-    const prog = s.current.progress || null;
-    let pct = 0, phaseLabel = 'Working', remaining = null;
-    if (prog) {
-      pct = Math.min(99, Math.max(0, prog.pct ?? 0));
-      phaseLabel = prog.phase_label || 'Working';
-      remaining = prog.remaining_sec != null ? prog.remaining_sec : null;
-    } else {
-      // Legacy fallback — match the now-card's elapsed/avg shape.
-      const elapsed = Math.max(0, s.server_now - s.current.started_ts);
-      const avg = s.avg_elapsed_sec || 420;
-      pct = Math.min(99, Math.round(elapsed / avg * 100));
-    }
-    ringFill.setAttribute('stroke', 'var(--accent-bright)');
-    ringFill.setAttribute('stroke-dashoffset', String(RING_C * (1 - pct / 100)));
-    ringPct.textContent = pct + '%';
-    const cur = s.current.params;
-    const label = cur.label || cur.prompt || 'Untitled';
-    titleEl.textContent = snippet(label, 60);
-    const remTxt = (remaining != null && remaining > 0)
-      ? `~${fmtMin(remaining)} left`
-      : 'estimating…';
-    metaEl.innerHTML = `<strong>${escapeHtml(phaseLabel)}</strong> · ${remTxt}`;
-    return;
-  }
-  // Surface a persistent failure chip on the player too, mirroring the
-  // now-card's policy (don't let a fail drift back to a sleepy idle).
-  // Honors the same _dismissedFailureId the now-card does, so dismissing
-  // once clears both surfaces.
-  const last = (s.history || [])[0];
-  const showFailure = last && last.status === 'failed' && !s.queue.length
-                      && last.id !== window._dismissedFailureId;
-  if (showFailure) {
-    chip.classList.add('failed');
-    chip.style.display = '';
-    ringFill.setAttribute('stroke', 'var(--danger)');
-    ringFill.setAttribute('stroke-dashoffset', '0');
-    ringPct.textContent = '!';
-    titleEl.textContent = 'Last render failed';
-    metaEl.innerHTML = escapeHtml(snippet(last.error || 'unknown error', 80)) +
-      ` <button type="button" class="player-progress-dismiss" title="Dismiss this failure" ` +
-      `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
-      `if (typeof poll === 'function') poll();"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
-    return;
-  }
-  chip.style.display = 'none';
-  ringFill.setAttribute('stroke-dashoffset', String(RING_C));
-  ringPct.textContent = '0%';
 }
 
 // Relative-time helper for the player overlay meta line. Takes the
