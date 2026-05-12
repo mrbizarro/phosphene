@@ -9615,7 +9615,13 @@ HTML = r"""<!doctype html>
     .studio-ref-slot.dragover {
       border-style: solid;
       border-color: var(--accent-bright);
-      background: rgba(90, 124, 255, 0.10);
+      background: rgba(90, 124, 255, 0.14);
+      transform: scale(1.02);
+      box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.18),
+                  0 10px 28px rgba(0, 0, 0, 0.42);
+      transition: transform 120ms cubic-bezier(.2,.8,.2,1),
+                  border-color var(--t-fast), background var(--t-fast),
+                  box-shadow 160ms ease-out;
     }
     .studio-ref-slot.has-image {
       border-style: solid;
@@ -9960,6 +9966,23 @@ HTML = r"""<!doctype html>
     }
     /* Estimate strip — three labelled cells. Sits between the cards and
        the action footer like the video form's derived hint does. */
+    /* Tiny "Recommended" badge — shown on first-time-friendly presets
+       (Quick) so newcomers know which lane to start in. Mono, small,
+       accent-tinted, sits inline next to the preset name. */
+    .rec-badge {
+      display: inline-flex; align-items: center;
+      margin-left: 6px;
+      padding: 1px 6px;
+      font-size: 9.5px; font-weight: 600;
+      font-family: var(--ph-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      letter-spacing: 0.04em;
+      text-transform: none;
+      color: var(--accent-bright);
+      background: rgba(47, 129, 247, 0.12);
+      border: 1px solid rgba(47, 129, 247, 0.30);
+      border-radius: 4px;
+      vertical-align: baseline;
+    }
     .train-estimate {
       display: flex;
       gap: 18px;
@@ -11246,6 +11269,16 @@ HTML = r"""<!doctype html>
       background: var(--accent-dim);
       border-color: var(--accent);
     }
+    /* Brief pulse when a Studio/agent submit completes — draws the
+       eye to where progress will land. Toggled in JS for ~1.2 s. */
+    @keyframes phos-tab-flash {
+      0%   { box-shadow: 0 0 0 0 rgba(47, 129, 247, 0.55); }
+      45%  { box-shadow: 0 0 0 6px rgba(47, 129, 247, 0.18); }
+      100% { box-shadow: 0 0 0 0 rgba(47, 129, 247, 0); }
+    }
+    .tabs button.flash {
+      animation: phos-tab-flash 1.1s ease-out;
+    }
     .tabs button .badge {
       background: rgba(47,129,247,0.30);
       color: #fff;
@@ -11255,7 +11288,17 @@ HTML = r"""<!doctype html>
       min-width: 18px;
       text-align: center;
       letter-spacing: 0;
+      transition: transform 220ms cubic-bezier(.2,.8,.2,1),
+                  background var(--t-fast);
     }
+    /* Pulse the badge briefly when count rises — applied + removed by
+       poll() rendering when it detects the new value differs. */
+    @keyframes phos-badge-pop {
+      0%   { transform: scale(1);   }
+      40%  { transform: scale(1.22); }
+      100% { transform: scale(1);   }
+    }
+    .tabs button .badge.bump { animation: phos-badge-pop 280ms cubic-bezier(.34,1.56,.64,1); }
     .tabs .spacer { flex: 1; }
     .tabs .model-credit {
       font-size: 11px;
@@ -18528,7 +18571,7 @@ HTML = r"""<!doctype html>
           <span class="h2-hint">trade time for fidelity</span>
         </h2>
         <div class="pill-group cols-3" id="trainPresetGroup">
-          <button type="button" class="pill-btn active" data-train-preset="quick"><span>Quick</span><span class="sub" id="trainPresetQuickSub">~30 min · rank 8 · 512px</span></button>
+          <button type="button" class="pill-btn active" data-train-preset="quick"><span>Quick <span class="rec-badge">Recommended</span></span><span class="sub" id="trainPresetQuickSub">~30 min · rank 8 · 512px</span></button>
           <button type="button" class="pill-btn" data-train-preset="medium"><span>Medium</span><span class="sub" id="trainPresetMediumSub">~2 h · rank 16 · 576px</span></button>
           <button type="button" class="pill-btn" data-train-preset="high"><span>High</span><span class="sub" id="trainPresetHighSub">~4 h · rank 32 · 768px</span></button>
         </div>
@@ -18582,8 +18625,12 @@ HTML = r"""<!doctype html>
         </details>
       </div>
 
-      <!-- Estimate strip — wall time + RAM peak update as inputs change. -->
-      <div class="train-estimate" id="trainEstimate">
+      <!-- Estimate strip — wall time + RAM peak update as inputs
+           change. Hidden until at least one image is in the dataset:
+           before that, the estimate row is misleading ("— · —" reads
+           as "data missing" not "waiting on you"). Shown by
+           trainRenderImagesGrid() the moment count > 0. -->
+      <div class="train-estimate" id="trainEstimate" style="display:none">
         <span class="train-est-line">
           <span class="train-est-label">Estimated wall time</span>
           <span class="train-est-value" id="trainEstimateTime">—</span>
@@ -20193,6 +20240,21 @@ async function imgStudioGenerate() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     document.getElementById('imgStudioStatus').textContent =
       'Submitted. Watch Now / Recent → Photos.';
+    // Non-blocking toast — the user can stay focused on the form (e.g.
+    // queue a second variant) without reading the inline status line.
+    if (typeof phosToast === 'function') {
+      const n = body.n || 1;
+      phosToast(`Queued ${n} image${n === 1 ? '' : 's'} · watch Recent → Photos`,
+                { kind: 'success' });
+    }
+    // Briefly flash the bottom-pane Now tab so the user's eye is drawn
+    // to where the live progress will appear. CSS handles the pulse;
+    // we just toggle a class for a second.
+    const nowTab = document.querySelector('.tabs button[data-tab="now"]');
+    if (nowTab) {
+      nowTab.classList.add('flash');
+      setTimeout(() => nowTab.classList.remove('flash'), 1200);
+    }
     // Recent uploads may now include the refs the user just touched, and
     // the worker will start downloading weights for an uncached engine —
     // refresh both so the next user click sees the fresh state.
@@ -20202,6 +20264,10 @@ async function imgStudioGenerate() {
     }, 2000);
   } catch (e) {
     document.getElementById('imgStudioStatus').textContent = 'Submit failed: ' + e.message;
+    if (typeof phosToast === 'function') {
+      phosToast('Image submit failed: ' + (e.message || 'unknown'),
+                { kind: 'danger', duration: 5000 });
+    }
   } finally {
     IMG_STUDIO.busy = false;
     document.getElementById('imgStudioGenBtn').disabled = false;
@@ -20638,13 +20704,15 @@ function trainUpdateEstimate() {
   const steps = stepOverride || preset.steps;
   const n = TRAIN.images.length;
   const sec = Math.round(3 * Math.max(0, n) + steps * preset.seconds_per_step + 30);
+  // Estimate row is hidden until the user has dropped at least one
+  // image. Before that, the row reads as missing data — not a useful
+  // signal. Once there's data, reveal the row + populate it.
+  const row = document.getElementById('trainEstimate');
+  if (row) row.style.display = n === 0 ? 'none' : '';
   const ramRow = document.getElementById('trainEstimateRam');
   const timeRow = document.getElementById('trainEstimateTime');
   const outRow = document.getElementById('trainEstimateOut');
-  if (timeRow) {
-    if (n === 0) timeRow.textContent = `— (add images first)`;
-    else timeRow.textContent = trainFmtDuration(sec) + ` · ${steps} steps`;
-  }
+  if (timeRow && n > 0) timeRow.textContent = trainFmtDuration(sec) + ` · ${steps} steps`;
   if (ramRow) ramRow.textContent = `~${preset.ram_peak_gb} GB peak`;
   if (outRow) {
     const trig = (document.getElementById('trainTrigger').value || 'mrz07');
