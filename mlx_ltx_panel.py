@@ -14923,14 +14923,16 @@ HTML = r"""<!doctype html>
     }
 
     /* === TOP HEADER ============================================
-       80px tall (was 62) — Salo flagged the chrome was reading too
+       88px tall (was 62) — Salo flagged the chrome was reading too
        small and the brand was getting lost. Logo bumped 48 → 64,
        wordmark 22 → 28, plus a soft halo glow behind the mark so it
-       lifts off the void. */
+       lifts off the void. Second-round bump (2026-05-12) to chrome
+       chips: pills 28 → 34, icon-btn 26 → 34, "by Bizarro" 24 → 34
+       — everything else needed to scale with the bigger brand. */
     body > header {
-      height: 80px;
+      height: 88px;
       flex: 0 0 auto;
-      padding: 0 20px;
+      padding: 0 22px;
       gap: 14px;
       flex-wrap: nowrap;
       align-items: center;
