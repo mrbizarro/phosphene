@@ -5367,13 +5367,51 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
             mflux_family="z_image_turbo", mflux_quantize=4,
         )
     if engine_override == "hidream_inline":
-        # HiDream-O1-Image-Dev Q8 (8B Qwen3-VL pixel-patch transformer, MIT).
-        # Lab venv at /Users/salo/HIDREAM-O1-MLX-LAB-active/. Strong prompt
-        # fidelity at the cost of slowness vs Z-Image-Turbo (~67s vs ~30s)
-        # and ~11.5 GB working set (Comfortable+ tier). Defaults are tuned
-        # for the Dev distillation; do not change noise_scale or steps without
-        # re-evaluating quality.
+        # HiDream-O1-Image-Dev BF16 (28-step distilled, 8B Qwen3-VL pixel-patch
+        # transformer, MIT). Lab venv at /Users/salo/HIDREAM-O1-MLX-LAB-active/.
+        # Strong prompt fidelity at the cost of slowness vs Z-Image-Turbo
+        # (~67s vs ~30s) and ~16 GB working set (Comfortable+ tier).
+        # Native edit + multi-ref supported at BF16.
         return agent_image_engine.ImageEngineConfig(kind="hidream")
+    if engine_override == "hidream_full_bf16_inline":
+        # HiDream-O1-Image Full BF16 — undistilled 50-step variant with
+        # CFG=5.0 + shift=3.0 + FlowEulerScheduler. Fixes the "plastic
+        # / creamy skin" complaint Dev has on portraits. ~18 GB RAM,
+        # ~480 s per 1024² image. Edit NOT yet supported on Full (use
+        # Dev for instruction edits).
+        return agent_image_engine.ImageEngineConfig(
+            kind="hidream",
+            hidream_model_path="/Users/salo/HIDREAM-O1-MLX-LAB-active/mlx_models/hidream-o1-full-bf16",
+            hidream_recipe="full",
+            hidream_steps=50,
+            hidream_guidance_scale=5.0,
+        )
+    if engine_override == "hidream_full_q8_inline":
+        # HiDream-O1-Image Full Q8 — same recipe + quality as Full BF16
+        # (verified visually) but with ~12 GB peak RAM instead of 18 GB.
+        # Per-step is the same (Apple Silicon doesn't speed up from Q8
+        # on this model). Pick this to coexist with other GPU work
+        # (video render, training) without OOM.
+        return agent_image_engine.ImageEngineConfig(
+            kind="hidream",
+            hidream_model_path="/Users/salo/HIDREAM-O1-MLX-LAB-active/mlx_models/hidream-o1-full-q8",
+            hidream_recipe="full",
+            hidream_steps=50,
+            hidream_guidance_scale=5.0,
+        )
+    if engine_override == "hidream_full_q4_inline":
+        # HiDream-O1-Image Full Q4 — smallest variant (~8 GB peak RAM).
+        # Fits 16 GB Macs alongside other apps. Quality is close to BF16
+        # but shows mild patch-grid speckle on smooth skin in close-up
+        # portraits. Use for medium/wide shots; prefer Q8 for close
+        # portraits. Same per-step as Q8 (dequant overhead).
+        return agent_image_engine.ImageEngineConfig(
+            kind="hidream",
+            hidream_model_path="/Users/salo/HIDREAM-O1-MLX-LAB-active/mlx_models/hidream-o1-full-q4",
+            hidream_recipe="full",
+            hidream_steps=50,
+            hidream_guidance_scale=5.0,
+        )
     if engine_override == "mock_inline":
         return agent_image_engine.ImageEngineConfig(kind="mock")
     raise ValueError(f"unknown engine_override: {engine_override!r}")
@@ -6350,6 +6388,9 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
                     ("hidream_inline",             None,                         0.0, 130.0),
+                    ("hidream_full_bf16_inline",   None,                         0.0, 480.0),
+                    ("hidream_full_q8_inline",     None,                         0.0, 530.0),
+                    ("hidream_full_q4_inline",     None,                         0.0, 530.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
@@ -18240,7 +18281,10 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 (max-fidelity T2I + native edit/multi-ref &middot; ~67 s/image, 16 GB) [NEW]</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 (28-step distilled, T2I + edit + multi-ref &middot; ~67 s/image, 16 GB)</option>
+              <option value="hidream_full_bf16_inline">HiDream-O1-Image FULL BF16 (50-step undistilled w/ CFG &middot; ~480 s/image, 18 GB) [NEW]</option>
+              <option value="hidream_full_q8_inline">HiDream-O1-Image FULL Q8 (same quality as BF16, 12 GB peak RAM) [NEW]</option>
+              <option value="hidream_full_q4_inline">HiDream-O1-Image FULL Q4 (smallest, fits 16 GB Macs, mild skin speckle) [NEW]</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"

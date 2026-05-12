@@ -192,9 +192,15 @@ class ImageEngineConfig:
     # location; override when the lab moves.
     hidream_python_path: str = ""                   # default = HIDREAM_LAB_DIR/.venv/bin/python
     hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-bf16
-    hidream_steps: int = 28                         # Dev distillation needs the full 28; don't lower
+    hidream_steps: int = 28                         # Dev = 28; Full = 50 (auto-overridden when recipe="full")
     hidream_noise_scale: float = 7.5                # FlashFlowMatch tuned default; lowering collapses the image
     hidream_noise_clip_std: float = 2.5
+    # New for the Full / undistilled variant: pick the lab script's recipe
+    # via --model-type. "dev" = 28-step distilled (existing behaviour);
+    # "full" = 50-step undistilled with CFG + FlowEulerScheduler. The lab
+    # script auto-overrides steps + guidance + shift when model-type=full.
+    hidream_recipe: str = "dev"                     # "dev" | "full"
+    hidream_guidance_scale: float = 0.0             # 0 = no CFG (Dev). 5.0 typical for Full.
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -1194,6 +1200,7 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
     cmd = [
         py, script,
         "--model-path", model,
+        "--model-type", config.hidream_recipe,
         "--prompt", prompt,
         "--width", str(aligned_w),
         "--height", str(aligned_h),
@@ -1204,6 +1211,9 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         "--noise-scale-end", str(config.hidream_noise_scale),
         "--noise-clip-std", str(config.hidream_noise_clip_std),
     ]
+    # CFG only fires when guidance > 0 AND no refs (Full edit not supported yet).
+    if config.hidream_guidance_scale and config.hidream_guidance_scale > 0:
+        cmd.extend(["--guidance-scale", str(config.hidream_guidance_scale)])
     if refs:
         cmd.extend(["--ref-images", *map(str, refs)])
     if on_log:
