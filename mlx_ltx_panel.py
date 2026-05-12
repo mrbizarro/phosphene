@@ -11340,7 +11340,11 @@ HTML = r"""<!doctype html>
       border-color: var(--accent);
       box-shadow: 0 0 0 1px rgba(47,129,247,0.15) inset, var(--shadow-1);
     }
-    .now-card.idle { opacity: 0.85; }
+    /* Idle state — full opacity. Pre-fix the card was 0.85 opacity
+       which read as "broken/disabled" at a glance. The dim signal is
+       now carried only by the muted .ttl color + the live-dot turning
+       off, not by dimming the whole surface. */
+    .now-card.idle .ttl { color: var(--muted); font-weight: 500; }
     .now-card.failed {
       border-color: rgba(248,81,73,0.55);
       background: rgba(248,81,73,0.06);
@@ -21666,12 +21670,32 @@ async function poll() {
   // lives in updateModelsCard so we don't bloat poll() further.
   updateModelsCard(s);
 
-  // Queue pill + tab badge
+  // Queue pill + tab badge. Animate the bottom-pane Queue badge with
+  // a brief scale-up "pop" when the count goes up — draws the eye to
+  // the badge so the user notices that a new job got queued without
+  // having to watch the strip. CSS .badge.bump handles the keyframes;
+  // we just toggle the class for ~280 ms.
   const qp = document.getElementById('queuePill');
   qp.innerHTML = `<span class="dot"></span>queue ${s.queue.length}${s.paused ? ' · paused' : ''}`;
   qp.className = 'pill ' + (s.paused ? 'pill-warn' : (s.queue.length ? 'pill-running' : ''));
   const qb = document.getElementById('queueBadge');
-  if (s.queue.length) { qb.textContent = s.queue.length; qb.style.display = ''; } else { qb.style.display = 'none'; }
+  const prevQueueLen = window._lastQueueLen ?? 0;
+  if (s.queue.length) {
+    qb.textContent = s.queue.length;
+    qb.style.display = '';
+    if (s.queue.length > prevQueueLen) {
+      qb.classList.remove('bump');
+      // Re-trigger the CSS animation by toggling the class after a
+      // reflow. Without the rAF the second add doesn't re-fire.
+      requestAnimationFrame(() => {
+        qb.classList.add('bump');
+        setTimeout(() => qb.classList.remove('bump'), 320);
+      });
+    }
+  } else {
+    qb.style.display = 'none';
+  }
+  window._lastQueueLen = s.queue.length;
 
   // Job pill
   const jp = document.getElementById('jobPill');
@@ -21910,22 +21934,30 @@ async function poll() {
   log.textContent = s.log.length ? s.log.join('\n') : 'No log yet.';
   if (wasNearBottom) log.scrollTop = log.scrollHeight;
 
-  // Queue list
+  // Queue list — memoized on a signature of the IDs + ordinals so
+  // identical queue data doesn't trigger a full innerHTML replacement
+  // every 1.5 s. Pre-fix every poll() rebuilt all <li> nodes which
+  // caused a perceptible flicker on the Queue tab during long batches.
   const ql = document.getElementById('queueList');
-  if (!s.queue.length) ql.innerHTML = '<li class="empty-state"><span></span><span>Queue empty</span><span></span><span></span></li>';
-  else ql.innerHTML = s.queue.map((j, i) => {
-    // Image jobs don't have width/height/frames; show n × aspect instead.
-    const params = (j.params.mode === 'image')
-      ? `image · ${j.params.aspect || '?'} · n=${j.params.n || '?'}`
-      : `${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f`;
-    return `
-    <li>
-      <span class="pos">#${i+1}</span>
-      <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
-      <span class="params">${params}</span>
-      <button title="Remove" onclick="removeJob('${j.id}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
-    </li>`;
-  }).join('');
+  const qSig = !s.queue.length ? '__empty__'
+             : s.queue.map(j => j.id).join('|');
+  if (qSig !== window._lastQueueSig) {
+    if (!s.queue.length) ql.innerHTML = '<li class="empty-state"><span></span><span>Queue empty</span><span></span><span></span></li>';
+    else ql.innerHTML = s.queue.map((j, i) => {
+      // Image jobs don't have width/height/frames; show n × aspect instead.
+      const params = (j.params.mode === 'image')
+        ? `image · ${j.params.aspect || '?'} · n=${j.params.n || '?'}`
+        : `${j.params.mode} · ${j.params.width}×${j.params.height} · ${j.params.frames}f`;
+      return `
+      <li>
+        <span class="pos">#${i+1}</span>
+        <span class="ttl" title="${escapeHtml(j.params.prompt)}">${escapeHtml(j.params.label || snippet(j.params.prompt, 60))}</span>
+        <span class="params">${params}</span>
+        <button title="Remove" onclick="removeJob('${j.id}')"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+      </li>`;
+    }).join('');
+    window._lastQueueSig = qSig;
+  }
 
   // History — failed jobs show the error inline in the title slot, so
   // users can see WHY without having to scroll the log to find it.
