@@ -7808,23 +7808,43 @@ class Handler(BaseHTTPRequestHandler):
                 }, 400); return
             if not _resolved.is_file():
                 self._json({"error": "not a file"}, 404); return
-            removed = []
+            # Move media + sibling sidecars to ~/.Trash instead of
+            # hard-deleting. Users can restore from Finder Trash if
+            # they fat-finger Delete on a good take. Collision-safe:
+            # if a file with the same name already lives in Trash we
+            # suffix with a timestamp so nothing in Trash is silently
+            # overwritten.
+            trash_dir = Path.home() / ".Trash"
+            try:
+                trash_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                self._json({"error": f"trash dir unavailable: {e}"}, 500); return
             # Find related sidecars next to the media: <stem>.<media>.json
             # is the canonical sidecar shape; also try plain <stem>.json
-            # because older flows wrote that.
-            candidates = [_resolved, Path(str(_resolved) + ".json"),
-                          _resolved.with_suffix(".json")]
+            # because older flows wrote that. Dedupe before moving.
+            seen = set()
+            candidates = []
+            for cand in [_resolved, Path(str(_resolved) + ".json"),
+                         _resolved.with_suffix(".json")]:
+                key = str(cand)
+                if key in seen: continue
+                seen.add(key)
+                if cand.is_file(): candidates.append(cand)
+            trashed = []
+            ts = time.strftime("%Y%m%d-%H%M%S")
             for c in candidates:
+                dest = trash_dir / c.name
+                if dest.exists():
+                    dest = trash_dir / f"{c.stem}-{ts}{c.suffix}"
                 try:
-                    if c.is_file():
-                        c.unlink()
-                        removed.append(str(c))
+                    shutil.move(str(c), str(dest))
+                    trashed.append(str(dest))
                 except OSError as e:
-                    self._json({"error": f"delete failed: {e}"}, 500); return
+                    self._json({"error": f"move to Trash failed: {e}"}, 500); return
             # Also drop from HIDDEN_PATHS if it was hidden (so we don't
             # leak orphan entries into panel_hidden.json).
             set_hidden(str(_resolved), False)
-            self._json({"ok": True, "deleted": removed})
+            self._json({"ok": True, "trashed": trashed})
             return
 
         # ====== Reveal the outputs folder in Finder (one click, no
@@ -12107,6 +12127,54 @@ HTML = r"""<!doctype html>
        MutationObserver in the modal scaffold IIFE. Without this, the
        background page scrolls behind the modal which reads as broken. */
     body.modal-open { overflow: hidden; }
+
+    /* Toast notifications — stacked at the bottom-center of the
+       viewport, fade-in/fade-out, no blocking. Used for delete
+       confirmation, "moved to Trash" feedback, etc. The container is
+       pointer-events:none so it doesn't shadow anything underneath;
+       individual toasts opt back in for the close button. */
+    .phos-toast-container {
+      position: fixed;
+      bottom: 24px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      display: flex; flex-direction: column-reverse;
+      gap: 8px;
+      pointer-events: none;
+    }
+    @keyframes phos-toast-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes phos-toast-out {
+      from { opacity: 1; transform: translateY(0); }
+      to   { opacity: 0; transform: translateY(8px); }
+    }
+    .phos-toast {
+      pointer-events: auto;
+      display: inline-flex; align-items: center; gap: 10px;
+      min-width: 260px; max-width: 480px;
+      padding: 10px 16px;
+      background: rgba(20, 26, 50, 0.94);
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      color: var(--text);
+      font-size: 12.5px;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      animation: phos-toast-in 200ms cubic-bezier(.2,.8,.2,1);
+    }
+    .phos-toast.is-leaving { animation: phos-toast-out 180ms ease-in forwards; }
+    .phos-toast .ph { width: 16px; height: 16px; flex-shrink: 0; opacity: 0.85; }
+    .phos-toast .phos-toast-msg {
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .phos-toast.phos-toast-success { border-color: rgba(63, 185, 80, 0.45); }
+    .phos-toast.phos-toast-success .ph { color: var(--success); opacity: 1; }
+    .phos-toast.phos-toast-danger  { border-color: rgba(248, 81, 73, 0.45); }
+    .phos-toast.phos-toast-danger  .ph { color: var(--danger); opacity: 1; }
 
     /* Models modal — opened by the header `models` pill. Layered on top
        of everything; the form/log keep working underneath while a
@@ -19493,6 +19561,11 @@ function setMainOutputsFilter(mode) {
     selectOutput(visible[0].path);
   }
   renderCarousel();
+  // Reset scroll position on filter change so the user lands at the
+  // top of the newly-filtered list, not mid-gallery from the previous
+  // selection's position.
+  const carEl = document.getElementById('carousel');
+  if (carEl) carEl.scrollTop = 0;
   // Count badge mirrors the active filter (e.g. "Outputs · 23 photos").
   const titleEl = document.getElementById('carouselTitle');
   if (titleEl && filterMode !== 'hidden') {
@@ -22062,7 +22135,13 @@ function renderCarousel() {
     // the same /image?path=… cache-bust URL the server stamped.
     const thumbHtml = isPhoto
       ? `<img class="car-thumb" src="${o.url}" alt="${escapeHtml(o.name)}" loading="lazy">`
-      : `<video src="${o.url}#t=2.5" preload="metadata" muted></video>`;
+      // Hover-scrub: on enter, jump to 0 and play silently at 0.6×;
+      // on leave, pause + snap back to the static 2.5s preview frame.
+      // The play() promise can reject during a fast scrub (browser
+      // says "play interrupted by pause") — swallow it.
+      : `<video src="${o.url}#t=2.5" preload="metadata" muted playsinline
+                onmouseenter="this.currentTime=0; this.playbackRate=0.6; this.play().catch(()=>{})"
+                onmouseleave="this.pause(); this.currentTime=2.5; this.playbackRate=1"></video>`;
     // Per-card actions (revealed on hover) — kept deliberately minimal:
     //   * Photos get a small "Animate" chip (turns the still into i2v).
     //   * Everything gets a delete (×) chip.
@@ -22240,9 +22319,61 @@ function closeExpandLightbox() {
     } else if ((e.key === 'f' || e.key === 'F') && !isOpen && !inField && activePath) {
       openExpandLightbox();
       e.preventDefault();
+    } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !inField && activePath
+               && typeof filteredMainOutputs === 'function') {
+      // Carousel keyboard nav. Wraps at the edges so power users can
+      // scrub through the whole gallery without lifting hands off the
+      // keyboard. Works whether the lightbox is open or not — if it
+      // IS open, the lightbox content updates with the new selection.
+      const list = filteredMainOutputs();
+      if (!list.length) return;
+      const idx = list.findIndex(o => o.path === activePath);
+      const nextIdx = e.key === 'ArrowLeft'
+        ? (idx <= 0 ? list.length - 1 : idx - 1)
+        : (idx < 0 || idx >= list.length - 1 ? 0 : idx + 1);
+      const next = list[nextIdx];
+      if (next && typeof selectOutput === 'function') {
+        selectOutput(next.path);
+        if (isOpen) openExpandLightbox();   // re-bind media to new pick
+      }
+      e.preventDefault();
     }
   });
 })();
+
+// Toast helper — non-blocking confirmation pattern, stacks at the
+// bottom-center of the viewport. Use for delete confirmation, "moved
+// to Trash" feedback, save success, etc. Auto-dismisses after
+// `duration` ms (default 3 s). Pass `kind: "success" | "danger"` to
+// tint the border + icon.
+function phosToast(message, opts) {
+  opts = opts || {};
+  const c = document.getElementById('phosToast');
+  if (!c) return null;
+  const el = document.createElement('div');
+  el.className = 'phos-toast';
+  if (opts.kind === 'success' || opts.kind === 'danger') {
+    el.classList.add('phos-toast-' + opts.kind);
+  }
+  const icon = opts.icon
+            || (opts.kind === 'success' ? 'ph-check-bold'
+            :  opts.kind === 'danger'  ? 'ph-x-circle'
+                                       : 'ph-info');
+  el.innerHTML =
+    `<svg class="ph" aria-hidden="true"><use href="#${icon}"/></svg>` +
+    `<span class="phos-toast-msg"></span>`;
+  el.querySelector('.phos-toast-msg').textContent = String(message);
+  c.appendChild(el);
+  const duration = (opts.duration === 0) ? 0 : (opts.duration || 3000);
+  if (duration > 0) {
+    setTimeout(() => {
+      if (!el.isConnected) return;
+      el.classList.add('is-leaving');
+      el.addEventListener('animationend', () => el.remove(), { once: true });
+    }, duration);
+  }
+  return el;
+}
 
 // Animate the active output (photo only). Mirrors animateFromPhoto's
 // shape — pre-fills the i2v form from the active entry's path and the
@@ -22274,28 +22405,39 @@ async function hide(path) { await fetch('/output/hide?path='+encodeURIComponent(
 async function unhide(path) { await fetch('/output/show?path='+encodeURIComponent(path),{method:'POST'}); currentOutputs = []; poll(); }
 
 async function deleteOutput(path) {
-  // Per-card × button. Hard-deletes the media + its sidecar from disk
-  // via /output/delete. One confirmation — destructive and irreversible.
-  // Selection state resets via poll() picking up the smaller outputs
-  // list; if the user was on the deleted card, selectOutput() drops to
-  // whatever the first remaining card is.
+  // Per-card × button. Moves the media (and any sibling sidecar JSON)
+  // to the macOS Trash via /output/delete — files are recoverable
+  // from Finder Trash via Cmd-Z right after, or by dragging them out
+  // of the Trash bin later. Toast confirms the move; if the user was
+  // viewing this clip in the expand lightbox, that closes too.
   if (!path) return;
   const base = path.split('/').pop();
-  if (!confirm('Delete this file from disk?\n\n' + base + '\n\nThis cannot be undone.')) return;
+  if (!confirm('Move to Trash?\n\n' + base + '\n\nRestore from Finder if needed.')) return;
   try {
     const fd = new URLSearchParams();
     fd.set('path', path);
     const r = await fetch('/output/delete', { method: 'POST', body: fd });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.ok) {
-      alert('Delete failed: ' + (data.error || ('HTTP ' + r.status)));
+      phosToast('Delete failed: ' + (data.error || ('HTTP ' + r.status)),
+                { kind: 'danger', duration: 5000 });
       return;
     }
-    if (activePath === path) activePath = null;
+    // If the deleted clip was open in the expand lightbox, close it —
+    // otherwise the lightbox sits there pointing at a 404 URL.
+    if (activePath === path) {
+      activePath = null;
+      const lb = document.getElementById('expandLightbox');
+      if (lb && lb.style.display === 'flex' && typeof closeExpandLightbox === 'function') {
+        closeExpandLightbox();
+      }
+    }
     currentOutputs = [];
     poll();
+    phosToast('Moved to Trash · ' + base, { kind: 'success' });
   } catch (e) {
-    alert('Delete error: ' + (e.message || 'unknown'));
+    phosToast('Delete error: ' + (e.message || 'unknown'),
+              { kind: 'danger', duration: 5000 });
   }
 }
 
@@ -28607,6 +28749,7 @@ try {
   try { localStorage.removeItem('phos_agent_fullscreen'); } catch(e) {}
 } catch(e) {}
 </script>
+<div class="phos-toast-container" id="phosToast" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>
 
