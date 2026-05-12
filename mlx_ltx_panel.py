@@ -3551,12 +3551,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # repo before submitting to the helper.
             "hdr": f("hdr", "off") == "on",
             # Q8 HQ tuning knobs — exposed for experiments / power use.
-            # Defaults match production (stage1=15, stage2=3, teacache=1.0,
-            # cfg=3.0); the dev panel can override per render via form fields
-            # to bench Q8 speedup configs without code edits.
-            "stage1_steps": max(1, int(f("stage1_steps", "15") or 15)),
+            # Defaults are the "5-min sweet spot" recovered from the
+            # clip 11–17 cluster on 2026-05-10 (stage1=10, stage2=3,
+            # teacache=2.0). Same shape (1024×576, 121 frames) the panel
+            # picks by default for High, ~5 min wall time, quality the
+            # user signed off on at the time. Power users can dial back
+            # to stage1=15 / teacache=1.0 for the conservative Max via
+            # the advanced fields.
+            "stage1_steps": max(1, int(f("stage1_steps", "10") or 10)),
             "stage2_steps": max(0, int(f("stage2_steps", "3") or 3)),
-            "teacache_thresh": float(f("teacache_thresh", "1.0") or 1.0),
+            "teacache_thresh": float(f("teacache_thresh", "2.0") or 2.0),
             "cfg_scale": float(f("cfg_scale", "3.0") or 3.0),
             # Bongmath inner-loop cap for HQ res_2s sampler. Default 100
             # (matches upstream). Lower values save latent algebra time
@@ -4664,10 +4668,11 @@ def run_job_inner(job: dict) -> None:
                 "seed": p["seed"],
                 "image": p["image"] if mode != "t2v" else None,
                 "loras": hq_loras,
-                # Q8 tuning knobs honor per-job overrides from the form
-                # (defaults match production: stage1=15, stage2=3, cfg=3.0,
-                # teacache=1.0). See make_job for where these are read.
-                "stage1_steps": int(p.get("stage1_steps", 15)),
+                # Q8 tuning knobs honor per-job overrides from the form.
+                # Defaults updated 2026-05-12 to match the 5-min sweet
+                # spot recovered from the May-10 clip 11–17 cluster
+                # (stage1=10, stage2=3, teacache=2.0). See make_job.
+                "stage1_steps": int(p.get("stage1_steps", 10)),
                 "stage2_steps": int(p.get("stage2_steps", 3)),
                 "cfg_scale": float(p.get("cfg_scale", 3.0)),
                 # Upstream HQ params (`LTX_2_3_HQ_PARAMS`) and the
@@ -4678,7 +4683,7 @@ def run_job_inner(job: dict) -> None:
                 # by mistake (copy from standard params); fixed here.
                 "stg_scale": 0.0,
                 "enable_teacache": True,
-                "teacache_thresh": float(p.get("teacache_thresh", 1.0)),
+                "teacache_thresh": float(p.get("teacache_thresh", 2.0)),
                 "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
                 # Stage-2 image conditioning mode. "full" re-encodes the
                 # reference image at full res for stage 2 (upstream default,
@@ -23773,6 +23778,39 @@ function _serializeLoras() {
   // don't touch it here to avoid two functions stomping each other.
   const slim = _activeLoras.map(l => ({ path: l.path, strength: l.strength }));
   document.getElementById('lorasJson').value = JSON.stringify(slim);
+  // Train-Character LoRAs are trained against the dev transformer (HQ
+  // path) — Quick/Standard run the distilled model at 8 steps, which is
+  // a different fine-tune of the same architecture. Fusion succeeds
+  // numerically but deltas don't transfer cleanly; the user sees muddy
+  // output. Disable those chips when any trained LoRA is attached so
+  // the wrong-path landing becomes visible.
+  try { updateQualityChipsForLora(); } catch (_) {}
+}
+
+function updateQualityChipsForLora() {
+  const trained = Array.isArray(_activeLoras) && _activeLoras.some(a => {
+    const meta = Array.isArray(_knownUserLoras)
+      ? _knownUserLoras.find(u => u.path === a.path)
+      : null;
+    return meta && meta.kind === 'trained';
+  });
+  document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => {
+    const q = b.dataset.quality;
+    const incompat = trained && (q === 'quick' || q === 'standard');
+    b.classList.toggle('disabled', incompat);
+    if (incompat) {
+      b.title = 'Trained character LoRA needs the dev transformer (High quality). Quick/Standard run the distilled model — different fine-tune, so the LoRA can\'t reproduce the character faithfully.';
+    } else if (b.dataset.tooltipDefault) {
+      b.title = b.dataset.tooltipDefault;
+    } else {
+      b.removeAttribute('title');
+    }
+  });
+  // If the currently-selected preset just became incompatible, bump to High.
+  const cur = document.getElementById('quality').value;
+  if (trained && (cur === 'quick' || cur === 'standard')) {
+    setQuality('high');
+  }
 }
 
 function addLoraToActive(entry) {
