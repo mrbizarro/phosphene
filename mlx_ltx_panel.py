@@ -26667,6 +26667,12 @@ function renderToolResultCard(result) {
   card.appendChild(body);
   head.addEventListener('click', () => card.classList.toggle('open'));
 
+  // Error cards auto-expand on render so users don't have to click
+  // through every collapsed card hunting for "which submit_shot
+  // failed?". Success cards stay collapsed (the head's one-line
+  // summary is enough for a quick scan).
+  if (!ok) card.classList.add('open');
+
   // Phase B of the director workflow: when the result carries
   // `candidates`, render an interactive thumbnail grid below the head.
   // The card stays expanded by default so the user can immediately pick.
@@ -27605,6 +27611,16 @@ function openAgentSettings() {
     const sel = document.getElementById('agentLocalModel');
     sel.innerHTML = '';
     const models = (window.AGENT.config && window.AGENT.config.available_models) || [];
+    // Compute current RAM headroom so we can flag models that won't
+    // fit. Auto-spawn already refuses to start when system is in
+    // swap, but the picker was happy to let users select e.g. a
+    // 22 GB model on a Mac with 6 GB free. Now those entries are
+    // visibly tagged "won't fit" so the user picks a smaller one.
+    let freeGb = 0;
+    try {
+      const m = (window.AGENT.lastStatus && window.AGENT.lastStatus.memory) || {};
+      freeGb = Math.max(0, (Number(m.total_gb) || 0) - (Number(m.used_gb) || 0));
+    } catch (e) {}
     if (models.length === 0) {
       const opt = document.createElement('option');
       opt.value = '';
@@ -27614,7 +27630,15 @@ function openAgentSettings() {
       for (const m of models) {
         const opt = document.createElement('option');
         opt.value = m.path;
-        opt.textContent = `${m.name} · ${m.size_gb} GB`;
+        // 2 GB safety margin — the renderer needs some headroom too.
+        const wontFit = freeGb > 0 && Number(m.size_gb) > 0 && m.size_gb + 2 > freeGb;
+        opt.textContent = wontFit
+          ? `${m.name} · ${m.size_gb} GB · won't fit (${freeGb.toFixed(0)} GB free)`
+          : `${m.name} · ${m.size_gb} GB`;
+        if (wontFit) {
+          opt.disabled = true;
+          opt.title = `Needs ~${m.size_gb} GB; only ${freeGb.toFixed(1)} GB free. Close apps or pick a smaller model.`;
+        }
         if ((cfg.local_model_path || '') === m.path) opt.selected = true;
         sel.appendChild(opt);
       }
@@ -28403,6 +28427,15 @@ function agentRenderRamChip(status) {
     if (free < 4 || swapGb >= 8) { cls = 'is-bad'; text = `Tight · ${free.toFixed(0)} GB free`; }
     else if (free < 12)            { cls = 'is-tight'; text = `${free.toFixed(0)} GB free`; }
     else                            { cls = 'is-roomy'; text = `${free.toFixed(0)} GB free`; }
+  }
+  // Append a one-line "what to do about it" hint for amber/red states.
+  // Pre-fix the chip went amber with no actionable copy; Salo flagged
+  // that "Tight" tells you the symptom but not the move.
+  if (cls === 'is-tight') {
+    tip += '\n\nTip: switch Engine to plan-and-sleep mode, or pick a smaller chat model.';
+  } else if (cls === 'is-bad') {
+    tip += '\n\nAction: stop the chat engine (Settings → Stop engine) ' +
+           'or close memory-heavy apps before queuing another render.';
   }
   chip.className = 'agent-ram-chip ' + cls;
   chip.title = tip;
