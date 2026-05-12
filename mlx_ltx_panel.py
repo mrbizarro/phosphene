@@ -14984,25 +14984,25 @@ HTML = r"""<!doctype html>
        (mono "v2.0" in a chip). Keep the element so the JS doesn't break. */
     body > header .version-badge {
       margin: 0;
-      padding: 3px 8px;
-      font-size: 11px;
+      padding: 5px 10px;
+      font-size: 13px;
       font-family: var(--ph-font-mono);
       color: var(--muted);
       background: rgba(140, 160, 220, 0.06);
       border: 1px solid var(--ph-border-soft);
-      border-radius: 6px;
+      border-radius: 7px;
       letter-spacing: 0.02em;
       font-weight: 500;
       text-transform: none;
     }
     body > header .profile-badge {
       margin: 0 0 0 4px;
-      padding: 3px 8px;
-      font-size: 10px;
+      padding: 5px 10px;
+      font-size: 12px;
       font-family: var(--ph-font-mono);
       letter-spacing: 0.08em;
       font-weight: 600;
-      border-radius: 6px;
+      border-radius: 7px;
     }
     body > header .spacer { flex: 1 1 auto; }
 
@@ -15011,14 +15011,14 @@ HTML = r"""<!doctype html>
     body > header > .pill {
       display: inline-flex;
       align-items: center;
-      gap: 7px;
-      height: 28px;
-      padding: 0 11px;
-      border-radius: 7px;
+      gap: 8px;
+      height: 34px;
+      padding: 0 14px;
+      border-radius: 8px;
       background: rgba(140, 160, 220, 0.04);
       border: 1px solid var(--ph-border-soft);
       color: var(--muted);
-      font-size: 12.5px;
+      font-size: 13.5px;
       font-weight: 500;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
@@ -15029,7 +15029,7 @@ HTML = r"""<!doctype html>
       color: var(--text);
     }
     body > header > .pill .dot {
-      width: 6px; height: 6px;
+      width: 7px; height: 7px;
       border-radius: 999px;
       margin-right: 0;
       box-shadow: none;
@@ -15051,12 +15051,12 @@ HTML = r"""<!doctype html>
     /* Settings cog — same height as chips, ghost styling. */
     body > header #settingsBtn,
     body > header .icon-btn {
-      width: 26px; height: 26px;
+      width: 34px; height: 34px;
       padding: 0;
       border: none;
       background: transparent;
       color: var(--muted);
-      border-radius: 6px;
+      border-radius: 7px;
       display: inline-flex;
       align-items: center; justify-content: center;
       cursor: pointer;
@@ -15066,6 +15066,12 @@ HTML = r"""<!doctype html>
     body > header .icon-btn:hover {
       color: var(--text);
       background: rgba(140, 160, 220, 0.06);
+    }
+    /* Force the inline-sized SVGs (16×16) to scale up so the icons
+       look proportionate inside the larger 34×34 button. */
+    body > header #settingsBtn svg,
+    body > header .icon-btn svg {
+      width: 20px; height: 20px;
     }
     /* Bug button — neon-pulsing accent so it reads as "interactive" and
        discoverable. Uses an HSL accent (cyan-leaning) that's distinct from
@@ -15105,14 +15111,14 @@ HTML = r"""<!doctype html>
     body > header .creator-link {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      height: 24px;
-      padding: 0 8px 0 3px;
-      border-radius: 6px;
+      gap: 8px;
+      height: 34px;
+      padding: 0 12px 0 4px;
+      border-radius: 8px;
       background: rgba(140, 160, 220, 0.04);
       border: 1px solid var(--ph-border-soft);
       color: var(--muted);
-      font-size: 11px;
+      font-size: 13px;
       font-weight: 500;
       text-decoration: none;
       transition: border-color var(--t-base), color var(--t-base);
@@ -15120,15 +15126,18 @@ HTML = r"""<!doctype html>
     body > header .creator-link:hover { color: var(--text); border-color: var(--ph-border-strong); }
     body > header .creator-link .creator-avatar,
     body > header .creator-link img {
-      width: 18px; height: 18px;
-      border-radius: 4px;
+      width: 26px; height: 26px;
+      border-radius: 6px;
       object-fit: cover;
       flex-shrink: 0;
     }
     body > header .creator-link .x-icon {
-      font-size: 10px;
+      font-size: 11px;
       color: var(--ph-text-faint);
       letter-spacing: 0.04em;
+    }
+    body > header .creator-link .x-icon svg {
+      width: 12px; height: 12px;
     }
 
     /* === MAIN LAYOUT ===========================================
@@ -23610,7 +23619,10 @@ function updateQualityChipsForLora() {
     const meta = Array.isArray(_knownUserLoras)
       ? _knownUserLoras.find(u => u.path === a.path)
       : null;
-    return meta && meta.kind === 'trained';
+    // _knownUserLoras carries the raw sidecar kind ('train_character');
+    // 'trained' is only a display-side alias built inside renderLorasList.
+    // Match the raw value so the chip disable actually fires.
+    return meta && meta.kind === 'train_character';
   });
   document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => {
     const q = b.dataset.quality;
