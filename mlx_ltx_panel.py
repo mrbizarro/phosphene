@@ -12090,12 +12090,31 @@ HTML = r"""<!doctype html>
     button.primary-btn:hover { background: var(--accent-bright); }
     button.primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* Modal entrance animation — fires every time a modal goes from
+       display:none to display:flex/block because that re-mounts the
+       child into the layout tree, which restarts CSS animations from
+       frame 0. Pure-CSS, no JS hook required. Backdrop fades in,
+       inner card scales up + drifts down by 8px. */
+    @keyframes phos-modal-bg-in {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    @keyframes phos-modal-card-in {
+      from { opacity: 0; transform: scale(0.96) translateY(8px); }
+      to   { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    /* When any modal is open the body scroll is locked — set by the
+       MutationObserver in the modal scaffold IIFE. Without this, the
+       background page scrolls behind the modal which reads as broken. */
+    body.modal-open { overflow: hidden; }
+
     /* Models modal — opened by the header `models` pill. Layered on top
        of everything; the form/log keep working underneath while a
        download streams in (via the existing log panel at the bottom). */
     .models-modal {
       position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100;
       display: flex; align-items: center; justify-content: center;
+      animation: phos-modal-bg-in 140ms ease-out;
     }
     .models-card {
       background: var(--bg-elevated, #1a1f29); color: var(--fg, #d8e0ee);
@@ -12103,6 +12122,7 @@ HTML = r"""<!doctype html>
       width: min(640px, 92vw); max-height: 86vh; overflow-y: auto;
       box-shadow: 0 20px 60px rgba(0,0,0,0.6);
       padding: 22px 24px;
+      animation: phos-modal-card-in 180ms cubic-bezier(.2,.8,.2,1);
     }
     .models-head {
       display: flex; align-items: center; justify-content: space-between;
@@ -24728,6 +24748,88 @@ async function versionDoPull() {
 // then every 5 minutes thereafter.
 setTimeout(refreshVersionPill, 2000);
 setInterval(refreshVersionPill, 5 * 60 * 1000);
+
+// ====== Modal reliability scaffold ======
+// One global scaffold for all 8 modals on the panel (.models-modal,
+// .model-browser-modal, .expand-lightbox). Covers three things the
+// individual open/close functions didn't:
+//   1. Esc closes the topmost-visible modal.
+//   2. Tab/Shift-Tab cycles focus inside the modal (no escape into
+//      the form behind it).
+//   3. body.modal-open is toggled whenever any modal is visible so
+//      CSS can lock background scroll.
+// No need to patch each open/close fn — a MutationObserver watches
+// inline style changes on the modals themselves; whoever toggles
+// display gets the side-effects for free.
+(function _phosModalScaffold() {
+  const MODAL_SEL = '.models-modal, .model-browser-modal, .expand-lightbox';
+  const isVisible = el => {
+    const d = el.style.display;
+    // Some modals open by adding an .open class (.model-browser-modal);
+    // others toggle the inline style. Cover both.
+    if (el.classList.contains('open')) return true;
+    return d === 'flex' || d === 'block';
+  };
+  const visibleModals = () =>
+    Array.from(document.querySelectorAll(MODAL_SEL)).filter(isVisible);
+  const topVisible = () => {
+    const v = visibleModals();
+    return v.length ? v[v.length - 1] : null;
+  };
+  const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const refreshScrollLock = () => {
+    document.body.classList.toggle('modal-open', visibleModals().length > 0);
+  };
+  // Wire a single MutationObserver per modal element. Cheaper than a
+  // global subtree observer and avoids the cost of body-wide attribute
+  // tracking. Lazy — modals added later (none today, but defensive)
+  // need to re-register.
+  document.querySelectorAll(MODAL_SEL).forEach(el => {
+    new MutationObserver(refreshScrollLock).observe(el, {
+      attributes: true,
+      attributeFilter: ['style', 'class'],
+    });
+  });
+  refreshScrollLock();
+
+  // Esc closes the topmost modal. We find the close button inside it
+  // and click it (preserves any per-modal cleanup logic — settings
+  // save, civitai abort, etc.). Fall back to hiding the element if no
+  // close button is found.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const top = topVisible();
+    if (!top) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const closeBtn =
+      top.querySelector('button[onclick*="close"]') ||
+      top.querySelector('.close-btn') ||
+      top.querySelector('.expand-close');
+    if (closeBtn) closeBtn.click();
+    else { top.style.display = 'none'; top.classList.remove('open'); }
+  });
+
+  // Focus trap — when a modal is visible, Tab cycles inside it.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const top = topVisible();
+    if (!top) return;
+    const focusables = Array.from(top.querySelectorAll(FOCUSABLE))
+      .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !top.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !top.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+})();
 
 // ====== Init ======
 // Skip poll when the tab is backgrounded — at 1.5s cadence with a fan-
