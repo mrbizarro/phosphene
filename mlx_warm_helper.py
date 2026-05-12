@@ -328,6 +328,38 @@ def _resolve_lora_path(path: str) -> str:
     return chosen
 
 
+def _filter_unsupported_kwargs(fn, kwargs: dict) -> dict:
+    """Return `kwargs` with any keys the target callable doesn't accept removed.
+
+    Phosphene's helper passes a superset of kwargs to `generate_and_save`
+    so newer pipeline features (bongmath_max_iter, stage2_image_conditioning,
+    etc.) work transparently. But stock upstream releases sometimes ship a
+    strict signature without **kwargs — calling them blows up with
+    `unexpected keyword argument 'X'` even if the feature would just be a
+    no-op when missing. Introspect once, drop unsupported keys, log what we
+    dropped. If the target has a VAR_KEYWORD parameter (**kwargs in any
+    form), pass everything through untouched."""
+    try:
+        import inspect as _inspect
+        sig = _inspect.signature(fn)
+        has_var_kw = any(
+            pp.kind == _inspect.Parameter.VAR_KEYWORD
+            for pp in sig.parameters.values()
+        )
+        if has_var_kw:
+            return kwargs
+        accepted = set(sig.parameters.keys())
+        dropped = sorted(k for k in kwargs if k not in accepted)
+        if dropped:
+            emit({"event": "log",
+                  "line": f"pipeline.generate_and_save doesn't accept {dropped}; dropping."})
+        return {k: v for k, v in kwargs.items() if k in accepted}
+    except Exception:
+        # Introspection itself shouldn't block a render — fall through
+        # and let the original call surface whatever the real error is.
+        return kwargs
+
+
 _LORA_PATCH_INSTALLED = False
 
 
@@ -1485,6 +1517,13 @@ for line in sys.__stdin__:
             with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
                 if neg_active:
                     emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                # Stock site-packages versions of TI2VidTwoStagesPipeline ship
+                # a strict generate_and_save signature with no **kwargs catchall.
+                # Phosphene passes bongmath_max_iter / stage2_image_conditioning /
+                # etc., which would crash a stock install. Introspect once, drop
+                # any kwarg the installed signature doesn't accept — better to
+                # silently skip a feature flag than to fail the whole render.
+                kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
                 out_path = pipe.generate_and_save(**kwargs)
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
@@ -1607,6 +1646,7 @@ for line in sys.__stdin__:
             with _override_default_negative_prompt(p.get("negative_prompt")) as neg_active:
                 if neg_active:
                     emit({"event": "log", "line": "Avoid terms active via native CFG negative prompt."})
+                kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
                 out_path = pipe.generate_and_save(**kwargs)
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
