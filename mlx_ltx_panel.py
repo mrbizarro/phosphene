@@ -11217,29 +11217,58 @@ HTML = r"""<!doctype html>
       opacity: 1;
       position: relative;
     }
-    /* Dismiss × on the failure card so a stuck-failed Now tab can be
-       acknowledged. Sits in the top-right corner of the card; clicking
-       sets _dismissedFailureId so the next poll tick treats this job
-       id as already-handled and the card returns to Idle. */
-    .now-card .now-card-dismiss {
+    /* Reserve room on the right of the title/meta so the action row
+       (Retry + Close) doesn't overlap the text it sits next to. */
+    .now-card.failed .ttl,
+    .now-card.failed .meta {
+      padding-right: 140px;
+    }
+    /* Failure-card action row — Retry + Close on the failed Now card.
+       Lives in its own sibling element of .ttl so poll()'s rewrites
+       don't replace the buttons mid-click. Pinned to the top-right of
+       the card; hidden (empty) outside the failed state. */
+    .now-card .now-card-actions {
       position: absolute;
       top: 8px; right: 8px;
-      width: 22px; height: 22px;
-      padding: 0;
-      border-radius: var(--r-xs);
-      border: 1px solid transparent;
-      background: transparent;
-      color: var(--muted);
-      font-size: 16px; line-height: 1;
-      cursor: pointer;
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .now-card .now-card-actions:empty { display: none; }
+    .now-card .now-card-retry,
+    .now-card .now-card-dismiss {
       display: inline-flex;
       align-items: center; justify-content: center;
+      gap: 5px;
+      padding: 0 9px;
+      height: 24px;
+      border-radius: var(--r-xs);
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
       transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+    }
+    .now-card .now-card-retry .ph,
+    .now-card .now-card-dismiss .ph {
+      width: 13px; height: 13px;
+      flex-shrink: 0;
+    }
+    .now-card .now-card-retry:hover {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(47,129,247,0.14);
+    }
+    .now-card .now-card-dismiss {
+      width: 24px;
+      padding: 0;
     }
     .now-card .now-card-dismiss:hover {
       color: var(--text);
-      border-color: rgba(248,81,73,0.45);
-      background: rgba(248,81,73,0.12);
+      border-color: rgba(248,81,73,0.55);
+      background: rgba(248,81,73,0.15);
     }
     /* (.player-progress-chip .player-progress-dismiss CSS removed
        2026-05-12 with the in-player failure overlay.) */
@@ -18971,6 +19000,10 @@ HTML = r"""<!doctype html>
         <div class="ttl">Idle</div>
         <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
         <div class="meta" id="nowDetail">No job running</div>
+        <!-- Action row populated on the failed state with Retry + Close.
+             Lives outside .ttl so poll()'s innerHTML rewrites don't
+             clobber the buttons mid-click. Hidden when empty. -->
+        <div class="now-card-actions" id="nowCardActions"></div>
       </div>
     </div>
     <div class="tab-content" id="tab-queue">
@@ -21519,6 +21552,7 @@ async function poll() {
     // dismiss so we don't keep nagging. Clears on next job (id changes).
     const showFailure = last && last.status === 'failed' && !s.queue.length
                         && last.id !== window._dismissedFailureId;
+    const actionsEl = document.getElementById('nowCardActions');
     if (showFailure) {
       nowCard.classList.remove('idle');
       nowCard.classList.add('failed');
@@ -21556,14 +21590,29 @@ async function poll() {
         hint = raw;
       }
       nowCard.querySelector('.ttl').innerHTML =
-        `<span style="color: var(--danger, #f85149)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>${escapeHtml(friendly)}</span>` +
-        `<button type="button" class="now-card-dismiss" title="Dismiss this failure" ` +
-        `onclick="event.stopPropagation(); window._dismissedFailureId = ${JSON.stringify(last.id)}; ` +
-        `if (typeof poll === 'function') poll();"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
+        `<span style="color: var(--danger, #f85149)"><svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-warning-fill"/></svg>${escapeHtml(friendly)}</span>`;
       nowCard.querySelector('.meta').innerHTML =
         `<span style="color: var(--muted)">${escapeHtml(snippet(last.params.label || last.params.prompt, 80))}</span>` +
         ` <span style="color: var(--muted)">· ${escapeHtml(last.params.mode)} · ${last.params.width}×${last.params.height}</span>` +
         `<br><span style="color: var(--text)">${escapeHtml(hint)}</span>`;
+      // Action row: Retry (re-submit same params via /queue/retry) +
+      // Dismiss (mark this id as handled so the next idle poll clears
+      // the card). Both buttons live in a stable sibling element of
+      // .ttl so the click handlers survive every poll-driven rewrite.
+      // A single delegated listener on document (installed once at
+      // boot) catches the clicks via data-action so we never lose them
+      // to an inline-handler race.
+      if (actionsEl) {
+        actionsEl.dataset.jobId = String(last.id);
+        actionsEl.innerHTML =
+          `<button type="button" class="now-card-retry" data-action="retry" ` +
+          `title="Re-submit this job with the same params">` +
+          `<svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise"/></svg>` +
+          `<span>Retry</span></button>` +
+          `<button type="button" class="now-card-dismiss" data-action="dismiss" ` +
+          `title="Dismiss this failure" aria-label="Dismiss this failure">` +
+          `<svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>`;
+      }
     } else {
       nowCard.classList.add('idle');
       nowCard.classList.remove('failed');
@@ -21571,6 +21620,7 @@ async function poll() {
       nowCard.querySelector('.meta').textContent = s.paused
         ? 'Worker paused — current job (if any) finishes, queue waits for resume.'
         : (s.queue.length ? 'Worker about to pick up next queued job.' : 'No jobs queued. Generate something on the left.');
+      if (actionsEl) { actionsEl.innerHTML = ''; actionsEl.dataset.jobId = ''; }
     }
   }
 
@@ -24647,6 +24697,28 @@ setInterval(refreshVersionPill, 5 * 60 * 1000);
 // catches up on the first frame.
 setInterval(() => { if (!document.hidden) poll(); }, 1500);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+// Delegated click handler for the failed Now-card action buttons.
+// Inline `onclick` attributes on these buttons were fragile — the
+// failed branch of poll() rewrites .ttl's innerHTML every 1.5s, and a
+// click that landed mid-rewrite could be lost. A single delegated
+// listener on document survives every rewrite + costs nothing.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action="retry"], [data-action="dismiss"]');
+  if (!btn) return;
+  e.stopPropagation();
+  e.preventDefault();
+  const actions = btn.closest('.now-card-actions');
+  const id = actions ? actions.dataset.jobId : '';
+  if (!id) return;
+  if (btn.dataset.action === 'retry') {
+    if (typeof retryJob === 'function') retryJob(id);
+  } else {
+    window._dismissedFailureId = id;
+    if (typeof poll === 'function') poll();
+  }
+});
+
 poll();
 setMode('t2v');
 setAspect('landscape');         // sets aspect first so the default preset orients correctly
