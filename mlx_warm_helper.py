@@ -380,14 +380,34 @@ def _install_lora_fusion_patches() -> None:
     from ltx_core_mlx.utils.memory import aggressive_cleanup
     from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 
+    distilled_cls = next(
+        (c for c in classes if c.__name__ == "DistilledPipeline"), None
+    )
+
     def _resolve_tx_path(pipe):
-        # Dev-based pipelines (two-stage, one-stage, HQ) carry the dev
-        # transformer filename in `_dev_transformer`. Distilled has no such
-        # attribute and tries `transformer.safetensors` first, then
-        # `transformer-distilled.safetensors` (mirrors DistilledPipeline.load).
+        # CRITICAL: this must return the SAME file the pipeline's own load()
+        # would load — fusion sets self.dit, and the original load() then
+        # short-circuits because self.dit is not None. If we fuse into a
+        # different file than the pipeline expects to run inference against,
+        # we get a base-fine-tune mismatch (e.g. dev weights running through
+        # the distilled 8-step sigma schedule = undertrained denoise = blur).
+        #
+        # DistilledPipeline inherits `_dev_transformer = "transformer-dev..."`
+        # from its TI2VidTwoStagesPipeline parent, but its load() actually
+        # picks `transformer.safetensors` → `transformer-distilled.safetensors`
+        # (see distilled.py). We must match THAT, not the inherited dev name.
+        if distilled_cls is not None and isinstance(pipe, distilled_cls):
+            p = pipe.model_dir / "transformer.safetensors"
+            if not p.exists():
+                p = pipe.model_dir / "transformer-distilled.safetensors"
+            return p
+        # Genuine dev-based pipelines: TI2VidTwoStagesPipeline (non-distilled),
+        # TI2VidOneStagePipeline, TI2VidTwoStagesHQPipeline. They all load
+        # via `_load_dev_transformer()` which reads `_dev_transformer`.
         dev_name = getattr(pipe, "_dev_transformer", None)
         if dev_name:
             return pipe.model_dir / dev_name
+        # Fallback (shouldn't hit): distilled file resolution.
         p = pipe.model_dir / "transformer.safetensors"
         if not p.exists():
             p = pipe.model_dir / "transformer-distilled.safetensors"
