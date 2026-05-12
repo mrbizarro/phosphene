@@ -677,10 +677,44 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
         # we silently take refs[0] without warning here.
         refs_used = [str(Path(refs[0]).resolve())]
         cmd.extend(["--image-path", refs_used[0]])
-    # Optional Lightning / acceleration LoRAs
+    # Optional Lightning / acceleration LoRAs.
+    # Translate any `repo_id:filename.safetensors` entries to real local
+    # paths via hf_hub_download — the mflux CLI's --lora-paths accepts
+    # ABSOLUTE files only; its repo-shorthand was removed and now errors
+    # with "Could not find LoRA file ... in downloaded files". Paths that
+    # look like real files or that don't contain a colon are passed
+    # through untouched.
     if config.mflux_lora_paths:
+        resolved_paths: list[str] = []
+        for lp in config.mflux_lora_paths:
+            lp_str = str(lp)
+            # Path with a colon → repo:filename collection syntax. Skip
+            # if the file already exists locally (e.g. a Civitai LoRA
+            # under panel_uploads or an absolute /Users/... path).
+            if ":" in lp_str and not Path(lp_str).exists():
+                try:
+                    repo_id, filename = lp_str.split(":", 1)
+                except ValueError:
+                    resolved_paths.append(lp_str)
+                    continue
+                try:
+                    from huggingface_hub import hf_hub_download
+                    cached = hf_hub_download(repo_id=repo_id, filename=filename)
+                    if on_log is not None:
+                        try: on_log(f"[lora] resolved {lp_str} -> {cached}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    resolved_paths.append(cached)
+                except Exception as e:        # noqa: BLE001
+                    if on_log is not None:
+                        try: on_log(f"[lora] WARN: could not resolve {lp_str}: {e}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    resolved_paths.append(lp_str)
+            else:
+                resolved_paths.append(lp_str)
         cmd.append("--lora-paths")
-        cmd.extend(config.mflux_lora_paths)
+        cmd.extend(resolved_paths)
         if config.mflux_lora_scales:
             cmd.append("--lora-scales")
             cmd.extend(str(s) for s in config.mflux_lora_scales)
