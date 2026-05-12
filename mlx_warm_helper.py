@@ -468,6 +468,47 @@ def _install_lora_fusion_patches() -> None:
         cls.load = _make_wrapper(cls.load)
         cls._phosphene_lora_fix = True
 
+    # Second entry point: TI2VidTwoStagesHQPipeline.generate_two_stage()
+    # bypasses self.load() entirely — it calls `self._load_dev_transformer()`
+    # directly when self.dit is None. So the load() wrapper above never fires
+    # for HQ renders, and the LoRA silently isn't fused. Wrap the weight-loader
+    # method itself so HQ also fuses. Other classes call _load_dev_transformer
+    # from inside their load(); the load() wrapper above runs first and sets
+    # self.dit, so the inner call short-circuits in `if self.dit is None`.
+    def _make_dev_loader_wrapper(orig):
+        def patched_load_dev(self):
+            pending = getattr(self, "_pending_loras", None)
+            if pending and not getattr(self, "_phosphene_dit_fused", False):
+                dev_name = (getattr(self, "_dev_transformer", None)
+                            or "transformer-dev.safetensors")
+                tx_path = self.model_dir / dev_name
+                emit({"event": "log",
+                      "line": f"Fusing {len(pending)} LoRA(s) into "
+                              f"{os.path.basename(str(tx_path))}..."})
+                weights = load_split_safetensors(tx_path, prefix="transformer.")
+                weights = self._fuse_pending_loras(weights, pending)
+                dit = LTXModel()
+                apply_quantization(dit, weights)
+                dit.load_weights(list(weights.items()))
+                aggressive_cleanup()
+                self._phosphene_dit_fused = True
+                return dit
+            return orig(self)
+        return patched_load_dev
+
+    # Patch on BasePipeline once — every subclass that calls _load_dev_transformer
+    # inherits it from BasePipeline, so a single wrap covers HQ + two-stage +
+    # one-stage + keyframe + retake. Idempotent via class flag.
+    try:
+        from ltx_pipelines_mlx._base import BasePipeline as _BasePipeline
+    except ImportError:
+        _BasePipeline = None
+    if _BasePipeline is not None and not getattr(_BasePipeline, "_phosphene_dev_loader_fix", False):
+        _BasePipeline._load_dev_transformer = _make_dev_loader_wrapper(
+            _BasePipeline._load_dev_transformer
+        )
+        _BasePipeline._phosphene_dev_loader_fix = True
+
     _LORA_PATCH_INSTALLED = True
 
 
