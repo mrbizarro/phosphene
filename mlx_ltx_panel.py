@@ -22432,6 +22432,36 @@ async function loadParams() {
   // Extend-specific: restore source video path
   if (p.video_path) document.getElementById('video_path').value = p.video_path;
   if (p.label) document.getElementById('preset_label').value = p.label;
+
+  // Restore the LoRA picker state. Without this, Load Params would silently
+  // drop every LoRA the prior render used — prompt + seed + dims all match
+  // but `loras=0` would go on the wire and the model would re-render
+  // without fusion (no face/style transfer). Wire shape on the sidecar is
+  // a list of {path, strength}; we re-decorate with `name` + `trigger_words`
+  // from _knownUserLoras when available so the chip renders nicely.
+  if (Array.isArray(p.loras)) {
+    _activeLoras = p.loras.map(l => {
+      const path = l.path;
+      const strength = (typeof l.strength === 'number') ? l.strength : 1.0;
+      const meta = (Array.isArray(_knownUserLoras)
+                    ? _knownUserLoras.find(u => u.path === path)
+                    : null) || {};
+      return {
+        path,
+        strength,
+        name: meta.name || (path ? path.split('/').pop() : 'LoRA'),
+        trigger_words: meta.trigger_words || [],
+        compatible_modes: meta.compatible_modes || ['unknown'],
+      };
+    }).filter(x => x.path);
+    if (typeof renderLorasList === 'function') {
+      try { renderLorasList(); } catch (_) {}
+    }
+    if (typeof _serializeLoras === 'function') {
+      try { _serializeLoras(); } catch (_) {}
+    }
+  }
+
   updateCustomizeSummary();
   updateDerived();
 }
