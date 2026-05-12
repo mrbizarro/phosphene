@@ -10414,6 +10414,31 @@ HTML = r"""<!doctype html>
       opacity: 0.4;
       cursor: not-allowed;
     }
+    /* Disabled-but-clickable variant — the High pill when Q8 is
+       missing. Reads as a discoverable install CTA rather than a
+       dead grey button: full opacity, accent-tinted border, pointer
+       cursor, and a small download icon prefixed to the subtitle.
+       Click → opens the Models modal so the user can kick off the
+       37 GB Q8 download from one place. */
+    .quality-strip .q-chip.needs-install {
+      opacity: 1;
+      cursor: pointer;
+      border-color: rgba(47, 129, 247, 0.45);
+      background: rgba(47, 129, 247, 0.04);
+    }
+    .quality-strip .q-chip.needs-install:hover {
+      background: rgba(47, 129, 247, 0.12);
+      border-color: var(--accent-bright);
+    }
+    .quality-strip .q-chip.needs-install .ql-tier {
+      color: var(--accent-bright);
+      opacity: 1;
+      font-weight: 500;
+    }
+    .quality-strip .q-chip.needs-install .ql-tier::before {
+      content: '↓ ';
+      font-weight: 700;
+    }
     .quality-strip .q-chip .q-spec {
       font-size: 9.5px; font-weight: 500;
       color: inherit; opacity: 0.7;
@@ -10435,6 +10460,17 @@ HTML = r"""<!doctype html>
       font-size: 10px; font-weight: 600;
       color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.08em;
+      display: inline-flex; align-items: baseline; gap: 6px;
+    }
+    /* Lightweight hint after the label name — explains the field
+       constraint inline (e.g. "8k+1", "-1 = random") instead of
+       hiding it in a title= tooltip the user might never hover. */
+    .mini-fields .mf-label .mf-hint {
+      font-size: 9.5px; font-weight: 500;
+      color: var(--muted);
+      opacity: 0.7;
+      text-transform: none; letter-spacing: 0.02em;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .mini-fields input {
       width: 100%;
@@ -17944,8 +17980,8 @@ HTML = r"""<!doctype html>
             </div>
             <label class="lbl" style="margin-top:10px">Extend mode</label>
             <div class="pill-group cols-2" id="extendModeGroup">
-              <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">12 steps · no CFG · 64 GB safe</span></button>
-              <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">30 steps · CFG 3.0 · 96+ GB</span></button>
+              <button type="button" class="pill-btn active" data-extend-mode="fast"><span>Fast</span><span class="sub">~16 min · 12 steps · 64 GB safe</span></button>
+              <button type="button" class="pill-btn" data-extend-mode="quality"><span>Quality</span><span class="sub">~38 min · 30 steps · 96+ GB</span></button>
             </div>
             <input type="hidden" name="extend_steps" id="extend_steps" value="12">
             <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
@@ -18043,12 +18079,12 @@ HTML = r"""<!doctype html>
               <input id="duration" value="5" type="number" min="1" max="20" step="1">
             </div>
             <div class="mf-cell">
-              <span class="mf-label">Frames</span>
-              <input name="frames" id="frames" value="121" type="number" min="1" title="8k+1">
+              <span class="mf-label">Frames <span class="mf-hint">8k+1</span></span>
+              <input name="frames" id="frames" value="121" type="number" min="1" title="Must be 8k+1 (e.g., 121, 161, 201). Duration auto-syncs.">
             </div>
             <div class="mf-cell">
-              <span class="mf-label">Seed</span>
-              <input name="seed" id="seed" value="-1" title="-1 = random">
+              <span class="mf-label">Seed <span class="mf-hint">-1 = random</span></span>
+              <input name="seed" id="seed" value="-1" title="-1 picks a fresh random seed per render. Any integer locks the seed for repeatable output.">
             </div>
           </div>
         </div>
@@ -20958,7 +20994,18 @@ function setExtendMode(m) {
 }
 
 document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () => setMode(b.dataset.mode));
-document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setQuality(b.dataset.quality); });
+document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => {
+  // Disabled-but-actionable: the High pill becomes a "click to install Q8"
+  // CTA when Q8 is missing. Routes to the Models modal so the user lands
+  // on the download button with full context (size, current state, etc.).
+  if (b.classList.contains('disabled')) {
+    if (b.classList.contains('needs-install') && typeof openModelsModal === 'function') {
+      openModelsModal();
+    }
+    return;
+  }
+  setQuality(b.dataset.quality);
+});
 document.querySelectorAll('#accelGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setAccel(b.dataset.accel); });
 document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setTemporalMode(b.dataset.temporal); });
 document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscale(b.dataset.upscale); });
@@ -21577,12 +21624,22 @@ async function poll() {
   const highBtn = document.getElementById('qualityHigh');
   const highSub = document.getElementById('highSub');
   if (s.q8_available) {
-    highBtn.classList.remove('disabled');
+    highBtn.classList.remove('disabled', 'needs-install');
     highSub.textContent = 'Q8 Pro · 7 min';
   } else {
-    highBtn.classList.add('disabled');
+    // Disabled-but-actionable: a click on the High pill now opens the
+    // Models modal so the user can install Q8 in one move instead of
+    // hunting for the download. CSS .needs-install gives the pill an
+    // accent-tinted look + download arrow in the subtitle so it reads
+    // as a CTA, not a dead button.
+    highBtn.classList.add('disabled', 'needs-install');
     const missing = (s.q8_missing || []).length;
-    highSub.textContent = missing > 0 && missing < 6 ? `Q8 downloading · ${missing} left` : 'Q8 not installed';
+    if (missing > 0 && missing < 6) {
+      highSub.textContent = `Q8 downloading · ${missing} left`;
+      highBtn.classList.remove('needs-install');   // mid-download, no need for the CTA hint
+    } else {
+      highSub.textContent = 'Install Q8 (37 GB)';
+    }
     if (document.getElementById('quality').value === 'high') setQuality('standard');
   }
 
