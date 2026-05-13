@@ -5331,23 +5331,20 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
     engine_override = (engine_override or "auto").lower()
     if engine_override == "auto":
         return _load_agent_image_config()
-    if engine_override == "qwen_edit_inline":
-        # Iteration default: Qwen-Image-Edit-2511 (Apache 2.0, ungated)
-        # at Q6 + 8 steps. 2511 is the current best Qwen-Edit — stronger
-        # character consistency than 2509, mitigated multi-ref drift,
-        # built-in popular LoRAs. Q6 (vs prior Q4) is the Apple-Silicon
-        # community sweet spot — ~4-6% quality loss vs full precision
-        # instead of 8-12% for Q4, with negligible speed impact on
-        # M4 Max 64 GB.
-        return agent_image_engine.ImageEngineConfig(
-            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
-            mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=8,
-        )
+    # ===== Qwen-Image-Edit-2511 — Fast / Medium / Quality ====================
+    # All three share the same ~24 GB Qwen-Image-Edit-2511 model on disk
+    # (Apache 2.0, ungated). The split is steps × quantization × LoRA.
+    # 2511 is the current best Qwen-Edit — stronger character consistency
+    # than 2509 and mitigated multi-ref drift.
+    # Q6 (vs prior Q4) is the Apple-Silicon community sweet spot — ~4-6%
+    # quality loss vs full precision instead of 8-12% for Q4, with
+    # negligible speed impact on M4 Max 64 GB.
     if engine_override == "qwen_edit_lightning_inline":
-        # Fast preset: 2511 + Q6 + 4 steps + Lightning distillation LoRA.
-        # Pin the bf16 4-step file via the `repo:filename` collection-format
-        # syntax so mflux doesn't pull all four LoRA variants and stall.
-        # Prior config had a 2509 base + 2511 Lightning version mismatch.
+        # Qwen FAST — 4-step Lightning distillation LoRA, Q6. The
+        # `repo:filename` collection-format syntax pins the bf16 4-step
+        # variant so mflux doesn't pull all four LoRA versions and stall.
+        # Lightning was distilled at scale 1.0 — don't change it.
+        # Total wall-time ~1:30 per image (50 s cold + 40 s denoise).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
             mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=4,
@@ -5356,43 +5353,63 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
             ],
             mflux_lora_scales=[1.0],
         )
+    if engine_override == "qwen_edit_inline":
+        # Qwen MEDIUM — 8-step Q6, no LoRA, no CFG. Sits between Fast's
+        # distilled output (sometimes over-smooth) and Quality's 40-step
+        # cost. ~2:35 per image (50 s cold + 105 s denoise).
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
+            mflux_family="qwen_edit", mflux_quantize=6, mflux_steps=8,
+        )
     if engine_override == "qwen_edit_high_inline":
-        # Final-render preset: 2511 Q8 + 40 steps. 40 steps matches the
-        # official Diffusers reference (qwen.ai blog: true_cfg_scale=4.0
-        # + guidance_scale=1.0 + steps=40). mflux's --guidance maps to
-        # true_cfg_scale on the qwen-edit CLI.
+        # Qwen QUALITY — 40-step Q8 + CFG 4.0. Matches the Qwen
+        # reference recipe (qwen.ai blog: true_cfg_scale=4.0 +
+        # guidance_scale=1.0 + steps=40). mflux's --guidance maps to
+        # true_cfg_scale on the qwen-edit CLI. ~5 min per image
+        # (60 s cold + 240 s denoise).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="Qwen/Qwen-Image-Edit-2511",
             mflux_family="qwen_edit", mflux_quantize=8, mflux_steps=40,
             mflux_guidance=4.0,
         )
-    if engine_override == "flux2_inline":
-        # Q6 instead of Q4 — same Apple-Silicon sweet-spot rationale as
-        # the qwen presets above.
-        return agent_image_engine.ImageEngineConfig(
-            kind="mflux", mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
-            mflux_family="flux2", mflux_quantize=6,
-        )
+    # ===== FLUX.2 family + Z-Image-Turbo ====================================
+    # Flux ships TWO edit tiers (no middle): the distilled Klein-Edit
+    # (fast, illustrative aesthetic) and the non-distilled Klein-Base-Edit
+    # (slower, photographic). A Medium tier would require a separate
+    # distilled-with-CFG checkpoint that doesn't exist upstream; we keep
+    # the dropdown honest at Fast / Quality only.
     if engine_override == "flux2_edit_inline":
-        # FLUX.2 Klein-Edit (distilled klein-4b). mflux's flux2_edit_generate.py
-        # FORCES guidance == 1.0 on distilled bases. Q6 default for the
-        # same reason as above (Q4 → 8-12% quality loss; Q6 → 4-6%).
+        # Flux FAST — Klein-Edit (distilled klein-4b), 4-step Q6. mflux's
+        # flux2_edit_generate.py FORCES guidance=1.0 on distilled bases.
+        # Output has the distinctive illustrative / cartoonish look that's
+        # a feature for stylized work and a downside for photoreal. Q6
+        # over Q4 buys ~4-6 percentage points of quality. ~50 s per image
+        # (30 s cold + 20 s denoise).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="flux2-klein-4b",
             mflux_family="flux2_edit", mflux_quantize=6,
             mflux_steps=4, mflux_guidance=1.0,
         )
     if engine_override == "flux2_edit_high_inline":
-        # FLUX.2 Klein-Base-Edit (NON-distilled klein-base-4b). Real CFG,
-        # ~3-5 min/image at Q8 + 25 steps. Photographic output (vs the
-        # illustrative look of distilled flux2_edit). Already at Q8 — no
-        # change.
+        # Flux QUALITY — Klein-Base-Edit (NON-distilled klein-base-4b),
+        # 25-step Q8 + CFG 4.0. Real CFG = photographic output (vs the
+        # illustrative look of distilled flux2_edit). Already at Q8.
+        # ~4 min per image (30 s cold + 210 s denoise).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="flux2-klein-base-4b",
             mflux_family="flux2_edit", mflux_quantize=8,
             mflux_steps=25, mflux_guidance=4.0,
         )
+    if engine_override == "flux2_inline":
+        # Flux2 T2I — Klein 4B, 4-step Q6. No-refs path. Same Q6 sweet-
+        # spot rationale as qwen. ~24 s per image (15 s cold + 9 s denoise).
+        return agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_model="Runpod/FLUX.2-klein-4B-mflux-4bit",
+            mflux_family="flux2", mflux_quantize=6,
+        )
     if engine_override == "z_image_turbo_inline":
+        # Z-Image-Turbo — compact T2I, 9-step Q4 distilled. Fastest pure
+        # T2I in the panel. ~17 s per image (12 s cold + 5 s denoise).
         return agent_image_engine.ImageEngineConfig(
             kind="mflux", mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
             mflux_family="z_image_turbo", mflux_quantize=4,
@@ -6420,21 +6437,30 @@ class Handler(BaseHTTPRequestHandler):
                 # PER candidate. cold_start_sec is the one-time subprocess
                 # model-load that's paid ONCE per batch, regardless of n.
                 # The JS estimator does: total = cold_start + n × sec_per_image.
+                #
+                # All numbers anchored to measured wall-time on M4 Max @ 1024
+                # for mflux engines, 2560×1440 for HiDream. mflux subprocess
+                # cold loads are not negligible: Qwen-Edit Q6 = ~50s,
+                # Qwen-Edit Q8 = ~60s, Flux2 family ~30s, Z-Image-Turbo ~12s.
+                # The previous table folded loads into sec_per_image, which
+                # made N=1 understate and N=4+ overstate the wall-time. The
+                # studio now estimates correctly across all batch sizes.
                 ENGINES = [
-                    # mflux-family engines load the model once per subprocess
-                    # too, but their loads are quick (~15s) so we fold them
-                    # into sec_per_image rather than expose the split.
-                    ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  13.0,   0.0),
-                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0,  60.0,   0.0),
-                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 300.0,   0.0),
-                    ("flux2_edit_inline",          None,                         0.0,  30.0,   0.0),
-                    ("flux2_edit_high_inline",     None,                         0.0, 240.0,   0.0),
-                    ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0, 0.0),
-                    ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0, 0.0),
+                    # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
+                    # download (one-time) shared across all three tiers.
+                    ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  40.0,  50.0),
+                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0, 105.0,  50.0),
+                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 240.0,  60.0),
+                    # FLUX.2 Klein edit family — distilled vs base-edit.
+                    ("flux2_edit_inline",          None,                         0.0,  20.0,  30.0),
+                    ("flux2_edit_high_inline",     None,                         0.0, 210.0,  30.0),
+                    # Flux2 T2I + Z-Image-Turbo (no refs). Both have small
+                    # cold loads (bundled mflux engines).
+                    ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0,  9.0, 15.0),
+                    ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0,  5.0, 12.0),
                     # HiDream lab subprocess: ~45s cold load (BF16 weights →
-                    # MLX) is real and material to the estimate for n=1
-                    # requests. Denoise times are the measured per-candidate
-                    # wall-time from the May 2026 step+FBCache bench at HD.
+                    # MLX) per batch. Denoise times measured from the May 2026
+                    # step+FBCache bench at HD 2560×1440.
                     ("hidream_fast_inline",        None,                         0.0,  45.0,  45.0),
                     ("hidream_inline",             None,                         0.0,  80.0,  45.0),
                     ("hidream_quality_inline",     None,                         0.0, 120.0,  45.0),
@@ -18493,16 +18519,16 @@ HTML = r"""<!doctype html>
           <div class="studio-engine-row">
             <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
-              <option value="qwen_edit_lightning_inline" selected>Qwen-Image-Edit-2511 + Lightning &mdash; FAST (multi-ref &middot; 4-step Q6, ~90 s/image @ 1024)</option>
-              <option value="qwen_edit_inline">Qwen-Image-Edit-2511 &mdash; polished (multi-ref &middot; 8-step Q6, ~2:35 /image @ 1024)</option>
-              <option value="qwen_edit_high_inline">Qwen-Image-Edit-2511 &mdash; best (multi-ref &middot; 40-step Q8, ~5 min/image @ 1024)</option>
-              <option value="flux2_edit_inline">FLUX.2 Klein-Edit fast (multi-ref &middot; 4-step Q6, ~30 s/image)</option>
-              <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
-              <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
-              <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_fast_inline">HiDream Fast (3-step &middot; ~45 s preview, slight bg softness, 18 GB)</option>
-              <option value="hidream_inline">HiDream Medium (6-step + FBCache &middot; ~80 s, character-preserving, 18 GB)</option>
-              <option value="hidream_quality_inline">HiDream Quality (12-step + light FBCache &middot; ~120 s, best detail, 18 GB)</option>
+              <option value="qwen_edit_lightning_inline" selected>Qwen Fast (Lightning &middot; 4-step Q6, ~1:30 / image, multi-ref)</option>
+              <option value="qwen_edit_inline">Qwen Medium (8-step Q6, ~2:35 / image, multi-ref)</option>
+              <option value="qwen_edit_high_inline">Qwen Quality (40-step Q8 + CFG 4.0, ~5 min / image, multi-ref)</option>
+              <option value="flux2_edit_inline">Flux Fast (Klein-Edit 4-step Q6, ~50 s / image, multi-ref, illustrative)</option>
+              <option value="flux2_edit_high_inline">Flux Quality (Klein-Base-Edit 25-step Q8 + CFG 4.0, ~4 min / image, multi-ref, photoreal)</option>
+              <option value="flux2_inline">Flux2 T2I (Klein 4B 4-step Q6, ~24 s / image, no refs)</option>
+              <option value="z_image_turbo_inline">Z-Image Turbo (T2I, ~17 s / image, compact, no refs)</option>
+              <option value="hidream_fast_inline">HiDream Fast (3-step, ~3:45 / 4-img batch, slight bg softness)</option>
+              <option value="hidream_inline">HiDream Medium (6-step + FBCache, ~6 min / 4-img batch, character-preserving)</option>
+              <option value="hidream_quality_inline">HiDream Quality (12-step + light FBCache, ~9 min / 4-img batch, best detail)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
