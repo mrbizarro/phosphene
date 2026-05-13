@@ -82,16 +82,32 @@ module.exports = {
       }
     },
 
-    // ---- ltx-2-mlx version: use HEAD (the original audio bug was MLX 0.31.2,
-    //      not anything dgrauet shipped). Earlier we briefly pinned to
-    //      dcd639e thinking the audio regression was in dgrauet's commits;
-    //      empirical follow-up showed pinning mlx==0.31.1 alone fixes audio
-    //      on HEAD. dcd639e was missing several APIs the panel calls
-    //      (cfg_scale on extend_from_video, the 0.2.0 I2V structure our OOM
-    //      patch targets, split_model.json filename resolution). HEAD with
-    //      the mlx pin gives us working audio AND working Extend / I2V.
-    //      Leaving this comment as a marker so we don't re-introduce the
-    //      pin without re-verifying the audio path. ----
+    // ---- ltx-2-mlx version: PIN to v0.14.0. dgrauet asked on 2026-05-12
+    //      to lock onto a tag because he's about to push breaking changes
+    //      upstream to sync with the official Lightricks repo. Without a
+    //      tag pin, every fresh install (and every Update) would pull the
+    //      next breaking push and Phosphene would fail to start.
+    //
+    //      v0.14.0 (commit b35254a, the "ultra-strict iso on frame_rate
+    //      kwarg" release) is the last known-good tag against which the
+    //      current panel + helper + patch_ltx_codec.py were validated.
+    //      Tag-bumps from here are a deliberate decision — read his
+    //      release notes first, smoke-test on dev, then bump this pin
+    //      AND the matching pin in update.js in one commit.
+    //
+    //      Idempotent — works on a fresh clone (already on the cloned
+    //      branch's tip) AND on a re-install where the clone exists.
+    {
+      method: "shell.run",
+      params: {
+        path: "ltx-2-mlx",
+        message: [
+          "git fetch --tags origin",
+          "git checkout v0.14.0",
+          "git rev-parse --short HEAD"
+        ]
+      }
+    },
 
     // ---- Force Python 3.11 venv (SHIP-BLOCKER fix) ------------------------
     // Pinokio's `venv: "env"` shortcut creates a venv using whatever python
