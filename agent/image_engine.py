@@ -201,6 +201,11 @@ class ImageEngineConfig:
     # script auto-overrides steps + guidance + shift when model-type=full.
     hidream_recipe: str = "dev"                     # "dev" | "full"
     hidream_guidance_scale: float = 0.0             # 0 = no CFG (Dev). 5.0 typical for Full.
+    # Dev-edit scheduler. Upstream switched from "flash" -> "flow_match" on
+    # 2026-05-12 — flow_match (FlowMatchEulerDiscreteScheduler from diffusers
+    # via torch CPU bridge) cures the milky/over-textured Dev-edit output we
+    # saw in the morning gallery. Ignored for Full or T2I.
+    hidream_editing_scheduler: str = "flow_match"   # "flow_match" | "flash"
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -1250,6 +1255,10 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         cmd.extend(["--guidance-scale", str(config.hidream_guidance_scale)])
     if refs:
         cmd.extend(["--ref-images", *map(str, refs)])
+        # Dev-edit scheduler choice — upstream's 2026-05-12 flow_match is the
+        # default and the recipe we ship. Only meaningful when model_type=dev
+        # AND refs are present; ignored otherwise by the generator.
+        cmd.extend(["--editing-scheduler", config.hidream_editing_scheduler])
     if on_log:
         on_log(f"[hidream] launching {n} candidate(s) in one process, seeds={seeds}"
                + (f" with {len(refs)} ref(s)" if refs else ""))
