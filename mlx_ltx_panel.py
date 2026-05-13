@@ -22223,6 +22223,81 @@ async function retryJob(jobId) {
   }
 }
 
+// Re-run a previously-generated still through HiDream Quality (the
+// 12-step + light FBCache recipe). Reads the source's sidecar to pull
+// the original prompt + seed + refs, then drives the Image Studio form
+// (engine swapped to hidream_quality_inline, n=1) and submits to the
+// queue. Used from the photo card hover button.
+//
+// Why no manual confirmation step: Salo's intent is "pick best of 4
+// Fast/Medium previews → bake one at Quality" — adding a dialog would
+// burn a click for no information. The Image Studio form is left
+// pre-filled so the user can tweak + resubmit if they want.
+async function remakeInQuality(payload) {
+  if (!payload || !payload.path) {
+    if (typeof phosToast === 'function') {
+      phosToast('Remake: missing path', { kind: 'danger' });
+    }
+    return;
+  }
+  // Pull the source's generation params from its sidecar JSON.
+  let sidecar;
+  try {
+    const r = await fetch('/sidecar?path=' + encodeURIComponent(payload.path));
+    if (!r.ok) throw new Error('no sidecar (older output?)');
+    sidecar = await r.json();
+  } catch (e) {
+    if (typeof phosToast === 'function') {
+      phosToast('Remake: ' + (e.message || 'failed to read sidecar'),
+                { kind: 'danger' });
+    }
+    return;
+  }
+  // Switch to Image Studio mode so the form is visible.
+  if (typeof setMode === 'function') setMode('image');
+
+  // Pre-fill the form. Prompt + seed + aspect carry over verbatim.
+  // Refs go into the studio's 3-slot model.
+  const promptEl = document.getElementById('imgStudioPrompt');
+  if (promptEl) promptEl.value = sidecar.prompt || '';
+  const seedEl = document.getElementById('imgStudioSeed');
+  if (seedEl && sidecar.seed != null) seedEl.value = String(sidecar.seed);
+  const nEl = document.getElementById('imgStudioN');
+  if (nEl) nEl.value = '1';   // remake just the picked one
+  const engineEl = document.getElementById('imgStudioEngine');
+  if (engineEl) engineEl.value = 'hidream_quality_inline';
+  const aspectEl = document.getElementById('imgStudioAspect');
+  if (aspectEl && sidecar.aspect) aspectEl.value = sidecar.aspect;
+
+  // Refs — clear the 3 slots, then re-populate from sidecar.refs.
+  if (typeof IMG_STUDIO !== 'undefined' && IMG_STUDIO.refs) {
+    for (let i = 0; i < IMG_STUDIO.refs.length; i++) {
+      IMG_STUDIO.refs[i] = null;
+      if (typeof imgStudioRenderSlot === 'function') imgStudioRenderSlot(i);
+    }
+    const refs = Array.isArray(sidecar.refs) ? sidecar.refs : [];
+    refs.slice(0, IMG_STUDIO.refs.length).forEach((path, i) => {
+      const fname = String(path).split('/').pop();
+      IMG_STUDIO.refs[i] = { path, name: fname };
+      if (typeof imgStudioRenderSlot === 'function') imgStudioRenderSlot(i);
+    });
+  }
+
+  // Refresh validity + estimate UI so the Generate button enables.
+  if (typeof imgStudioUpdateValidity === 'function') imgStudioUpdateValidity();
+  if (typeof imgStudioUpdateEstimate === 'function') imgStudioUpdateEstimate();
+  if (typeof imgStudioRefreshEngineStatus === 'function') imgStudioRefreshEngineStatus();
+
+  // Auto-submit. imgStudioGenerate reads the now-prefilled fields.
+  if (typeof imgStudioGenerate === 'function') {
+    if (typeof phosToast === 'function') {
+      phosToast('Remaking in Quality (12-step) · watch Recent → Photos',
+                { kind: 'success' });
+    }
+    imgStudioGenerate();
+  }
+}
+
 function animateFromPhoto(payload) {
   if (!payload || !payload.path) return;
   // Switch to i2v mode (pill + form fields). setMode('i2v') hides the
@@ -22303,6 +22378,18 @@ function renderCarousel() {
                  title="Pre-fill i2v with this image (does not auto-submit)"
                  onclick="event.stopPropagation(); animateFromPhoto(${animateArgs})">Animate</button>`
       : '';
+    // Remake-in-Quality chip — only on photos that have a sidecar (we need the
+    // original prompt + seed + refs to re-run). Pre-fills the Image Studio
+    // form with the source's exact params, swaps the engine to
+    // hidream_quality_inline, sets n=1, and auto-submits. Useful flow:
+    // generate 4 candidates in Fast/Medium, pick the best, hit ✦ to bake the
+    // same composition at Quality fidelity.
+    const remakeArgs = JSON.stringify({path: o.path}).replace(/"/g, '&quot;');
+    const remakeChip = (isPhoto && o.has_sidecar)
+      ? `<button class="card-action card-action-photo" type="button"
+                 title="Re-run this prompt + seed + refs through HiDream Quality (auto-submits)"
+                 onclick="event.stopPropagation(); remakeInQuality(${remakeArgs})">✦ Quality</button>`
+      : '';
     return `
     <div class="car-card${o.path === activePath ? ' active' : ''}"
          data-path="${escapeHtml(o.path)}" onclick="selectOutput(${pathAttr})">
@@ -22313,6 +22400,7 @@ function renderCarousel() {
                      onclick="event.stopPropagation(); openOutputInfoModal(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-info"/></svg></button>`
           : ''}
         <div class="card-chrome">
+          ${remakeChip}
           ${animateChip}
           <button class="card-action card-action-danger" type="button" title="Delete this file from disk"
                   onclick="event.stopPropagation(); deleteOutput(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-trash-simple"/></svg></button>
