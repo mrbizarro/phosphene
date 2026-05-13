@@ -192,7 +192,7 @@ class ImageEngineConfig:
     # location; override when the lab moves.
     hidream_python_path: str = ""                   # default = HIDREAM_LAB_DIR/.venv/bin/python
     hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-bf16
-    hidream_steps: int = 20                         # Dev edit sweet spot (uniformly subsampled from upstream's 28-step DEFAULT_TIMESTEPS; visually identical, 30% faster). Full overrides to 50.
+    hidream_steps: int = 3                          # Aggressive 3-step uniform-subsample of upstream's 28-step DEFAULT_TIMESTEPS. Empirically the quality floor for Dev+flow_match edits — at 2 steps the face blurs, at 3 steps character + skin still hold. ~54 s denoise (vs 292 s @ 20). Full overrides to 50.
     hidream_noise_scale: float = 7.5                # FlashFlowMatch tuned default; lowering collapses the image
     hidream_noise_clip_std: float = 2.5
     # New for the Full / undistilled variant: pick the lab script's recipe

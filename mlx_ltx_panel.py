@@ -5399,10 +5399,12 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
         )
     if engine_override == "hidream_inline":
         # HiDream-O1-Image-Dev BF16 + flow_match Dev-edit scheduler
-        # (upstream's 2026-05-12 default). The ONE recipe we ship —
-        # clean character-preserving edit with smooth cinematic skin
-        # (no pores/freckles overlay), HD 16:9. 28-step distilled, no
-        # CFG. ~18 GB RAM, ~540 s per HD edit on M4 Max.
+        # (upstream's 2026-05-12 default) + 3-step aggressive subsample.
+        # The ONE recipe we ship — clean character-preserving edit with
+        # smooth cinematic skin (no pores/freckles overlay), HD 16:9.
+        # Distilled DEFAULT_TIMESTEPS subsampled uniformly to 3 values
+        # = ~54s denoise on M4 Max (vs 292s @ 20 steps). No CFG.
+        # ~18 GB RAM. First request includes ~45s model load.
         #
         # The Full (50-step CFG=5) variants were removed: they produce
         # over-textured "deep-fried" skin on edits per the Civitai
@@ -6384,7 +6386,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_edit_high_inline",     None,                         0.0, 240.0),
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
-                    ("hidream_inline",             None,                         0.0, 300.0),
+                    ("hidream_inline",             None,                         0.0, 100.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
@@ -18416,7 +18418,7 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 + flow_match HD (character-preserving edit &middot; ~5 min, 18 GB)</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 + flow_match HD (3-step character-preserving edit &middot; ~1 min, 18 GB)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
