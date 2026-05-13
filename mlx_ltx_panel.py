@@ -5397,28 +5397,45 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
             kind="mflux", mflux_model="filipstrand/Z-Image-Turbo-mflux-4bit",
             mflux_family="z_image_turbo", mflux_quantize=4,
         )
+    if engine_override == "hidream_fast_inline":
+        # HiDream FAST — 3-step subsample, no FBCache. ~55s denoise.
+        # Acceptable for previews / exploration. Background gets softer
+        # at this step count; subject identity still holds.
+        return agent_image_engine.ImageEngineConfig(
+            kind="hidream",
+            hidream_steps=3,
+            hidream_fb_cache=False,
+        )
     if engine_override == "hidream_inline":
-        # HiDream-O1-Image-Dev BF16 + flow_match Dev-edit scheduler
-        # (upstream's 2026-05-12 default) + 6-step subsample of the
-        # 28-step DEFAULT_TIMESTEPS + First-Block Cache. The ONE recipe
-        # we ship — character-preserving HD 16:9 edit with smooth
-        # cinematic skin.
+        # HiDream MEDIUM (default) — 6-step + FBCache thr 0.15, keep_last 8.
+        # The recipe we ship — character-preserving HD 16:9 edit with
+        # smooth cinematic skin. ~80 s denoise on M4 Max.
         #
-        # The acceleration stack:
+        # Acceleration stack:
         #   - flow_match scheduler (cures milky output from old flash)
         #   - 6 steps, uniform-subsampled from 28 (preserves curve shape)
         #   - FBCache threshold 0.15, keep_last 8 (~1 cached step out of
         #     6; skips 27 middle layers but keeps first + last 8 always
         #     running so fine texture is preserved)
         #   - Snap to trained dim 2560x1440 (off-spec breaks ref-conditioning)
-        #
-        # ~80 s denoise on M4 Max (vs 292s @ 20 steps no cache). No CFG.
-        # ~18 GB RAM. First request includes ~45s subprocess model load.
+        # No CFG. ~18 GB RAM. First request includes ~45s subprocess load.
         #
         # The Full (50-step CFG=5) variants were removed: they produce
         # over-textured "deep-fried" skin on edits. Q8/Q4 don't help on
         # Apple Silicon (no int8 matmul speedup + dequant cost).
         return agent_image_engine.ImageEngineConfig(kind="hidream")
+    if engine_override == "hidream_quality_inline":
+        # HiDream QUALITY — 12-step + conservative FBCache thr 0.10,
+        # keep_last 12. ~150s denoise. Closer to the 20-step ground
+        # truth than the medium recipe, with more late layers preserved.
+        # Use when you need the best detail (e.g. close-up portraits).
+        return agent_image_engine.ImageEngineConfig(
+            kind="hidream",
+            hidream_steps=12,
+            hidream_fb_cache=True,
+            hidream_fb_threshold=0.10,
+            hidream_fb_keep_last=12,
+        )
     if engine_override == "mock_inline":
         return agent_image_engine.ImageEngineConfig(kind="mock")
     raise ValueError(f"unknown engine_override: {engine_override!r}")
@@ -6394,14 +6411,16 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_edit_high_inline",     None,                         0.0, 240.0),
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
+                    ("hidream_fast_inline",        None,                         0.0,  90.0),
                     ("hidream_inline",             None,                         0.0, 130.0),
+                    ("hidream_quality_inline",     None,                         0.0, 165.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
                 for engine, repo, dl_gb, sec in ENGINES:
-                    if engine == "hidream_inline":
+                    if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                         # HiDream lives outside the HF cache (lab venv path).
-                        # Check the actual converted model dir, not the cache.
+                        # All three modes share the same Dev-BF16 model dir.
                         cached = (agent_image_engine.HIDREAM_DEFAULT_MODEL / "model.safetensors").exists() and \
                                  (agent_image_engine.HIDREAM_DEFAULT_MODEL / "extras" / "custom_heads.safetensors").exists()
                     elif repo is None:
@@ -18426,7 +18445,9 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 + flow_match HD + FBCache (6-step character-preserving edit &middot; ~80 s, 18 GB)</option>
+              <option value="hidream_fast_inline">HiDream Fast (3-step &middot; ~45 s preview, slight bg softness, 18 GB)</option>
+              <option value="hidream_inline">HiDream Medium (6-step + FBCache &middot; ~80 s, character-preserving, 18 GB)</option>
+              <option value="hidream_quality_inline">HiDream Quality (12-step + light FBCache &middot; ~120 s, best detail, 18 GB)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"
