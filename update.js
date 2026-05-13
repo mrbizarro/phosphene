@@ -30,19 +30,20 @@ module.exports = {
         ]
       }
     },
-    // Pull ltx-2-mlx HEAD with the same pattern. (We previously pinned
-    // to dcd639e thinking audio regressed in dgrauet's commits; turned
-    // out the audio bug was in mlx 0.31.2 itself. HEAD has the APIs the
-    // panel needs — cfg_scale on extend_from_video, the I2V structure
-    // our OOM patch targets, etc.)
+    // ltx-2-mlx is PINNED to v0.14.0 (dgrauet's request 2026-05-12 — he
+    // is pushing breaking changes upstream to sync with the official
+    // Lightricks repo). Update no longer tracks main; it fetches tags
+    // and re-checks-out the pinned tag so a previously-installed user
+    // converges to a known-good state, never to a moving HEAD. To bump
+    // the pin: edit BOTH install.js and update.js to a new tag, smoke-
+    // test on dev, push.
     {
       method: "shell.run",
       params: {
         path: "ltx-2-mlx",
         message: [
-          "git fetch origin",
-          "git checkout main || true",
-          "git pull --ff-only origin main || (echo 'ltx-2-mlx history diverged; resetting' && git reset --hard origin/main)",
+          "git fetch --tags origin",
+          "git checkout v0.14.0",
           "git rev-parse --short HEAD"
         ]
       }
