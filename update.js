@@ -104,15 +104,23 @@ module.exports = {
     // agent/runtime_smol.py (Phase 2 of the agent-layer refactor —
     // see /Users/salo/.claude/plans/fancy-conjuring-lovelace.md).
     // Off by default; the panel uses it only when launched with
-    // PHOSPHENE_RUNTIME=smol. Pulls transformers as a transitive dep
-    // which downgrades huggingface-hub to <1.0 — re-pin >=1.5.0,<2.0
-    // afterwards to keep mflux + the hf v1 CLI working. The
-    // smolagents <1.0 hub pin is empirically benign (verified
-    // CodeAgent + LocalPythonExecutor both work on hub 1.14.0).
+    // PHOSPHENE_RUNTIME=smol.
+    //
+    // IMPORTANT: smolagents 1.24.0 hard-pins huggingface-hub<1.0.0 in its
+    // setup, which conflicts with our >=1.5.0 floor (transformers 5+,
+    // mflux, hf v1 CLI all need hub 1.x). Plain `pip install --upgrade`
+    // refuses to resolve and fails the entire update with
+    // ResolutionImpossible — Salo saw this as a "blue screen error
+    // flashing for a second every update".
+    //
+    // Fix: match install.js and use `uv pip install`. uv allows the
+    // version-overlap conflict and installs both, leaving smolagents in
+    // a "warned but functional" state (verified CodeAgent +
+    // LocalPythonExecutor both work on hub 1.14.0).
     {
       method: "shell.run",
       params: {
-        message: "./ltx-2-mlx/env/bin/pip install --upgrade 'smolagents>=1.24.0' 'huggingface-hub>=1.5.0,<2.0'"
+        message: "uv pip install --python ./ltx-2-mlx/env/bin/python --upgrade 'huggingface-hub>=1.5.0,<2.0' 'smolagents>=1.24.0'"
       }
     },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
