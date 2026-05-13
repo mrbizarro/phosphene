@@ -78,6 +78,28 @@ _ACTIVE_PROC_LOCK = threading.Lock()
 _ACTIVE_PROCS: set = set()  # set[subprocess.Popen]
 
 
+def _clean_subprocess_env() -> dict:
+    """os.environ.copy() with macOS Malloc* debug vars stripped.
+
+    Pinokio's launcher (and some macOS dev tools) export Malloc* env
+    vars — most commonly an empty/zero MallocStackLogging or
+    MallocStackLoggingNoCompact. Subprocesses inherit those, and each
+    child prints "MallocStackLogging: can't turn off malloc stack
+    logging because it was not enabled" to stderr on exit. With the
+    HiDream / mflux lab spawning 50+ Python subprocesses per request
+    (HF download workers + the generation process + helpers), that
+    flooded the terminal. Stripping the Malloc* vars makes the
+    warning go away cleanly — those vars are only useful if you're
+    actively profiling with Instruments, and we never are.
+    """
+    import os as _os
+    env = _os.environ.copy()
+    for key in list(env.keys()):
+        if key.startswith("Malloc"):
+            del env[key]
+    return env
+
+
 class ImageJobCancelled(RuntimeError):
     """Raised when an image-generation subprocess is killed by /stop.
 
@@ -749,7 +771,7 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     #   flux2 / z_image_turbo: ~15 s @ 4-9 steps Q4
     #   qwen_edit:             ~30 s @ 8 steps Q4 / ~5 min @ 30 steps Q8
     # Plus the one-time load, plus first-run download.
-    env = os.environ.copy()
+    env = _clean_subprocess_env()
     per_image_budget = 60 if fam in ("flux2", "z_image_turbo") else 360
     cold_start_budget = 240 if fam in ("flux2", "z_image_turbo") else 1800
     timeout_s = cold_start_budget + per_image_budget * n
@@ -1283,7 +1305,7 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=os.environ.copy(),
+        env=_clean_subprocess_env(),
         # Own process group so /stop's killpg cascades to any
         # child procs MLX/Metal might spawn under this generation.
         start_new_session=True,
