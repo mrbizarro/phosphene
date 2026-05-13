@@ -6448,9 +6448,15 @@ class Handler(BaseHTTPRequestHandler):
                 ENGINES = [
                     # Qwen-Image-Edit-2511 — three-tier ladder. ~24 GB
                     # download (one-time) shared across all three tiers.
+                    # Medium + Quality use FBCache via the mflux patch:
+                    # measured 1.39x speedup at 8-step (243s -> 175s);
+                    # bigger absolute saving at 40-step Quality. Fast
+                    # (4-step Lightning) doesn't benefit (only 2 middle
+                    # steps cacheable, often forced full) so its number
+                    # is unchanged.
                     ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  40.0,  50.0),
-                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0, 105.0,  50.0),
-                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 240.0,  60.0),
+                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0,  75.0,  50.0),
+                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 170.0,  60.0),
                     # FLUX.2 Klein edit family — distilled vs base-edit.
                     ("flux2_edit_inline",          None,                         0.0,  20.0,  30.0),
                     ("flux2_edit_high_inline",     None,                         0.0, 210.0,  30.0),
@@ -18520,8 +18526,8 @@ HTML = r"""<!doctype html>
             <select id="imgStudioEngine" onchange="imgStudioUpdateValidity();imgStudioRefreshEngineStatus();imgStudioUpdateEstimate();if(typeof renderLorasList==='function')renderLorasList()">
               <option value="auto">Auto (use Settings)</option>
               <option value="qwen_edit_lightning_inline" selected>Qwen Fast (Lightning &middot; 4-step Q6, ~1:30 / image, multi-ref)</option>
-              <option value="qwen_edit_inline">Qwen Medium (8-step Q6, ~2:35 / image, multi-ref)</option>
-              <option value="qwen_edit_high_inline">Qwen Quality (40-step Q8 + CFG 4.0, ~5 min / image, multi-ref)</option>
+              <option value="qwen_edit_inline">Qwen Medium (8-step Q6 + FBCache, ~2:05 / image, multi-ref)</option>
+              <option value="qwen_edit_high_inline">Qwen Quality (40-step Q8 + CFG 4.0 + FBCache, ~3:50 / image, multi-ref)</option>
               <option value="flux2_edit_inline">Flux Fast (Klein-Edit 4-step Q6, ~50 s / image, multi-ref, illustrative)</option>
               <option value="flux2_edit_high_inline">Flux Quality (Klein-Base-Edit 25-step Q8 + CFG 4.0, ~4 min / image, multi-ref, photoreal)</option>
               <option value="flux2_inline">Flux2 T2I (Klein 4B 4-step Q6, ~24 s / image, no refs)</option>

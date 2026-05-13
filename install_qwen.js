@@ -46,11 +46,30 @@ module.exports = {
     {
       method: "shell.run",
       params: {
-        // -U upgrades if already installed at older version. The `>=0.17.5`
-        // pin is the minimum where `mflux-generate-qwen-edit` ships with
-        // the Edit-2509 multi-image fixes (vision encoder save bug
-        // resolved in 0.17.5).
-        message: "./ltx-2-mlx/env/bin/pip install -U 'mflux>=0.17.5'"
+        // EXACT pin to 0.17.5 (not >=). 0.17.5 is the version our local
+        // patch_mflux_fbcache.py is line-targeted against — bumping mflux
+        // without re-validating the patch risks silent failure or worse,
+        // a partial patch that produces broken output. To upgrade:
+        //   1. Bump this pin (here + update.js) to the new version.
+        //   2. Re-run the patch script and confirm it still finds the
+        //      QwenTransformer / Flux2Transformer layer loops.
+        //   3. Bench a known prompt before/after, verify quality.
+        // The 0.17.5 baseline shipped Edit-2509 multi-image fixes
+        // (vision encoder save bug) and is the bottom of our FBCache
+        // patch contract.
+        message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'"
+      }
+    },
+    {
+      method: "shell.run",
+      params: {
+        // FBCache patch — injects optional step-caching into mflux's Qwen
+        // transformer layer loop. Line-targeted against mflux==0.17.5 (the
+        // pin enforced above). Idempotent — script checks for its marker
+        // before touching anything. Off unless MFLUX_FB_CACHE=1 is set in
+        // the subprocess env (which Phosphene does for the Fast/Medium
+        // Qwen tiers via agent/image_engine.py).
+        message: "./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py"
       }
     },
     {

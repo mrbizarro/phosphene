@@ -124,13 +124,29 @@ module.exports = {
         message: "uv pip install --python ./ltx-2-mlx/env/bin/python --upgrade 'huggingface-hub>=1.5.0,<2.0' 'smolagents>=1.24.0'"
       }
     },
+    // Pin mflux to the exact version our FBCache patch is line-targeted
+    // against (0.17.5). --force-reinstall + --no-deps so we don't churn
+    // unrelated packages. If a future bump is needed, change the pin here
+    // AND in install_qwen.js AND re-validate patch_mflux_fbcache.py.
+    {
+      method: "shell.run",
+      params: {
+        message: "./ltx-2-mlx/env/bin/pip install --force-reinstall --no-deps 'mflux==0.17.5'"
+      }
+    },
     // Re-apply patches. Codec patch is required; I2V OOM patch is a no-op
     // on dcd639e (older I2V structure) and reports drift gracefully now.
+    // mflux FBCache patch is idempotent (skips when its marker is already
+    // present); installs the cache path the first time and stays put.
     // Pin to the venv's python3.11 to match install.js — `python3` on
     // Pinokio hosts isn't guaranteed to be 3.11 (or even present on PATH).
     {
       method: "shell.run",
       params: { message: "./ltx-2-mlx/env/bin/python3.11 patch_ltx_codec.py" }
+    },
+    {
+      method: "shell.run",
+      params: { message: "./ltx-2-mlx/env/bin/python3.11 patch_mflux_fbcache.py" }
     },
     // Y1.024: reclaim disk on existing installs by deleting model files
     // we never load. dgrauet's LTX repos host duplicate transformer

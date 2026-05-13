@@ -772,6 +772,17 @@ def _generate_mflux(prompt: str, n: int, width: int, height: int,
     #   qwen_edit:             ~30 s @ 8 steps Q4 / ~5 min @ 30 steps Q8
     # Plus the one-time load, plus first-run download.
     env = _clean_subprocess_env()
+    # FBCache toggle for the Qwen-Edit transformer (skips middle blocks
+    # when the layer-0 residual is stable step-to-step). The patch is
+    # injected by patch_mflux_fbcache.py at install/update time and is
+    # a no-op unless MFLUX_FB_CACHE=1 is set in the subprocess env.
+    # Only meaningful at >=6 steps — at 4-step Lightning the first +
+    # last forced-full steps leave too little middle to cache. We turn
+    # it on for the qwen_edit family at steps >= 6.
+    if fam == "qwen_edit" and (config.mflux_steps or 0) >= 6:
+        env["MFLUX_FB_CACHE"] = "1"
+        env.setdefault("MFLUX_FB_THRESHOLD", "0.15")
+        env.setdefault("MFLUX_FB_KEEP_LAST", "8")
     per_image_budget = 60 if fam in ("flux2", "z_image_turbo") else 360
     cold_start_budget = 240 if fam in ("flux2", "z_image_turbo") else 1800
     timeout_s = cold_start_budget + per_image_budget * n
