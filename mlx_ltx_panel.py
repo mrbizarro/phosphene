@@ -5399,17 +5399,25 @@ def _build_image_engine_config(engine_override: str) -> agent_image_engine.Image
         )
     if engine_override == "hidream_inline":
         # HiDream-O1-Image-Dev BF16 + flow_match Dev-edit scheduler
-        # (upstream's 2026-05-12 default) + 3-step aggressive subsample.
-        # The ONE recipe we ship — clean character-preserving edit with
-        # smooth cinematic skin (no pores/freckles overlay), HD 16:9.
-        # Distilled DEFAULT_TIMESTEPS subsampled uniformly to 3 values
-        # = ~54s denoise on M4 Max (vs 292s @ 20 steps). No CFG.
-        # ~18 GB RAM. First request includes ~45s model load.
+        # (upstream's 2026-05-12 default) + 6-step subsample of the
+        # 28-step DEFAULT_TIMESTEPS + First-Block Cache. The ONE recipe
+        # we ship — character-preserving HD 16:9 edit with smooth
+        # cinematic skin.
+        #
+        # The acceleration stack:
+        #   - flow_match scheduler (cures milky output from old flash)
+        #   - 6 steps, uniform-subsampled from 28 (preserves curve shape)
+        #   - FBCache threshold 0.15, keep_last 8 (~1 cached step out of
+        #     6; skips 27 middle layers but keeps first + last 8 always
+        #     running so fine texture is preserved)
+        #   - Snap to trained dim 2560x1440 (off-spec breaks ref-conditioning)
+        #
+        # ~80 s denoise on M4 Max (vs 292s @ 20 steps no cache). No CFG.
+        # ~18 GB RAM. First request includes ~45s subprocess model load.
         #
         # The Full (50-step CFG=5) variants were removed: they produce
-        # over-textured "deep-fried" skin on edits per the Civitai
-        # workflow / community findings, and Apple Silicon doesn't
-        # speed up from quantization on this model.
+        # over-textured "deep-fried" skin on edits. Q8/Q4 don't help on
+        # Apple Silicon (no int8 matmul speedup + dequant cost).
         return agent_image_engine.ImageEngineConfig(kind="hidream")
     if engine_override == "mock_inline":
         return agent_image_engine.ImageEngineConfig(kind="mock")
@@ -6386,7 +6394,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("flux2_edit_high_inline",     None,                         0.0, 240.0),
                     ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
                     ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
-                    ("hidream_inline",             None,                         0.0, 100.0),
+                    ("hidream_inline",             None,                         0.0, 130.0),
                     ("mock_inline",                None,                         0.0,   0.5),
                 ]
                 out = []
@@ -18418,7 +18426,7 @@ HTML = r"""<!doctype html>
               <option value="flux2_edit_high_inline">FLUX.2 Klein-Base-Edit photoreal (multi-ref &middot; 25-step Q8, ~3-5 min/image)</option>
               <option value="flux2_inline">FLUX.2 [klein] 4B (fast T2I, no refs)</option>
               <option value="z_image_turbo_inline">Z-Image-Turbo (compact T2I, no refs)</option>
-              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 + flow_match HD (3-step character-preserving edit &middot; ~1 min, 18 GB)</option>
+              <option value="hidream_inline">HiDream-O1-Image-Dev BF16 + flow_match HD + FBCache (6-step character-preserving edit &middot; ~80 s, 18 GB)</option>
               <option value="mock_inline" id="imgStudioMockOption" hidden>Mock (testing — debug only)</option>
             </select>
             <span class="engine-status-pill" id="imgStudioEnginePill"

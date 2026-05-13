@@ -192,7 +192,7 @@ class ImageEngineConfig:
     # location; override when the lab moves.
     hidream_python_path: str = ""                   # default = HIDREAM_LAB_DIR/.venv/bin/python
     hidream_model_path: str = ""                    # default = HIDREAM_LAB_DIR/mlx_models/hidream-o1-dev-bf16
-    hidream_steps: int = 3                          # Aggressive 3-step uniform-subsample of upstream's 28-step DEFAULT_TIMESTEPS. Empirically the quality floor for Dev+flow_match edits — at 2 steps the face blurs, at 3 steps character + skin still hold. ~54 s denoise (vs 292 s @ 20). Full overrides to 50.
+    hidream_steps: int = 6                          # 6 + FBCache (threshold 0.15) at HD is ~80s denoise with quality matching the 20-step baseline. Lower step counts (3-4) drop detail; 6+FBCache is the empirical sweet spot before quality goes "creamy". Full overrides to 50.
     hidream_noise_scale: float = 7.5                # FlashFlowMatch tuned default; lowering collapses the image
     hidream_noise_clip_std: float = 2.5
     # New for the Full / undistilled variant: pick the lab script's recipe
@@ -206,6 +206,13 @@ class ImageEngineConfig:
     # via torch CPU bridge) cures the milky/over-textured Dev-edit output we
     # saw in the morning gallery. Ignored for Full or T2I.
     hidream_editing_scheduler: str = "flow_match"   # "flow_match" | "flash"
+    # First-Block Cache. At 6 steps the conservative 0.15 threshold gives
+    # ~1 cache hit per edit, knocking ~30s off the wall-time without the
+    # "creamy" detail loss that happens at higher thresholds. keep_last=8
+    # always runs the final 8 of 36 layers so fine texture work survives.
+    hidream_fb_cache: bool = True
+    hidream_fb_threshold: float = 0.15
+    hidream_fb_keep_last: int = 8
 
     def to_public_dict(self) -> dict:
         d = asdict(self)
@@ -1259,6 +1266,14 @@ def _generate_hidream(prompt: str, n: int, width: int, height: int,
         # default and the recipe we ship. Only meaningful when model_type=dev
         # AND refs are present; ignored otherwise by the generator.
         cmd.extend(["--editing-scheduler", config.hidream_editing_scheduler])
+        # First-Block Cache for the Dev-edit path. Only worth enabling when
+        # there are refs (the edit path is where the per-step cost matters).
+        if config.hidream_fb_cache and config.hidream_recipe == "dev":
+            cmd.extend([
+                "--fb-cache",
+                "--fb-threshold", str(config.hidream_fb_threshold),
+                "--fb-keep-last", str(config.hidream_fb_keep_last),
+            ])
     if on_log:
         on_log(f"[hidream] launching {n} candidate(s) in one process, seeds={seeds}"
                + (f" with {len(refs)} ref(s)" if refs else ""))
