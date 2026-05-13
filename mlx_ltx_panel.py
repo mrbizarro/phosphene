@@ -6294,6 +6294,8 @@ class Handler(BaseHTTPRequestHandler):
             import copy as _copy
             with LOCK:
                 avg = _avg_elapsed()
+                avg_image = _avg_elapsed("image")
+                avg_video = _avg_elapsed("video")
                 payload = _copy.deepcopy({
                     "running": STATE["running"], "paused": STATE["paused"],
                     "current": STATE["current"], "queue": STATE["queue"],
@@ -6307,7 +6309,18 @@ class Handler(BaseHTTPRequestHandler):
             payload["comfy_pids"] = find_comfy_pids()
             payload["server_now"] = time.time()
             payload["avg_elapsed_sec"] = avg
-            payload["eta_sec"] = (avg or 420) * len(payload["queue"])
+            # Per-kind avg ETA: image jobs are 30s–2min, video jobs are
+            # 5–30min. Computing queue ETA from one mixed avg makes an
+            # image queued after a few videos show "~30 min" — the
+            # videos drown out the truth. Use the kind-specific avg per
+            # queued job and fall back to category-appropriate defaults
+            # when history is empty (90s for images, 420s for videos).
+            def _eta_for(job: dict) -> float:
+                params = job.get("params") or {}
+                if params.get("mode") == "image":
+                    return float(avg_image) if avg_image else 90.0
+                return float(avg_video) if avg_video else 420.0
+            payload["eta_sec"] = round(sum(_eta_for(j) for j in payload["queue"]))
             # Y1.039 — per-job progress for the Now-card. Phase-aware,
             # config-bucketed ETA, denoise-step extrapolation. Replaces the
             # old elapsed/global-avg ratio that mis-paced Quick/High renders.
@@ -6402,22 +6415,33 @@ class Handler(BaseHTTPRequestHandler):
             # engine option labels in the Studio dropdown so the wall-time
             # estimate matches the user-facing copy.
             try:
-                # (engine_override, repo_id_or_none, est_dl_gb, sec_per_image)
+                # (engine_override, repo_id_or_none, est_dl_gb, sec_per_image,
+                #  cold_start_sec). sec_per_image is the steady-state denoise
+                # PER candidate. cold_start_sec is the one-time subprocess
+                # model-load that's paid ONCE per batch, regardless of n.
+                # The JS estimator does: total = cold_start + n × sec_per_image.
                 ENGINES = [
-                    ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0, 13.0),
-                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0, 60.0),
-                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 300.0),
-                    ("flux2_edit_inline",          None,                         0.0,  30.0),
-                    ("flux2_edit_high_inline",     None,                         0.0, 240.0),
-                    ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0),
-                    ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0),
-                    ("hidream_fast_inline",        None,                         0.0,  90.0),
-                    ("hidream_inline",             None,                         0.0, 130.0),
-                    ("hidream_quality_inline",     None,                         0.0, 165.0),
-                    ("mock_inline",                None,                         0.0,   0.5),
+                    # mflux-family engines load the model once per subprocess
+                    # too, but their loads are quick (~15s) so we fold them
+                    # into sec_per_image rather than expose the split.
+                    ("qwen_edit_lightning_inline", "Qwen/Qwen-Image-Edit-2511", 24.0,  13.0,   0.0),
+                    ("qwen_edit_inline",           "Qwen/Qwen-Image-Edit-2511", 24.0,  60.0,   0.0),
+                    ("qwen_edit_high_inline",      "Qwen/Qwen-Image-Edit-2511", 24.0, 300.0,   0.0),
+                    ("flux2_edit_inline",          None,                         0.0,  30.0,   0.0),
+                    ("flux2_edit_high_inline",     None,                         0.0, 240.0,   0.0),
+                    ("flux2_inline",               "Runpod/FLUX.2-klein-4B-mflux-4bit", 4.0, 12.0, 0.0),
+                    ("z_image_turbo_inline",       "filipstrand/Z-Image-Turbo-mflux-4bit", 3.0, 6.0, 0.0),
+                    # HiDream lab subprocess: ~45s cold load (BF16 weights →
+                    # MLX) is real and material to the estimate for n=1
+                    # requests. Denoise times are the measured per-candidate
+                    # wall-time from the May 2026 step+FBCache bench at HD.
+                    ("hidream_fast_inline",        None,                         0.0,  45.0,  45.0),
+                    ("hidream_inline",             None,                         0.0,  80.0,  45.0),
+                    ("hidream_quality_inline",     None,                         0.0, 120.0,  45.0),
+                    ("mock_inline",                None,                         0.0,   0.5,   0.0),
                 ]
                 out = []
-                for engine, repo, dl_gb, sec in ENGINES:
+                for engine, repo, dl_gb, sec, cold in ENGINES:
                     if engine in ("hidream_inline", "hidream_fast_inline", "hidream_quality_inline"):
                         # HiDream lives outside the HF cache (lab venv path).
                         # All three modes share the same Dev-BF16 model dir.
@@ -6433,6 +6457,7 @@ class Handler(BaseHTTPRequestHandler):
                         "cached": cached,
                         "download_gb": dl_gb,
                         "sec_per_image": sec,
+                        "cold_start_sec": cold,
                     })
                 self._json({"engines": out})
             except Exception as exc:                                # noqa: BLE001
@@ -8657,13 +8682,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
-def _avg_elapsed() -> float | None:
+def _avg_elapsed(kind: str | None = None) -> float | None:
+    """Average elapsed time for recent completed jobs, optionally filtered
+    to a single job kind (``"image"`` or ``"video"``).
+
+    Why filter: image jobs are 30s–2min, video jobs are 5–30 min. Mixing
+    them when computing queue ETA means a session that's done a few
+    videos shows "~30 min" for a freshly-queued image (the 30-min video
+    avg drowns out the image's true ~2-min cost). Splitting the avg by
+    kind keeps each queue ETA honest. Falls back to the kind-agnostic
+    avg when the requested kind has no recent samples, and finally to
+    None when there's no history at all.
+    """
     with LOCK:
-        recent = [j["elapsed_sec"] for j in STATE["history"][:10]
-                  if j.get("status") == "done" and j.get("elapsed_sec")]
-    if not recent:
+        history_snap = list(STATE["history"][:10])
+
+    def _ok(j: dict) -> bool:
+        return j.get("status") == "done" and j.get("elapsed_sec")
+
+    def _is_image(j: dict) -> bool:
+        params = j.get("params") or {}
+        return params.get("mode") == "image"
+
+    if kind == "image":
+        rec = [j["elapsed_sec"] for j in history_snap if _ok(j) and _is_image(j)]
+    elif kind == "video":
+        rec = [j["elapsed_sec"] for j in history_snap if _ok(j) and not _is_image(j)]
+    else:
+        rec = [j["elapsed_sec"] for j in history_snap if _ok(j)]
+
+    # Fall back to the kind-agnostic average if the kind-specific bucket
+    # is empty (e.g. first image generation of a session). Avoids
+    # showing a 0 or NaN to the user.
+    if not rec and kind in ("image", "video"):
+        rec = [j["elapsed_sec"] for j in history_snap if _ok(j)]
+    if not rec:
         return None
-    return round(sum(recent) / len(recent), 1)
+    return round(sum(rec) / len(rec), 1)
 
 
 # ---- Per-job progress (Y1.039) ----------------------------------------------
@@ -20069,8 +20124,11 @@ function imgStudioUpdateEstimate() {
   const eng = (document.getElementById('imgStudioEngine') || {}).value || 'auto';
   const n = parseInt((document.getElementById('imgStudioN') || {}).value || '4', 10);
   const safeN = Math.max(1, Math.min(8, isFinite(n) ? n : 4));
-  // Wall-time = n × per-image. Per-image comes from /image/engine_status;
-  // the auto preset doesn't know its target ahead of time so we hide.
+  // Wall-time = cold_start (paid once per batch) + n × per-image (denoise).
+  // /image/engine_status returns both fields. The HiDream lab subprocess
+  // pays ~45s cold load per batch (BF16 weights -> MLX); mflux engines
+  // fold theirs into sec_per_image (cold_start_sec=0). The auto preset
+  // doesn't know its target ahead of time so we hide.
   const info = _IMG_ENGINE_STATUS[eng];
   let label = 'Generate';
   if (info && !info.cached && (info.download_gb || 0) > 0) {
@@ -20082,7 +20140,8 @@ function imgStudioUpdateEstimate() {
     out.classList.add('dim');
     return;
   }
-  const total = safeN * info.sec_per_image;
+  const coldStart = info.cold_start_sec || 0;
+  const total = coldStart + safeN * info.sec_per_image;
   out.textContent = '~' + _imgStudioFmtDuration(total) + (safeN > 1 ? ` · ${safeN} imgs` : '');
   out.classList.remove('dim');
 }
