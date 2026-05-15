@@ -748,14 +748,16 @@ TRAIN_VOICE_MAX_BYTES = 50 * 1024 * 1024         # 50 MB
 TRAIN_VOICE_MIN_SECONDS = 3                       # advisory; we don't ffprobe
 TRAIN_VOICE_MAX_SECONDS = 60                      # advisory; we don't ffprobe
 
-# Audio-phase defaults. ~30 s/step on M4 Max is the rough heuristic for the
-# wall-time chips — measured value lives in lora-lab's train_audio module and
-# may drift; the panel's chip labels are guidance, not contract.
+# Audio-phase defaults. Measured ~4 s/step on M4 Max during the salotrn
+# end-to-end run on 2026-05-15 (250 steps in 17 min). The original 30 s/step
+# heuristic massively overestimated — chip labels were showing 2 h for what
+# is actually ~17 min, scaring users off the voice phase. The audit's earlier
+# 24 s/step number conflated preprocess + setup time with pure training.
 TRAIN_AUDIO_DEFAULT_STEPS = 250
 TRAIN_AUDIO_DEFAULT_RANK = 16
 TRAIN_AUDIO_DEFAULT_LR = 1e-4
 TRAIN_AUDIO_SLICE_SECONDS = 4.0
-TRAIN_AUDIO_SECONDS_PER_STEP = 30.0               # heuristic for ETA strip
+TRAIN_AUDIO_SECONDS_PER_STEP = 4.0                # heuristic for ETA strip
 
 
 def _existing_voice_file(dataset_dir: Path) -> Path | None:
@@ -4406,9 +4408,14 @@ def run_train_job_inner(job: dict) -> None:
                 except json.JSONDecodeError:
                     payload = None
             if isinstance(payload, dict):
-                # Progress event from the lab side.
+                # Progress event from the lab side. lora-lab's train_character
+                # emits 'train_progress' (legacy upstream name from ltx-trainer),
+                # while our newer train_audio emits 'step'. Accept both so the
+                # face-phase progress bar actually advances (2026-05-15 fix —
+                # before this the bar stuck at 'Loading pipeline' through the
+                # entire face run).
                 evt = payload.get("event") or "step"
-                if evt == "step":
+                if evt in ("step", "train_progress"):
                     try:
                         last_step = int(payload.get("step") or last_step)
                     except (TypeError, ValueError):
@@ -4529,12 +4536,22 @@ def run_train_job_inner(job: dict) -> None:
     audio_lora_path = LORAS_DIR / f"{trigger}.audio.safetensors"
     voice_dst = LORAS_DIR / f"{trigger}.voice{voice_src.suffix.lower()}"
 
+    # train_character.py copies images into a `training_data/` subdir before
+    # preprocessing, so the image latents land at
+    # `<dataset_dir>/training_data/.precomputed/latents/`. Point the audio
+    # trainer at that subdir directly so it can find the latents without
+    # having to auto-detect (defense in depth — train_audio.py also handles
+    # this, but giving it the right path up front is cleaner).
+    training_data_dir = dataset_dir / "training_data"
+    audio_dataset_dir = (training_data_dir if training_data_dir.is_dir()
+                          else dataset_dir)
+
     audio_spec = {
         "schema": "phosphene/train_audio@1",
         "job_id": train_job_id,
         "trigger": trigger,
         "audio_path": str(voice_src),
-        "dataset_dir": str(dataset_dir),
+        "dataset_dir": str(audio_dataset_dir),
         "image_count": len(image_files),
         "audio_steps": audio_steps_req,
         "audio_rank": audio_rank_req,
@@ -4591,8 +4608,11 @@ def run_train_job_inner(job: dict) -> None:
                 except json.JSONDecodeError:
                     payload = None
             if isinstance(payload, dict):
+                # train_audio.py emits 'step' events (with phase: audio); be
+                # liberal and also accept 'train_progress' in case the audio
+                # path later runs the upstream trainer directly.
                 evt = payload.get("event") or "step"
-                if evt == "step":
+                if evt in ("step", "train_progress"):
                     try:
                         audio_last_step = int(payload.get("step")
                                               or audio_last_step)
@@ -14310,9 +14330,9 @@ HTML = r"""<!doctype html>
           <div class="train-voice-steps" id="trainVoiceStepsRow" hidden>
             <span class="mf-label">Audio steps</span>
             <div class="pill-group cols-3" id="trainVoicePresetGroup">
-              <button type="button" class="pill-btn" data-voice-preset="smoke"><span>Smoke <span class="rec-badge">100</span></span><span class="sub">~50 min wall</span></button>
-              <button type="button" class="pill-btn active" data-voice-preset="standard"><span>Standard <span class="rec-badge">250</span></span><span class="sub">~2 h 5 min wall</span></button>
-              <button type="button" class="pill-btn" data-voice-preset="long"><span>Long <span class="rec-badge">500</span></span><span class="sub">~4 h 10 min wall</span></button>
+              <button type="button" class="pill-btn" data-voice-preset="smoke"><span>Smoke <span class="rec-badge">100</span></span><span class="sub">~7 min wall</span></button>
+              <button type="button" class="pill-btn active" data-voice-preset="standard"><span>Standard <span class="rec-badge">250</span></span><span class="sub">~17 min wall</span></button>
+              <button type="button" class="pill-btn" data-voice-preset="long"><span>Long <span class="rec-badge">500</span></span><span class="sub">~33 min wall</span></button>
             </div>
             <div class="hint" style="margin-top:6px">Estimates assume ~30 s/step on M4 Max — measured value lives in lora-lab and may drift.</div>
           </div>
@@ -15698,9 +15718,9 @@ const TRAIN = {
   voiceEnabled: false,        // default OFF; auto-flips ON after upload
   voicePreset: 'standard',    // 'smoke' | 'standard' | 'long'
   voicePresets: {
-    smoke:    { steps: 100, label: 'Smoke',    sub: '~50 min wall' },
-    standard: { steps: 250, label: 'Standard', sub: '~2 h 5 min wall' },
-    long:     { steps: 500, label: 'Long',     sub: '~4 h 10 min wall' },
+    smoke:    { steps: 100, label: 'Smoke',    sub: '~7 min wall' },
+    standard: { steps: 250, label: 'Standard', sub: '~17 min wall' },
+    long:     { steps: 500, label: 'Long',     sub: '~33 min wall' },
   },
   // ~30 s/step on M4 Max. Mirrors TRAIN_AUDIO_SECONDS_PER_STEP py-side;
   // these labels are guidance not contract.
