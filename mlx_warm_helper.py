@@ -361,6 +361,43 @@ def _filter_unsupported_kwargs(fn, kwargs: dict) -> dict:
 
 
 _LORA_PATCH_INSTALLED = False
+_VIDEO_DECODER_PATCH_INSTALLED = False
+
+
+def _install_video_decoder_patch() -> None:
+    """Translate fps/frame_rate kwargs across upstream layers.
+
+    Upstream regression (observed 2026-05-13/14): `utils.blocks.VideoDecoder.
+    decode_and_stream` accepts `fps=`, but `utils._orchestration.
+    decode_and_save_video` calls it with `frame_rate=`, raising TypeError.
+    Similarly the inner decoder in `ltx_core_mlx.model.video_vae.VideoDecoder`
+    uses `frame_rate=` while the wrapper used `fps=` for the inner call.
+    This patch wraps the wrapper to accept either kwarg and tries both
+    when invoking the inner decoder. Idempotent.
+    """
+    global _VIDEO_DECODER_PATCH_INSTALLED
+    if _VIDEO_DECODER_PATCH_INSTALLED:
+        return
+    import ltx_pipelines_mlx.utils.blocks as _blocks
+    _orig = _blocks.VideoDecoder.decode_and_stream
+
+    def _wrapped(self, video_latent, output_path, fps=24.0,
+                 frame_rate=None, audio_path=None):
+        if frame_rate is not None:
+            fps = frame_rate
+        decoder = self.load()
+        try:
+            decoder.decode_and_stream(
+                video_latent, output_path, frame_rate=fps, audio_path=audio_path
+            )
+        except TypeError:
+            decoder.decode_and_stream(
+                video_latent, output_path, fps=fps, audio_path=audio_path
+            )
+        return output_path
+
+    _blocks.VideoDecoder.decode_and_stream = _wrapped
+    _VIDEO_DECODER_PATCH_INSTALLED = True
 
 
 def _install_lora_fusion_patches() -> None:
@@ -478,7 +515,14 @@ def _install_lora_fusion_patches() -> None:
     def _make_dev_loader_wrapper(orig):
         def patched_load_dev(self):
             pending = getattr(self, "_pending_loras", None)
-            if pending and not getattr(self, "_phosphene_dit_fused", False):
+            # FIX 2026-05-14: removed the `_phosphene_dit_fused` flag guard.
+            # That flag latched True after the first job in a batch and
+            # never reset; the next job in the same panel pipeline reuse
+            # would skip fusion → bare dev transformer → silent
+            # "LoRA-not-applied" on every clip after the first. This method
+            # is only called when self.dit is None (per HQ pipeline logic),
+            # so when we reach this branch we always need to (re)fuse.
+            if pending:
                 dev_name = (getattr(self, "_dev_transformer", None)
                             or "transformer-dev.safetensors")
                 tx_path = self.model_dir / dev_name
@@ -491,7 +535,6 @@ def _install_lora_fusion_patches() -> None:
                 apply_quantization(dit, weights)
                 dit.load_weights(list(weights.items()))
                 aggressive_cleanup()
-                self._phosphene_dit_fused = True
                 return dit
             return orig(self)
         return patched_load_dev
@@ -585,6 +628,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
 
     # Repair the subclass-override-skips-fusion bug before any pipe is built.
     _install_lora_fusion_patches()
+    _install_video_decoder_patch()  # fps/frame_rate kwarg shim
 
     fp = _lora_fingerprint(loras)
 
@@ -678,6 +722,7 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None):
     # Reuse the same fusion-patch installer as get_pipe. Without this,
     # TI2VidTwoStagesHQPipeline.load() would still bypass _pending_loras.
     _install_lora_fusion_patches()
+    _install_video_decoder_patch()  # fps/frame_rate kwarg shim
 
     fp = _lora_fingerprint(loras)
 
@@ -1392,7 +1437,8 @@ for line in sys.__stdin__:
                 # Free the upscaler before VAE decode (can be ~2-3 GB peak).
                 _free_upscaler()
                 # Step 3: VAE decode + save (decoder loads inside _decode_and_save_video).
-                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], fps=kwargs["frame_rate"])
+                # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
             else:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
@@ -1402,7 +1448,8 @@ for line in sys.__stdin__:
                 _free_pipe_for_decode(pipe)
                 emit({"event": "log", "line": "step:free_generation_modules done"})
                 emit({"event": "log", "line": "step:decode_and_save start"})
-                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], fps=kwargs["frame_rate"])
+                # FIX 2026-05-14: upstream renamed fps= → frame_rate= (keyword-only).
+                out_path = pipe._decode_and_save_video(video_latent, audio_latent, kwargs["output_path"], frame_rate=kwargs["frame_rate"])
                 emit({"event": "log", "line": "step:decode_and_save done"})
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
@@ -1478,7 +1525,8 @@ for line in sys.__stdin__:
                 pipe._loaded = False
                 aggressive_cleanup()
             pipe._load_decoders()
-            pipe._decode_and_save_video(video_lat, audio_lat, p["output_path"])
+            # FIX 2026-05-14: upstream made frame_rate= keyword-only required.
+            pipe._decode_and_save_video(video_lat, audio_lat, p["output_path"], frame_rate=float(p.get("frame_rate", 24.0)))
             elapsed = round(time.time() - t0, 2)
             _last_activity = time.time()
             emit({
@@ -1523,6 +1571,10 @@ for line in sys.__stdin__:
                 height=int(p["height"]),
                 width=int(p["width"]),
                 num_frames=int(p["frames"]),
+                # Upstream regression 2026-05-13: generate_and_save now requires
+                # frame_rate as a keyword-only arg. LTX frame counts are 8k+1
+                # paired with 24 fps everywhere in our panel; hardcode that here.
+                frame_rate=float(p.get("frame_rate", 24.0)),
                 seed=seed,
                 stage1_steps=int(p.get("stage1_steps", 15)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
@@ -1671,7 +1723,12 @@ for line in sys.__stdin__:
                 height=int(p["height"]),
                 width=int(p["width"]),
                 num_frames=num_frames,
+                # Upstream regression 2026-05-13: generate_and_save needs
+                # frame_rate (keyword-only required), not fps. Keep fps for
+                # legacy compat; the filter step below drops whichever the
+                # installed signature doesn't accept.
                 fps=24,
+                frame_rate=float(p.get("frame_rate", 24.0)),
                 seed=seed,
                 stage1_steps=int(p.get("stage1_steps", 15)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
