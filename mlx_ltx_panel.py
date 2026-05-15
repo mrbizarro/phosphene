@@ -1255,12 +1255,28 @@ def _character_safe_id(value: str) -> str:
 def _character_dataset_image(trigger: str) -> Path | None:
     """Find the most representative training image for `trigger`.
 
-    Convention: lora-lab writes dataset_<stem>_v2/images/<trigger>_001.png
-    where <stem> is the trigger with the trailing 'trn' stripped
-    (ariatrn → aria, bizarrotrn → bizarro). Falls back to scanning the
-    `images/` dir for any <trigger>_*.png. Returns None when nothing
-    resolvable exists — the UI then paints a placeholder.
+    Lookup order (first match wins):
+      1. mlx_models/characters/<trigger>/avatar.{jpg,jpeg,png,webp} —
+         panel-owned avatar. Written by run_train_job_inner after a
+         successful face training (copies the first training image).
+         New characters created via the Train tab end up here.
+      2. lora-lab/dataset_<stem>_v2/images/<trigger>_001.png — the
+         lora-lab convention Salo set up manually for ariatrn / bizarrotrn
+         pre-Train-tab automation. <stem> = trigger with trailing 'trn'
+         stripped (ariatrn → aria).
+      3. lora-lab/dataset_<stem>*/images/<trigger>_*.png — any glob match
+         under any dataset_<stem>* subdir (legacy fallback).
+    Returns None when nothing resolvable exists — the UI paints a
+    letter placeholder.
     """
+    # 1. Panel-owned avatar (Train-tab convention).
+    char_dir = _CHARACTERS_CACHE_PATH / trigger
+    if char_dir.is_dir():
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            avatar = char_dir / f"avatar{ext}"
+            if avatar.is_file():
+                return avatar
+    # 2 + 3. lora-lab conventions (legacy / manual).
     lab_root = Path("/Users/salo/AI/projects/lora-lab")
     stem = trigger[:-3] if trigger.endswith("trn") else trigger
     candidates = [
@@ -1270,11 +1286,9 @@ def _character_dataset_image(trigger: str) -> Path | None:
     for c in candidates:
         if c.is_file():
             return c
-    # Last-ditch: grab any <trigger>_*.png in any dataset_<stem>* dir.
-    for parent in (lab_root,):
-        if not parent.is_dir():
-            continue
-        for child in sorted(parent.glob(f"dataset_{stem}*/images/{trigger}_*.png")):
+    if lab_root.is_dir():
+        for child in sorted(lab_root.glob(
+                f"dataset_{stem}*/images/{trigger}_*.png")):
             if child.is_file():
                 return child
     return None
@@ -4509,6 +4523,24 @@ def run_train_job_inner(job: dict) -> None:
     except OSError as e:
         push(f"[train] warn: could not write sidecar JSON: {e}")
 
+    # Copy the first training image into mlx_models/characters/<trigger>/
+    # as the character's avatar. The Characters tab discovers this via
+    # _character_dataset_image() and serves it through the /characters/
+    # <trigger>/preview endpoint. Without this, freshly-trained characters
+    # render with a letter placeholder instead of a real portrait.
+    try:
+        char_dir = _CHARACTERS_CACHE_PATH / trigger
+        char_dir.mkdir(parents=True, exist_ok=True)
+        first_img = image_files[0]
+        avatar_dst = char_dir / f"avatar{first_img.suffix.lower()}"
+        # Only write if missing or stale — don't clobber a Salo-curated avatar.
+        if (not avatar_dst.is_file()
+                or first_img.stat().st_mtime > avatar_dst.stat().st_mtime):
+            avatar_dst.write_bytes(first_img.read_bytes())
+            push(f"[train] avatar copied → {avatar_dst}")
+    except OSError as e:
+        push(f"[train] warn: could not copy avatar: {e}")
+
     job["output_path"] = str(final_lora_path)
     job["raw_path"] = str(final_lora_path)
     p["elapsed_seconds"] = elapsed
@@ -6451,12 +6483,17 @@ class Handler(BaseHTTPRequestHandler):
             sample = _character_dataset_image(cid)
             if not sample or not sample.is_file():
                 self.send_error(404); return
-            # Defense in depth: confirm the resolved file lives under the
-            # known lora-lab root before serving its bytes.
+            # Defense in depth: confirm the resolved file lives under one of
+            # the known safe roots before serving its bytes. Either the
+            # lora-lab dataset tree (legacy / manual characters) OR the
+            # panel-owned characters cache (new Train-tab avatars).
             try:
                 lab_root = Path("/Users/salo/AI/projects/lora-lab").resolve()
+                char_root = _CHARACTERS_CACHE_PATH.resolve()
                 resolved = sample.resolve()
-                if not resolved.is_relative_to(lab_root):
+                in_lab = resolved.is_relative_to(lab_root)
+                in_char_cache = resolved.is_relative_to(char_root)
+                if not (in_lab or in_char_cache):
                     self.send_error(404); return
             except (OSError, ValueError):
                 self.send_error(404); return
