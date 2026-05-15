@@ -1591,6 +1591,11 @@ for line in sys.__stdin__:
                 # the cap IS the iteration count (not just a safety bound).
                 # Each iter is pure latent algebra — no model forwards.
                 bongmath_max_iter=int(p.get("bongmath_max_iter", 100)),
+                # Upstream HQ exposes skip_step for each modality. The MLX
+                # res_2s path now honors it as an opt-in experimental speed
+                # knob; 0 preserves the locked recipe.
+                video_skip_step=int(p.get("video_skip_step", 0)),
+                audio_skip_step=int(p.get("audio_skip_step", 0)),
                 # Stage-2 image-conditioning mode for I2V (HQ).
                 # "full"  = re-encode reference at full res (upstream default)
                 # "off"   = skip the full-res re-encode; saves the biggest
