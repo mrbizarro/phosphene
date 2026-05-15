@@ -8399,19 +8399,23 @@ HTML = r"""<!doctype html>
     .models-inline-link:hover { color: var(--accent-bright, #93a8ff); }
 
     /* ===== MAIN LAYOUT =====
-       Left form-pane is the panel's primary surface (composer, picker,
-       library) so it earns more horizontal real-estate than before. The
-       stage on the right caps at the viewport-tall × 16/9 aspect so a
-       16:9 video fills the pane without side letterboxing — the
-       leftover width flows back into the form-pane via 1fr. On
-       portrait or very-wide windows the cap still keeps the player
-       size sane while form-pane absorbs the remainder.
-       Old layout: `440px 1fr` (small form, huge letterboxed player).
-       New layout: form min 580px + stage capped at video-natural aspect
-       so empty side-bars become extra UI. */
+       Two-column grid: a tight composer on the left, the stage (player
+       + carousel) absorbs the rest. Salo's call (2026-05-15): the
+       previous layout let the form spread to ~580-700px on a 1440p
+       window, which letterboxed the video and left huge black margins.
+       New cap is 420px on the left so the right side gets all the
+       extra width — bigger player, more cards per row, an extra row
+       of carousel visible below the player.
+       History:
+         · 440px 1fr  — tiny form, huge letterboxed player
+         · 580px 1fr capped to 16/9  — form too wide; stage capped
+         · 360-420px clamp + 1fr  — composer-tight, stage-cinematic
+       The 16/9 stage cap from the prior layout is intentionally gone:
+       the video and carousel both fluid-fit, so a wider stage just
+       means a bigger player + more cards visible. */
     .layout {
       flex: 1 1 auto; display: grid;
-      grid-template-columns: minmax(580px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
+      grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
       gap: 14px; padding: 14px; min-height: 0;
     }
     .form-pane, .stage-pane {
@@ -8780,12 +8784,12 @@ HTML = r"""<!doctype html>
          .characters-compose-state — single character + prompt + chips
        JS toggles `hidden` on each, no animation needed (instant).
        ============================================================ */
-    .characters-pane { display: none; padding: 24px 24px 96px 24px; }
+    .characters-pane { display: none; padding: 18px 18px 96px 18px; }
     .characters-pane.show { display: block; }
 
     .characters-head {
-      max-width: 920px;
-      margin: 4px auto 28px auto;
+      max-width: 100%;
+      margin: 4px 0 22px;
       text-align: left;
     }
     .characters-title {
@@ -8802,11 +8806,11 @@ HTML = r"""<!doctype html>
       margin: 0;
     }
     .characters-grid {
-      max-width: 920px;
-      margin: 0 auto;
+      /* Compact tile grid — many small characters at a glance.
+         Tiles sized so a row of 6-7 fits at typical panel widths. */
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 14px;
     }
     .characters-loading {
       grid-column: 1 / -1;
@@ -8949,10 +8953,14 @@ HTML = r"""<!doctype html>
       border: 1px solid rgba(140, 160, 220, 0.06);
     }
 
-    /* ---- Compose state ---- */
+    /* ---- Compose state ----
+       The form-pane is now capped at ~420px (2026-05-15 polish) so
+       the compose state fills its column instead of carrying its own
+       wider cap. Internal chip rows are single-line wherever they
+       fit; longer ones flex-wrap. */
     .characters-compose-state {
-      max-width: 760px;
-      margin: 0 auto;
+      max-width: 100%;
+      margin: 0;
     }
     .characters-back-link {
       display: inline-flex;
@@ -9057,18 +9065,23 @@ HTML = r"""<!doctype html>
       box-shadow: 0 0 0 3px rgba(94, 234, 255, 0.10);
     }
 
+    /* Chip rows are stacked top-to-bottom (Framing / Duration / Quality);
+       inside each row, chips flow in a single horizontal line and wrap
+       only on very narrow viewports. The Manual workflow uses the
+       same chip language (.q-chip / .pill-quality), so the visual
+       weight here matches the rest of the panel. */
     .characters-chip-row {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
     .characters-chip-group {
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 5px;
     }
     .characters-group-label {
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 600;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -9076,18 +9089,22 @@ HTML = r"""<!doctype html>
     }
     .characters-chips {
       display: flex;
-      gap: 6px;
+      gap: 5px;
       flex-wrap: wrap;
     }
     .characters-chip {
-      padding: 6px 11px;
-      border-radius: 6px;
+      flex: 0 0 auto;
+      padding: 5px 9px;
+      border-radius: 999px;
       background: rgba(140, 160, 220, 0.05);
       border: 1px solid var(--ph-border-soft, var(--border));
       color: var(--ph-text-faint, var(--muted));
-      font-size: 12.5px;
+      font-size: 11.5px;
+      font-weight: 500;
+      letter-spacing: 0;
       cursor: pointer;
       transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+      white-space: nowrap;
     }
     .characters-chip:hover {
       background: rgba(140, 160, 220, 0.10);
@@ -10284,22 +10301,52 @@ HTML = r"""<!doctype html>
       color: var(--accent-bright);
       border-color: var(--accent);
     }
-    /* The carousel kind chips (All/Videos/Photos) inherit
-       .stage-outputs-filter from the agent-stage block — no override
-       needed, they already match the chip language. */
+    /* Carousel kind chips (All/Videos/Photos). This class used to be
+       inherited from the agent-stage block; it was deleted along with
+       the agent UI cleanup and restored here as a first-class rule. */
+    .stage-outputs-filter {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 8px;
+    }
+    .stage-outputs-filter button {
+      width: auto;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      cursor: pointer;
+      transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
+    }
+    .stage-outputs-filter button:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .stage-outputs-filter button.active {
+      color: var(--accent-bright);
+      border-color: var(--accent);
+      background: var(--accent-dim, rgba(47,129,247,0.12));
+    }
 
     /* Carousel grid — multi-row when there's enough room (uses CSS
        grid auto-fill), horizontal-scroll fallback on narrow widths.
        Cards have 16/9 thumb so the gallery reads as a contact sheet
-       at a glance. Height clamped so only ~1.3 rows are visible —
-       enough peek of row 2 to telegraph "scroll for more" without
-       eating the video player's real estate. Was 36vh (≈2 full rows
-       at 1080p) which made the video preview cramped; Salo's call. */
+       at a glance. Height clamped so only ~2.3 rows are visible —
+       enough peek of the next row to telegraph "scroll for more"
+       without eating the video player's real estate.
+       History:
+         · 36vh — ~2 full rows at 1080p, cramped the player
+         · 20vh — ~1.3 rows, player breathed but carousel felt thin
+         · 26vh / minmax(160) — Salo 2026-05-15: tighter cards (one
+           more per row) + a peek of row 3. */
     .carousel {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
       gap: 10px;
-      max-height: max(160px, 20vh);
+      max-height: max(220px, 26vh);
       overflow-y: auto;
       padding-right: 4px;
     }
@@ -12028,20 +12075,18 @@ HTML = r"""<!doctype html>
     /* === MAIN LAYOUT ===========================================
        Hairline-bordered panes, no internal radius — Linear's edge
        feel is "everything is one continuous surface".
-       The form-pane min width is bumped from 440 → 580 to match
-       the new composer-led redesign (which packs prompt + refs
-       + 4-up quality strip + 3-up dur/frames/seed + sticky
-       footer into the left pane). The stage cap on the right
-       still keeps the player from letterboxing into empty side
-       bars. Without this rule the two `main.layout` blocks
-       (this one + the one in the global section above) raced
-       and the more-specific selector here won, leaving the
-       form-pane stuck at 440 even after the redesign's wider
-       intent. */
+       The form-pane cap is 420px so the composer stays compact and
+       the stage absorbs leftover width (bigger player + more
+       carousel cards). The earlier 580px min-width / 16:9 stage cap
+       came from a moment when the composer needed every pixel; the
+       2026-05-15 polish flipped that balance — composer-tight,
+       stage-cinematic. Without this rule the two `main.layout`
+       blocks (this one + the one in the global section above) race
+       and the more-specific selector here wins. */
     main.layout {
       gap: 0;
       padding: 0;
-      grid-template-columns: minmax(580px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
+      grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
     }
     .form-pane,
     .stage-pane {
@@ -14736,23 +14781,28 @@ window.CHARACTERS = {
   initialised: false,
 };
 
+// Triples: [value, short chip label, full descriptive text used in
+// the assembled prompt + as a tooltip on the chip].
 const CHARACTERS_FRAMING = [
-  ['ECU', 'extreme close-up'],
-  ['CU',  'close-up'],
-  ['MCU', 'medium close-up'],
-  ['MS',  'medium shot'],
-  ['LS',  'long shot'],
+  ['ECU', 'ECU', 'extreme close-up'],
+  ['CU',  'CU',  'close-up'],
+  ['MCU', 'MCU', 'medium close-up'],
+  ['MS',  'MS',  'medium shot'],
+  ['LS',  'LS',  'long shot'],
 ];
 const CHARACTERS_DURATION = [
-  ['5s',  '5 sec'],
-  ['7s',  '7 sec'],
-  ['10s', '10 sec'],
+  ['5s',  '5s',  '5 seconds'],
+  ['7s',  '7s',  '7 seconds'],
+  ['10s', '10s', '10 seconds'],
 ];
 const CHARACTERS_QUALITY = [
-  ['balanced', 'Balanced'],
-  ['high',     'High'],
+  ['balanced', 'Balanced', 'Balanced — faster, slight identity drift'],
+  ['high',     'High',     'High — Q8 two-stage, best identity'],
 ];
-const CHARACTERS_FRAMING_TEXT = Object.fromEntries(CHARACTERS_FRAMING);
+// Look-up by value → full descriptive text (the third tuple slot).
+const CHARACTERS_FRAMING_TEXT = Object.fromEntries(
+  CHARACTERS_FRAMING.map(([v, , full]) => [v, full])
+);
 
 async function charactersInit() {
   // Idempotent. The grid is the default view; compose state only
@@ -14819,12 +14869,16 @@ function charactersRenderGrid() {
 }
 
 function charactersRenderChips() {
+  // Each option is [value, shortLabel, fullText]. The chip face shows
+  // the short label (so 5 framing options fit on one row at ~420px);
+  // the full text lives on `title` for accessibility / hover discovery.
   const renderGroup = (containerId, options, current, fieldName) => {
     const el = document.getElementById(containerId);
     if (!el) return;
-    el.innerHTML = options.map(([val, label]) => (
+    el.innerHTML = options.map(([val, label, full]) => (
       `<button type="button" class="characters-chip${val === current ? ' active' : ''}"
                data-val="${charactersEscapeAttr(val)}"
+               title="${charactersEscapeAttr(full || label)}"
                onclick="charactersPickChip('${fieldName}', '${charactersEscapeAttr(val)}')">${charactersEscapeHtml(label)}</button>`
     )).join('');
   };
