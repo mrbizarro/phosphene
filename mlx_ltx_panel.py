@@ -3126,6 +3126,7 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
     #      apart from real outputs.
     in_flight_paths: set[str] = set()
     failed_paths: set[str] = set()
+    succeeded_paths: set[str] = set()
     with LOCK:
         hidden_snap = set(HIDDEN_PATHS)
         cur = STATE.get("current")
@@ -3135,11 +3136,21 @@ def list_outputs(include_hidden: bool = False) -> list[dict]:
                 if v:
                     in_flight_paths.add(str(v))
         for h in (STATE.get("history") or []):
-            if (h.get("status") or "") in ("failed", "cancelled", "error"):
+            status = (h.get("status") or "")
+            if status in ("failed", "cancelled", "error"):
                 for k in ("raw_path", "output_path", "native_path", "upscaled_path"):
                     v = h.get(k)
                     if v:
                         failed_paths.add(str(v))
+            elif status == "done":
+                for k in ("raw_path", "output_path", "native_path", "upscaled_path"):
+                    v = h.get(k)
+                    if v:
+                        succeeded_paths.add(str(v))
+    # A path that appears in both a failed and a done entry was successfully
+    # re-rendered after a crash (e.g. cold-start Metal failure + auto-retry).
+    # The successful render wins — remove it from the exclusion set.
+    failed_paths -= succeeded_paths
     inflight_mtime_cutoff = time.time() - 2.0
     out = []
     for p in files:

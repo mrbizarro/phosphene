@@ -599,6 +599,10 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
     global _t2v_pipe, _i2v_pipe, _extend_pipe
     global _t2v_lora_key, _i2v_lora_key, _extend_lora_key
     global _extend_model_dir
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+    except Exception:
+        _ac = lambda: None
     # Upstream refactor 2026-05-09 (commits d6cc3d1, 493aec2) renamed +
     # removed several pipeline classes. Past intermediate commits had a
     # mix of old + new names. Three import strategies in priority order:
@@ -642,6 +646,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     emit({"event": "log",
                           "line": f"LoRA set changed; reloading I2V pipeline."})
                     _i2v_pipe = None
+                    _ac()
                 emit({"event": "log",
                       "line": "Loading I2V pipeline (first job is the slow one)..."})
                 pipe = ImageToVideoPipeline(
@@ -661,6 +666,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     emit({"event": "log",
                           "line": f"{why}; reloading Extend pipeline."})
                     _extend_pipe = None
+                    _ac()
                 emit({"event": "log",
                       "line": f"Loading Extend pipeline (heavier — uses dev transformer at {ext_dir})..."})
                 pipe = ExtendPipeline(
@@ -677,6 +683,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                 emit({"event": "log",
                       "line": f"LoRA set changed; reloading T2V pipeline."})
                 _t2v_pipe = None
+                _ac()
             emit({"event": "log",
                   "line": "Loading T2V pipeline (first job is the slow one)..."})
             pipe = TextToVideoPipeline(
@@ -726,6 +733,10 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None):
 
     fp = _lora_fingerprint(loras)
 
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+    except Exception:
+        _ac = lambda: None
     with _pipe_lock:
         release_pipelines(keep_kind="hq")
         if (_hq_pipe is None
@@ -735,6 +746,7 @@ def get_hq_pipe(model_dir: str, loras: list[dict] | None = None):
                 why = "LoRA set changed" if _hq_lora_key != fp else "model_dir changed"
                 emit({"event": "log", "line": f"{why}; reloading HQ pipeline."})
                 _hq_pipe = None
+                _ac()
             emit({"event": "log", "line": f"Loading HQ pipeline (Q8 dev model — {model_dir})..."})
             _hq_pipe = TwoStageHQPipeline(
                 model_dir=model_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
