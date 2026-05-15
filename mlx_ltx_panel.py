@@ -9168,6 +9168,48 @@ HTML = r"""<!doctype html>
       border-color: rgba(94, 234, 255, 0.40);
       color: var(--accent-bright, #5EEAFF);
     }
+    /* Quality row gets a small Turbo toggle alongside the chips — small,
+       secondary-looking, opt-in. Locked-recipe defaults stay the path of
+       least resistance. */
+    .characters-chips-with-toggle {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .characters-turbo {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11.5px;
+      color: var(--ph-text-faint, var(--muted));
+      cursor: pointer;
+      user-select: none;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+    .characters-turbo input {
+      accent-color: var(--accent-bright, #5EEAFF);
+      margin: 0;
+    }
+    .characters-turbo em {
+      font-style: normal;
+      opacity: 0.65;
+      margin-left: 2px;
+    }
+    .characters-turbo:hover {
+      color: var(--text);
+    }
+    .characters-turbo:has(input:checked) {
+      color: var(--accent-bright, #5EEAFF);
+      border-color: rgba(94, 234, 255, 0.30);
+      background: rgba(94, 234, 255, 0.06);
+    }
+    .characters-turbo:has(input:checked) em {
+      opacity: 0.9;
+    }
 
     .characters-preview-block {
       background: var(--ph-elev-2, var(--bg-2));
@@ -9327,6 +9369,111 @@ HTML = r"""<!doctype html>
     .train-pane .composer-card.train-card {
       padding: 14px 14px 12px;
       margin-bottom: 12px;
+    }
+    /* ------------------------------------------------------------
+       Train-tab dataset guidance panel.
+
+       Collapsible "How to train well" walk-through that appears at the
+       top of the Train tab. Concise bullets, matches the Composer-card
+       chrome, dismissible. Stored in localStorage so power users don't
+       see it every session, but visible by default to new users.
+       ------------------------------------------------------------ */
+    .train-guidance {
+      background: var(--ph-elev-1, var(--panel));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 10px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .train-guidance summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      user-select: none;
+    }
+    .train-guidance summary::-webkit-details-marker { display: none; }
+    .train-guidance summary::after {
+      content: "";
+      width: 8px; height: 8px;
+      border-right: 1.5px solid var(--ph-text-faint, var(--muted));
+      border-bottom: 1.5px solid var(--ph-text-faint, var(--muted));
+      transform: rotate(45deg);
+      margin-left: auto;
+      transition: transform 180ms ease;
+    }
+    .train-guidance[open] summary::after { transform: rotate(-135deg); }
+    .train-guidance-eyebrow {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint, var(--muted));
+    }
+    .train-guidance-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .train-guidance-body {
+      padding: 4px 16px 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px 22px;
+    }
+    .train-guidance-section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint, var(--muted));
+      margin: 0 0 6px 0;
+    }
+    .train-guidance-section p,
+    .train-guidance-section ul {
+      margin: 0;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .train-guidance-section ul {
+      list-style: none;
+      padding: 0;
+    }
+    .train-guidance-section li {
+      padding: 2px 0;
+      color: rgba(220, 224, 240, 0.86);
+    }
+    .train-guidance-section li::before {
+      content: "·";
+      color: var(--accent-bright, #5EEAFF);
+      font-weight: 700;
+      margin-right: 6px;
+    }
+    .train-guidance-section li b {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .train-guidance-foot {
+      padding: 0 16px 14px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .train-guidance-dismiss {
+      background: transparent;
+      border: 1px solid var(--ph-border-soft, var(--border));
+      color: var(--ph-text-faint, var(--muted));
+      border-radius: 999px;
+      font-size: 11.5px;
+      padding: 5px 12px;
+      cursor: pointer;
+      transition: color 160ms ease, border-color 160ms ease;
+    }
+    .train-guidance-dismiss:hover {
+      color: var(--text);
+      border-color: var(--ph-border-strong, var(--accent));
     }
     /* Drop zone — mirrors the picker-drop idiom from the video I2V
        picker (dashed border, accent on hover) but tall enough to hold
@@ -13324,7 +13471,14 @@ HTML = r"""<!doctype html>
             </div>
             <div class="characters-chip-group" data-group="quality">
               <span class="characters-group-label">Quality</span>
-              <div class="characters-chips" id="charactersQualityChips" role="group"></div>
+              <div class="characters-chips-with-toggle">
+                <div class="characters-chips" id="charactersQualityChips" role="group"></div>
+                <label class="characters-turbo"
+                       title="Skip-guidance on the HQ sampler. Validated at ~12.6% faster wall (426s → 372s) on the locked recipe with no identity loss.">
+                  <input type="checkbox" id="charactersTurbo">
+                  <span>Turbo <em>~12% faster</em></span>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -13349,6 +13503,57 @@ HTML = r"""<!doctype html>
            trainCheckPreflight() if any required model file is missing
            (today: transformer-dev.safetensors which isn't in default install). -->
       <div id="trainPreflight" style="display:none"></div>
+
+      <!-- ============== GUIDANCE PANEL ==============
+           Collapsible "How to train well" walk-through. Open by default
+           for new users; dismissed state persists in localStorage. Sets
+           the dataset expectations before the user drops their first
+           image. Concise, scannable, matches the Linear design language. -->
+      <details class="train-guidance" id="trainGuidance" open>
+        <summary>
+          <span class="train-guidance-eyebrow">Guide</span>
+          <span class="train-guidance-title">How to train a character well</span>
+        </summary>
+        <div class="train-guidance-body">
+          <div class="train-guidance-section">
+            <h3>Image count</h3>
+            <p>25–50 photos is the sweet spot. Variety beats quantity — more angles teach the model more than more shots of the same pose.</p>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Angle coverage</h3>
+            <ul>
+              <li><b>Tight close-ups</b> · face fills frame, anchors identity</li>
+              <li><b>Medium close-ups</b> · head + shoulders, the most-used shot</li>
+              <li><b>Medium shots</b> · waist up, teaches body proportions</li>
+              <li><b>Full-body shots</b> · varied poses, the whole person</li>
+            </ul>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Lighting variety</h3>
+            <p>Mix indoor and outdoor, warm and cool, day and night. If every photo shares the same studio lighting, the LoRA bakes that lighting into every generation.</p>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Background variety</h3>
+            <p>Different rooms, streets, contexts. A single backdrop teaches the LoRA to refuse to put the character anywhere else.</p>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Avoid</h3>
+            <ul>
+              <li>group photos</li>
+              <li>obvious props that aren't part of the look</li>
+              <li>heavy makeup that varies wildly between shots</li>
+              <li>face partly obscured</li>
+            </ul>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Caption rule</h3>
+            <p>Describe what <b>varies</b> in each shot — outfit, setting, pose, lighting. Don't describe invariant identity features (face, hair color, build); the LoRA absorbs those automatically.</p>
+          </div>
+        </div>
+        <div class="train-guidance-foot">
+          <button type="button" class="train-guidance-dismiss" onclick="trainGuidanceDismiss()">Got it — don't show again</button>
+        </div>
+      </details>
 
       <!-- ============== DATASET CARD ============== -->
       <div class="composer-card train-card">
@@ -14985,6 +15190,11 @@ function charactersOpenCompose(id) {
   }
   const toast = document.getElementById('charactersToast');
   if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
+  // Reset Turbo to off for new compositions — loadParams restores it
+  // explicitly from the sidecar when re-opening a previous Characters
+  // clip, so this default-off applies only to fresh picks.
+  const turbo = document.getElementById('charactersTurbo');
+  if (turbo) turbo.checked = false;
 
   charactersUpdatePreview();
 }
@@ -15038,6 +15248,14 @@ async function charactersGenerate() {
   fd.set('framing',  window.CHARACTERS.framing);
   fd.set('duration', window.CHARACTERS.duration);
   fd.set('quality',  window.CHARACTERS.quality);
+  // Turbo toggle → skip-guidance on the HQ sampler. Both knobs to 1 when
+  // on. Defaults (off) match the locked recipe. Speed-up validated at
+  // ~12.6% on a 7s/High clip; no identity loss in side-by-side tests.
+  const turboEl = document.getElementById('charactersTurbo');
+  if (turboEl && turboEl.checked) {
+    fd.set('video_skip_step', '1');
+    fd.set('audio_skip_step', '1');
+  }
 
   try {
     const r = await fetch(`/characters/${encodeURIComponent(c.id)}/generate`, {
@@ -15175,6 +15393,26 @@ function trainInit() {
   trainUpdateEstimate();
   trainUpdateButtonState();
   trainCheckPreflight();
+  trainGuidanceRestore();
+}
+
+// "How to train well" guidance — open by default, dismissible. The dismissed
+// state persists in localStorage so power users don't see the panel every
+// session. New users always see it on first visit.
+function trainGuidanceRestore() {
+  const el = document.getElementById('trainGuidance');
+  if (!el) return;
+  try {
+    if (localStorage.getItem('phos_train_guidance_dismissed') === '1') {
+      el.removeAttribute('open');
+    }
+  } catch (_) { /* private browsing — leave open */ }
+}
+
+function trainGuidanceDismiss() {
+  const el = document.getElementById('trainGuidance');
+  if (el) el.removeAttribute('open');
+  try { localStorage.setItem('phos_train_guidance_dismissed', '1'); } catch (_) {}
 }
 
 // Hits /train/preflight and surfaces a banner inside the Train form when a
