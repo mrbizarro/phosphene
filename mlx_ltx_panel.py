@@ -3699,7 +3699,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     if temporal_mode not in ("native", "fps12_interp24"):
         temporal_mode = "native"
 
-    return {
+    # Optional Characters-tab origin fields. The /characters/<id>/generate
+    # endpoint stamps these onto the form so the sidecar records enough state
+    # for a later "Load Params" to re-open the Characters compose state with
+    # the original character pre-selected and chips pre-filled. When absent
+    # (every other code path) these stay None and never reach the sidecar.
+    _source = f("source", "")
+    _character_id = f("character_id", "")
+    _framing_choice = f("framing", "")
+    _duration_choice = f("duration", "")
+    _prompt_body = f("prompt_body", "")
+    _quality_choice = f("quality_choice", "")
+
+    job = {
         "id": _new_job_id(),
         "status": "queued",
         "queued_at": iso_now(),
@@ -3788,6 +3800,21 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         "output_path": None,
         "error": None,
     }
+    # Attach Characters-origin metadata only when the form actually carried
+    # it. Keeps the params shape unchanged for every other entry point.
+    if _source == "characters" and _character_id:
+        job["params"]["source"] = "characters"
+        job["params"]["character_id"] = _character_id
+        if _framing_choice:
+            job["params"]["framing"] = _framing_choice
+        if _duration_choice:
+            job["params"]["duration"] = _duration_choice
+        # prompt_body stays verbatim — separate from the assembled `prompt`
+        # so Load Params can repopulate the textarea exactly as typed.
+        job["params"]["prompt_body"] = _prompt_body
+        if _quality_choice:
+            job["params"]["quality_choice"] = _quality_choice
+    return job
 
 
 # ---------------------------------------------------------------------------
@@ -6961,6 +6988,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "quality must be balanced or high"}, 400); return
             full_prompt = _character_assemble_prompt(char, prompt_body, framing)
             job_form = _character_build_form(char, full_prompt, duration, quality)
+            # Forward optional HQ speed knobs the Characters compose UI may set
+            # (Turbo toggle → video_skip_step + audio_skip_step). Default 0 when
+            # unset matches the locked recipe.
+            video_skip = (form.get("video_skip_step", ["0"])[0] or "0").strip()
+            audio_skip = (form.get("audio_skip_step", ["0"])[0] or "0").strip()
+            try:
+                video_skip_int = max(0, int(video_skip or "0"))
+                audio_skip_int = max(0, int(audio_skip or "0"))
+            except (TypeError, ValueError):
+                video_skip_int = 0
+                audio_skip_int = 0
+            if video_skip_int:
+                job_form["video_skip_step"] = [str(video_skip_int)]
+            if audio_skip_int:
+                job_form["audio_skip_step"] = [str(audio_skip_int)]
+            # Stamp Characters-origin metadata onto the job form BEFORE make_job
+            # sees it so the sidecar's params dict records enough state for a
+            # future "Load Params" click to re-open the Characters compose
+            # state with everything restored. source="characters" is the
+            # branch flag; the rest is the compose state verbatim.
+            job_form["character_id"] = [cid]
+            job_form["source"] = ["characters"]
+            job_form["framing"] = [framing]
+            job_form["duration"] = [duration]
+            job_form["prompt_body"] = [prompt_body]
+            job_form["quality_choice"] = [quality]
             job = make_job(job_form)
             with QUEUE_COND:
                 STATE["queue"].append(job)
@@ -15025,6 +15078,70 @@ function charactersEscapeHtml(s) {
 }
 function charactersEscapeAttr(s) { return charactersEscapeHtml(s); }
 
+// Restore the Characters compose state from a sidecar `params` dict that
+// was written by /characters/<id>/generate (source === 'characters').
+// Called from loadParams() when the clip's sidecar carries that flag.
+//
+// Sequence:
+//   1. Switch workflow tab to Characters (this calls charactersInit which
+//      lazy-loads the list if needed).
+//   2. Wait for the character list to be ready (charactersLoadList is
+//      idempotent — we just await it).
+//   3. Call charactersOpenCompose(character_id) — same code path the
+//      grid card uses, so all the avatar / chip / preview wiring is
+//      reused.
+//   4. Restore framing / duration / quality / turbo chip state from the
+//      sidecar values. Re-render chips to update .active classes.
+//   5. Repopulate the prompt textarea with prompt_body verbatim and
+//      refresh the preview.
+async function charactersLoadParams(p) {
+  workflowSwitch('characters');
+  // charactersInit is idempotent + starts the list load. Wait for the
+  // list to populate so charactersOpenCompose can find the character.
+  if (typeof charactersInit === 'function') {
+    await charactersInit();
+  }
+  // If list is still empty (race / refresh failure), bail loudly so the
+  // outer loadParams falls back to Manual rather than silently doing
+  // nothing.
+  if (!Array.isArray(window.CHARACTERS.list) || window.CHARACTERS.list.length === 0) {
+    throw new Error('character list empty after init');
+  }
+  const found = window.CHARACTERS.list.find(c => c.id === p.character_id);
+  if (!found) {
+    throw new Error(`character ${p.character_id} not in list`);
+  }
+  charactersOpenCompose(p.character_id);
+  // Sidecar values → compose state. Falls back to current defaults when a
+  // field is missing (older sidecar shapes).
+  if (typeof p.framing === 'string' && p.framing) {
+    window.CHARACTERS.framing = p.framing;
+  }
+  if (typeof p.duration === 'string' && p.duration) {
+    window.CHARACTERS.duration = p.duration;
+  }
+  // The form's "quality_choice" is the user-visible chip ("balanced" / "high").
+  // Older sidecars may have only "quality" (the helper-side recipe), which
+  // for Characters today is always 'high' regardless of chip — so we trust
+  // quality_choice when present, otherwise leave the chip alone.
+  if (typeof p.quality_choice === 'string' && p.quality_choice) {
+    window.CHARACTERS.quality = p.quality_choice;
+  }
+  charactersRenderChips();
+  // Prompt textarea + preview.
+  const ta = document.getElementById('charactersPrompt');
+  if (ta) ta.value = (typeof p.prompt_body === 'string') ? p.prompt_body : '';
+  // Turbo toggle reflects video_skip_step + audio_skip_step. Either knob
+  // > 0 counts as Turbo on; when both are 0 (or missing), Turbo is off.
+  const turbo = document.getElementById('charactersTurbo');
+  if (turbo) {
+    const vs = Number(p.video_skip_step || 0);
+    const as = Number(p.audio_skip_step || 0);
+    turbo.checked = (vs > 0 || as > 0);
+  }
+  charactersUpdatePreview();
+}
+
 
 // ============================================================================
 // TRAIN CHARACTER tab
@@ -17396,6 +17513,20 @@ async function loadParams() {
   if (!r.ok) return;
   const data = await r.json();
   const p = data.params;
+  // If this clip came from the Characters tab, restore the Characters
+  // compose state instead of dumping the user into Manual. The sidecar
+  // carries the source flag + the original compose chips verbatim
+  // (character_id, framing, duration, prompt_body, quality_choice).
+  if (p && p.source === 'characters' && p.character_id) {
+    try {
+      await charactersLoadParams(p);
+      return;
+    } catch (e) {
+      // Fall through to manual-form population on any unexpected error
+      // so the user still gets *something* useful.
+      console.warn('characters loadParams failed, falling back to Manual:', e);
+    }
+  }
   if (p.mode === 'extend') setMode('extend');
   else if (p.mode === 'keyframe') setMode('keyframe');
   else if (p.mode === 'i2v_clean_audio' || p.mode === 'i2v') { setMode('i2v'); document.getElementById('i2vMode').value = p.mode; document.getElementById('mode').value = p.mode; }
