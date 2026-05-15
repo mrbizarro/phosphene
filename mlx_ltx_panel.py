@@ -1193,6 +1193,234 @@ def list_curated_loras() -> list[dict]:
     return [dict(v) for v in CURATED_LORAS.values()]
 
 
+# ---- Characters discovery ----------------------------------------------------
+#
+# A "character" is a paired face + audio LoRA bundle trained in lora-lab.
+# Discovery scans mlx_models/loras/ for files matching `<trigger>_v2.safetensors`
+# and looks for the matching `<trigger>.audio.safetensors`. Metadata
+# (display name, pronoun, subject_noun, default_action) is read from
+# mlx_models/characters/<trigger>/bundle.json when present.
+#
+# This drives the Characters tab — see GET /characters,
+# GET /characters/<id>/preview, POST /characters/<id>/generate.
+
+_CHARACTERS_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_CHARACTERS_PREVIEW_LOCK = threading.Lock()
+_CHARACTERS_CACHE_PATH = MODELS_DIR / "characters"
+
+
+def _character_safe_id(value: str) -> str:
+    """Validate a character id from a URL path. Trigger ids ship as
+    [A-Za-z0-9_-]+ — anything else is path traversal or junk."""
+    v = (value or "").strip()
+    if not v or not _CHARACTERS_ID_RE.match(v):
+        raise ValueError("invalid character id")
+    return v
+
+
+def _character_dataset_image(trigger: str) -> Path | None:
+    """Find the most representative training image for `trigger`.
+
+    Convention: lora-lab writes dataset_<stem>_v2/images/<trigger>_001.png
+    where <stem> is the trigger with the trailing 'trn' stripped
+    (ariatrn → aria, bizarrotrn → bizarro). Falls back to scanning the
+    `images/` dir for any <trigger>_*.png. Returns None when nothing
+    resolvable exists — the UI then paints a placeholder.
+    """
+    lab_root = Path("/Users/salo/AI/projects/lora-lab")
+    stem = trigger[:-3] if trigger.endswith("trn") else trigger
+    candidates = [
+        lab_root / f"dataset_{stem}_v2" / "images" / f"{trigger}_001.png",
+        lab_root / f"dataset_{stem}" / "images" / f"{trigger}_001.png",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    # Last-ditch: grab any <trigger>_*.png in any dataset_<stem>* dir.
+    for parent in (lab_root,):
+        if not parent.is_dir():
+            continue
+        for child in sorted(parent.glob(f"dataset_{stem}*/images/{trigger}_*.png")):
+            if child.is_file():
+                return child
+    return None
+
+
+def _character_bundle(trigger: str) -> dict:
+    """Read mlx_models/characters/<trigger>/bundle.json if present.
+    Returns an empty dict on missing or unparseable JSON — discovery
+    still surfaces the character, just with reduced metadata."""
+    bundle_path = _CHARACTERS_CACHE_PATH / trigger / "bundle.json"
+    if not bundle_path.is_file():
+        return {}
+    try:
+        return json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def list_characters() -> list[dict]:
+    """Scan mlx_models/loras/ for paired face+audio LoRAs and return one
+    record per discovered character.
+
+    Discovery rules:
+      - face_lora = `<trigger>_v2.safetensors`
+      - audio_lora = `<trigger>.audio.safetensors`  (same dir)
+      - voice_wav = `<trigger>.voice.wav`           (same dir, optional)
+      - bundle = mlx_models/characters/<trigger>/bundle.json (optional)
+      - sample_image = first training image in lora-lab's dataset dir
+
+    Only characters with BOTH face and audio LoRAs are returned. The
+    audio LoRA carries the lip-sync + voice characteristics — without
+    it the character lacks the production recipe's full identity.
+    """
+    loras_dir = _safe_loras_dir()
+    if not loras_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
+        trigger = face_path.name[: -len("_v2.safetensors")]
+        if not _CHARACTERS_ID_RE.match(trigger):
+            continue
+        audio_path = loras_dir / f"{trigger}.audio.safetensors"
+        if not audio_path.is_file():
+            continue
+        voice_path = loras_dir / f"{trigger}.voice.wav"
+        bundle = _character_bundle(trigger)
+        sample = _character_dataset_image(trigger)
+        out.append({
+            "id": trigger,
+            "trigger": trigger,
+            "name": bundle.get("name") or trigger.replace("trn", "").title() or trigger,
+            "pronoun": bundle.get("pronoun") or "they",
+            "subject_noun": bundle.get("subject_noun") or "person",
+            "default_action": bundle.get("default_action") or "",
+            "sexy_directive": bool(bundle.get("sexy_directive", False)),
+            "face_lora_path": str(face_path),
+            "audio_lora_path": str(audio_path),
+            "voice_wav_path": str(voice_path) if voice_path.is_file() else None,
+            "sample_image_path": str(sample) if sample else None,
+            "sample_image_url": (f"/characters/{trigger}/preview"
+                                 if sample else None),
+        })
+    return out
+
+
+# Duration in seconds → frames the LTX 2.3 pipeline accepts. The
+# constraint is `frames % 8 == 1`; 121 / 169 / 241 satisfy that and
+# correspond to 5s / 7s / 10s at 24 fps.
+_CHARACTER_DURATION_FRAMES = {
+    "5s": 121,
+    "7s": 169,
+    "10s": 241,
+}
+
+# Framing instruction prepended to the assembled prompt. ECU and CU are
+# the most identity-preserving choices for a trained character; MS / LS
+# work but bias the sampler toward generic body shapes.
+_CHARACTER_FRAMING_TEXT = {
+    "ECU": "extreme close-up",
+    "CU":  "close-up",
+    "MCU": "medium close-up",
+    "MS":  "medium shot",
+    "LS":  "long shot",
+}
+
+
+def _character_assemble_prompt(character: dict, prompt_body: str,
+                               framing: str) -> str:
+    """Build the full prompt that the helper will see.
+
+    Inserts the trigger word + subject noun automatically so the user
+    only types the scene description. Pronoun + subject_noun fall back
+    to neutral defaults when bundle.json is missing. The sexy_directive
+    flag (set per-character in bundle.json) prepends the validated
+    erotic-tension paragraph for Aria-style triggers.
+    """
+    trigger = character["trigger"]
+    subj = character.get("subject_noun") or "person"
+    pronoun = character.get("pronoun") or "they"
+    pronoun_subject = pronoun.capitalize() if pronoun else "Their"
+    pronoun_possessive = (
+        "His" if pronoun.lower() == "he"
+        else "Her" if pronoun.lower() == "she"
+        else "Their"
+    )
+    framing_text = _CHARACTER_FRAMING_TEXT.get(framing, "close-up")
+    body = (prompt_body or "").strip().rstrip(".")
+    parts: list[str] = []
+    if character.get("sexy_directive"):
+        # Validated language for trigger-preserving sultry shots.
+        # Matches the memory note on Aria — quiet seduction, knowing
+        # half-smile, sultry presence.
+        parts.append(
+            f"Cinematic {framing_text} of a stunning sultry {trigger} {subj}, "
+            f"quiet seduction, knowing half-smile, "
+            + (f"{body}." if body else "")
+        )
+    else:
+        parts.append(
+            f"Cinematic {framing_text} of {trigger} {subj}"
+            + (f", {body}." if body else ".")
+        )
+    parts.append("Photorealistic, cinematic, atmospheric.")
+    parts.append(
+        f"{pronoun_possessive} head is steady and locked in position throughout the entire shot, "
+        f"only natural micro-movements of breathing and eyes."
+    )
+    return " ".join(s.strip() for s in parts if s.strip())
+
+
+def _character_build_form(character: dict, prompt: str, duration: str,
+                          quality: str) -> dict:
+    """Translate a Characters-tab submission into a /queue/add form payload.
+
+    The locked recipe defaults (1024x576, quality=high, TC=2.0,
+    stage1=10/stage2=3, cfg=3.0, accel=off, enhance=false) match
+    docs/API.md and are the production-validated settings for
+    character-LoRA T2V on M-series Macs.
+    """
+    frames = _CHARACTER_DURATION_FRAMES.get(duration, 169)
+    # NOTE: both visible 'balanced' and 'high' map to quality=high.
+    # Today balanced silently routes >121f to the Q4 distilled
+    # transformer where current LoRAs lose identity — the two-stage HQ
+    # pipeline is the only one that preserves the trigger faithfully.
+    # We keep two visible labels so we can introduce a real
+    # balanced-grade fast path later without changing the UI contract.
+    _q = quality   # kept for clarity
+    loras_payload = json.dumps([
+        {"path": character["face_lora_path"], "strength": 1.0},
+        {"path": character["audio_lora_path"], "strength": 1.0},
+    ])
+    return {
+        "mode": ["t2v"],
+        "prompt": [prompt],
+        "negative_prompt": [""],
+        "width": ["1024"],
+        "height": ["576"],
+        "frames": [str(frames)],
+        "frame_rate": ["24"],
+        "seed": ["-1"],
+        "quality": ["high"],
+        "temporal_mode": ["native"],
+        "stage1_steps": ["10"],
+        "stage2_steps": ["3"],
+        "teacache_thresh": ["2.0"],
+        "cfg_scale": ["3.0"],
+        "bongmath_max_iter": ["100"],
+        "upscale": ["fit_720p"],
+        "upscale_method": ["lanczos"],
+        "accel": ["off"],
+        # CRITICAL: enhance=false. Gemma's rewrite strips trigger words
+        # and breaks identity. The user has chosen this character — they
+        # don't want the model second-guessing the prompt.
+        "enhance": ["false"],
+        "hdr": ["false"],
+        "loras": [loras_payload],
+        "label": [f"{character.get('name', character['trigger'])} · {duration} · {quality}"],
+    }
+
+
 # ---- Version check / update notifier ----------------------------------------
 # Phosphene ships fixes often (multiple commits a day in active periods) and
 # users keep telling us "I clicked Update but I don't see anything new" — by
@@ -5888,6 +6116,50 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # ====== Characters — discover paired face+audio LoRA bundles =====
+        # Each bundle becomes a card in the Characters tab. The user picks
+        # a card, types the scene body, picks framing/duration/quality —
+        # /characters/<id>/generate assembles the full prompt server-side
+        # with the locked production recipe applied. See list_characters()
+        # for the discovery rules.
+        if parsed.path == "/characters":
+            self._json({"characters": list_characters()})
+            return
+
+        # Serve the sample training image for a character so the browser
+        # can <img src="/characters/<id>/preview">. Path-traversal safe:
+        # `id` is validated against [A-Za-z0-9_-]+ at parse time, and the
+        # resolved file MUST live inside the lora-lab dataset root.
+        if parsed.path.startswith("/characters/") and parsed.path.endswith("/preview"):
+            cid_raw = parsed.path[len("/characters/"):-len("/preview")]
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                self.send_error(404); return
+            sample = _character_dataset_image(cid)
+            if not sample or not sample.is_file():
+                self.send_error(404); return
+            # Defense in depth: confirm the resolved file lives under the
+            # known lora-lab root before serving its bytes.
+            try:
+                lab_root = Path("/Users/salo/AI/projects/lora-lab").resolve()
+                resolved = sample.resolve()
+                if not resolved.is_relative_to(lab_root):
+                    self.send_error(404); return
+            except (OSError, ValueError):
+                self.send_error(404); return
+            try:
+                data = resolved.read_bytes()
+            except OSError:
+                self.send_error(500); return
+            # PNG content type for the dataset image convention. Falls
+            # back to octet-stream if we ever broaden the discovery.
+            ctype = ("image/png" if resolved.suffix.lower() == ".png"
+                     else "image/jpeg" if resolved.suffix.lower() in (".jpg", ".jpeg")
+                     else "application/octet-stream")
+            self._ok(data, ctype)
+            return
+
         # ====== Train Character — completed LoRA list =====================
         if parsed.path == "/train/list":
             self._json({
@@ -6656,6 +6928,56 @@ class Handler(BaseHTTPRequestHandler):
                 QUEUE_COND.notify_all()
             persist_queue()
             self._json({"ok": True, "id": job["id"]})
+            return
+
+        # ====== Characters — assemble prompt + submit a render job =========
+        # The Characters tab posts here with prompt_body + duration +
+        # quality + framing. We look up the character, assemble the full
+        # prompt (auto-injecting the trigger word, subject noun, and
+        # production recipe), then push a normal mode=t2v job into the
+        # queue. From the worker's POV this is indistinguishable from a
+        # /queue/add submission — same params shape, same render path.
+        if path.startswith("/characters/") and path.endswith("/generate"):
+            cid_raw = path[len("/characters/"):-len("/generate")]
+            try:
+                cid = _character_safe_id(cid_raw)
+            except ValueError:
+                self._json({"error": "invalid character id"}, 400); return
+            chars = {c["id"]: c for c in list_characters()}
+            char = chars.get(cid)
+            if not char:
+                self._json({"error": f"character {cid!r} not found"}, 404); return
+            prompt_body = (form.get("prompt_body", [""])[0] or "").strip()
+            duration = (form.get("duration", ["7s"])[0] or "7s").strip()
+            if duration not in _CHARACTER_DURATION_FRAMES:
+                self._json({"error": f"duration must be one of "
+                            f"{sorted(_CHARACTER_DURATION_FRAMES)}"}, 400); return
+            framing = (form.get("framing", ["CU"])[0] or "CU").strip().upper()
+            if framing not in _CHARACTER_FRAMING_TEXT:
+                self._json({"error": f"framing must be one of "
+                            f"{sorted(_CHARACTER_FRAMING_TEXT)}"}, 400); return
+            quality = (form.get("quality", ["high"])[0] or "high").strip().lower()
+            if quality not in ("balanced", "high"):
+                self._json({"error": "quality must be balanced or high"}, 400); return
+            full_prompt = _character_assemble_prompt(char, prompt_body, framing)
+            job_form = _character_build_form(char, full_prompt, duration, quality)
+            job = make_job(job_form)
+            with QUEUE_COND:
+                STATE["queue"].append(job)
+                QUEUE_COND.notify_all()
+            persist_queue()
+            push(f"characters: queued {cid} duration={duration} quality={quality} "
+                 f"framing={framing} job_id={job['id']}")
+            self._json({
+                "ok": True,
+                "job_id": job["id"],
+                "assembled_prompt": full_prompt,
+                "character": {
+                    "id": cid,
+                    "name": char.get("name"),
+                    "trigger": char.get("trigger"),
+                },
+            })
             return
 
         # ====== Train Character — start training (enqueue a mode='train' job)
@@ -8445,6 +8767,426 @@ HTML = r"""<!doctype html>
     .studio-results {
       margin-top: 14px;
     }
+
+    /* ============================================================
+       Characters pane (.characters-pane) — pick a trained character +
+       describe the scene + ship. The aesthetic stays Linear-clean
+       (hairlines, dense type, mono numerics) but the cards lead with
+       the actual training photo because a face is the highest-bandwidth
+       way to tell two characters apart.
+
+       Two states:
+         .characters-grid-state   — card grid, default
+         .characters-compose-state — single character + prompt + chips
+       JS toggles `hidden` on each, no animation needed (instant).
+       ============================================================ */
+    .characters-pane { display: none; padding: 24px 24px 96px 24px; }
+    .characters-pane.show { display: block; }
+
+    .characters-head {
+      max-width: 920px;
+      margin: 4px auto 28px auto;
+      text-align: left;
+    }
+    .characters-title {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      color: var(--text);
+      margin: 0 0 6px 0;
+    }
+    .characters-sub {
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ph-text-faint, var(--muted));
+      margin: 0;
+    }
+    .characters-grid {
+      max-width: 920px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 24px;
+    }
+    .characters-loading {
+      grid-column: 1 / -1;
+      padding: 60px 16px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .characters-empty {
+      max-width: 560px;
+      margin: 60px auto;
+      padding: 32px;
+      text-align: center;
+      background: var(--ph-elev-1, var(--panel));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 14px;
+    }
+    .characters-empty-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .characters-empty-body {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .characters-empty-body a {
+      color: var(--accent-bright);
+      text-decoration: none;
+      border-bottom: 1px dotted currentColor;
+    }
+    .characters-empty-body code {
+      background: rgba(140, 160, 220, 0.06);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 11.5px;
+    }
+
+    /* ---- Character card ---- */
+    .characters-card {
+      position: relative;
+      background: var(--ph-elev-1, var(--panel));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 14px;
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1),
+                  border-color 280ms ease,
+                  box-shadow 280ms ease;
+    }
+    .characters-card::before {
+      /* Animated gradient halo on hover. Lives behind the card via
+         a pseudo-element so we can fade it in without re-laying-out. */
+      content: '';
+      position: absolute;
+      inset: -1px;
+      border-radius: 14px;
+      padding: 1px;
+      background: linear-gradient(135deg,
+        var(--ph-grad-pink, #FF2E9F) 0%,
+        var(--ph-grad-purple, #B14AFF) 50%,
+        var(--ph-grad-cyan, #5EEAFF) 100%);
+      -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+              mask-composite: exclude;
+      opacity: 0;
+      transition: opacity 280ms ease;
+      pointer-events: none;
+    }
+    .characters-card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+    }
+    .characters-card:hover::before {
+      opacity: 0.7;
+    }
+    .characters-card-img {
+      aspect-ratio: 1;
+      width: 100%;
+      object-fit: cover;
+      display: block;
+      background: var(--ph-elev-2, var(--bg-2));
+    }
+    .characters-card-placeholder {
+      aspect-ratio: 1;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 64px;
+      font-weight: 700;
+      color: rgba(255, 255, 255, 0.5);
+      background: linear-gradient(135deg,
+        rgba(255, 46, 159, 0.18),
+        rgba(177, 74, 255, 0.18),
+        rgba(94, 234, 255, 0.18));
+    }
+    .characters-card-meta {
+      padding: 14px 16px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .characters-card-name {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      line-height: 1.15;
+    }
+    .characters-card-chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .characters-trigger-chip {
+      font-family: var(--ph-font-mono, "SF Mono", monospace);
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      padding: 2px 7px;
+      border-radius: 4px;
+      color: var(--ph-text-faint, var(--muted));
+      background: rgba(140, 160, 220, 0.06);
+      border: 1px solid rgba(140, 160, 220, 0.08);
+    }
+    .characters-pronoun-chip {
+      font-size: 11px;
+      letter-spacing: 0.01em;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: var(--ph-text-faint, var(--muted));
+      background: rgba(140, 160, 220, 0.04);
+      border: 1px solid rgba(140, 160, 220, 0.06);
+    }
+
+    /* ---- Compose state ---- */
+    .characters-compose-state {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    .characters-back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px 4px 4px;
+      margin-bottom: 18px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--ph-text-faint, var(--muted));
+      font-size: 12.5px;
+      cursor: pointer;
+      transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
+    }
+    .characters-back-link:hover {
+      color: var(--text);
+      background: rgba(140, 160, 220, 0.05);
+    }
+    .characters-compose-head {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    .characters-compose-avatar {
+      width: 64px; height: 64px;
+      border-radius: 14px;
+      overflow: hidden;
+      flex-shrink: 0;
+      background: var(--ph-elev-2, var(--bg-2));
+      border: 1px solid var(--ph-border-soft, var(--border));
+    }
+    .characters-compose-avatar img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .characters-avatar-placeholder {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px; font-weight: 700;
+      color: rgba(255, 255, 255, 0.6);
+      background: linear-gradient(135deg,
+        rgba(255, 46, 159, 0.22),
+        rgba(177, 74, 255, 0.22),
+        rgba(94, 234, 255, 0.22));
+    }
+    .characters-compose-titles { flex: 1; min-width: 0; }
+    .characters-compose-name {
+      font-size: 24px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin: 0 0 4px 0;
+    }
+    .characters-compose-meta {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .characters-compose-card {
+      background: var(--ph-elev-1, var(--panel));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 14px;
+      padding: 22px 22px 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .characters-field-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint, var(--muted));
+      margin-bottom: -10px;     /* tighten gap to the input */
+    }
+    .characters-prompt-input {
+      width: 100%;
+      background: var(--ph-elev-2, var(--bg-2));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 10px;
+      padding: 12px 14px;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.55;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 90px;
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+    .characters-prompt-input::placeholder {
+      color: var(--ph-text-faint, var(--muted));
+      opacity: 0.7;
+    }
+    .characters-prompt-input:focus {
+      outline: none;
+      border-color: rgba(94, 234, 255, 0.4);
+      box-shadow: 0 0 0 3px rgba(94, 234, 255, 0.10);
+    }
+
+    .characters-chip-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .characters-chip-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .characters-group-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint, var(--muted));
+    }
+    .characters-chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .characters-chip {
+      padding: 6px 11px;
+      border-radius: 6px;
+      background: rgba(140, 160, 220, 0.05);
+      border: 1px solid var(--ph-border-soft, var(--border));
+      color: var(--ph-text-faint, var(--muted));
+      font-size: 12.5px;
+      cursor: pointer;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+    }
+    .characters-chip:hover {
+      background: rgba(140, 160, 220, 0.10);
+      color: var(--text);
+    }
+    .characters-chip.active {
+      background: rgba(94, 234, 255, 0.10);
+      border-color: rgba(94, 234, 255, 0.40);
+      color: var(--accent-bright, #5EEAFF);
+    }
+
+    .characters-preview-block {
+      background: var(--ph-elev-2, var(--bg-2));
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .characters-preview-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ph-text-faint, var(--muted));
+      margin-bottom: 6px;
+    }
+    .characters-preview-text {
+      font-family: var(--ph-font-mono, "SF Mono", monospace);
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: rgba(220, 224, 240, 0.78);
+      margin: 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .characters-generate-btn {
+      align-self: stretch;
+      margin-top: 4px;
+      padding: 14px 22px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      font-size: 14.5px;
+      font-weight: 600;
+      letter-spacing: -0.005em;
+      color: #001020;
+      background: linear-gradient(92deg,
+        var(--ph-grad-pink, #FF2E9F) 0%,
+        var(--ph-grad-purple, #B14AFF) 50%,
+        var(--ph-grad-cyan, #5EEAFF) 100%);
+      box-shadow:
+        0 8px 22px rgba(177, 74, 255, 0.22),
+        0 0 0 1px rgba(255, 46, 159, 0.32) inset;
+      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+                  box-shadow 220ms ease, filter 180ms ease;
+    }
+    .characters-generate-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow:
+        0 14px 28px rgba(177, 74, 255, 0.30),
+        0 0 0 1px rgba(255, 46, 159, 0.40) inset;
+      filter: brightness(1.04);
+    }
+    .characters-generate-btn:active:not(:disabled) {
+      transform: translateY(0);
+      filter: brightness(0.97);
+    }
+    .characters-generate-btn:disabled {
+      cursor: not-allowed;
+      filter: grayscale(0.4) brightness(0.78);
+      box-shadow: none;
+    }
+    .characters-generate-busy:not([hidden]) + .characters-generate-label,
+    .characters-generate-btn .characters-generate-busy[hidden] + .characters-generate-label { display: inline; }
+    .characters-generate-btn:has(.characters-generate-busy:not([hidden])) .characters-generate-label { display: none; }
+
+    .characters-toast {
+      margin-top: 4px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      background: rgba(94, 234, 255, 0.06);
+      border: 1px solid rgba(94, 234, 255, 0.20);
+      color: var(--text);
+    }
+    .characters-toast.error {
+      background: rgba(248, 81, 73, 0.06);
+      border-color: rgba(248, 81, 73, 0.28);
+    }
+
+    /* When the Characters workflow is active, hide the manual-only
+       chrome so the form-pane is dedicated to the Characters surface.
+       Mirrors the train workflow rules above. */
+    body[data-workflow="characters"] #modelsInline,
+    body[data-workflow="characters"] #modeGroup,
+    body[data-workflow="characters"] aside.form-pane > h2,
+    body[data-workflow="characters"] #genForm,
+    body[data-workflow="characters"] #studioSection { display: none !important; }
+    body[data-workflow="characters"] #charactersSection { display: block; }
 
     /* ============================================================
        Train Character pane (.train-pane) — same chrome as the
@@ -11743,12 +12485,14 @@ HTML = r"""<!doctype html>
   <!-- ============== FORM PANE ============== -->
   <aside class="form-pane">
 
-    <!-- Workflow tabs: switch the form-pane between the manual form and
-         the chat-driven planner. Default = manual; toggling persists in
+    <!-- Workflow tabs: Manual (the unified generate form), Characters
+         (pick a trained character + scene + ship), Train (train new
+         character LoRAs). Default = manual; the choice persists in
          localStorage so the user lands on the same tab next session. -->
     <nav class="workflow-tabs" id="workflowTabs">
       <button data-workflow="manual" class="active">Manual</button>
-      <button data-workflow="train">Train<span class="new-badge">NEW</span></button>
+      <button data-workflow="characters">Characters<span class="new-badge">NEW</span></button>
+      <button data-workflow="train">Train</button>
     </nav>
     <!-- The original manual form is unchanged; it sits below in the DOM
          and is shown/hidden by JS as the workflow tab toggles. -->
@@ -12410,6 +13154,97 @@ HTML = r"""<!doctype html>
          shells out to it via /train/start. Job status surfaces through
          the existing Now / Queue / Recent / Logs panes (training is just
          another mode dispatch in run_job_inner). -->
+
+    <!-- ============== CHARACTERS SECTION ==============
+         The pick-a-character-and-ship surface. Two visual states:
+           grid  — auto-discovered cards from mlx_models/loras/
+           compose — single character + prompt + framing/duration/quality
+         JS state machine lives in charactersInit / charactersOpenCompose /
+         charactersBackToGrid. Submits POST /characters/<id>/generate
+         which assembles the full prompt (trigger + recipe) server-side. -->
+    <div class="mode-only characters-pane" id="charactersSection">
+      <!-- GRID STATE — card per discovered character -->
+      <div class="characters-grid-state" id="charactersGridState">
+        <div class="characters-head">
+          <h1 class="characters-title">Characters</h1>
+          <p class="characters-sub">Pick a character, describe the scene, ship.<br/>
+            Trigger word and the validated production recipe are applied for you.</p>
+        </div>
+        <div class="characters-grid" id="charactersGrid">
+          <div class="characters-loading">Scanning <code>mlx_models/loras/</code>…</div>
+        </div>
+        <div class="characters-empty" id="charactersEmpty" hidden>
+          <div class="characters-empty-title">No characters yet</div>
+          <div class="characters-empty-body">
+            Train one in the <a href="#" onclick="workflowSwitch('train'); return false;">Train tab</a> —
+            once a face + audio LoRA pair lands in <code>mlx_models/loras/</code> it shows up here automatically.
+          </div>
+        </div>
+      </div>
+
+      <!-- COMPOSE STATE — selected character, scene description, framing,
+           duration, quality, real-time prompt preview, Generate button -->
+      <div class="characters-compose-state" id="charactersComposeState" hidden>
+        <button class="characters-back-link" type="button" onclick="charactersBackToGrid()" aria-label="Back to characters">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+          <span>Characters</span>
+        </button>
+
+        <div class="characters-compose-head">
+          <div class="characters-compose-avatar" id="charactersComposeAvatar">
+            <div class="characters-avatar-placeholder" id="charactersComposeAvatarPlaceholder">A</div>
+          </div>
+          <div class="characters-compose-titles">
+            <h1 class="characters-compose-name" id="charactersComposeName">Character</h1>
+            <div class="characters-compose-meta">
+              <code class="characters-trigger-chip" id="charactersComposeTrigger">trigger</code>
+              <span class="characters-pronoun-chip" id="charactersComposePronoun">she · woman</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="characters-compose-card">
+          <label class="characters-field-label" for="charactersPrompt">Scene</label>
+          <textarea
+            id="charactersPrompt"
+            class="characters-prompt-input"
+            rows="4"
+            placeholder='e.g. "in a steampunk workshop at dusk, holding a brass dial"'
+            oninput="charactersUpdatePreview()"
+          ></textarea>
+
+          <div class="characters-chip-row">
+            <div class="characters-chip-group" data-group="framing">
+              <span class="characters-group-label">Framing</span>
+              <div class="characters-chips" id="charactersFramingChips" role="group"></div>
+            </div>
+            <div class="characters-chip-group" data-group="duration">
+              <span class="characters-group-label">Duration</span>
+              <div class="characters-chips" id="charactersDurationChips" role="group"></div>
+            </div>
+            <div class="characters-chip-group" data-group="quality">
+              <span class="characters-group-label">Quality</span>
+              <div class="characters-chips" id="charactersQualityChips" role="group"></div>
+            </div>
+          </div>
+
+          <div class="characters-preview-block">
+            <div class="characters-preview-label">What the model will see</div>
+            <pre class="characters-preview-text" id="charactersPromptPreview"></pre>
+          </div>
+
+          <button type="button" id="charactersGenerateBtn" class="characters-generate-btn"
+                  onclick="charactersGenerate()">
+            <span class="characters-generate-label">Generate</span>
+            <span class="characters-generate-busy" hidden>Queueing…</span>
+          </button>
+          <div class="characters-toast" id="charactersToast" hidden></div>
+        </div>
+      </div>
+    </div>
+
     <div class="mode-only train-pane" id="trainSection">
 
       <!-- Preflight model check — hidden by default; populated by
@@ -13878,6 +14713,268 @@ const TRAIN = {
   initialised: false,
 };
 
+// ============================================================================
+// CHARACTERS TAB — discover paired LoRAs, pick one, type the scene, ship.
+// ============================================================================
+//
+// Server endpoints:
+//   GET  /characters                  — discover bundles, returns list
+//   GET  /characters/<id>/preview     — serve the sample training image
+//   POST /characters/<id>/generate    — assemble prompt + queue render job
+//
+// All recipe defaults (1024x576, quality=high, TC=2.0, stage1=10/stage2=3,
+// cfg=3.0, enhance=false) are applied server-side per docs/API.md. The UI
+// only collects scene body + framing + duration + quality.
+
+window.CHARACTERS = {
+  list: [],            // [{id, name, trigger, pronoun, subject_noun, sample_image_url, ...}]
+  selected: null,      // currently-composing character (object from list)
+  framing: 'CU',       // ECU | CU | MCU | MS | LS
+  duration: '7s',      // 5s | 7s | 10s
+  quality: 'high',     // balanced | high
+  loading: false,
+  initialised: false,
+};
+
+const CHARACTERS_FRAMING = [
+  ['ECU', 'extreme close-up'],
+  ['CU',  'close-up'],
+  ['MCU', 'medium close-up'],
+  ['MS',  'medium shot'],
+  ['LS',  'long shot'],
+];
+const CHARACTERS_DURATION = [
+  ['5s',  '5 sec'],
+  ['7s',  '7 sec'],
+  ['10s', '10 sec'],
+];
+const CHARACTERS_QUALITY = [
+  ['balanced', 'Balanced'],
+  ['high',     'High'],
+];
+const CHARACTERS_FRAMING_TEXT = Object.fromEntries(CHARACTERS_FRAMING);
+
+async function charactersInit() {
+  // Idempotent. The grid is the default view; compose state only
+  // appears after the user picks a card.
+  if (!window.CHARACTERS.initialised) {
+    window.CHARACTERS.initialised = true;
+    charactersRenderChips();
+    charactersBackToGrid();   // ensure grid state visible
+  }
+  await charactersLoadList();
+}
+
+async function charactersLoadList() {
+  if (window.CHARACTERS.loading) return;
+  window.CHARACTERS.loading = true;
+  const grid = document.getElementById('charactersGrid');
+  const empty = document.getElementById('charactersEmpty');
+  if (grid) grid.innerHTML = '<div class="characters-loading">Scanning <code>mlx_models/loras/</code>…</div>';
+  if (empty) empty.hidden = true;
+  try {
+    const r = await fetch('/characters', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    window.CHARACTERS.list = Array.isArray(j.characters) ? j.characters : [];
+    charactersRenderGrid();
+  } catch (e) {
+    if (grid) grid.innerHTML = `<div class="characters-loading">Couldn't load characters: ${charactersEscapeHtml(String(e.message || e))}</div>`;
+  } finally {
+    window.CHARACTERS.loading = false;
+  }
+}
+
+function charactersRenderGrid() {
+  const grid = document.getElementById('charactersGrid');
+  const empty = document.getElementById('charactersEmpty');
+  if (!grid) return;
+  const list = window.CHARACTERS.list || [];
+  if (list.length === 0) {
+    grid.innerHTML = '';
+    if (empty) empty.hidden = false;
+    return;
+  }
+  if (empty) empty.hidden = true;
+  const cards = list.map(c => {
+    const img = c.sample_image_url
+      ? `<img class="characters-card-img" src="${charactersEscapeAttr(c.sample_image_url)}" alt="${charactersEscapeAttr(c.name || c.trigger)}" loading="lazy">`
+      : `<div class="characters-card-placeholder">${charactersEscapeHtml((c.name || c.trigger || '?').slice(0, 1).toUpperCase())}</div>`;
+    return `
+      <div class="characters-card" role="button" tabindex="0"
+           data-character-id="${charactersEscapeAttr(c.id)}"
+           onclick="charactersOpenCompose('${charactersEscapeAttr(c.id)}')"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();charactersOpenCompose('${charactersEscapeAttr(c.id)}')}">
+        ${img}
+        <div class="characters-card-meta">
+          <div class="characters-card-name">${charactersEscapeHtml(c.name || c.trigger)}</div>
+          <div class="characters-card-chips">
+            <code class="characters-trigger-chip">${charactersEscapeHtml(c.trigger)}</code>
+            <span class="characters-pronoun-chip">${charactersEscapeHtml((c.pronoun || 'they') + ' · ' + (c.subject_noun || 'person'))}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+  grid.innerHTML = cards;
+}
+
+function charactersRenderChips() {
+  const renderGroup = (containerId, options, current, fieldName) => {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.innerHTML = options.map(([val, label]) => (
+      `<button type="button" class="characters-chip${val === current ? ' active' : ''}"
+               data-val="${charactersEscapeAttr(val)}"
+               onclick="charactersPickChip('${fieldName}', '${charactersEscapeAttr(val)}')">${charactersEscapeHtml(label)}</button>`
+    )).join('');
+  };
+  renderGroup('charactersFramingChips',  CHARACTERS_FRAMING,  window.CHARACTERS.framing,  'framing');
+  renderGroup('charactersDurationChips', CHARACTERS_DURATION, window.CHARACTERS.duration, 'duration');
+  renderGroup('charactersQualityChips',  CHARACTERS_QUALITY,  window.CHARACTERS.quality,  'quality');
+}
+
+function charactersPickChip(field, val) {
+  if (field !== 'framing' && field !== 'duration' && field !== 'quality') return;
+  window.CHARACTERS[field] = val;
+  charactersRenderChips();
+  charactersUpdatePreview();
+}
+
+function charactersOpenCompose(id) {
+  const c = (window.CHARACTERS.list || []).find(x => x.id === id);
+  if (!c) return;
+  window.CHARACTERS.selected = c;
+
+  // Toggle states.
+  const grid = document.getElementById('charactersGridState');
+  const compose = document.getElementById('charactersComposeState');
+  if (grid) grid.hidden = true;
+  if (compose) compose.hidden = false;
+
+  // Populate the avatar.
+  const av = document.getElementById('charactersComposeAvatar');
+  const placeholder = document.getElementById('charactersComposeAvatarPlaceholder');
+  if (av) {
+    if (c.sample_image_url) {
+      av.innerHTML = `<img src="${charactersEscapeAttr(c.sample_image_url)}" alt="${charactersEscapeAttr(c.name || c.trigger)}">`;
+    } else {
+      av.innerHTML = `<div class="characters-avatar-placeholder">${charactersEscapeHtml((c.name || c.trigger || '?').slice(0, 1).toUpperCase())}</div>`;
+    }
+  }
+
+  // Populate the titles + chips.
+  const nameEl = document.getElementById('charactersComposeName');
+  if (nameEl) nameEl.textContent = c.name || c.trigger;
+  const trigEl = document.getElementById('charactersComposeTrigger');
+  if (trigEl) trigEl.textContent = c.trigger;
+  const pronounEl = document.getElementById('charactersComposePronoun');
+  if (pronounEl) pronounEl.textContent = `${c.pronoun || 'they'} · ${c.subject_noun || 'person'}`;
+
+  // Clear the prompt + toast for the new selection. Focus the input.
+  const ta = document.getElementById('charactersPrompt');
+  if (ta) {
+    ta.value = '';
+    setTimeout(() => ta.focus(), 60);
+  }
+  const toast = document.getElementById('charactersToast');
+  if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
+
+  charactersUpdatePreview();
+}
+
+function charactersBackToGrid() {
+  window.CHARACTERS.selected = null;
+  const grid = document.getElementById('charactersGridState');
+  const compose = document.getElementById('charactersComposeState');
+  if (grid) grid.hidden = false;
+  if (compose) compose.hidden = true;
+}
+
+function charactersUpdatePreview() {
+  const pre = document.getElementById('charactersPromptPreview');
+  if (!pre) return;
+  const c = window.CHARACTERS.selected;
+  if (!c) { pre.textContent = ''; return; }
+  const body = (document.getElementById('charactersPrompt')?.value || '').trim().replace(/\.$/, '');
+  const trigger = c.trigger;
+  const subj = c.subject_noun || 'person';
+  const pronoun = (c.pronoun || 'they').toLowerCase();
+  const possessive = (pronoun === 'he') ? 'His' : (pronoun === 'she') ? 'Her' : 'Their';
+  const framingText = CHARACTERS_FRAMING_TEXT[window.CHARACTERS.framing] || 'close-up';
+  const parts = [];
+  if (c.sexy_directive) {
+    parts.push(`Cinematic ${framingText} of a stunning sultry ${trigger} ${subj}, quiet seduction, knowing half-smile, ${body ? body + '.' : ''}`.trim());
+  } else {
+    parts.push(`Cinematic ${framingText} of ${trigger} ${subj}${body ? ', ' + body + '.' : '.'}`);
+  }
+  parts.push('Photorealistic, cinematic, atmospheric.');
+  parts.push(`${possessive} head is steady and locked in position throughout the entire shot, only natural micro-movements of breathing and eyes.`);
+  pre.textContent = parts.join(' ');
+}
+
+async function charactersGenerate() {
+  const c = window.CHARACTERS.selected;
+  if (!c) return;
+  const btn = document.getElementById('charactersGenerateBtn');
+  const labelSpan = btn ? btn.querySelector('.characters-generate-label') : null;
+  const busySpan  = btn ? btn.querySelector('.characters-generate-busy')  : null;
+  const promptEl = document.getElementById('charactersPrompt');
+  const toast = document.getElementById('charactersToast');
+  const prompt_body = (promptEl?.value || '').trim();
+  if (btn) btn.disabled = true;
+  if (labelSpan) labelSpan.hidden = true;
+  if (busySpan)  busySpan.hidden  = false;
+  if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
+
+  const fd = new URLSearchParams();
+  fd.set('prompt_body', prompt_body);
+  fd.set('framing',  window.CHARACTERS.framing);
+  fd.set('duration', window.CHARACTERS.duration);
+  fd.set('quality',  window.CHARACTERS.quality);
+
+  try {
+    const r = await fetch(`/characters/${encodeURIComponent(c.id)}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      credentials: 'same-origin',
+      body: fd.toString(),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (toast) {
+      toast.hidden = false;
+      toast.textContent = `Queued ${c.name || c.trigger} · ${window.CHARACTERS.duration} · ${window.CHARACTERS.quality} → job ${j.job_id}`;
+    }
+    // Refresh the queue/recent display so the user sees the new job
+    // land. The panel's status loop polls every couple of seconds; nudge
+    // it for an immediate refresh so the new card pops without delay.
+    if (typeof poll === 'function') {
+      try { poll(); } catch (e) {}
+    }
+  } catch (e) {
+    if (toast) {
+      toast.hidden = false;
+      toast.classList.add('error');
+      toast.textContent = `Couldn't queue: ${String(e.message || e)}`;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+    if (labelSpan) labelSpan.hidden = false;
+    if (busySpan)  busySpan.hidden  = true;
+  }
+}
+
+function charactersEscapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+function charactersEscapeAttr(s) { return charactersEscapeHtml(s); }
+
+
+// ============================================================================
+// TRAIN CHARACTER tab
+// ============================================================================
 const TRAIN_MIN = 15;
 const TRAIN_MAX = 50;
 
