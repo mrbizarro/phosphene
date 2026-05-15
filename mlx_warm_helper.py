@@ -28,7 +28,12 @@ from pathlib import Path
 # ---- config ------------------------------------------------------------------
 # All paths come from env vars set by the panel. If LTX_GEMMA isn't set, the
 # pipeline falls back to downloading the HF model id, which works first-run.
-MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
+_ROOT = Path(__file__).resolve().parent
+_Q4_LOCAL_PATH = _ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+MODEL_ID = os.environ.get(
+    "LTX_MODEL",
+    str(_Q4_LOCAL_PATH) if _Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
+)
 GEMMA_PATH = os.environ.get("LTX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
 IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")

@@ -273,7 +273,7 @@ Serves the sample training image for the character (PNG/JPEG).
 
 ### `POST /characters/<id>/generate`
 
-Assembles the locked production recipe + queues a T2V render. See the panel source for the full form; the audio LoRA is only stacked when `has_voice` is true.
+Assembles the locked production recipe + queues a T2V render. The endpoint accepts `prompt_body`, `framing`, `duration`, `quality`, and an optional integer `seed` (`-1` means random, matching `/queue/add`). For exact replay/debug calls, callers may pass `full_prompt` plus HQ override fields such as `stage1_steps`, `stage2_steps`, `teacache_thresh`, `cfg_scale`, `bongmath_max_iter`, `video_skip_step`, and `audio_skip_step`. The audio LoRA is only stacked when `has_voice` is true.
 
 ---
 

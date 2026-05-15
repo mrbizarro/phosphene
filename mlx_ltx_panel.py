@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import cgi
 import importlib.util
+import io
 import json
 import os
 import random
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import urllib.error
@@ -106,7 +108,11 @@ FFMPEG = _resolve_ffmpeg()
 FFMPEG_BIN = FFMPEG.parent
 FFPROBE = FFMPEG.parent / "ffprobe"  # ships next to ffmpeg in every distribution we support
 
-MODEL_ID = os.environ.get("LTX_MODEL", "dgrauet/ltx-2.3-mlx-q4")
+Q4_LOCAL_PATH = MODELS_DIR / "ltx-2.3-mlx-q4"
+MODEL_ID = os.environ.get(
+    "LTX_MODEL",
+    str(Q4_LOCAL_PATH) if Q4_LOCAL_PATH.is_dir() else "dgrauet/ltx-2.3-mlx-q4",
+)
 MODEL_ID_HQ = os.environ.get("LTX_MODEL_HQ", "dgrauet/ltx-2.3-mlx-q8")
 # Q8 model is detected on disk so the High quality tier can be conditionally enabled.
 Q8_LOCAL_PATH = Path(os.environ.get("LTX_Q8_LOCAL", str(ROOT / "mlx_models/ltx-2.3-mlx-q8")))
@@ -724,18 +730,78 @@ TRAIN_PRESETS = {
                "label": "Medium",
                "subtitle": "~2 h · rank 16 · 576px",
                "checkpoint_interval": 500},
-    "high":   {"steps": 5000, "rank": 32, "lr": 5e-5, "resolution": 768,
-               "seconds_per_step": 3.0,  "ram_peak_gb": 28,
+    # high tier mirrors the validated CLI recipe in the ltx-lora skill
+    # (rank 32 / 5000 steps / lr 1e-4 / 512px). The earlier 5e-5 LR was a
+    # mistake — it slowed convergence vs the proven 1e-4 (Aria_v2,
+    # Bizarro_v2 both trained at 1e-4). 512px portrait-friendly resolution
+    # matches the lora-lab preprocess defaults and what Aria/Bizarro used.
+    "high":   {"steps": 5000, "rank": 32, "lr": 1e-4, "resolution": 512,
+               "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
-               "subtitle": "~4 h · rank 32 · 768px",
-               "checkpoint_interval": 500},
+               "subtitle": "~2 h 50 min · rank 32 · 5000 steps · 512px",
+               "checkpoint_interval": 250},
 }
+
+# Style LoRA presets — parallel to TRAIN_PRESETS but tuned for aesthetic
+# transfers rather than identity. Targets the same to_q/to_k/to_v/to_out
+# video-attention modules a character LoRA does; the difference is what the
+# DATASET teaches the model (composition / grading / lighting vs face/voice).
+#
+# Why the table looks different from TRAIN_PRESETS:
+#   - Style benefits less from very high rank than character does — rank 32
+#     is the validated capacity ceiling for our LTX-2.3 stack (Aria_v2,
+#     Bizarro_v2). For style, "high" tier adds STEPS, not rank.
+#   - Default Quick uses rank 16 (not rank 8) because style coverage needs a
+#     bit more attention budget than identity, even at the fast tier.
+#   - 512px resolution across the board — style training benefits from a
+#     single fixed bucket so the model sees the same aspect / detail level
+#     across the dataset.
+TRAIN_STYLE_PRESETS = {
+    "quick":  {"steps": 1500, "rank": 16, "lr": 1e-4, "resolution": 512,
+               "seconds_per_step": 1.5,  "ram_peak_gb": 12,
+               "label": "Quick",
+               "subtitle": "~30 min · rank 16 · 512px",
+               "checkpoint_interval": 500},
+    "medium": {"steps": 3000, "rank": 32, "lr": 1e-4, "resolution": 512,
+               "seconds_per_step": 2.0,  "ram_peak_gb": 18,
+               "label": "Medium",
+               "subtitle": "~1 h 40 min · rank 32 · 512px",
+               "checkpoint_interval": 500},
+    # high adds steps not rank (see note above).
+    "high":   {"steps": 5000, "rank": 32, "lr": 1e-4, "resolution": 512,
+               "seconds_per_step": 2.0,  "ram_peak_gb": 28,
+               "label": "High",
+               "subtitle": "~2 h 50 min · rank 32 · 5000 steps · 512px",
+               "checkpoint_interval": 250},
+}
+
+# Train-type values accepted by /train/start and stamped onto job params.
+TRAIN_TYPES = ("character", "style")
 
 # Dataset rules.
 TRAIN_MIN_IMAGES = 15
 TRAIN_MAX_IMAGES = 50
 TRAIN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 TRAIN_MAX_BYTES_PER_IMAGE = 32 * 1024 * 1024     # 32 MB per image upload
+
+# User-provided captions. Industry convention: `image_001.png` pairs with
+# `image_001.txt` (same stem) in the same upload. Caption body uses LTX's
+# canonical format:
+#   [VISUAL]: <trigger>, <50-80 word description of what VARIES in this shot>
+#   [TEXT]: None
+# See ~/.claude/skills/ltx-lora/SKILL.md (caption rules) and Aria_v2 / Bizarro_v2
+# datasets for validated examples.
+TRAIN_CAPTION_EXTS = {".txt", ".json"}            # .json reserved for future
+TRAIN_CAPTION_MAX_BYTES = 64 * 1024              # 64 KB per caption (huge headroom)
+
+# /train/upload-bundle limits — covers 50 images × ~10 MB each, plus captions.
+TRAIN_BUNDLE_MAX_BYTES = 500 * 1024 * 1024        # 500 MB upper bound
+TRAIN_BUNDLE_MAX_ENTRIES = 200                    # paranoia cap on ZIP entries
+# Allowed entry name pattern — basename only, no subdirs, no path traversal.
+# Stem ≤ 64 chars, then a single dot + one of our extensions.
+TRAIN_BUNDLE_NAME_RE = re.compile(
+    r"^[A-Za-z0-9_\-]{1,64}\.(png|jpg|jpeg|webp|txt)$"
+)
 
 # Voice clip rules. The voice clip is optional — if the user uploads one and
 # flips the toggle, run_train_job_inner chains a second `lora_lab.train_audio`
@@ -812,6 +878,161 @@ def _safe_job_id(job_id: str) -> str:
     return job_id
 
 
+def _normalise_caption_text(text: str, trigger: str | None = None) -> str:
+    """Coerce a caption body into LTX format:
+        [VISUAL]: <trigger>, <description>
+        [TEXT]: <on-screen text or None>
+
+    Forgiving on input shape:
+      * Strips BOM + CRLF.
+      * If the first non-empty line lacks `[VISUAL]:` and a trigger is known,
+        prepend `[VISUAL]: <trigger>, ` — only when the line doesn't already
+        start with the trigger (avoid double-trigger).
+      * If `[TEXT]:` is missing entirely, append `[TEXT]: None`.
+
+    Does not enforce content rules — the UI surfaces a soft warning when the
+    caption is < 10 words. Returns a normalised string ready to write to disk.
+    """
+    if not text:
+        return ""
+    # Strip UTF-8 BOM + normalise line endings.
+    text = text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # Auto-prepend [VISUAL]: when missing. Match case-insensitive at the
+    # very start of the first non-empty line.
+    if not re.match(r"^\s*\[VISUAL\]\s*:", text, re.IGNORECASE):
+        prefix = "[VISUAL]: "
+        first_line = text.split("\n", 1)[0].strip()
+        if trigger and first_line.lower().startswith(trigger.lower()):
+            # Line already starts with trigger — just add the [VISUAL]: tag.
+            text = prefix + text
+        elif trigger:
+            # No trigger yet; add `[VISUAL]: <trigger>, ` so the trainer sees a
+            # token at position 0 of the [VISUAL]: body.
+            text = f"{prefix}{trigger}, {text}"
+        else:
+            text = prefix + text
+
+    # Auto-append [TEXT]: None if absent.
+    if not re.search(r"^\s*\[TEXT\]\s*:", text, re.IGNORECASE | re.MULTILINE):
+        text = text.rstrip() + "\n[TEXT]: None"
+    return text + ("\n" if not text.endswith("\n") else "")
+
+
+def _decode_caption_bytes(data: bytes) -> str:
+    """Best-effort UTF-8 decode; fall back to latin-1 for legacy Win-1252
+    captions. Strip nothing — `_normalise_caption_text` handles cleanup."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1", errors="replace")
+
+
+def _caption_word_count(text: str) -> int:
+    """Cheap word count for the < 10 words warning. Excludes the `[VISUAL]:` /
+    `[TEXT]:` tag tokens so a sparse `[VISUAL]: bizarrotrn, man` doesn't read
+    as 4 words and slip past the threshold."""
+    body = re.sub(r"\[(?:VISUAL|TEXT)\]\s*:", " ", text, flags=re.IGNORECASE)
+    return len([w for w in re.split(r"\s+", body.strip()) if w])
+
+
+# ---------- Caption ↔ Image pairing helpers ----------------------------------
+# Each training dataset records a `caption_map.json` next to images/ + captions/
+# that maps the user's original filename stem (e.g. `image_001`) to the
+# panel-renumbered saved stem (e.g. `char_001`). This lets a user upload
+# `image_001.png` + `image_001.txt` in any order and have them pair correctly.
+
+_TRAIN_CAPTION_MAP_NAME = "caption_map.json"
+
+
+def _train_caption_map_path(dataset_dir: Path) -> Path:
+    return dataset_dir / _TRAIN_CAPTION_MAP_NAME
+
+
+def _train_read_caption_map(dataset_dir: Path) -> dict[str, str]:
+    p = _train_caption_map_path(dataset_dir)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()
+                    if isinstance(k, str) and isinstance(v, str)}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _train_write_caption_map(dataset_dir: Path, mapping: dict[str, str]) -> None:
+    p = _train_caption_map_path(dataset_dir)
+    try:
+        p.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _train_set_caption_map_entry(dataset_dir: Path,
+                                 original_stem: str,
+                                 saved_stem: str) -> None:
+    m = _train_read_caption_map(dataset_dir)
+    m[original_stem] = saved_stem
+    _train_write_caption_map(dataset_dir, m)
+
+
+def _train_reconcile_one(dataset_dir: Path,
+                         original_stem: str,
+                         saved_stem: str) -> bool:
+    """If a caption file exists under `original_stem.txt`, rename it to
+    `saved_stem.txt`. Used when the user uploads `image_001.txt` BEFORE its
+    matching `image_001.png` arrives. Returns True if a paired caption now
+    sits under `<captions>/<saved_stem>.txt`."""
+    captions_dir = dataset_dir / "captions"
+    saved_path = captions_dir / f"{saved_stem}.txt"
+    if saved_path.is_file():
+        return True
+    if original_stem == saved_stem:
+        return False
+    parked = captions_dir / f"{original_stem}.txt"
+    if parked.is_file():
+        try:
+            parked.rename(saved_path)
+            return True
+        except OSError:
+            return False
+    return False
+
+
+def _train_reconcile_captions(dataset_dir: Path) -> tuple[int, int, list[str]]:
+    """Called on training start. Walks images/ + captions/, ensures every
+    caption under an *original* stem in caption_map.json is moved to its
+    saved stem so the trainer's per-image lookup hits. Returns
+    (paired_count, total_images, warnings)."""
+    images_dir = dataset_dir / "images"
+    captions_dir = dataset_dir / "captions"
+    cmap = _train_read_caption_map(dataset_dir)
+    if not images_dir.is_dir():
+        return 0, 0, ["images dir missing"]
+    images = [p for p in sorted(images_dir.iterdir())
+              if p.is_file() and p.suffix.lower() in TRAIN_IMAGE_EXTS]
+    total = len(images)
+    warnings: list[str] = []
+    if not captions_dir.is_dir():
+        return 0, total, warnings
+    for original, saved in cmap.items():
+        if original == saved:
+            continue
+        parked = captions_dir / f"{original}.txt"
+        target = captions_dir / f"{saved}.txt"
+        if parked.is_file() and not target.is_file():
+            try:
+                parked.rename(target)
+            except OSError as e:
+                warnings.append(f"could not move {parked.name} → {target.name}: {e}")
+    paired = sum(1 for img in images
+                 if (captions_dir / f"{img.stem}.txt").is_file())
+    return paired, total, warnings
+
+
 def _suggest_trigger_token() -> str:
     """Generate a rare token of the form `<3-letter><2-digit>` (e.g. `mrz07`,
     `lqx42`). Avoids English-word collisions by picking three consonants for
@@ -832,12 +1053,17 @@ def _suggest_trigger_token() -> str:
 
 
 def _train_estimate_seconds(preset: str, image_count: int, *,
-                            steps_override: int | None = None) -> int:
+                            steps_override: int | None = None,
+                            is_style: bool = False) -> int:
     """Wall-time estimate in seconds for a training run. The image count
     has a small overhead for the preprocess pass (image → VAE latent
     cache, ~3 s/image on M4 Max), then `steps * seconds_per_step` for
-    the train loop itself."""
-    cfg = TRAIN_PRESETS.get(preset) or TRAIN_PRESETS["quick"]
+    the train loop itself.
+
+    `is_style` switches the preset lookup table — style training pulls
+    its seconds_per_step from TRAIN_STYLE_PRESETS, not TRAIN_PRESETS."""
+    table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
+    cfg = table.get(preset) or table["quick"]
     steps = steps_override if steps_override else cfg["steps"]
     preprocess = 3.0 * max(0, image_count)
     train = float(steps) * float(cfg["seconds_per_step"])
@@ -845,9 +1071,13 @@ def _train_estimate_seconds(preset: str, image_count: int, *,
 
 
 def _train_list_completed() -> list[dict]:
-    """Scan mlx_models/loras/ for .safetensors with a `kind=train_character`
-    sidecar, plus the in-progress / failed entries from history. Returns
-    one dict per completed run for the UI list."""
+    """Scan mlx_models/loras/ for .safetensors with a Phosphene-trained
+    sidecar (`kind=train_character` OR `kind=train_style`) and return one
+    record per discovered run for the Trained-LoRAs list in the Train tab.
+    Surfacing both kinds in a single list lets the user see their full
+    training inventory in one place; the UI filters by `train_type` to show
+    the kind that matches the active train-type toggle (and lists everything
+    when "All" is selected)."""
     out: list[dict] = []
     if LORAS_DIR.exists():
         for p in sorted(LORAS_DIR.iterdir(),
@@ -855,14 +1085,22 @@ def _train_list_completed() -> list[dict]:
                         reverse=True):
             if p.suffix.lower() != ".safetensors":
                 continue
-            sidecar = p.with_suffix(".json")
-            if not sidecar.is_file():
+            # Style LoRAs use a `.style.safetensors` suffix, so the sidecar
+            # is `.style.json` not `.json`. Probe both paths.
+            sidecar_candidates = [p.with_suffix(".json")]
+            if p.name.endswith(".style.safetensors"):
+                sidecar_candidates.insert(
+                    0, p.with_name(p.name[: -len(".safetensors")] + ".json")
+                )
+            sidecar = next((s for s in sidecar_candidates if s.is_file()), None)
+            if sidecar is None:
                 continue
             try:
                 meta = json.loads(sidecar.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            if meta.get("kind") != "train_character":
+            kind = meta.get("kind")
+            if kind not in ("train_character", "train_style"):
                 continue
             try:
                 stat = p.stat()
@@ -873,6 +1111,10 @@ def _train_list_completed() -> list[dict]:
                 "name": meta.get("name") or p.stem,
                 "trigger": meta.get("trigger") or "",
                 "preset": meta.get("preset") or "",
+                "kind": kind,
+                "train_type": meta.get("train_type")
+                                or ("style" if kind == "train_style"
+                                    else "character"),
                 "path": str(p),
                 "filename": p.name,
                 "size_mb": round(stat.st_size / (1024 * 1024), 1),
@@ -1241,6 +1483,11 @@ def list_curated_loras() -> list[dict]:
 _CHARACTERS_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _CHARACTERS_PREVIEW_LOCK = threading.Lock()
 _CHARACTERS_CACHE_PATH = MODELS_DIR / "characters"
+# Styles mirror the characters cache layout: mlx_models/styles/<trigger>/
+# holds avatar.{ext} (first training frame) + optional bundle.json. The style
+# id-validation regex piggybacks on _CHARACTERS_ID_RE — same [A-Za-z0-9_-]+
+# rule, no point in two regexes.
+_STYLES_CACHE_PATH = MODELS_DIR / "styles"
 
 
 def _character_safe_id(value: str) -> str:
@@ -1372,6 +1619,79 @@ def list_characters() -> list[dict]:
     return out
 
 
+def _style_dataset_image(trigger: str) -> Path | None:
+    """Find the avatar image for a trained style. Mirrors
+    `_character_dataset_image` but only checks the panel-owned styles cache —
+    styles don't have a lora-lab legacy convention to fall back on.
+
+    Returns the first avatar.{jpg,jpeg,png,webp} under
+    mlx_models/styles/<trigger>/ or None if no avatar is on disk.
+    """
+    style_dir = _STYLES_CACHE_PATH / trigger
+    if not style_dir.is_dir():
+        return None
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        avatar = style_dir / f"avatar{ext}"
+        if avatar.is_file():
+            return avatar
+    return None
+
+
+def list_styles() -> list[dict]:
+    """Scan mlx_models/loras/ for STYLE LoRAs and return one record per
+    discovered style. Parallel to `list_characters()` but the discovery rule
+    is the `<trigger>.style.safetensors` naming convention rather than the
+    `<trigger>_v2.safetensors` character convention. Style LoRAs are
+    standalone — there's no paired audio LoRA, no voice sample.
+
+    Returns: [{trigger, name, lora_path, created_at, rank, steps,
+               image_count, sample_image_path, sample_image_url}]
+    """
+    loras_dir = _safe_loras_dir()
+    if not loras_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for style_path in sorted(loras_dir.glob("*.style.safetensors")):
+        # Strip the ".style.safetensors" suffix to recover the trigger.
+        trigger = style_path.name[: -len(".style.safetensors")]
+        if not _CHARACTERS_ID_RE.match(trigger):
+            continue
+        # Read sibling sidecar JSON for metadata (rank, steps, etc.). Missing
+        # sidecar isn't fatal — the LoRA still surfaces, just with reduced
+        # metadata.
+        sidecar_path = loras_dir / f"{trigger}.style.json"
+        meta: dict = {}
+        if sidecar_path.is_file():
+            try:
+                meta = json.loads(sidecar_path.read_text(encoding="utf-8")) or {}
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+        try:
+            stat = style_path.stat()
+        except OSError:
+            continue
+        sample = _style_dataset_image(trigger)
+        out.append({
+            "id": trigger,
+            "trigger": trigger,
+            "name": meta.get("name") or trigger,
+            "lora_path": str(style_path),
+            "filename": style_path.name,
+            "size_mb": round(stat.st_size / (1024 * 1024), 1),
+            "created_at": meta.get("created_at") or stat.st_mtime,
+            "preset": meta.get("preset") or "",
+            "rank": meta.get("rank"),
+            "steps": meta.get("steps"),
+            "resolution": meta.get("resolution"),
+            "image_count": meta.get("image_count") or 0,
+            "recommended_strength": float(meta.get("recommended_strength") or 1.0),
+            "sample_image_path": str(sample) if sample else None,
+            "sample_image_url": (f"/styles/{trigger}/preview"
+                                 if sample else None),
+        })
+    return out
+
+
 # Duration in seconds → frames the LTX 2.3 pipeline accepts. The
 # constraint is `frames % 8 == 1`; 121 / 169 / 241 satisfy that and
 # correspond to 5s / 7s / 10s at 24 fps.
@@ -1391,6 +1711,12 @@ _CHARACTER_FRAMING_TEXT = {
     "MS":  "medium shot",
     "LS":  "long shot",
 }
+
+_CHARACTER_DIRECT_JOIN_RE = re.compile(
+    r"^(?:in|inside|on|at|against|under|over|near|beside|with|wearing|"
+    r"seated|standing|looking|holding|playing|walking|running)\b",
+    re.IGNORECASE,
+)
 
 
 def _character_assemble_prompt(character: dict, prompt_body: str,
@@ -1412,41 +1738,77 @@ def _character_assemble_prompt(character: dict, prompt_body: str,
         else "Her" if pronoun.lower() == "she"
         else "Their"
     )
-    framing_text = _CHARACTER_FRAMING_TEXT.get(framing, "close-up")
+    # Framing param retained in the signature for back-compat with
+    # callers/sidecars, but no longer affects the assembled prompt.
+    # Salo's call 2026-05-15: user owns the full prompt. Server-side
+    # composers were silently rewriting the user's intent (auto-suffix
+    # 'Photorealistic, cinematic, atmospheric.' + head-lock clause +
+    # framing prefix). All gone. Trigger word is pre-populated in the
+    # frontend textarea; if the user wants a medium shot, they write
+    # "medium shot" in the prompt body themselves.
     body = (prompt_body or "").strip().rstrip(".")
     parts: list[str] = []
     if character.get("sexy_directive"):
         # Validated language for trigger-preserving sultry shots.
         # Matches the memory note on Aria — quiet seduction, knowing
-        # half-smile, sultry presence.
+        # half-smile, sultry presence. Kept ONLY for sexy_directive
+        # characters because the language was validated against
+        # specific bundle metadata.
         parts.append(
-            f"Cinematic {framing_text} of a stunning sultry {trigger} {subj}, "
+            f"Cinematic close-up of a stunning sultry {trigger} {subj}, "
             f"quiet seduction, knowing half-smile, "
             + (f"{body}." if body else "")
         )
-    else:
+        parts.append("Professional cinematography, photorealistic.")
         parts.append(
-            f"Cinematic {framing_text} of {trigger} {subj}"
-            + (f", {body}." if body else ".")
+            f"{pronoun_possessive} head is steady and locked in position throughout the entire shot, "
+            f"only natural micro-movements of breathing and eyes."
         )
-    parts.append("Photorealistic, cinematic, atmospheric.")
-    parts.append(
-        f"{pronoun_possessive} head is steady and locked in position throughout the entire shot, "
-        f"only natural micro-movements of breathing and eyes."
-    )
+    else:
+        # Non-sultry path: pass the user's body through verbatim.
+        # No auto-prefix, no auto-suffix, no framing word. The trigger
+        # word is pre-populated in the frontend textarea so it's already
+        # in `body` by the time it lands here. If the user wants
+        # cinematography hints, framing words, lighting cues — they
+        # write them. The composer's job is to NOT silently rewrite
+        # the user's intent.
+        parts.append(body or trigger)
     return " ".join(s.strip() for s in parts if s.strip())
 
 
 def _character_build_form(character: dict, prompt: str, duration: str,
-                          quality: str) -> dict:
+                          quality: str, seed: str = "-1") -> dict:
     """Translate a Characters-tab submission into a /queue/add form payload.
 
-    The locked recipe defaults (1024x576, quality=high, TC=2.0,
-    stage1=10/stage2=3, cfg=3.0, accel=off, enhance=false) match
-    docs/API.md and are the production-validated settings for
-    character-LoRA T2V on M-series Macs.
+    The locked recipe defaults (1024x576, quality=high, TC=1.8,
+    stage1=10/stage2=3, cfg=3.0, accel=off, enhance=false) are the
+    production-validated settings for character-LoRA T2V on M-series Macs.
+
+    TC=1.8 vs 2.0: the overnight TC sweep (Salo, 2026-05-15) showed
+    both values produce identical wall-time (TC saturates at 1.8) and
+    NEITHER value introduces artifacts on its own (quality good at
+    every TC 1.0..2.0 in the sweep). 1.8 just removes pointless cache
+    aggressiveness at no quality cost.
     """
     frames = _CHARACTER_DURATION_FRAMES.get(duration, 169)
+    # Per-quality resolution + skip-step recipe:
+    #   draft    : 736x416 + Q8 HQ + Turbo (video/audio skip-step = 1).
+    #              Wall ~3:30 for 7s. Same Q8 identity quality as High,
+    #              lower per-frame detail. NO Q4 fallback (Q4 distilled
+    #              produces stretch artifacts at >121f — banned 2026-05-15).
+    #   balanced : currently routes to High recipe. Reserved as a real
+    #              fast-but-quality-equal tier (e.g. stage1 reduction +
+    #              upscale-to-1024) when that's tuned in. Visible label
+    #              kept so the UI contract stays stable.
+    #   high     : 1024x576 + Q8 HQ + Turbo. Wall ~6:00 for 7s.
+    #              Validated locked recipe (see ltx-lora skill).
+    quality_norm = (quality or "high").strip().lower()
+    if quality_norm == "draft":
+        width, height = 736, 416
+        recipe_video_skip, recipe_audio_skip = "1", "1"
+    else:
+        width, height = 1024, 576
+        recipe_video_skip, recipe_audio_skip = "1", "1"
     # NOTE: both visible 'balanced' and 'high' map to quality=high.
     # Today balanced silently routes >121f to the Q4 distilled
     # transformer where current LoRAs lose identity — the two-stage HQ
@@ -1463,22 +1825,28 @@ def _character_build_form(character: dict, prompt: str, duration: str,
     if character.get("audio_lora_path"):
         lora_stack.append({"path": character["audio_lora_path"], "strength": 1.0})
     loras_payload = json.dumps(lora_stack)
+    try:
+        seed_str = str(int(seed))
+    except (TypeError, ValueError):
+        seed_str = "-1"
     return {
         "mode": ["t2v"],
         "prompt": [prompt],
         "negative_prompt": [""],
-        "width": ["1024"],
-        "height": ["576"],
+        "width": [str(width)],
+        "height": [str(height)],
         "frames": [str(frames)],
         "frame_rate": ["24"],
-        "seed": ["-1"],
+        "seed": [seed_str],
         "quality": ["high"],
         "temporal_mode": ["native"],
         "stage1_steps": ["10"],
         "stage2_steps": ["3"],
-        "teacache_thresh": ["2.0"],
+        "teacache_thresh": ["1.8"],
         "cfg_scale": ["3.0"],
         "bongmath_max_iter": ["100"],
+        "video_skip_step": [recipe_video_skip],
+        "audio_skip_step": [recipe_audio_skip],
         "upscale": ["fit_720p"],
         "upscale_method": ["lanczos"],
         "accel": ["off"],
@@ -1488,7 +1856,7 @@ def _character_build_form(character: dict, prompt: str, duration: str,
         "enhance": ["false"],
         "hdr": ["false"],
         "loras": [loras_payload],
-        "label": [f"{character.get('name', character['trigger'])} · {duration} · {quality}"],
+        "label": [f"{character.get('name', character['trigger'])} · {duration} · {quality_norm}"],
     }
 
 
@@ -2927,6 +3295,24 @@ def plan_memory_policy(frames: int, *, mode: str, quality: str) -> dict:
         max_full = tier_auto.get(SYSTEM_TIER, 121)
         reason = f"{SYSTEM_CAPS['label']} tier"
 
+    # Decode-path-seam guard. Frames <= max_full use full-volume VAE
+    # decode; frames > max_full use temporal streaming. If a job's
+    # frame count crosses max_full, the helper does FULL decode for
+    # frames 0..max_full and STREAMED decode for frames max_full+1..end,
+    # joining them at the seam. The two paths produce slightly different
+    # latent->pixel mappings → visible stretch/stitch artifacts at the
+    # boundary frame. Salo's 2026-05-15 diagnosis: gen #18/#20 (clean,
+    # 7s/169f, safe policy, max_full=0) vs panel 19:52 (artifacts, same
+    # 169f but Comfortable tier picked max_full=121 → seam at frame 121).
+    # Force safe (max_full=0, all streamed) when the requested frame
+    # count would create a seam.
+    if max_full and int(frames) > int(max_full):
+        effective = "safe"
+        prev_max = max_full
+        max_full = 0
+        reason = (f"frames {int(frames)} > tier cap {prev_max} "
+                  f"(would create decode-path seam — forced safe)")
+
     return {
         "requested": saved,
         "effective": effective,
@@ -3630,8 +4016,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             train_job_id = _safe_job_id(train_job_id)
         except ValueError:
             train_job_id = _new_train_job_id()
+        # Train type — character (default, voice-paired) or style (no voice,
+        # different naming + preset table). The "kind" we stamp on params is
+        # train_character or train_style, mirroring the discriminator used in
+        # the sidecar JSON the run_train_job_inner branch writes.
+        train_type = (f("train_type", "character") or "character").lower()
+        if train_type not in TRAIN_TYPES:
+            train_type = "character"
+        is_style = (train_type == "style")
         preset = (f("preset", "quick") or "quick").lower()
-        if preset not in TRAIN_PRESETS:
+        preset_table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
+        if preset not in preset_table:
             preset = "quick"
         trigger = (f("trigger", "") or "").strip() or _suggest_trigger_token()
         try:
@@ -3650,7 +4045,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 return float(f(name, "") or default)
             except (TypeError, ValueError):
                 return default
-        cfg = TRAIN_PRESETS[preset]
+        cfg = preset_table[preset]
         rank = _int_or("rank", cfg["rank"])
         steps = _int_or("steps", cfg["steps"])
         lr = _float_or("lr", cfg["lr"])
@@ -3658,12 +4053,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         caption_strategy = (f("caption_strategy", "trigger_simple")
                             or "trigger_simple").lower()
         eta_sec = _train_estimate_seconds(preset, image_count,
-                                          steps_override=steps)
+                                          steps_override=steps,
+                                          is_style=is_style)
         # Optional voice-LoRA phase. Off unless the user explicitly toggled
         # it in the Train tab. /train/start validates that a voice file
-        # exists before queueing — make_job just carries the flags.
-        train_audio_raw = f("train_audio", "false").lower()
-        train_audio = train_audio_raw in ("1", "true", "yes", "on")
+        # exists before queueing — make_job just carries the flags. Styles
+        # never train audio — force off regardless of what the form says.
+        if is_style:
+            train_audio = False
+        else:
+            train_audio_raw = f("train_audio", "false").lower()
+            train_audio = train_audio_raw in ("1", "true", "yes", "on")
         audio_steps = max(50, _int_or("audio_steps", TRAIN_AUDIO_DEFAULT_STEPS))
         audio_rank = max(2, _int_or("audio_rank", TRAIN_AUDIO_DEFAULT_RANK))
         # Add an audio-phase estimate if the user opted in. The chip heuristic
@@ -3671,6 +4071,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # in lora-lab and may drift.
         if train_audio:
             eta_sec += int(TRAIN_AUDIO_SECONDS_PER_STEP * audio_steps + 30)
+        # Sidecar discriminator + Now/Queue card label depend on train_type.
+        kind = "train_style" if is_style else "train_character"
+        if is_style:
+            label = f"Train style · {trigger} ({preset})"
+        else:
+            label = (f"Train · {trigger} ({preset})"
+                     + (" + voice" if train_audio else ""))
         return {
             "id": _new_job_id(),
             "status": "queued",
@@ -3681,7 +4088,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "elapsed_sec": None,
             "params": {
                 "mode": "train",
-                "kind": "train_character",
+                "kind": kind,
+                "train_type": train_type,
                 "train_job_id": train_job_id,
                 "preset": preset,
                 "trigger": trigger,
@@ -3694,13 +4102,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "eta_sec": eta_sec,
                 "ram_peak_gb": cfg["ram_peak_gb"],
                 # Voice-LoRA phase params; consumed by run_train_job_inner
-                # after the face phase finishes.
+                # after the face phase finishes. Always false for styles.
                 "train_audio": train_audio,
                 "audio_steps": audio_steps,
                 "audio_rank": audio_rank,
-                # Convenient label that surfaces in Now / Queue cards.
-                "label": (f"Train · {trigger} ({preset})"
-                          + (" + voice" if train_audio else "")),
+                "label": label,
             },
             "command": None,
             "raw_path": None,
@@ -3810,6 +4216,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     _duration_choice = f("duration", "")
     _prompt_body = f("prompt_body", "")
     _quality_choice = f("quality_choice", "")
+    _full_prompt_override = f("full_prompt_override", "")
 
     job = {
         "id": _new_job_id(),
@@ -3914,6 +4321,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         job["params"]["prompt_body"] = _prompt_body
         if _quality_choice:
             job["params"]["quality_choice"] = _quality_choice
+        if _full_prompt_override:
+            job["params"]["full_prompt_override"] = _full_prompt_override
     return job
 
 
@@ -4299,6 +4708,16 @@ def run_train_job_inner(job: dict) -> None:
     except ValueError as e:
         raise RuntimeError(f"train job has invalid id: {e}")
 
+    # Train type — "character" (default, voice-paired) or "style" (no voice,
+    # different output naming + cache dir + sidecar kind). The branching is
+    # mostly cosmetic from the trainer's perspective: same target_modules,
+    # same trainer entry point, same hyperparams shape. What differs is
+    # where the output file lands + what kind of avatar cache we create.
+    train_type = (p.get("train_type") or "character").lower()
+    if train_type not in TRAIN_TYPES:
+        train_type = "character"
+    is_style = (train_type == "style")
+
     dataset_dir = _train_dataset_dir(train_job_id)
     images_dir = dataset_dir / "images"
     captions_dir = dataset_dir / "captions"
@@ -4316,36 +4735,81 @@ def run_train_job_inner(job: dict) -> None:
     preset = p.get("preset", "quick")
     trigger = p.get("trigger") or _suggest_trigger_token()
     caption_strategy = p.get("caption_strategy", "trigger_simple")
+    preset_table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
 
-    # Generate captions if they aren't present. `trigger_simple` writes
-    # `<trigger> man` against every image — dumbest-strongest default,
-    # documented in the design doc. Auto-captioning via Qwen-VL is on the
-    # roadmap (the form has a hint).
+    # ---- Captions -------------------------------------------------------
+    # Two paths into this block:
+    #   * user_provided  — user dropped `<stem>.txt` files alongside images
+    #                      (industry convention; LTX `[VISUAL]: ...` format).
+    #                      We reconcile the parked-by-original-stem layout
+    #                      to the renamed `char_NNN` stems the trainer
+    #                      expects, then auto-fill any holes with the
+    #                      trigger_simple fallback so a partial dataset
+    #                      still trains.
+    #   * trigger_simple — every image gets `<trigger> man` (character) or
+    #                      `<trigger> shot` (style). Dumbest-strongest
+    #                      default, no description.
+    #   * trigger_only   — bare trigger token, no role hint.
+    #
+    # Auto-captioning via Qwen-VL is on the roadmap (the form has a hint).
     captions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Reconcile any user-uploaded captions parked under their original
+    # stems into the renamed `char_NNN` stems the trainer reads. Always
+    # safe to call — no-op when caption_map is empty.
+    paired_count, _total_imgs, recon_warnings = _train_reconcile_captions(dataset_dir)
+    for w in recon_warnings:
+        push(f"[train] caption reconcile: {w}")
+
     if caption_strategy == "trigger_only":
-        caption_text = trigger
+        fallback_text = trigger
+    elif is_style:
+        fallback_text = f"{trigger} shot"
     else:
-        caption_text = f"{trigger} man"
+        fallback_text = f"{trigger} man"
+
+    user_caps = 0
+    auto_caps = 0
     for img in image_files:
         cap = captions_dir / (img.stem + ".txt")
-        if not cap.exists():
-            try:
-                cap.write_text(caption_text, encoding="utf-8")
-            except OSError as e:
-                push(f"[train] warn: could not write caption for {img.name}: {e}")
+        if cap.exists():
+            user_caps += 1
+            continue
+        try:
+            cap.write_text(fallback_text, encoding="utf-8")
+            auto_caps += 1
+        except OSError as e:
+            push(f"[train] warn: could not write caption for {img.name}: {e}")
+
+    total_imgs = len(image_files)
+    if user_caps:
+        push(f"[train] using user-provided captions: {user_caps} / {total_imgs} images"
+             + (f" (auto-filled {auto_caps} with '{fallback_text}')"
+                if auto_caps else ""))
+    elif caption_strategy == "user_provided":
+        push(f"[train] caption_strategy=user_provided but no .txt files found — "
+             f"auto-filled all {total_imgs} images with '{fallback_text}'")
 
     # Output path for the trained LoRA. Going straight into
     # mlx_models/loras/ so the existing picker scan finds it.
     #
-    # Naming convention: `<trigger>_v2.safetensors` — matches what the
-    # Characters tab discovery scan expects (list_characters scans for
-    # `*_v2.safetensors`). A freshly-trained character thus shows up in
-    # the Characters tab immediately, no manual rename. If the same trigger
-    # is trained twice the second run overwrites the first; we log a
-    # warning below so the user notices.
+    # Naming convention:
+    #   - character: `<trigger>_v2.safetensors` — what list_characters scans
+    #     for. A freshly-trained character thus shows up in the Characters
+    #     tab immediately, no manual rename.
+    #   - style: `<trigger>.style.safetensors` + `<trigger>.style.json` —
+    #     what list_styles scans for. Distinct namespace so a style and a
+    #     character can share a trigger token without clobbering each other
+    #     on disk (though we still warn on overwrite within the namespace).
+    # If the same trigger is trained twice the second run overwrites the
+    # first; we log a warning below so the user notices.
     _safe_loras_dir()
-    final_lora_path = LORAS_DIR / f"{trigger}_v2.safetensors"
-    final_sidecar_path = LORAS_DIR / f"{trigger}_v2.json"
+    if is_style:
+        final_lora_path = LORAS_DIR / f"{trigger}.style.safetensors"
+        final_sidecar_path = LORAS_DIR / f"{trigger}.style.json"
+    else:
+        final_lora_path = LORAS_DIR / f"{trigger}_v2.safetensors"
+        final_sidecar_path = LORAS_DIR / f"{trigger}_v2.json"
     if final_lora_path.is_file():
         push(f"[train] warn: {final_lora_path.name} already exists — "
              f"this run will overwrite the previous {trigger!r} LoRA.")
@@ -4353,9 +4817,16 @@ def run_train_job_inner(job: dict) -> None:
     # Job-spec JSON — the contract surface with the lora-lab train_character
     # script. The lab agent reads this and emits a .safetensors to
     # output_path. Keep the field names stable; the lab side asserts them.
+    # Style and character runs share the same spec schema and the same
+    # train_character.py entry point — what changes is the dataset (face
+    # photos vs movie frames) and the output filename. The trainer doesn't
+    # care which it is.
+    spec_schema = ("phosphene/train_style@1" if is_style
+                   else "phosphene/train_character@1")
     spec = {
-        "schema": "phosphene/train_character@1",
+        "schema": spec_schema,
         "job_id": train_job_id,
+        "train_type": train_type,
         "trigger": trigger,
         "preset": preset,
         "rank": p.get("rank"),
@@ -4368,7 +4839,7 @@ def run_train_job_inner(job: dict) -> None:
         "checkpoints_dir": str(dataset_dir / "checkpoints"),
         "output_path": str(final_lora_path),
         "image_count": len(image_files),
-        "checkpoint_interval": TRAIN_PRESETS[preset]["checkpoint_interval"],
+        "checkpoint_interval": preset_table[preset]["checkpoint_interval"],
     }
     spec_path = dataset_dir / "spec.json"
     try:
@@ -4454,16 +4925,21 @@ def run_train_job_inner(job: dict) -> None:
                     # pick up — same shape as _compute_progress would emit.
                     with LOCK:
                         if STATE.get("current") and STATE["current"].get("id") == job["id"]:
+                            phase_word = "style" if is_style else "face"
                             STATE["current"]["progress"] = {
                                 "phase": "denoise",
-                                "phase_label": f"Training face · step {last_step} / {total_steps}",
+                                "phase_label": (
+                                    f"Training {phase_word} · step "
+                                    f"{last_step} / {total_steps}"),
                                 "pct": (last_step / max(1, total_steps)) * 100.0,
                                 "elapsed_sec": time.time() - t0,
                                 "eta_sec": max(0,
                                     (total_steps - last_step) * (
                                         (time.time() - t0) / max(1, last_step)
                                         if last_step > 0
-                                        else TRAIN_PRESETS.get(preset, TRAIN_PRESETS["quick"])["seconds_per_step"]
+                                        else preset_table.get(
+                                            preset, preset_table["quick"]
+                                        )["seconds_per_step"]
                                     )),
                                 "denoise_step": last_step,
                                 "denoise_total": total_steps,
@@ -4507,15 +4983,28 @@ def run_train_job_inner(job: dict) -> None:
         raise RuntimeError(
             f"training finished but output .safetensors missing at {final_lora_path}")
 
-    # Write a sidecar JSON next to the LoRA — same schema the CivitAI
-    # downloader uses, plus a `kind=train_character` discriminator the
-    # Train Character UI filters on for its "Trained LoRAs" list.
+    # Write a sidecar JSON next to the LoRA. Same overall shape the CivitAI
+    # downloader uses, plus a `kind` discriminator (train_character or
+    # train_style) the Train form's Trained-LoRAs list + list_styles filter
+    # on. For style runs we also include the style-specific source tag.
+    sidecar_kind = "train_style" if is_style else "train_character"
+    if is_style:
+        sidecar_name = f"{trigger} (style · {preset})"
+        sidecar_desc = (f"Style LoRA trained in Phosphene · trigger "
+                        f"'{trigger}' · preset {preset}.")
+        sidecar_source = "phosphene.train_style"
+    else:
+        sidecar_name = f"{trigger} ({preset})"
+        sidecar_desc = (f"Character LoRA trained in Phosphene · trigger "
+                        f"'{trigger}' · preset {preset}.")
+        sidecar_source = "phosphene.train_character"
     sidecar = {
         "schema": "phosphene/lora_sidecar@1",
-        "kind": "train_character",
+        "kind": sidecar_kind,
+        "train_type": train_type,
         "job_id": train_job_id,
-        "name": f"{trigger} ({preset})",
-        "description": f"Character LoRA trained in Phosphene · trigger '{trigger}' · preset {preset}.",
+        "name": sidecar_name,
+        "description": sidecar_desc,
         "trigger_words": [trigger],
         "trigger": trigger,
         "preset": preset,
@@ -4527,23 +5016,25 @@ def run_train_job_inner(job: dict) -> None:
         "base_model": "LTXV 2.3",
         "created_at": time.time(),
         "elapsed_sec": elapsed,
-        "source": "phosphene.train_character",
+        "source": sidecar_source,
     }
     try:
         final_sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     except OSError as e:
         push(f"[train] warn: could not write sidecar JSON: {e}")
 
-    # Copy the first training image into mlx_models/characters/<trigger>/
-    # as the character's avatar. The Characters tab discovers this via
-    # _character_dataset_image() and serves it through the /characters/
-    # <trigger>/preview endpoint. Without this, freshly-trained characters
-    # render with a letter placeholder instead of a real portrait.
+    # Copy the first training image into the right per-kind cache dir as the
+    # avatar. Character runs land under mlx_models/characters/<trigger>/ and
+    # the Characters tab serves them via /characters/<id>/preview. Style runs
+    # land under mlx_models/styles/<trigger>/ and the (forthcoming) styles
+    # picker will serve them via /styles/<id>/preview. Without this, freshly-
+    # trained entries render with a letter placeholder instead of a thumbnail.
     try:
-        char_dir = _CHARACTERS_CACHE_PATH / trigger
-        char_dir.mkdir(parents=True, exist_ok=True)
+        avatar_root = _STYLES_CACHE_PATH if is_style else _CHARACTERS_CACHE_PATH
+        avatar_dir = avatar_root / trigger
+        avatar_dir.mkdir(parents=True, exist_ok=True)
         first_img = image_files[0]
-        avatar_dst = char_dir / f"avatar{first_img.suffix.lower()}"
+        avatar_dst = avatar_dir / f"avatar{first_img.suffix.lower()}"
         # Only write if missing or stale — don't clobber a Salo-curated avatar.
         if (not avatar_dst.is_file()
                 or first_img.stat().st_mtime > avatar_dst.stat().st_mtime):
@@ -4563,8 +5054,13 @@ def run_train_job_inner(job: dict) -> None:
     # opted in via the Train tab toggle. Failure here is logged
     # but doesn't fail the whole job: the face LoRA is already
     # on disk and the character can still be used silently.
+    #
+    # Styles never have a voice phase — bail immediately if this is
+    # a style run, even if a caller managed to set train_audio=true
+    # by hand (make_job force-disables it for style, but defense in
+    # depth here covers the direct-POST case).
     # ============================================================
-    if not p.get("train_audio"):
+    if is_style or not p.get("train_audio"):
         return
 
     voice_src = _existing_voice_file(dataset_dir)
@@ -6520,6 +7016,48 @@ class Handler(BaseHTTPRequestHandler):
             self._ok(data, ctype)
             return
 
+        # ====== Styles — discover trained style LoRAs ====================
+        # Parallel to /characters but scans for `<trigger>.style.safetensors`
+        # rather than `<trigger>_v2.safetensors`. Styles are standalone
+        # LoRAs (no voice pair). Today this powers (a) the Style picker the
+        # Manual tab can stack alongside a character, and (b) future Compose
+        # UI work to attach a style to a character render.
+        if parsed.path == "/styles":
+            self._json({"styles": list_styles()})
+            return
+
+        # Serve the avatar image for a trained style. Mirror of the
+        # /characters/<id>/preview endpoint but resolves through
+        # _style_dataset_image and confines the resolved path to
+        # mlx_models/styles/ (no lora-lab fallback — styles are
+        # panel-owned only).
+        if parsed.path.startswith("/styles/") and parsed.path.endswith("/preview"):
+            sid_raw = parsed.path[len("/styles/"):-len("/preview")]
+            try:
+                sid = _character_safe_id(sid_raw)
+            except ValueError:
+                self.send_error(404); return
+            sample = _style_dataset_image(sid)
+            if not sample or not sample.is_file():
+                self.send_error(404); return
+            try:
+                style_root = _STYLES_CACHE_PATH.resolve()
+                resolved = sample.resolve()
+                if not resolved.is_relative_to(style_root):
+                    self.send_error(404); return
+            except (OSError, ValueError):
+                self.send_error(404); return
+            try:
+                data = resolved.read_bytes()
+            except OSError:
+                self.send_error(500); return
+            ctype = ("image/png" if resolved.suffix.lower() == ".png"
+                     else "image/jpeg" if resolved.suffix.lower() in (".jpg", ".jpeg")
+                     else "image/webp" if resolved.suffix.lower() == ".webp"
+                     else "application/octet-stream")
+            self._ok(data, ctype)
+            return
+
         # ====== Train Character — completed LoRA list =====================
         if parsed.path == "/train/list":
             self._json({
@@ -6562,7 +7100,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 400); return
             ds = _train_dataset_dir(job_id)
             images_dir = ds / "images"
+            captions_dir = ds / "captions"
+            cmap = _train_read_caption_map(ds)
+            # Reverse map (saved_stem → original_stem) so the UI can show
+            # the user's filename in tooltips.
+            reverse_cmap = {v: k for k, v in cmap.items()}
             images: list[dict] = []
+            captioned_count = 0
             if images_dir.is_dir():
                 for p in sorted(images_dir.iterdir()):
                     if not p.is_file() or p.suffix.lower() not in TRAIN_IMAGE_EXTS:
@@ -6571,15 +7115,39 @@ class Handler(BaseHTTPRequestHandler):
                         st = p.stat()
                     except OSError:
                         continue
+                    cap_path = captions_dir / f"{p.stem}.txt"
+                    has_caption = cap_path.is_file()
+                    word_count = None
+                    if has_caption:
+                        try:
+                            word_count = _caption_word_count(
+                                cap_path.read_text(encoding="utf-8", errors="replace"))
+                        except OSError:
+                            word_count = None
+                        captioned_count += 1
                     images.append({
                         "filename": p.name,
                         "path": str(p),
                         "size_bytes": st.st_size,
+                        "captioned": has_caption,
+                        "caption_words": word_count,
+                        "original_stem": reverse_cmap.get(p.stem, p.stem),
                     })
+            # Parked captions — uploaded .txt without a matching image yet.
+            parked: list[str] = []
+            if captions_dir.is_dir():
+                image_stems = {Path(im["filename"]).stem for im in images}
+                for c in sorted(captions_dir.iterdir()):
+                    if not c.is_file() or c.suffix.lower() != ".txt":
+                        continue
+                    if c.stem not in image_stems:
+                        parked.append(c.stem)
             self._json({
                 "ok": True,
                 "job_id": job_id,
                 "count": len(images),
+                "captioned_count": captioned_count,
+                "parked_captions": parked,
                 "min": TRAIN_MIN_IMAGES,
                 "max": TRAIN_MAX_IMAGES,
                 "images": images,
@@ -6950,13 +7518,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # ====== Train Character — multipart dataset upload ===============
-        # POSTs one image file per request, accumulating them under
-        # state/train_character/<job_id>/images/. Same multipart shape as
-        # /upload but the field name is `file` and the response carries
-        # the running count + the saved filename. The JS client iterates a
-        # FileList client-side and fires one /train/upload per image so we
-        # get individual progress feedback in the UI (vs one fat multi-file
-        # multipart that would block the whole pane on a slow drive).
+        # POSTs one file per request (image OR caption), accumulating under
+        # state/train_character/<job_id>/{images,captions}/. Captions are
+        # paired by filename stem via a caption_map.json (original_stem →
+        # saved_stem) the image upload records — if no matching image is
+        # present yet, captions are parked under their original stem and
+        # reconciled when the image arrives (or on training start, as a
+        # safety net).
         if path == "/train/upload" and ctype.startswith("multipart/form-data"):
             MAX_UPLOAD_BYTES = TRAIN_MAX_BYTES_PER_IMAGE
             try:
@@ -6966,7 +7534,7 @@ class Handler(BaseHTTPRequestHandler):
             if clen <= 0:
                 self._json({"error": "Content-Length required"}, 411); return
             if clen > MAX_UPLOAD_BYTES:
-                self._json({"error": f"upload too large (max {MAX_UPLOAD_BYTES} bytes per image)"}, 413)
+                self._json({"error": f"upload too large (max {MAX_UPLOAD_BYTES} bytes per file)"}, 413)
                 return
             try:
                 form = cgi.FieldStorage(
@@ -6992,14 +7560,49 @@ class Handler(BaseHTTPRequestHandler):
                 if not getattr(fld, "filename", None):
                     self._json({"error": "no filename"}, 400); return
                 ext = Path(fld.filename).suffix.lower()
-                if ext not in TRAIN_IMAGE_EXTS:
+                original_stem = Path(fld.filename).stem
+                if ext not in TRAIN_IMAGE_EXTS and ext not in TRAIN_CAPTION_EXTS:
                     self._json({
                         "error": f"unsupported file type {ext!r}; want one of "
-                                 f"{sorted(TRAIN_IMAGE_EXTS)}"
+                                 f"{sorted(TRAIN_IMAGE_EXTS | TRAIN_CAPTION_EXTS)}"
                     }, 400)
                     return
 
                 ds = _train_dataset_dir(train_job_id)
+                ds.mkdir(parents=True, exist_ok=True)
+
+                # ----- CAPTION branch (.txt / .json) -----
+                if ext in TRAIN_CAPTION_EXTS:
+                    data = fld.file.read()
+                    if len(data) > TRAIN_CAPTION_MAX_BYTES:
+                        self._json({
+                            "error": f"caption too large (max "
+                                     f"{TRAIN_CAPTION_MAX_BYTES} bytes)"
+                        }, 413)
+                        return
+                    captions_dir = ds / "captions"
+                    captions_dir.mkdir(parents=True, exist_ok=True)
+                    cmap = _train_read_caption_map(ds)
+                    saved_stem = cmap.get(original_stem, original_stem)
+                    raw_text = _decode_caption_bytes(data)
+                    normalised = _normalise_caption_text(raw_text)
+                    dest = captions_dir / f"{saved_stem}.txt"
+                    dest.write_text(normalised, encoding="utf-8")
+                    paired = original_stem in cmap
+                    self._json({
+                        "ok": True,
+                        "job_id": train_job_id,
+                        "kind": "caption",
+                        "filename": dest.name,
+                        "original_stem": original_stem,
+                        "saved_stem": saved_stem,
+                        "paired": paired,
+                        "word_count": _caption_word_count(normalised),
+                        "path": str(dest),
+                    })
+                    return
+
+                # ----- IMAGE branch (.png/.jpg/.jpeg/.webp) -----
                 images_dir = ds / "images"
                 images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -7018,13 +7621,24 @@ class Handler(BaseHTTPRequestHandler):
                 # Lets the lab side load them in a deterministic order.
                 next_idx = len(existing) + 1
                 saved_name = f"char_{next_idx:03d}{ext}"
+                saved_stem = f"char_{next_idx:03d}"
                 dest = images_dir / saved_name
                 dest.write_bytes(fld.file.read())
+                # Record original_stem → saved_stem so a later caption with
+                # the original filename pairs on arrival.
+                _train_set_caption_map_entry(ds, original_stem, saved_stem)
+                # Reconcile any caption already parked under the original
+                # stem (when .txt was uploaded BEFORE its matching image).
+                captioned = _train_reconcile_one(ds, original_stem, saved_stem)
                 count = len(existing) + 1
                 self._json({
                     "ok": True,
                     "job_id": train_job_id,
+                    "kind": "image",
                     "filename": saved_name,
+                    "original_stem": original_stem,
+                    "saved_stem": saved_stem,
+                    "captioned": captioned,
                     "path": str(dest),
                     "count": count,
                     "min": TRAIN_MIN_IMAGES,
@@ -7032,6 +7646,206 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self._json({"error": f"train upload failed: {exc}"}, 500)
+            return
+
+        # ====== Train Character — bulk ZIP dataset upload =================
+        # Salo's "Cinematron" workflow: drop a ZIP containing paired
+        # image_NNN.png + image_NNN.txt files, get a fully-staged dataset
+        # back in one shot. Validates every entry against
+        # TRAIN_BUNDLE_NAME_RE (basename only, no subdirs, no traversal),
+        # dedupes by stem, and emits a paired_count + unpaired_warnings
+        # payload so the UI can decide whether to start training or nudge
+        # the user to upload more pairs.
+        if path == "/train/upload-bundle" and ctype.startswith("multipart/form-data"):
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"error": "Content-Length required"}, 411); return
+            if clen > TRAIN_BUNDLE_MAX_BYTES:
+                self._json({
+                    "error": f"bundle too large (max "
+                             f"{TRAIN_BUNDLE_MAX_BYTES // (1024*1024)} MB)"
+                }, 413)
+                return
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile, headers=self.headers,
+                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
+                )
+                requested_id = (form.getvalue("job_id") or "").strip() if "job_id" in form else ""
+                if requested_id:
+                    try:
+                        train_job_id = _safe_job_id(requested_id)
+                    except ValueError as e:
+                        self._json({"error": str(e)}, 400); return
+                else:
+                    train_job_id = _new_train_job_id()
+
+                if "file" not in form:
+                    self._json({"error": "no field 'file'"}, 400); return
+                fld = form["file"]
+                if not getattr(fld, "filename", None):
+                    self._json({"error": "no filename"}, 400); return
+                if Path(fld.filename).suffix.lower() != ".zip":
+                    self._json({"error": "expected a .zip bundle"}, 400)
+                    return
+
+                zip_bytes = fld.file.read()
+                try:
+                    zf = zipfile.ZipFile(io.BytesIO(zip_bytes), mode="r")
+                except zipfile.BadZipFile:
+                    self._json({"error": "invalid ZIP file"}, 400); return
+
+                # Filter entries server-side first so we can fast-fail on
+                # path traversal / unsupported types before doing any disk
+                # writes. The regex enforces basename + safe extension.
+                entries = [e for e in zf.infolist() if not e.is_dir()]
+                if len(entries) > TRAIN_BUNDLE_MAX_ENTRIES:
+                    self._json({
+                        "error": f"too many entries in ZIP (max "
+                                 f"{TRAIN_BUNDLE_MAX_ENTRIES})"
+                    }, 413)
+                    return
+
+                validated: list[tuple[zipfile.ZipInfo, str, str]] = []  # (info, stem, ext)
+                rejected: list[str] = []
+                for info in entries:
+                    # Strip any leading path components — accept basename only.
+                    name = Path(info.filename).name
+                    if not name or not TRAIN_BUNDLE_NAME_RE.fullmatch(name):
+                        rejected.append(info.filename)
+                        continue
+                    stem = Path(name).stem
+                    ext = Path(name).suffix.lower()
+                    validated.append((info, stem, ext))
+
+                # Partition into images + captions. Stems with the same
+                # extension are deduped (last wins — the user uploaded a
+                # newer copy on purpose).
+                images_by_stem: dict[str, tuple[zipfile.ZipInfo, str]] = {}
+                captions_by_stem: dict[str, zipfile.ZipInfo] = {}
+                for info, stem, ext in validated:
+                    if ext == ".txt":
+                        captions_by_stem[stem] = info
+                    else:
+                        images_by_stem[stem] = (info, ext)
+
+                # Apply the count cap. If the bundle has more images than
+                # TRAIN_MAX_IMAGES, accept the first N by sorted stem so
+                # the choice is deterministic.
+                ds = _train_dataset_dir(train_job_id)
+                ds.mkdir(parents=True, exist_ok=True)
+                images_dir = ds / "images"
+                captions_dir = ds / "captions"
+                images_dir.mkdir(parents=True, exist_ok=True)
+                captions_dir.mkdir(parents=True, exist_ok=True)
+
+                existing = [x for x in images_dir.iterdir()
+                            if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS]
+                next_idx = len(existing) + 1
+                slots_left = TRAIN_MAX_IMAGES - len(existing)
+                if slots_left <= 0:
+                    self._json({
+                        "error": f"already at {TRAIN_MAX_IMAGES} images; "
+                                 "remove some before adding more.",
+                        "job_id": train_job_id,
+                    }, 409)
+                    return
+
+                ordered_stems = sorted(images_by_stem.keys())
+                accepted_stems = ordered_stems[:slots_left]
+                truncated = len(ordered_stems) > slots_left
+
+                cmap = _train_read_caption_map(ds)
+                image_count = 0
+                caption_count = 0
+                paired_count = 0
+                unpaired_warnings: list[str] = []
+
+                # Pass 1 — images. Save renumbered, update caption_map.
+                stem_to_saved: dict[str, str] = {}
+                for stem in accepted_stems:
+                    info, ext = images_by_stem[stem]
+                    try:
+                        data = zf.read(info)
+                    except (KeyError, RuntimeError) as e:
+                        unpaired_warnings.append(f"read {info.filename}: {e}")
+                        continue
+                    saved_name = f"char_{next_idx:03d}{ext}"
+                    saved_stem = f"char_{next_idx:03d}"
+                    (images_dir / saved_name).write_bytes(data)
+                    cmap[stem] = saved_stem
+                    stem_to_saved[stem] = saved_stem
+                    image_count += 1
+                    next_idx += 1
+                _train_write_caption_map(ds, cmap)
+
+                # Pass 2 — captions. Write under saved stem when paired,
+                # otherwise under original stem (parked).
+                for stem, info in captions_by_stem.items():
+                    try:
+                        data = zf.read(info)
+                    except (KeyError, RuntimeError) as e:
+                        unpaired_warnings.append(f"read {info.filename}: {e}")
+                        continue
+                    if len(data) > TRAIN_CAPTION_MAX_BYTES:
+                        unpaired_warnings.append(
+                            f"{stem}.txt exceeds {TRAIN_CAPTION_MAX_BYTES} bytes — skipped")
+                        continue
+                    saved_stem = stem_to_saved.get(stem) or cmap.get(stem) or stem
+                    raw_text = _decode_caption_bytes(data)
+                    normalised = _normalise_caption_text(raw_text)
+                    (captions_dir / f"{saved_stem}.txt").write_text(
+                        normalised, encoding="utf-8")
+                    caption_count += 1
+                    if stem in stem_to_saved or stem in cmap:
+                        paired_count += 1
+                    else:
+                        unpaired_warnings.append(
+                            f"{stem}.txt has no matching image yet (parked)")
+
+                # Captions that pair via an image already on disk (not from
+                # this bundle) — count those too via reconciliation.
+                reconciled, total_imgs, recon_warnings = _train_reconcile_captions(ds)
+                unpaired_warnings.extend(recon_warnings)
+
+                # Images uploaded WITHOUT a caption — surface as a warning.
+                missing_caption_stems: list[str] = []
+                for stem in accepted_stems:
+                    saved_stem = stem_to_saved[stem]
+                    if not (captions_dir / f"{saved_stem}.txt").is_file():
+                        missing_caption_stems.append(stem)
+                if missing_caption_stems:
+                    unpaired_warnings.append(
+                        f"{len(missing_caption_stems)} image(s) without captions: "
+                        + ", ".join(missing_caption_stems[:5])
+                        + ("…" if len(missing_caption_stems) > 5 else ""))
+
+                if rejected:
+                    unpaired_warnings.append(
+                        f"{len(rejected)} entries rejected (bad name/extension): "
+                        + ", ".join(rejected[:3])
+                        + ("…" if len(rejected) > 3 else ""))
+                if truncated:
+                    unpaired_warnings.append(
+                        f"bundle had more than {TRAIN_MAX_IMAGES - len(existing)} "
+                        "image slots available; extras were ignored.")
+
+                self._json({
+                    "ok": True,
+                    "job_id": train_job_id,
+                    "image_count": image_count,
+                    "caption_count": caption_count,
+                    "paired_count": reconciled,
+                    "total_images": total_imgs,
+                    "unpaired_warnings": unpaired_warnings,
+                    "min": TRAIN_MIN_IMAGES,
+                    "max": TRAIN_MAX_IMAGES,
+                })
+            except Exception as exc:
+                self._json({"error": f"bundle upload failed: {exc}"}, 500)
             return
 
         # ====== Train Character — voice clip upload (optional, single file)
@@ -7342,7 +8156,10 @@ class Handler(BaseHTTPRequestHandler):
             zip_path: str | None = None
             if include_crash:
                 try:
-                    import zipfile
+                    # zipfile is imported at module scope (the caption bundle
+                    # endpoint also uses it). A local `import zipfile` here
+                    # would make zipfile local across the entire do_POST
+                    # method and break the bundle endpoint.
                     diag = Path.home() / "Library" / "Logs" / "DiagnosticReports"
                     if diag.is_dir():
                         # Latest 5 ips files (any process; .ips is the only
@@ -7404,30 +8221,64 @@ class Handler(BaseHTTPRequestHandler):
             if duration not in _CHARACTER_DURATION_FRAMES:
                 self._json({"error": f"duration must be one of "
                             f"{sorted(_CHARACTER_DURATION_FRAMES)}"}, 400); return
-            framing = (form.get("framing", ["CU"])[0] or "CU").strip().upper()
-            if framing not in _CHARACTER_FRAMING_TEXT:
-                self._json({"error": f"framing must be one of "
-                            f"{sorted(_CHARACTER_FRAMING_TEXT)}"}, 400); return
+            # Framing is no longer required (2026-05-15 — Salo's call: the
+            # composer was rewriting the user's intent). Accept the field
+            # if it's still being sent for back-compat, but ignore values
+            # we don't recognise instead of erroring out.
+            framing = (form.get("framing", [""])[0] or "").strip().upper()
+            if framing and framing not in _CHARACTER_FRAMING_TEXT:
+                framing = ""
             quality = (form.get("quality", ["high"])[0] or "high").strip().lower()
-            if quality not in ("balanced", "high"):
-                self._json({"error": "quality must be balanced or high"}, 400); return
-            full_prompt = _character_assemble_prompt(char, prompt_body, framing)
-            job_form = _character_build_form(char, full_prompt, duration, quality)
-            # Forward optional HQ speed knobs the Characters compose UI may set
-            # (Turbo toggle → video_skip_step + audio_skip_step). Default 0 when
-            # unset matches the locked recipe.
-            video_skip = (form.get("video_skip_step", ["0"])[0] or "0").strip()
-            audio_skip = (form.get("audio_skip_step", ["0"])[0] or "0").strip()
+            if quality not in ("draft", "balanced", "high"):
+                self._json({"error": "quality must be draft, balanced or high"}, 400); return
+            seed = (form.get("seed", ["-1"])[0] or "-1").strip()
             try:
-                video_skip_int = max(0, int(video_skip or "0"))
-                audio_skip_int = max(0, int(audio_skip or "0"))
+                int(seed)
             except (TypeError, ValueError):
-                video_skip_int = 0
-                audio_skip_int = 0
-            if video_skip_int:
-                job_form["video_skip_step"] = [str(video_skip_int)]
-            if audio_skip_int:
-                job_form["audio_skip_step"] = [str(audio_skip_int)]
+                self._json({"error": "seed must be an integer"}, 400); return
+            full_prompt_override = (
+                form.get("full_prompt", [""])[0]
+                or form.get("prompt", [""])[0]
+                or ""
+            ).strip()
+            full_prompt = (
+                full_prompt_override
+                if full_prompt_override
+                else _character_assemble_prompt(char, prompt_body, framing)
+            )
+            job_form = _character_build_form(char, full_prompt, duration, quality, seed)
+
+            # Forward optional exact-replay knobs when a caller is trying to
+            # clone a known-good sidecar through the Characters endpoint.
+            try:
+                for field, min_value in (
+                    ("stage1_steps", 1),
+                    ("stage2_steps", 0),
+                    ("bongmath_max_iter", 0),
+                    ("video_skip_step", 0),
+                    ("audio_skip_step", 0),
+                ):
+                    raw = (form.get(field, [""])[0] or "").strip()
+                    if raw == "":
+                        continue
+                    value = int(raw)
+                    if value < min_value:
+                        raise ValueError(f"{field} must be >= {min_value}")
+                    job_form[field] = [str(value)]
+                for field, min_value in (
+                    ("teacache_thresh", 0.0),
+                    ("cfg_scale", 0.0),
+                ):
+                    raw = (form.get(field, [""])[0] or "").strip()
+                    if raw == "":
+                        continue
+                    value = float(raw)
+                    if value < min_value:
+                        raise ValueError(f"{field} must be >= {min_value}")
+                    job_form[field] = [str(value)]
+            except (TypeError, ValueError) as exc:
+                self._json({"error": str(exc)}, 400); return
+
             # Stamp Characters-origin metadata onto the job form BEFORE make_job
             # sees it so the sidecar's params dict records enough state for a
             # future "Load Params" click to re-open the Characters compose
@@ -7439,6 +8290,8 @@ class Handler(BaseHTTPRequestHandler):
             job_form["duration"] = [duration]
             job_form["prompt_body"] = [prompt_body]
             job_form["quality_choice"] = [quality]
+            if full_prompt_override:
+                job_form["full_prompt_override"] = [full_prompt_override]
             job = make_job(job_form)
             with QUEUE_COND:
                 STATE["queue"].append(job)
@@ -7478,23 +8331,43 @@ class Handler(BaseHTTPRequestHandler):
                     "error": f"not enough images: {len(image_files)} (need >= {TRAIN_MIN_IMAGES})"
                 }, 400)
                 return
+            # Train type — "character" (default, voice-paired) or "style"
+            # (no voice). Validate up front so an unrecognized value 400s
+            # rather than silently routing to character.
+            train_type = (form.get("train_type", ["character"])[0]
+                          or "character").lower()
+            if train_type not in TRAIN_TYPES:
+                self._json({
+                    "error": f"train_type must be one of {list(TRAIN_TYPES)} "
+                             f"(got {train_type!r})"
+                }, 400)
+                return
             # If the user opted into voice training, a clip must exist on
             # disk before we queue the job — defensive guard so the worker
             # doesn't have to fail mid-flight. The Train tab also disables
             # the toggle when no clip is uploaded, but the API is the
-            # source of truth.
-            train_audio_raw = (form.get("train_audio", ["false"])[0] or "false").lower()
-            wants_audio = train_audio_raw in ("1", "true", "yes", "on")
-            if wants_audio and _existing_voice_file(ds) is None:
-                self._json({
-                    "error": "voice clip required when train_audio is true — "
-                             "upload one via /train/upload-voice first"
-                }, 400)
-                return
+            # source of truth. Styles never train audio — silently coerce
+            # train_audio to false for style runs so a stale form value
+            # doesn't get the user into the voice-required branch.
+            if train_type == "style":
+                form["train_audio"] = ["false"]
+                wants_audio = False
+            else:
+                train_audio_raw = (form.get("train_audio", ["false"])[0]
+                                   or "false").lower()
+                wants_audio = train_audio_raw in ("1", "true", "yes", "on")
+                if wants_audio and _existing_voice_file(ds) is None:
+                    self._json({
+                        "error": "voice clip required when train_audio is "
+                                 "true — upload one via /train/upload-voice "
+                                 "first"
+                    }, 400)
+                    return
             # Make sure the form has the canonical image_count so make_job's
             # estimate is right even if the JS forgot to set it.
             form["mode"] = ["train"]
             form["train_job_id"] = [train_job_id]
+            form["train_type"] = [train_type]
             form.setdefault("image_count", [str(len(image_files))])
             job = make_job(form)
             with QUEUE_COND:
@@ -7534,7 +8407,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # Remove a single image from a pending dataset (before training has
         # started). Re-numbers the remaining files so the lab side still
-        # sees char_001…NN.
+        # sees char_001…NN. Captions track image stems exactly so we move
+        # them in lockstep, and we update caption_map.json so the
+        # original_stem → saved_stem mapping survives the renumber.
         if path == "/train/remove-image":
             train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
             filename = (form.get("filename", [""])[0] or "").strip()
@@ -7549,23 +8424,58 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "bad filename"}, 400); return
             ds = _train_dataset_dir(train_job_id)
             images_dir = ds / "images"
+            captions_dir = ds / "captions"
             target = images_dir / filename
             if not target.is_file() or not target.resolve().is_relative_to(images_dir.resolve()):
                 self._json({"error": "image not found"}, 404); return
+            removed_stem = target.stem
             try:
                 target.unlink()
             except OSError as e:
                 self._json({"error": f"could not delete: {e}"}, 500); return
-            # Renumber to keep the char_NNN sequence dense.
+            # Drop the matching caption.
+            removed_caption = captions_dir / f"{removed_stem}.txt"
+            if removed_caption.is_file():
+                try:
+                    removed_caption.unlink()
+                except OSError:
+                    pass
+            # Drop the caption_map entry pointing at the removed saved_stem.
+            cmap = _train_read_caption_map(ds)
+            cmap = {k: v for k, v in cmap.items() if v != removed_stem}
+
+            # Renumber to keep the char_NNN sequence dense. Build the
+            # mapping first so we can update captions + caption_map in
+            # one consistent pass after the renames land.
             remaining = sorted([x for x in images_dir.iterdir()
                                 if x.is_file() and x.suffix.lower() in TRAIN_IMAGE_EXTS])
+            stem_renames: dict[str, str] = {}
             for idx, p in enumerate(remaining, start=1):
-                new_name = f"char_{idx:03d}{p.suffix.lower()}"
+                old_stem = p.stem
+                new_stem = f"char_{idx:03d}"
+                new_name = f"{new_stem}{p.suffix.lower()}"
                 if p.name != new_name:
                     try:
                         p.rename(p.with_name(new_name))
+                        stem_renames[old_stem] = new_stem
                     except OSError:
                         pass
+            # Apply the same renames to captions (best-effort — if a
+            # caption is missing we just skip it; the renumber must not
+            # fail the request).
+            if captions_dir.is_dir():
+                for old_stem, new_stem in stem_renames.items():
+                    old_cap = captions_dir / f"{old_stem}.txt"
+                    new_cap = captions_dir / f"{new_stem}.txt"
+                    if old_cap.is_file() and not new_cap.is_file():
+                        try:
+                            old_cap.rename(new_cap)
+                        except OSError:
+                            pass
+            # Update caption_map values to the new saved stems.
+            if stem_renames:
+                cmap = {k: stem_renames.get(v, v) for k, v in cmap.items()}
+            _train_write_caption_map(ds, cmap)
             self._json({"ok": True, "count": len(remaining),
                         "job_id": train_job_id})
             return
@@ -7586,17 +8496,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "path not under mlx_models/loras/"}, 400); return
             if not resolved.is_file() or resolved.suffix.lower() != ".safetensors":
                 self._json({"error": "not a .safetensors file"}, 404); return
-            sidecar = resolved.with_suffix(".json")
+            # Style LoRAs sit on disk as `<trigger>.style.safetensors` with a
+            # sibling `<trigger>.style.json` (NOT `<trigger>.style.safetensors`
+            # → `.json` via with_suffix — that would strip only ".safetensors"
+            # giving "<trigger>.style.json" anyway, but explicit is safer).
+            if resolved.name.endswith(".style.safetensors"):
+                sidecar = resolved.with_name(
+                    resolved.name[: -len(".safetensors")] + ".json"
+                )
+            else:
+                sidecar = resolved.with_suffix(".json")
             try:
-                # Only allow delete on entries flagged as our train_character
-                # output — never blow away an unrelated LoRA the user
-                # downloaded from CivitAI.
+                # Only allow delete on entries flagged as Phosphene-trained.
+                # Accepts both kinds (train_character + train_style) — never
+                # blow away an unrelated LoRA the user downloaded from CivitAI.
                 if sidecar.is_file():
                     try:
                         meta = json.loads(sidecar.read_text(encoding="utf-8"))
                     except Exception:
                         meta = {}
-                    if meta.get("kind") != "train_character":
+                    if meta.get("kind") not in ("train_character", "train_style"):
                         self._json({
                             "error": "refusing to delete: not a Phosphene-trained LoRA"
                         }, 403)
@@ -10085,6 +11004,123 @@ HTML = r"""<!doctype html>
     .train-counter.ok { color: var(--success); }
     .train-counter.short { color: var(--warning); }
     .train-counter-hint { color: var(--muted); font-size: 11px; }
+    /* Caption-pair counter — sibling chip in the same row as the image
+       count. Hidden until the user has ≥1 captioned image so it doesn't
+       read as a missing-data signal. */
+    .train-caption-counter {
+      font-family: var(--ph-font-mono);
+      color: var(--muted);
+      font-size: 11px;
+      padding: 1px 7px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.025);
+    }
+    .train-caption-counter.ok {
+      color: var(--success);
+      border-color: rgba(60,200,140,0.4);
+    }
+    .train-caption-counter.partial {
+      color: var(--warning);
+      border-color: rgba(220,160,80,0.35);
+    }
+    /* Caption badge on each thumbnail. Bottom-right corner so it doesn't
+       collide with the index chip (bottom-left) or the × remove (top-right). */
+    .train-thumb .train-thumb-cap {
+      position: absolute;
+      right: 4px; bottom: 4px;
+      font-size: 9px;
+      font-family: var(--ph-font-mono);
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.55);
+      color: var(--muted);
+      letter-spacing: 0;
+      pointer-events: none;
+    }
+    .train-thumb .train-thumb-cap.captioned { color: var(--success); }
+    .train-thumb .train-thumb-cap.uncaptioned { color: var(--warning); }
+    /* Bulk-bundle drop zone — smaller cousin of .train-drop. Lives just
+       below the per-image grid so the user knows there's a fast path
+       for paired datasets. */
+    .train-bundle-row {
+      margin-top: 10px;
+    }
+    .train-bundle-drop {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border: 1.5px dashed var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.01);
+      cursor: pointer;
+      font-size: 12px;
+      transition: border-color var(--t-fast), background var(--t-fast);
+    }
+    .train-bundle-drop:hover {
+      border-color: var(--accent);
+      background: rgba(90, 124, 255, 0.04);
+    }
+    .train-bundle-drop.dragover {
+      border-color: var(--accent);
+      border-style: solid;
+      background: rgba(90, 124, 255, 0.10);
+    }
+    .train-bundle-drop.busy {
+      opacity: 0.7;
+      cursor: progress;
+    }
+    .train-bundle-icon { width: 18px; height: 18px; opacity: 0.8; flex: 0 0 auto; }
+    .train-bundle-cta { color: var(--text); flex: 1 1 auto; }
+    .train-bundle-meta { color: var(--muted); font-size: 11px; }
+    /* Caption format hint card — collapsed by default; opens to a small
+       LTX-format example + the "describe what varies" rules. */
+    details.train-caption-hint {
+      margin-top: 12px;
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.015);
+    }
+    details.train-caption-hint > summary {
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      list-style: none;
+    }
+    details.train-caption-hint > summary::-webkit-details-marker { display: none; }
+    details.train-caption-hint .train-caption-hint-eyebrow {
+      color: var(--muted);
+      font-size: 10.5px;
+      margin-left: auto;
+      letter-spacing: 0.4px;
+    }
+    .train-caption-hint-body {
+      padding: 0 12px 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .train-caption-hint-example {
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--ph-border-soft);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: var(--ph-font-mono);
+      font-size: 11.5px;
+      color: var(--text);
+      white-space: pre-wrap;
+      line-height: 1.4;
+      margin: 0 0 8px;
+    }
+    .train-caption-hint-rules {
+      margin: 0;
+      padding-left: 18px;
+    }
+    .train-caption-hint-rules li { margin-bottom: 4px; line-height: 1.5; }
     /* Trigger word row — same hairline-input chrome as the rest. */
     .train-trigger-row {
       display: flex;
@@ -14142,40 +15178,23 @@ HTML = r"""<!doctype html>
         </div>
 
         <div class="characters-compose-card">
-          <label class="characters-field-label" for="charactersPrompt">Scene</label>
+          <label class="characters-field-label" for="charactersPrompt">Prompt</label>
           <textarea
             id="charactersPrompt"
             class="characters-prompt-input"
-            rows="4"
-            placeholder='e.g. "in a steampunk workshop at dusk, holding a brass dial"'
-            oninput="charactersUpdatePreview()"
+            rows="6"
+            placeholder='Write your scene. The trigger word is pre-filled — keep it in the prompt.'
           ></textarea>
 
           <div class="characters-chip-row">
-            <div class="characters-chip-group" data-group="framing">
-              <span class="characters-group-label">Framing</span>
-              <div class="characters-chips" id="charactersFramingChips" role="group"></div>
-            </div>
             <div class="characters-chip-group" data-group="duration">
               <span class="characters-group-label">Duration</span>
               <div class="characters-chips" id="charactersDurationChips" role="group"></div>
             </div>
             <div class="characters-chip-group" data-group="quality">
               <span class="characters-group-label">Quality</span>
-              <div class="characters-chips-with-toggle">
-                <div class="characters-chips" id="charactersQualityChips" role="group"></div>
-                <label class="characters-turbo"
-                       title="Skip-guidance on the HQ sampler. Validated at ~12.6% faster wall (426s → 372s) on the locked recipe with no identity loss.">
-                  <input type="checkbox" id="charactersTurbo">
-                  <span>Turbo <em>~12% faster</em></span>
-                </label>
-              </div>
+              <div class="characters-chips" id="charactersQualityChips" role="group"></div>
             </div>
-          </div>
-
-          <div class="characters-preview-block">
-            <div class="characters-preview-label">What the model will see</div>
-            <pre class="characters-preview-text" id="charactersPromptPreview"></pre>
           </div>
 
           <button type="button" id="charactersGenerateBtn" class="characters-generate-btn"
@@ -14195,17 +15214,42 @@ HTML = r"""<!doctype html>
            (today: transformer-dev.safetensors which isn't in default install). -->
       <div id="trainPreflight" style="display:none"></div>
 
+      <!-- ============== TRAIN TYPE TOGGLE ==============
+           Character: identity (face + optional voice). Style: aesthetic
+           transfer (cinematic look, color grading, lighting). Both use the
+           same trainer + target_modules; what changes is the dataset, the
+           caption template, the output naming, and whether a voice phase
+           runs after the face phase. Selecting Style hides the Voice card
+           and rewrites the guidance + button label. -->
+      <div class="composer-card train-card train-type-card">
+        <h2>Train type
+          <span class="h2-hint">character identity, or a visual style</span>
+        </h2>
+        <div class="pill-group cols-2" id="trainTypeGroup">
+          <button type="button" class="pill-btn active" data-train-type="character">
+            <span>Character</span>
+            <span class="sub">face (+ voice) of one person</span>
+          </button>
+          <button type="button" class="pill-btn" data-train-type="style">
+            <span>Style</span>
+            <span class="sub">cinematic look · color · lighting</span>
+          </button>
+        </div>
+      </div>
+
       <!-- ============== GUIDANCE PANEL ==============
            Collapsible "How to train well" walk-through. Open by default
            for new users; dismissed state persists in localStorage. Sets
            the dataset expectations before the user drops their first
-           image. Concise, scannable, matches the Linear design language. -->
+           image. Concise, scannable, matches the Linear design language.
+           Two mutually-exclusive bodies (character vs style); trainTypeApply
+           flips them based on the segmented toggle above. -->
       <details class="train-guidance" id="trainGuidance" open>
         <summary>
           <span class="train-guidance-eyebrow">Guide</span>
-          <span class="train-guidance-title">How to train a character well</span>
+          <span class="train-guidance-title" id="trainGuidanceTitle">How to train a character well</span>
         </summary>
-        <div class="train-guidance-body">
+        <div class="train-guidance-body" id="trainGuidanceBodyCharacter">
           <div class="train-guidance-section">
             <h3>Image count</h3>
             <p>25–50 photos is the sweet spot. Variety beats quantity — more angles teach the model more than more shots of the same pose.</p>
@@ -14241,6 +15285,44 @@ HTML = r"""<!doctype html>
             <p>Describe what <b>varies</b> in each shot — outfit, setting, pose, lighting. Don't describe invariant identity features (face, hair color, build); the LoRA absorbs those automatically.</p>
           </div>
         </div>
+        <!-- Style guidance — shown when train_type=style. Hand-picked movie
+             frames teach the model an aesthetic, not an identity. The rules
+             that drive a good character dataset and a good style dataset
+             are nearly inverted (e.g. "lighting variety" is desirable for a
+             face; "lighting consistency" is the whole point for a style). -->
+        <div class="train-guidance-body" id="trainGuidanceBodyStyle" hidden>
+          <div class="train-guidance-section">
+            <h3>Frame count</h3>
+            <p>20–100+ hand-picked movie frames. More variety inside the look (different scenes, different subjects) helps generalization. Skip duplicate-ish shots from the same scene — they teach less than fewer-but-more-varied frames.</p>
+          </div>
+          <div class="train-guidance-section">
+            <h3>What makes a frame "in the style"</h3>
+            <ul>
+              <li><b>Composition</b> · framing, headroom, negative space, geometry</li>
+              <li><b>Color grading</b> · palette, contrast, white point, saturation</li>
+              <li><b>Lighting</b> · key direction, hardness, motivation, falloff</li>
+              <li><b>Lens character</b> · focal length, depth of field, optical traits</li>
+              <li><b>Mood</b> · the atmospheric thumbprint the user is after</li>
+            </ul>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Consistency beats variety</h3>
+            <p>Opposite of a character dataset. You want every frame to share the visual fingerprint you're training on. Mixed grades and lighting motivations dilute the style — the LoRA averages everything you show it.</p>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Avoid</h3>
+            <ul>
+              <li>frames where the subject's identity dominates the frame</li>
+              <li>watermarks, subtitles, channel logos</li>
+              <li>heavily compressed or low-bitrate source frames</li>
+              <li>extreme aspect crops (letterboxed black bars hurt)</li>
+            </ul>
+          </div>
+          <div class="train-guidance-section">
+            <h3>Caption rule</h3>
+            <p>Describe the <b>shot itself</b>, not who's in it — composition, color grading, lighting, mood. The trigger anchors the look; the caption body teaches the model what to associate with that trigger.</p>
+          </div>
+        </div>
         <div class="train-guidance-foot">
           <button type="button" class="train-guidance-dismiss" onclick="trainGuidanceDismiss()">Got it — don't show again</button>
         </div>
@@ -14249,35 +15331,70 @@ HTML = r"""<!doctype html>
       <!-- ============== DATASET CARD ============== -->
       <div class="composer-card train-card">
         <h2>Dataset
-          <span class="h2-hint">15-50 stills · drop your character into the box</span>
+          <span class="h2-hint" id="trainDatasetHint">15-50 stills · drop your character into the box</span>
         </h2>
         <div class="train-drop" id="trainDrop">
           <div class="train-drop-empty" id="trainDropEmpty">
             <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
-            <div class="picker-cta">Drop 15-50 images here, or <strong>click to browse</strong></div>
-            <div class="hint">PNG / JPG / WEBP. Each preview shows the 1:1 center-crop the trainer will see.</div>
+            <div class="picker-cta">Drop 15-50 images <em>+ optional matching <code>.txt</code> captions</em> here, or <strong>click to browse</strong></div>
+            <div class="hint">PNG / JPG / WEBP for images, <code>.txt</code> for captions (same filename stem). Each preview shows the 1:1 center-crop the trainer will see.</div>
           </div>
           <div class="train-thumbs" id="trainThumbs" hidden></div>
-          <input type="file" id="trainFileInput" accept="image/png,image/jpeg,image/webp" multiple style="display:none">
+          <input type="file" id="trainFileInput" accept="image/png,image/jpeg,image/webp,text/plain,.png,.jpg,.jpeg,.webp,.txt" multiple style="display:none">
         </div>
         <div class="train-counter-row">
           <span class="train-counter" id="trainCounter">0 / 50 images</span>
           <span class="train-counter-hint" id="trainCounterHint">need at least 15 to train</span>
+          <span class="train-caption-counter" id="trainCaptionCounter" hidden>0 captioned</span>
           <span class="qchip-spacer"></span>
           <button type="button" class="qchip" id="trainClearAllBtn" onclick="trainClearAll()" hidden><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-x"/></svg>Clear all</button>
         </div>
+
+        <!-- ============== BULK BUNDLE DROP ============== -->
+        <!-- Salo's "Cinematron" workflow: a single ZIP containing paired
+             image_NNN.png + image_NNN.txt files. The server validates each
+             entry (no subdirs, no traversal), dedupes by stem, and stages
+             everything into one job_id. -->
+        <div class="train-bundle-row">
+          <div class="train-bundle-drop" id="trainBundleDrop">
+            <svg class="ph train-bundle-icon" aria-hidden="true"><use href="#ph-folder-simple"/></svg>
+            <span class="train-bundle-cta">Drop a <strong>ZIP</strong> of paired images + captions, or <strong>click</strong></span>
+            <span class="train-bundle-meta" id="trainBundleMeta">max 500 MB · stem-paired (image_001.png + image_001.txt)</span>
+            <input type="file" id="trainBundleInput" accept=".zip,application/zip" style="display:none">
+          </div>
+        </div>
+
+        <!-- ============== CAPTION FORMAT HINT ============== -->
+        <details class="train-caption-hint" id="trainCaptionHint">
+          <summary>
+            <svg class="ph" aria-hidden="true" style="margin-right:4px;vertical-align:-2px"><use href="#ph-info-fill"/></svg>
+            Caption format
+            <span class="train-caption-hint-eyebrow">LTX <code>[VISUAL]:</code> / <code>[TEXT]:</code></span>
+          </summary>
+          <div class="train-caption-hint-body">
+            <pre class="train-caption-hint-example">[VISUAL]: &lt;trigger&gt;, &lt;50–80 word description of what varies in this shot — outfit, pose, framing, lighting, environment&gt;
+[TEXT]: None</pre>
+            <ul class="train-caption-hint-rules">
+              <li><b>Trigger token first</b> inside <code>[VISUAL]:</code> body.</li>
+              <li>Describe what <b>varies</b> — outfit, pose, framing, lighting. <b>Do not</b> describe invariant identity (face structure, hair color); the LoRA absorbs those.</li>
+              <li>50–80 words is the sweet spot. Less than 20 is too thin; more than 120 dilutes.</li>
+              <li><code>[TEXT]:</code> is required — write <code>None</code> if there is no on-screen text.</li>
+              <li>If you forget <code>[VISUAL]:</code> or <code>[TEXT]:</code> tags, the panel auto-prepends/appends them.</li>
+            </ul>
+          </div>
+        </details>
       </div>
 
       <!-- ============== TRIGGER + PRESET ============== -->
       <div class="composer-card train-card">
         <h2>Trigger word
-          <span class="h2-hint">a rare token the model will associate with this character</span>
+          <span class="h2-hint" id="trainTriggerHint">a rare token the model will associate with this character</span>
         </h2>
         <div class="train-trigger-row">
           <input type="text" id="trainTrigger" maxlength="32" placeholder="auto-generated rare token" autocomplete="off">
           <button type="button" class="qchip" onclick="trainSuggestTrigger()" title="Suggest a fresh rare token">↻ Suggest</button>
         </div>
-        <div class="hint">Use the trigger word in your video prompts (e.g. <code><span id="trainTriggerExample">mrz07</span> man walking on the beach</code>).</div>
+        <div class="hint" id="trainTriggerExampleHint">Use the trigger word in your video prompts (e.g. <code><span id="trainTriggerExample">mrz07</span> man walking on the beach</code>).</div>
 
         <h2 style="margin-top:14px">Quality preset
           <span class="h2-hint">trade time for fidelity</span>
@@ -14327,13 +15444,14 @@ HTML = r"""<!doctype html>
             <div class="mf-cell" style="grid-column: 1 / -1">
               <span class="mf-label">Caption strategy</span>
               <select id="trainCaptionStrategy">
-                <option value="trigger_simple" selected>&lt;trigger&gt; man — dumbest-strongest default</option>
+                <option value="user_provided" selected>user-provided (<code>.txt</code> files alongside images) — recommended</option>
+                <option value="trigger_simple">&lt;trigger&gt; man — dumbest-strongest fallback</option>
                 <option value="trigger_only">trigger only — no role hint</option>
                 <option value="qwen_vl" disabled>auto-caption via Qwen-VL — coming soon</option>
               </select>
             </div>
           </div>
-          <div class="hint" style="margin-top:8px">Auto-captioning planned. For now, every image gets the same caption — the trigger does the heavy lifting.</div>
+          <div class="hint" style="margin-top:8px">Best results come from per-image captions in LTX <code>[VISUAL]:</code> format. Open <em>Caption format</em> above the trigger row to see the spec. If a caption is missing for an image we auto-fill with the <code>trigger_simple</code> fallback so the run still completes.</div>
         </details>
       </div>
 
@@ -14343,8 +15461,9 @@ HTML = r"""<!doctype html>
            this leaves the character "silent" — still usable for video
            but won't speak/sing. The drop zone reuses the same border /
            drop affordance as the image dataset so the two slots read
-           as siblings, not different surfaces. -->
-      <div class="composer-card train-card">
+           as siblings, not different surfaces. The whole card is
+           hidden when train_type=style (styles don't have voices). -->
+      <div class="composer-card train-card" id="trainVoiceCard">
         <h2>Voice
           <span class="h2-hint">optional · a short clean clip becomes the character's voice</span>
         </h2>
@@ -14432,7 +15551,7 @@ HTML = r"""<!doctype html>
 
       <!-- ============== TRAINED LORAs LIST ============== -->
       <div class="composer-card train-card">
-        <h2>Trained character LoRAs
+        <h2><span id="trainLoraListTitle">Trained character LoRAs</span>
           <span class="h2-hint">your finished runs — click to use</span>
         </h2>
         <div class="train-lora-list" id="trainLoraList">
@@ -15748,6 +16867,11 @@ const TRAIN = {
   // Mirror of the server-side image list. Each: {filename, path, src}.
   images: [],
   preset: 'quick',
+  // Train type — 'character' (face + optional voice) or 'style' (no voice,
+  // aesthetic LoRA). Drives the preset table lookup + UI visibility (Voice
+  // card hides for style; guidance + labels swap). Mirrors the server-side
+  // TRAIN_TYPES tuple in mlx_ltx_panel.py.
+  trainType: 'character',
   // Local mirror of the preset table; server has the authoritative copy in
   // TRAIN_PRESETS but the JS-side estimator is instant — saves a /status
   // round-trip per keystroke. Keep these in sync with TRAIN_PRESETS in py.
@@ -15758,6 +16882,17 @@ const TRAIN = {
               label: 'Medium', subtitle: '~2 h · rank 16 · 576px' },
     high:   { steps: 5000, rank: 32, resolution: 768, seconds_per_step: 3.0, ram_peak_gb: 28,
               label: 'High',   subtitle: '~4 h · rank 32 · 768px' },
+  },
+  // Mirror of the server-side TRAIN_STYLE_PRESETS. Style table differs from
+  // character: quick uses rank 16 (not rank 8), and "high" adds steps not
+  // rank (rank 32 is the validated capacity ceiling for our LTX-2.3 stack).
+  stylePresets: {
+    quick:  { steps: 1500, rank: 16, resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
+              label: 'Quick',  subtitle: '~30 min · rank 16 · 512px' },
+    medium: { steps: 3000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 18,
+              label: 'Medium', subtitle: '~1 h 40 min · rank 32 · 512px' },
+    high:   { steps: 5000, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
+              label: 'High',   subtitle: '~2 h 50 min · rank 32 · 5000 steps · 512px' },
   },
   // Voice (optional) state. `voiceFile` is the server-saved record once
   // an upload completes; `voiceEnabled` mirrors the toggle. The audio
@@ -15776,6 +16911,13 @@ const TRAIN = {
   initialised: false,
 };
 
+// Helper — returns the right preset table for the current train type.
+// Centralizes the lookup so trainUpdateEstimate / trainUpdateButtonState
+// don't each have to know about both tables.
+function trainActivePresets() {
+  return TRAIN.trainType === 'style' ? TRAIN.stylePresets : TRAIN.presets;
+}
+
 // ============================================================================
 // CHARACTERS TAB — discover paired LoRAs, pick one, type the scene, ship.
 // ============================================================================
@@ -15785,16 +16927,17 @@ const TRAIN = {
 //   GET  /characters/<id>/preview     — serve the sample training image
 //   POST /characters/<id>/generate    — assemble prompt + queue render job
 //
-// All recipe defaults (1024x576, quality=high, TC=2.0, stage1=10/stage2=3,
-// cfg=3.0, enhance=false) are applied server-side per docs/API.md. The UI
-// only collects scene body + framing + duration + quality.
+// Recipe defaults (TC=1.8, stage1=10/stage2=3, cfg=3.0, seed=-1,
+// enhance=false, video_skip=1+audio_skip=1) are applied server-side per
+// docs/API.md. The UI collects prompt (trigger pre-filled) + duration +
+// quality. Quality maps server-side to resolution + recipe:
+//   draft → 736x416, ~3:30 wall;  high → 1024x576, ~6:00 wall.
 
 window.CHARACTERS = {
   list: [],            // [{id, name, trigger, pronoun, subject_noun, sample_image_url, ...}]
   selected: null,      // currently-composing character (object from list)
-  framing: 'CU',       // ECU | CU | MCU | MS | LS
   duration: '7s',      // 5s | 7s | 10s
-  quality: 'high',     // balanced | high
+  quality: 'high',     // draft | high
   loading: false,
   initialised: false,
 };
@@ -15814,8 +16957,8 @@ const CHARACTERS_DURATION = [
   ['10s', '10s', '10 seconds'],
 ];
 const CHARACTERS_QUALITY = [
-  ['balanced', 'Balanced', 'Balanced — faster, slight identity drift'],
-  ['high',     'High',     'High — Q8 two-stage, best identity'],
+  ['draft',    'Draft',    'Draft — 736x416, Q8 + Turbo, ~3:30 wall, lower detail'],
+  ['high',     'High',     'High — 1024x576, Q8 two-stage + Turbo, ~6:00 wall, best identity'],
 ];
 // Look-up by value → full descriptive text (the third tuple slot).
 const CHARACTERS_FRAMING_TEXT = Object.fromEntries(
@@ -15916,16 +17059,14 @@ function charactersRenderChips() {
                onclick="charactersPickChip('${fieldName}', '${charactersEscapeAttr(val)}')">${charactersEscapeHtml(label)}</button>`
     )).join('');
   };
-  renderGroup('charactersFramingChips',  CHARACTERS_FRAMING,  window.CHARACTERS.framing,  'framing');
   renderGroup('charactersDurationChips', CHARACTERS_DURATION, window.CHARACTERS.duration, 'duration');
   renderGroup('charactersQualityChips',  CHARACTERS_QUALITY,  window.CHARACTERS.quality,  'quality');
 }
 
 function charactersPickChip(field, val) {
-  if (field !== 'framing' && field !== 'duration' && field !== 'quality') return;
+  if (field !== 'duration' && field !== 'quality') return;
   window.CHARACTERS[field] = val;
   charactersRenderChips();
-  charactersUpdatePreview();
 }
 
 function charactersOpenCompose(id) {
@@ -15994,21 +17135,21 @@ function charactersOpenCompose(id) {
     }
   }
 
-  // Clear the prompt + toast for the new selection. Focus the input.
+  // Pre-fill the prompt textarea with the trigger word as a starting
+  // point so the user keeps it in their prompt. They can edit anything
+  // around it but the trigger is what binds identity. Cursor lands at
+  // the end so they can immediately type the rest of their scene.
   const ta = document.getElementById('charactersPrompt');
   if (ta) {
-    ta.value = '';
-    setTimeout(() => ta.focus(), 60);
+    ta.value = `${c.trigger} `;
+    setTimeout(() => {
+      ta.focus();
+      const len = ta.value.length;
+      ta.setSelectionRange(len, len);
+    }, 60);
   }
   const toast = document.getElementById('charactersToast');
   if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
-  // Reset Turbo to off for new compositions — loadParams restores it
-  // explicitly from the sidecar when re-opening a previous Characters
-  // clip, so this default-off applies only to fresh picks.
-  const turbo = document.getElementById('charactersTurbo');
-  if (turbo) turbo.checked = false;
-
-  charactersUpdatePreview();
 }
 
 function charactersBackToGrid() {
@@ -16019,27 +17160,9 @@ function charactersBackToGrid() {
   if (compose) compose.hidden = true;
 }
 
-function charactersUpdatePreview() {
-  const pre = document.getElementById('charactersPromptPreview');
-  if (!pre) return;
-  const c = window.CHARACTERS.selected;
-  if (!c) { pre.textContent = ''; return; }
-  const body = (document.getElementById('charactersPrompt')?.value || '').trim().replace(/\.$/, '');
-  const trigger = c.trigger;
-  const subj = c.subject_noun || 'person';
-  const pronoun = (c.pronoun || 'they').toLowerCase();
-  const possessive = (pronoun === 'he') ? 'His' : (pronoun === 'she') ? 'Her' : 'Their';
-  const framingText = CHARACTERS_FRAMING_TEXT[window.CHARACTERS.framing] || 'close-up';
-  const parts = [];
-  if (c.sexy_directive) {
-    parts.push(`Cinematic ${framingText} of a stunning sultry ${trigger} ${subj}, quiet seduction, knowing half-smile, ${body ? body + '.' : ''}`.trim());
-  } else {
-    parts.push(`Cinematic ${framingText} of ${trigger} ${subj}${body ? ', ' + body + '.' : '.'}`);
-  }
-  parts.push('Photorealistic, cinematic, atmospheric.');
-  parts.push(`${possessive} head is steady and locked in position throughout the entire shot, only natural micro-movements of breathing and eyes.`);
-  pre.textContent = parts.join(' ');
-}
+// Preview removed — the user's prompt IS what the model sees, verbatim.
+// Stub kept so legacy oninput hooks calling it don't error.
+function charactersUpdatePreview() { /* no-op (preview block removed) */ }
 
 async function charactersGenerate() {
   const c = window.CHARACTERS.selected;
@@ -16056,18 +17179,13 @@ async function charactersGenerate() {
   if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
 
   const fd = new URLSearchParams();
+  // The textarea content IS the prompt — passed verbatim. The backend
+  // no longer composes anything around it (no framing prefix, no
+  // 'Photorealistic, cinematic, atmospheric.' suffix). The trigger
+  // word was pre-filled in the textarea so it's already in here.
   fd.set('prompt_body', prompt_body);
-  fd.set('framing',  window.CHARACTERS.framing);
   fd.set('duration', window.CHARACTERS.duration);
   fd.set('quality',  window.CHARACTERS.quality);
-  // Turbo toggle → skip-guidance on the HQ sampler. Both knobs to 1 when
-  // on. Defaults (off) match the locked recipe. Speed-up validated at
-  // ~12.6% on a 7s/High clip; no identity loss in side-by-side tests.
-  const turboEl = document.getElementById('charactersTurbo');
-  if (turboEl && turboEl.checked) {
-    fd.set('video_skip_step', '1');
-    fd.set('audio_skip_step', '1');
-  }
 
   try {
     const r = await fetch(`/characters/${encodeURIComponent(c.id)}/generate`, {
@@ -16143,10 +17261,9 @@ async function charactersLoadParams(p) {
   }
   charactersOpenCompose(p.character_id);
   // Sidecar values → compose state. Falls back to current defaults when a
-  // field is missing (older sidecar shapes).
-  if (typeof p.framing === 'string' && p.framing) {
-    window.CHARACTERS.framing = p.framing;
-  }
+  // field is missing (older sidecar shapes). Framing is no longer a UI
+  // control; sidecars with framing still load fine, the value is just
+  // ignored by the simplified composer.
   if (typeof p.duration === 'string' && p.duration) {
     window.CHARACTERS.duration = p.duration;
   }
@@ -16158,18 +17275,16 @@ async function charactersLoadParams(p) {
     window.CHARACTERS.quality = p.quality_choice;
   }
   charactersRenderChips();
-  // Prompt textarea + preview.
+  // Prompt textarea. The verbatim prompt from the sidecar is the
+  // source of truth; we don't try to re-derive a "body" from it.
+  // Older sidecars used prompt_body; newer sidecars store the full
+  // prompt — fall back to the full prompt if prompt_body is empty.
   const ta = document.getElementById('charactersPrompt');
-  if (ta) ta.value = (typeof p.prompt_body === 'string') ? p.prompt_body : '';
-  // Turbo toggle reflects video_skip_step + audio_skip_step. Either knob
-  // > 0 counts as Turbo on; when both are 0 (or missing), Turbo is off.
-  const turbo = document.getElementById('charactersTurbo');
-  if (turbo) {
-    const vs = Number(p.video_skip_step || 0);
-    const as = Number(p.audio_skip_step || 0);
-    turbo.checked = (vs > 0 || as > 0);
+  if (ta) {
+    ta.value = (typeof p.prompt_body === 'string' && p.prompt_body)
+      ? p.prompt_body
+      : (typeof p.prompt === 'string' ? p.prompt : '');
   }
-  charactersUpdatePreview();
 }
 
 
@@ -16186,6 +17301,7 @@ function trainInit() {
   if (!TRAIN.initialised) {
     TRAIN.initialised = true;
     trainWireDropZone();
+    trainWireBundleDropZone();
     trainWirePresetButtons();
     trainWireAdvancedFields();
     trainWireVoice();
@@ -16348,6 +17464,66 @@ function trainWireDropZone() {
   });
 }
 
+function trainWireBundleDropZone() {
+  const drop = document.getElementById('trainBundleDrop');
+  const input = document.getElementById('trainBundleInput');
+  if (!drop || !input) return;
+  drop.addEventListener('click', () => { if (!drop.classList.contains('busy')) input.click(); });
+  drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    drop.classList.add('dragover');
+  });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) trainUploadBundle(f);
+  });
+  input.addEventListener('change', () => {
+    if (input.files && input.files.length) trainUploadBundle(input.files[0]);
+    input.value = '';
+  });
+}
+
+async function trainUploadBundle(file) {
+  const drop = document.getElementById('trainBundleDrop');
+  const status = document.getElementById('trainStatus');
+  if (!file) return;
+  if (!/\.zip$/i.test(file.name)) {
+    if (status) status.textContent = 'Bundle must be a .zip file.';
+    return;
+  }
+  if (drop) drop.classList.add('busy');
+  if (status) status.textContent = `Unpacking ${file.name}…`;
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    if (TRAIN.jobId) fd.append('job_id', TRAIN.jobId);
+    const r = await fetch('/train/upload-bundle', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent = 'Bundle error: ' + (j.error || r.status);
+      return;
+    }
+    TRAIN.jobId = j.job_id;
+    await trainRefreshDataset();
+    const bits = [
+      `${j.image_count} image(s) staged`,
+      `${j.caption_count} caption(s)`,
+      `${j.paired_count} paired`,
+    ];
+    if (Array.isArray(j.unpaired_warnings) && j.unpaired_warnings.length) {
+      bits.push(`warnings: ${j.unpaired_warnings.slice(0, 2).join(' · ')}${j.unpaired_warnings.length > 2 ? '…' : ''}`);
+    }
+    if (status) status.textContent = bits.join(' · ');
+  } catch (e) {
+    if (status) status.textContent = 'Bundle upload failed: ' + (e.message || 'unknown');
+  } finally {
+    if (drop) drop.classList.remove('busy');
+  }
+}
+
 function trainWirePresetButtons() {
   document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(b => {
     b.addEventListener('click', () => {
@@ -16370,21 +17546,28 @@ function trainWireAdvancedFields() {
 
 async function trainUploadFiles(fileList) {
   const status = document.getElementById('trainStatus');
-  const files = Array.from(fileList).filter(f =>
+  // Partition incoming files into images and captions. The user may drop
+  // either type into the same zone — image_001.png + image_001.txt is the
+  // intended workflow.
+  const all = Array.from(fileList);
+  const imgs = all.filter(f =>
     /^image\/(png|jpe?g|webp)$/.test(f.type) ||
     /\.(png|jpe?g|webp)$/i.test(f.name));
-  if (!files.length) {
-    if (status) status.textContent = 'No supported image files in that selection.';
+  const caps = all.filter(f =>
+    /\.txt$/i.test(f.name) || /^text\/plain$/.test(f.type));
+  if (!imgs.length && !caps.length) {
+    if (status) status.textContent = 'No supported files in that selection (need PNG / JPG / WEBP / TXT).';
     return;
   }
-  if (status) status.textContent = `Uploading 0 / ${files.length}…`;
+  const total = imgs.length + caps.length;
+  if (status) status.textContent = `Uploading 0 / ${total}…`;
 
-  // Optimistic UI: render placeholders for the incoming batch using
-  // FileReader to get a local data URL so the user sees the crop preview
-  // immediately. Each placeholder is replaced with the server-saved path
-  // once /train/upload returns.
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
+  let done = 0;
+  let capThinWarnings = [];
+
+  // ----- IMAGES (optimistic placeholders so the grid lights up immediately) -----
+  for (let i = 0; i < imgs.length; i++) {
+    const f = imgs[i];
     if (TRAIN.images.length >= TRAIN_MAX) {
       if (status) status.textContent = `At max ${TRAIN_MAX} images. Stopping upload.`;
       break;
@@ -16396,6 +17579,7 @@ async function trainUploadFiles(fileList) {
       path: '',
       src: localUrl || '',
       uploading: true,
+      captioned: false,
     });
     trainRenderThumbs();
 
@@ -16406,7 +17590,6 @@ async function trainUploadFiles(fileList) {
       const r = await fetch('/train/upload', { method: 'POST', body: fd });
       const j = await r.json();
       if (!r.ok || !j.ok) {
-        // Remove the placeholder; surface the error.
         TRAIN.images.splice(placeholderIdx, 1);
         if (status) status.textContent = 'Upload error: ' + (j.error || r.status);
         trainRenderThumbs();
@@ -16420,19 +17603,59 @@ async function trainUploadFiles(fileList) {
              '&filename=' + encodeURIComponent(j.filename) +
              '&v=' + Date.now(),
         uploading: false,
+        captioned: !!j.captioned,
+        original_stem: j.original_stem || null,
       };
+      done += 1;
       trainRenderThumbs();
-      if (status) status.textContent = `Uploaded ${i + 1} / ${files.length}…`;
+      if (status) status.textContent = `Uploaded ${done} / ${total}…`;
     } catch (e) {
       TRAIN.images.splice(placeholderIdx, 1);
       if (status) status.textContent = 'Upload failed: ' + (e.message || 'unknown');
       trainRenderThumbs();
     }
   }
+
+  // ----- CAPTIONS (server pairs by stem against caption_map.json) -----
+  for (let i = 0; i < caps.length; i++) {
+    const f = caps[i];
+    try {
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      if (TRAIN.jobId) fd.append('job_id', TRAIN.jobId);
+      const r = await fetch('/train/upload', { method: 'POST', body: fd });
+      const j = await r.json();
+      if (!r.ok || !j.ok) {
+        if (status) status.textContent = 'Caption upload error: ' + (j.error || r.status);
+        continue;
+      }
+      TRAIN.jobId = j.job_id;
+      if (typeof j.word_count === 'number' && j.word_count < 10) {
+        capThinWarnings.push(`${f.name} (${j.word_count} words)`);
+      }
+      done += 1;
+      if (status) status.textContent = `Uploaded ${done} / ${total}…`;
+    } catch (e) {
+      if (status) status.textContent = 'Caption upload failed: ' + (e.message || 'unknown');
+    }
+  }
+  if (caps.length) {
+    // Pull canonical state so the captioned badges on existing thumbs
+    // refresh (a caption may have just paired with an already-uploaded image).
+    await trainRefreshDataset();
+  }
+
   if (status) {
     const n = TRAIN.images.length;
-    if (n < TRAIN_MIN) status.textContent = `${n} image${n === 1 ? '' : 's'} uploaded — need ${TRAIN_MIN - n} more to train.`;
-    else status.textContent = `${n} images ready — pick a preset and start training.`;
+    const captioned = TRAIN.images.filter(x => x.captioned).length;
+    const bits = [];
+    if (n < TRAIN_MIN) bits.push(`${n} image${n === 1 ? '' : 's'} — need ${TRAIN_MIN - n} more to train`);
+    else bits.push(`${n} images ready`);
+    if (caps.length) bits.push(`${captioned} captioned`);
+    if (capThinWarnings.length) {
+      bits.push(`thin captions: ${capThinWarnings.slice(0, 3).join(', ')}${capThinWarnings.length > 3 ? '…' : ''}`);
+    }
+    status.textContent = bits.join(' · ');
   }
   trainUpdateEstimate();
   trainUpdateButtonState();
@@ -16470,9 +17693,16 @@ function trainRenderThumbs() {
     const removeAttr = img.uploading
       ? ''
       : `onclick="trainRemoveImage('${img.filename.replace(/'/g, "\\'")}')"`;
+    const capCls = img.uploading ? '' :
+      (img.captioned ? 'captioned' : 'uncaptioned');
+    const capLabel = img.uploading ? '' :
+      (img.captioned ? '✓ cap' : 'no cap');
+    const capTitle = img.uploading ? '' :
+      (img.captioned ? 'caption paired' : 'no caption — will fall back to trigger_simple');
     return `<div class="${cls}" data-idx="${idx}">
       <img src="${img.src || ''}" alt="char ${idx + 1}" loading="lazy">
       <span class="train-thumb-num">${String(idx + 1).padStart(3, '0')}</span>
+      ${capLabel ? `<span class="train-thumb-cap ${capCls}" title="${capTitle}">${capLabel}</span>` : ''}
       <button type="button" class="train-thumb-x" ${removeAttr} title="Remove"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
     </div>`;
   }).join('');
@@ -16482,8 +17712,10 @@ function trainRenderThumbs() {
 function trainUpdateCounter() {
   const counter = document.getElementById('trainCounter');
   const hint = document.getElementById('trainCounterHint');
+  const capChip = document.getElementById('trainCaptionCounter');
   if (!counter) return;
   const n = TRAIN.images.length;
+  const captioned = TRAIN.images.filter(x => x.captioned).length;
   counter.textContent = `${n} / ${TRAIN_MAX} images`;
   counter.classList.toggle('ok', n >= TRAIN_MIN);
   counter.classList.toggle('short', n > 0 && n < TRAIN_MIN);
@@ -16492,6 +17724,18 @@ function trainUpdateCounter() {
     else if (n < TRAIN_MIN) hint.textContent = `need ${TRAIN_MIN - n} more`;
     else if (n < TRAIN_MAX) hint.textContent = `ready · up to ${TRAIN_MAX - n} more if you want variety`;
     else hint.textContent = `at the ${TRAIN_MAX}-image limit`;
+  }
+  if (capChip) {
+    if (captioned === 0) {
+      capChip.hidden = true;
+    } else {
+      capChip.hidden = false;
+      capChip.textContent = (captioned === n)
+        ? `${captioned} captioned · all paired`
+        : `${captioned} / ${n} captioned`;
+      capChip.classList.toggle('ok', captioned === n && n > 0);
+      capChip.classList.toggle('partial', captioned > 0 && captioned < n);
+    }
   }
 }
 
@@ -16544,7 +17788,17 @@ async function trainRefreshDataset() {
       src: '/train/file?job_id=' + encodeURIComponent(TRAIN.jobId) +
            '&filename=' + encodeURIComponent(im.filename) + '&v=' + Date.now(),
       uploading: false,
+      captioned: !!im.captioned,
+      caption_words: im.caption_words || null,
+      original_stem: im.original_stem || null,
     }));
+    if (Array.isArray(j.parked_captions) && j.parked_captions.length) {
+      const status = document.getElementById('trainStatus');
+      if (status) {
+        const msg = `${j.parked_captions.length} caption(s) parked without matching images: ${j.parked_captions.slice(0, 3).join(', ')}${j.parked_captions.length > 3 ? '…' : ''}`;
+        status.textContent = msg;
+      }
+    }
     trainRenderThumbs();
     trainUpdateEstimate();
     trainUpdateButtonState();
@@ -16617,12 +17871,26 @@ async function trainStart() {
     if (status) status.textContent = 'Trigger word required.';
     return;
   }
+  // Caption warnings: thin captions (< 10 words) or user_provided strategy
+  // with no .txt files at all. Surface as a one-time confirm so power users
+  // can override (e.g. they want bare trigger_simple anyway).
+  const captionStrategy = document.getElementById('trainCaptionStrategy').value || 'user_provided';
+  const captionedCount = TRAIN.images.filter(x => x.captioned).length;
+  const thinCaps = TRAIN.images.filter(x =>
+    x.captioned && typeof x.caption_words === 'number' && x.caption_words < 10);
+  if (captionStrategy === 'user_provided' && captionedCount === 0) {
+    if (!confirm('Caption strategy is "user_provided" but no .txt captions were uploaded. ' +
+                 'Continue with the trigger_simple fallback for every image?')) return;
+  } else if (thinCaps.length) {
+    if (!confirm(`${thinCaps.length} caption(s) are very short (< 10 words). ` +
+                 'Short captions usually train weaker LoRAs. Continue anyway?')) return;
+  }
   const fd = new URLSearchParams();
   fd.set('train_job_id', TRAIN.jobId);
   fd.set('trigger', trig);
   fd.set('preset', TRAIN.preset);
   fd.set('image_count', String(TRAIN.images.length));
-  fd.set('caption_strategy', document.getElementById('trainCaptionStrategy').value || 'trigger_simple');
+  fd.set('caption_strategy', captionStrategy);
   const rank = document.getElementById('trainRank').value;
   if (rank) fd.set('rank', rank);
   const stepsVal = document.getElementById('trainSteps').value;
