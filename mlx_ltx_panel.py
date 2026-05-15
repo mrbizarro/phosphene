@@ -33,34 +33,13 @@ import urllib.parse
 import urllib.request
 from urllib.parse import parse_qs, quote, urlparse
 
-# Agentic Flows runtime — chat-driven shot planner + queue submitter.
-# The agent module is self-contained (pure stdlib, imports nothing from
-# this panel); we wire it up via a PanelOps callback object built at the
-# end of this module just before the HTTP handler.
-from agent import engine as agent_engine
-from agent import image_engine as agent_image_engine
-from agent import local_server as agent_local_server
-from agent import prompts as agent_prompts
-from agent import runtime as agent_runtime
-from agent import tools as agent_tools
-# Phase 2 of the agent-layer refactor: smolagents CodeAgent in a parallel
-# runtime module. Selectable per-request via PHOSPHENE_RUNTIME=smol|legacy
-# (default: legacy). See agent/runtime_smol.py for the loop and
-# /Users/salo/.claude/plans/fancy-conjuring-lovelace.md for the plan.
-from agent import runtime_smol as agent_runtime_smol
-
-
-def _select_runtime():
-    """Pick the agent runtime for this request.
-
-    Reads PHOSPHENE_RUNTIME on every call so flipping back to legacy
-    doesn't require a panel restart — useful while we A/B these.
-    Falls back to legacy if smolagents isn't on this venv yet.
-    """
-    pick = (os.environ.get("PHOSPHENE_RUNTIME") or "legacy").strip().lower()
-    if pick == "smol" and agent_runtime_smol.is_smolagents_active():
-        return agent_runtime_smol
-    return agent_runtime
+# Image generation engine — used by the /image/generate endpoint.
+# Previously lived at agent/image_engine.py; moved to top level when the
+# agentic flows feature was removed 2026-05-15. The module is self-contained
+# (stdlib only) and has no relation to the (removed) agent chat surface.
+# External agents drive Phosphene via the HTTP API documented in docs/API.md.
+# Pre-removal snapshot: git tag pre-agent-removal-2026-05-15.
+import image_engine as agent_image_engine
 
 # --- Paths -------------------------------------------------------------------
 # Everything below is overridable via env vars so the panel can be cloned and
@@ -3566,6 +3545,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # (matches upstream). Lower values save latent algebra time
             # without skipping any model forwards. See helper for details.
             "bongmath_max_iter": max(0, int(f("bongmath_max_iter", "100") or 100)),
+            # Upstream HQ exposes per-modality guidance skip. Keep it off by
+            # default; experiments can opt in through the raw job form.
+            "video_skip_step": max(0, int(f("video_skip_step", "0") or 0)),
+            "audio_skip_step": max(0, int(f("audio_skip_step", "0") or 0)),
             # Stage-2 image-conditioning mode for HQ I2V. Empty string =
             # "let the dispatch decide" (auto-routes I2V>49f to "off" on
             # 48-79 GB tier to dodge boundary OOM). User can override
@@ -4685,6 +4668,8 @@ def run_job_inner(job: dict) -> None:
                 "enable_teacache": True,
                 "teacache_thresh": float(p.get("teacache_thresh", 2.0)),
                 "bongmath_max_iter": int(p.get("bongmath_max_iter", 100)),
+                "video_skip_step": int(p.get("video_skip_step", 0)),
+                "audio_skip_step": int(p.get("audio_skip_step", 0)),
                 # Stage-2 image conditioning mode. "full" re-encodes the
                 # reference image at full res for stage 2 (upstream default,
                 # best I2V anchor quality). "off" skips that full-res VAE
@@ -6885,16 +6870,12 @@ class Handler(BaseHTTPRequestHandler):
             self._ok(sidecar.read_bytes(), "application/json")
             return
 
-        # ---- Agentic Flows GETs --------------------------------------------
-        if parsed.path == "/agent/config":
-            cfg = _load_agent_config()
-            local = agent_local_server.status()
-            self._json({
-                "engine": cfg.to_public_dict(),
-                "capabilities": _agent_capabilities(),
-                "local_server": local,
-                "available_models": agent_local_server.discover_local_models(ROOT),
-            })
+        # ---- Agentic Flows GETs removed 2026-05-15.
+        # External agents use the documented HTTP API (docs/API.md).
+        # `/agent/image/config` retained below: image-engine config used by
+        # the Image Studio, unrelated to the removed chat surface.
+        if parsed.path.startswith("/agent/") and parsed.path != "/agent/image/config":
+            self._json({"error": "agentic flows removed; see docs/API.md"}, 410)
             return
 
         if parsed.path == "/agent/capabilities":
@@ -8242,23 +8223,12 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        # ---- Agentic Flows POSTs -------------------------------------------
-        if path == "/agent/config":
-            # JSON or urlencoded body. JSON is what the chat UI sends; form
-            # is here so curl-from-the-terminal still works.
-            try:
-                if ctype.startswith("application/json"):
-                    payload = json.loads(body or "{}")
-                else:
-                    payload = {k: v[0] if v else "" for k, v in form.items()}
-            except json.JSONDecodeError as e:
-                self._json({"error": f"bad JSON: {e}"}, 400); return
-            try:
-                cfg = _save_agent_config(payload)
-            except ValueError as e:
-                self._json({"error": str(e)}, 400); return
-            push(f"agent: engine config updated ({cfg.kind} → {cfg.model})")
-            self._json({"ok": True, "engine": cfg.to_public_dict()})
+        # ---- Agentic Flows POSTs removed 2026-05-15.
+        # External agents use the documented HTTP API (docs/API.md).
+        # `/agent/image/config` POST retained below: image-engine config used
+        # by the Image Studio, unrelated to the removed chat surface.
+        if path.startswith("/agent/") and path != "/agent/image/config":
+            self._json({"error": "agentic flows removed; see docs/API.md"}, 410)
             return
 
         if path == "/agent/local/start":
