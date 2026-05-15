@@ -191,16 +191,40 @@ Deletes the file. Returns `{"ok": true}`.
 
 Returns the dataset state (`train_job_id`, image count, etc.).
 
+### `POST /train/upload-voice`
+
+`multipart/form-data` upload. Attaches an optional voice clip to a training dataset. One clip per dataset — re-uploading overwrites.
+
+| Field | Type | Note |
+|---|---|---|
+| `job_id` | string | Required. From `/train/upload` (a dataset must exist first). |
+| `file` | file | `.wav`, `.mp3`, `.m4a`, or `.flac`, max 50 MB. Aim for 5–30 s, clean, single speaker. Duration is not validated server-side — the panel UI's `<audio controls>` preview is the user's confirmation. |
+
+Returns `{"ok": true, "job_id": "...", "filename": "voice.wav", "path": "...", "size": <bytes>}`.
+
+### `POST /train/remove-voice`
+
+Form-encoded. Removes the voice clip attached to a dataset (no-op if none exists).
+
+| Field | Type | Note |
+|---|---|---|
+| `train_job_id` | string | Required. |
+
+Returns `{"ok": true, "job_id": "...", "removed": ["voice.wav"]}`.
+
 ### `POST /train/start`
 
-Kick off a character LoRA training. The panel shells out to `lora_lab.train_character` and streams progress events back into `STATE['log']`.
+Kick off a character LoRA training. The panel shells out to `lora_lab.train_character` and streams progress events back into `STATE['log']`. If `train_audio=true` is set, a SECOND subprocess (`lora_lab.train_audio`) chains after the face phase to train a paired voice LoRA.
 
 | Field | Type | Note |
 |---|---|---|
 | `train_job_id` | string | From `/train/upload`. |
-| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound and rare so it doesn't collide with normal language. |
+| `trigger` | string | Trigger token, e.g. `bizarrotrn`. Must be compound and rare so it doesn't collide with normal language. The face LoRA lands at `mlx_models/loras/<trigger>_v2.safetensors`; the optional audio LoRA at `<trigger>.audio.safetensors`. |
 | `preset` | `quick` \| `medium` \| `high` | Hyperparameter preset. `high` = rank 32, 5000 steps. |
 | `image_count` | int | Confirmed by the panel from the uploaded images. |
+| `train_audio` | `true` \| `false` | Optional. Default `false`. When `true`, a voice clip must already exist for this `train_job_id` (uploaded via `/train/upload-voice`) — otherwise `/train/start` returns 400. |
+| `audio_steps` | int | Optional. Default `250`. Number of audio-LoRA training steps. Heuristic: ~30 s/step on M4 Max. Smoke = `100`, Standard = `250`, Long = `500`. |
+| `audio_rank` | int | Optional. Default `16`. LoRA rank for the audio adapter. |
 
 Advanced overrides (all optional, fall back to preset defaults):
 
@@ -210,7 +234,7 @@ Advanced overrides (all optional, fall back to preset defaults):
 | `caption_strategy` | `class_word` \| `trigger_only` \| `auto_caption` |
 | `crop_strategy` | `center` |
 
-Returns `{"ok": true, "id": "j-<...>"}`. Track progress via `/status` (the training job appears in `current` then `history`).
+Returns `{"ok": true, "id": "j-<...>"}`. Track progress via `/status` (the training job appears in `current` then `history`). During the run the `current.progress.phase_label` reads `Training face · step N / M` then `Training voice · step N / M` if the audio phase runs. If audio training fails, the face LoRA is still kept; `error` is set with `audio training failed: …` so callers can surface the partial success.
 
 ### `POST /train/install`
 
@@ -219,6 +243,37 @@ After training succeeds, the LoRA is automatically copied into `mlx_models/loras
 ### `POST /train/delete`, `POST /train/remove-image`
 
 Delete training datasets / individual training images.
+
+---
+
+## Characters
+
+Discover and drive trained character LoRAs as bundles.
+
+### `GET /characters`
+
+Returns `{"characters": [...]}`. Each entry describes one character discovered in `mlx_models/loras/`:
+
+| Field | Type | Note |
+|---|---|---|
+| `id`, `trigger` | string | Same value — the rare trigger token. |
+| `name`, `pronoun`, `subject_noun` | string | From the optional `mlx_models/characters/<trigger>/bundle.json`. |
+| `face_lora_path` | string | Absolute path to `<trigger>_v2.safetensors`. Always present. |
+| `audio_lora_path` | string \| null | Absolute path to `<trigger>.audio.safetensors`. `null` when the character is silent. |
+| `audio_lora` | string \| null | Alias for `audio_lora_path` — preferred for new callers. |
+| `voice_sample` | string \| null | Absolute path to `<trigger>.voice.<ext>` (the original training clip). For playback / inspection only; the model uses the audio LoRA, not the raw clip. |
+| `has_voice` | bool | `true` iff the audio LoRA is on disk. Silent characters (face LoRA only) are returned with `has_voice: false`. Callers should skip audio cues in prompts and not stack the (absent) audio LoRA. |
+| `sample_image_url` | string \| null | URL to a preview image from the training dataset. |
+
+Discovery rule: `<trigger>_v2.safetensors` is required; everything else is optional.
+
+### `GET /characters/<id>/preview`
+
+Serves the sample training image for the character (PNG/JPEG).
+
+### `POST /characters/<id>/generate`
+
+Assembles the locked production recipe + queues a T2V render. See the panel source for the full form; the audio LoRA is only stacked when `has_voice` is true.
 
 ---
 

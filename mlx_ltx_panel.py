@@ -737,6 +737,38 @@ TRAIN_MAX_IMAGES = 50
 TRAIN_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 TRAIN_MAX_BYTES_PER_IMAGE = 32 * 1024 * 1024     # 32 MB per image upload
 
+# Voice clip rules. The voice clip is optional — if the user uploads one and
+# flips the toggle, run_train_job_inner chains a second `lora_lab.train_audio`
+# subprocess after the face phase. The clip itself is preserved under the
+# dataset dir as `voice.<ext>` (single file, overwrites on re-upload) and
+# copied to LORAS_DIR/<trigger>.voice.<ext> on success so the Characters tab
+# can find it.
+TRAIN_VOICE_EXTS = {".wav", ".mp3", ".m4a", ".flac"}
+TRAIN_VOICE_MAX_BYTES = 50 * 1024 * 1024         # 50 MB
+TRAIN_VOICE_MIN_SECONDS = 3                       # advisory; we don't ffprobe
+TRAIN_VOICE_MAX_SECONDS = 60                      # advisory; we don't ffprobe
+
+# Audio-phase defaults. ~30 s/step on M4 Max is the rough heuristic for the
+# wall-time chips — measured value lives in lora-lab's train_audio module and
+# may drift; the panel's chip labels are guidance, not contract.
+TRAIN_AUDIO_DEFAULT_STEPS = 250
+TRAIN_AUDIO_DEFAULT_RANK = 16
+TRAIN_AUDIO_DEFAULT_LR = 1e-4
+TRAIN_AUDIO_SLICE_SECONDS = 4.0
+TRAIN_AUDIO_SECONDS_PER_STEP = 30.0               # heuristic for ETA strip
+
+
+def _existing_voice_file(dataset_dir: Path) -> Path | None:
+    """Return the single voice clip in `<dataset_dir>/voice.*` if present.
+    Only the file's stem matters — extension picks among TRAIN_VOICE_EXTS."""
+    if not dataset_dir.is_dir():
+        return None
+    for ext in TRAIN_VOICE_EXTS:
+        candidate = dataset_dir / f"voice{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
 # Counter for new training-job ids — short, sortable, unique-per-day.
 _TRAIN_COUNTER = 0
 _TRAIN_COUNTER_LOCK = threading.Lock()
@@ -1260,32 +1292,42 @@ def _character_bundle(trigger: str) -> dict:
 
 
 def list_characters() -> list[dict]:
-    """Scan mlx_models/loras/ for paired face+audio LoRAs and return one
-    record per discovered character.
+    """Scan mlx_models/loras/ for character LoRAs and return one record per
+    discovered character.
 
     Discovery rules:
-      - face_lora = `<trigger>_v2.safetensors`
-      - audio_lora = `<trigger>.audio.safetensors`  (same dir)
-      - voice_wav = `<trigger>.voice.wav`           (same dir, optional)
-      - bundle = mlx_models/characters/<trigger>/bundle.json (optional)
+      - face_lora  = `<trigger>_v2.safetensors`                  (REQUIRED)
+      - audio_lora = `<trigger>.audio.safetensors` (same dir)    (optional)
+      - voice_sample = `<trigger>.voice.<ext>`     (same dir)    (optional)
+      - bundle = mlx_models/characters/<trigger>/bundle.json     (optional)
       - sample_image = first training image in lora-lab's dataset dir
 
-    Only characters with BOTH face and audio LoRAs are returned. The
-    audio LoRA carries the lip-sync + voice characteristics — without
-    it the character lacks the production recipe's full identity.
+    Characters without an audio LoRA are "silent" — they can still drive
+    video generation (the face LoRA alone is enough for identity), but
+    callers should skip audio cues in their prompts. `has_voice` exposes
+    that state to the UI so a Silent badge + disabled audio toggle can
+    render appropriately.
     """
     loras_dir = _safe_loras_dir()
     if not loras_dir.is_dir():
         return []
+    voice_exts = sorted(TRAIN_VOICE_EXTS)
     out: list[dict] = []
     for face_path in sorted(loras_dir.glob("*_v2.safetensors")):
         trigger = face_path.name[: -len("_v2.safetensors")]
         if not _CHARACTERS_ID_RE.match(trigger):
             continue
         audio_path = loras_dir / f"{trigger}.audio.safetensors"
-        if not audio_path.is_file():
-            continue
-        voice_path = loras_dir / f"{trigger}.voice.wav"
+        has_audio = audio_path.is_file()
+        # Look for any voice sample with a supported extension; pick the
+        # first match in TRAIN_VOICE_EXTS order. The Train tab writes
+        # whatever extension the user uploaded.
+        voice_sample_path: Path | None = None
+        for ext in voice_exts:
+            candidate = loras_dir / f"{trigger}.voice{ext}"
+            if candidate.is_file():
+                voice_sample_path = candidate
+                break
         bundle = _character_bundle(trigger)
         sample = _character_dataset_image(trigger)
         out.append({
@@ -1297,8 +1339,16 @@ def list_characters() -> list[dict]:
             "default_action": bundle.get("default_action") or "",
             "sexy_directive": bool(bundle.get("sexy_directive", False)),
             "face_lora_path": str(face_path),
-            "audio_lora_path": str(audio_path),
-            "voice_wav_path": str(voice_path) if voice_path.is_file() else None,
+            # Legacy field — present iff the audio LoRA exists. New callers
+            # should prefer `audio_lora` + `has_voice` for clarity.
+            "audio_lora_path": str(audio_path) if has_audio else None,
+            "audio_lora": str(audio_path) if has_audio else None,
+            "voice_sample": str(voice_sample_path) if voice_sample_path else None,
+            # Back-compat alias — some older calls used `voice_wav_path`
+            # specifically (assumed .wav). New callers should use
+            # `voice_sample`.
+            "voice_wav_path": str(voice_sample_path) if voice_sample_path else None,
+            "has_voice": has_audio,
             "sample_image_path": str(sample) if sample else None,
             "sample_image_url": (f"/characters/{trigger}/preview"
                                  if sample else None),
@@ -1388,10 +1438,15 @@ def _character_build_form(character: dict, prompt: str, duration: str,
     # We keep two visible labels so we can introduce a real
     # balanced-grade fast path later without changing the UI contract.
     _q = quality   # kept for clarity
-    loras_payload = json.dumps([
-        {"path": character["face_lora_path"], "strength": 1.0},
-        {"path": character["audio_lora_path"], "strength": 1.0},
-    ])
+    # Stack the face LoRA always; only stack the audio LoRA if this
+    # character actually has one (silent characters don't have an audio
+    # LoRA on disk). The audio LoRA carries lip-sync + voice; without it
+    # the model just won't have an audio track to lip-sync to — the face
+    # identity still locks correctly.
+    lora_stack = [{"path": character["face_lora_path"], "strength": 1.0}]
+    if character.get("audio_lora_path"):
+        lora_stack.append({"path": character["audio_lora_path"], "strength": 1.0})
+    loras_payload = json.dumps(lora_stack)
     return {
         "mode": ["t2v"],
         "prompt": [prompt],
@@ -3577,6 +3632,18 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                             or "trigger_simple").lower()
         eta_sec = _train_estimate_seconds(preset, image_count,
                                           steps_override=steps)
+        # Optional voice-LoRA phase. Off unless the user explicitly toggled
+        # it in the Train tab. /train/start validates that a voice file
+        # exists before queueing — make_job just carries the flags.
+        train_audio_raw = f("train_audio", "false").lower()
+        train_audio = train_audio_raw in ("1", "true", "yes", "on")
+        audio_steps = max(50, _int_or("audio_steps", TRAIN_AUDIO_DEFAULT_STEPS))
+        audio_rank = max(2, _int_or("audio_rank", TRAIN_AUDIO_DEFAULT_RANK))
+        # Add an audio-phase estimate if the user opted in. The chip heuristic
+        # is intentionally coarse — the audio trainer's per-step cost lives
+        # in lora-lab and may drift.
+        if train_audio:
+            eta_sec += int(TRAIN_AUDIO_SECONDS_PER_STEP * audio_steps + 30)
         return {
             "id": _new_job_id(),
             "status": "queued",
@@ -3599,8 +3666,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "image_count": image_count,
                 "eta_sec": eta_sec,
                 "ram_peak_gb": cfg["ram_peak_gb"],
+                # Voice-LoRA phase params; consumed by run_train_job_inner
+                # after the face phase finishes.
+                "train_audio": train_audio,
+                "audio_steps": audio_steps,
+                "audio_rank": audio_rank,
                 # Convenient label that surfaces in Now / Queue cards.
-                "label": f"Train · {trigger} ({preset})",
+                "label": (f"Train · {trigger} ({preset})"
+                          + (" + voice" if train_audio else "")),
             },
             "command": None,
             "raw_path": None,
@@ -4236,9 +4309,19 @@ def run_train_job_inner(job: dict) -> None:
 
     # Output path for the trained LoRA. Going straight into
     # mlx_models/loras/ so the existing picker scan finds it.
+    #
+    # Naming convention: `<trigger>_v2.safetensors` — matches what the
+    # Characters tab discovery scan expects (list_characters scans for
+    # `*_v2.safetensors`). A freshly-trained character thus shows up in
+    # the Characters tab immediately, no manual rename. If the same trigger
+    # is trained twice the second run overwrites the first; we log a
+    # warning below so the user notices.
     _safe_loras_dir()
-    final_lora_path = LORAS_DIR / f"{train_job_id}.safetensors"
-    final_sidecar_path = LORAS_DIR / f"{train_job_id}.json"
+    final_lora_path = LORAS_DIR / f"{trigger}_v2.safetensors"
+    final_sidecar_path = LORAS_DIR / f"{trigger}_v2.json"
+    if final_lora_path.is_file():
+        push(f"[train] warn: {final_lora_path.name} already exists — "
+             f"this run will overwrite the previous {trigger!r} LoRA.")
 
     # Job-spec JSON — the contract surface with the lora-lab train_character
     # script. The lab agent reads this and emits a .safetensors to
@@ -4341,7 +4424,7 @@ def run_train_job_inner(job: dict) -> None:
                         if STATE.get("current") and STATE["current"].get("id") == job["id"]:
                             STATE["current"]["progress"] = {
                                 "phase": "denoise",
-                                "phase_label": f"Training · step {last_step} / {total_steps}",
+                                "phase_label": f"Training face · step {last_step} / {total_steps}",
                                 "pct": (last_step / max(1, total_steps)) * 100.0,
                                 "elapsed_sec": time.time() - t0,
                                 "eta_sec": max(0,
@@ -4424,6 +4507,188 @@ def run_train_job_inner(job: dict) -> None:
     p["elapsed_seconds"] = elapsed
     p["output_lora_path"] = str(final_lora_path)
     push(f"[train] done: {final_lora_path} (elapsed {elapsed}s)")
+
+    # ============================================================
+    # Voice (audio) LoRA phase — optional, runs ONLY if the user
+    # opted in via the Train tab toggle. Failure here is logged
+    # but doesn't fail the whole job: the face LoRA is already
+    # on disk and the character can still be used silently.
+    # ============================================================
+    if not p.get("train_audio"):
+        return
+
+    voice_src = _existing_voice_file(dataset_dir)
+    if voice_src is None:
+        # /train/start should have validated this; defensive log + bail.
+        push("[train] warn: train_audio=true but no voice clip found at "
+             f"{dataset_dir}/voice.<ext> — skipping audio phase.")
+        return
+
+    audio_steps_req = int(p.get("audio_steps") or TRAIN_AUDIO_DEFAULT_STEPS)
+    audio_rank_req = int(p.get("audio_rank") or TRAIN_AUDIO_DEFAULT_RANK)
+    audio_lora_path = LORAS_DIR / f"{trigger}.audio.safetensors"
+    voice_dst = LORAS_DIR / f"{trigger}.voice{voice_src.suffix.lower()}"
+
+    audio_spec = {
+        "schema": "phosphene/train_audio@1",
+        "job_id": train_job_id,
+        "trigger": trigger,
+        "audio_path": str(voice_src),
+        "dataset_dir": str(dataset_dir),
+        "image_count": len(image_files),
+        "audio_steps": audio_steps_req,
+        "audio_rank": audio_rank_req,
+        "audio_lr": TRAIN_AUDIO_DEFAULT_LR,
+        "audio_slice_seconds": TRAIN_AUDIO_SLICE_SECONDS,
+        "output_path": str(audio_lora_path),
+    }
+    audio_spec_path = dataset_dir / "audio_spec.json"
+    try:
+        audio_spec_path.write_text(json.dumps(audio_spec, indent=2),
+                                   encoding="utf-8")
+    except OSError as e:
+        push(f"[train] warn: could not write audio_spec.json: {e}; "
+             "skipping voice phase.")
+        if not job.get("error"):
+            job["error"] = f"audio training failed: spec write failed: {e}"
+        return
+
+    audio_cmd = [
+        str(LORA_LAB_RUN_SH), "python",
+        "-m", "lora_lab.train_audio",
+        "--spec", str(audio_spec_path),
+        "--job-id", train_job_id,
+    ]
+    push(f"[train] $ {' '.join(shlex.quote(c) for c in audio_cmd)}")
+
+    audio_t0 = time.time()
+    audio_proc: subprocess.Popen | None = None
+    audio_last_step = 0
+    audio_total_steps = audio_steps_req
+    audio_last_loss = None
+    audio_failed_reason: str | None = None
+
+    try:
+        audio_proc = subprocess.Popen(
+            audio_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env={**os.environ},
+        )
+        with LOCK:
+            STATE["pid"] = audio_proc.pid
+        assert audio_proc.stdout is not None
+        for raw in audio_proc.stdout:
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            payload = None
+            if line.lstrip().startswith("{"):
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    payload = None
+            if isinstance(payload, dict):
+                evt = payload.get("event") or "step"
+                if evt == "step":
+                    try:
+                        audio_last_step = int(payload.get("step")
+                                              or audio_last_step)
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        audio_total_steps = int(payload.get("total")
+                                                or audio_total_steps)
+                    except (TypeError, ValueError):
+                        pass
+                    audio_last_loss = payload.get("loss", audio_last_loss)
+                    with LOCK:
+                        if (STATE.get("current")
+                                and STATE["current"].get("id") == job["id"]):
+                            STATE["current"]["progress"] = {
+                                "phase": "audio",
+                                "phase_label": (
+                                    f"Training voice · step "
+                                    f"{audio_last_step} / {audio_total_steps}"
+                                ),
+                                "pct": (audio_last_step
+                                        / max(1, audio_total_steps)) * 100.0,
+                                "elapsed_sec": time.time() - audio_t0,
+                                "eta_sec": max(0,
+                                    (audio_total_steps - audio_last_step) * (
+                                        (time.time() - audio_t0)
+                                        / max(1, audio_last_step)
+                                        if audio_last_step > 0
+                                        else TRAIN_AUDIO_SECONDS_PER_STEP
+                                    )),
+                                "denoise_step": audio_last_step,
+                                "denoise_total": audio_total_steps,
+                            }
+                    if (audio_last_step % 25 == 0
+                            or audio_last_step == audio_total_steps):
+                        push(f"[train.audio] step {audio_last_step}/"
+                             f"{audio_total_steps} loss={audio_last_loss}")
+                elif evt == "log":
+                    push(f"[train.audio] {payload.get('msg', '')}")
+                elif evt == "done":
+                    push(f"[train.audio] done · {payload.get('path', '?')}")
+                else:
+                    push(f"[train.audio] {line}")
+            else:
+                push(f"[train.audio] {line}")
+        audio_rc = audio_proc.wait()
+        audio_proc = None
+        with LOCK:
+            STATE["pid"] = None
+        if audio_rc != 0:
+            audio_failed_reason = (f"audio trainer exited with code "
+                                   f"{audio_rc}")
+    except FileNotFoundError as e:
+        audio_failed_reason = f"audio trainer not available: {e}"
+    except Exception as e:
+        audio_failed_reason = f"audio trainer raised: {e}"
+    finally:
+        if audio_proc is not None:
+            try:
+                audio_proc.terminate()
+                audio_proc.wait(timeout=5)
+            except Exception:
+                try:
+                    audio_proc.kill()
+                except Exception:
+                    pass
+            with LOCK:
+                STATE["pid"] = None
+
+    if audio_failed_reason or not audio_lora_path.is_file():
+        reason = audio_failed_reason or (
+            f"audio output missing at {audio_lora_path}")
+        push(f"[train.audio] warn: {reason} — face LoRA is fine, but the "
+             "character will be silent. Re-run voice training later from the "
+             "Train tab to add a voice.")
+        # Surface the failure on the job but don't raise — face LoRA is
+        # the primary deliverable.
+        existing = (job.get("error") or "").strip()
+        suffix = f"audio training failed: {reason}"
+        job["error"] = f"{existing}; {suffix}" if existing else suffix
+        return
+
+    # Copy the voice clip itself to LORAS_DIR/<trigger>.voice.<ext> so the
+    # Characters tab discovery scan can find it (informational — playback
+    # only; the model uses the audio LoRA, not the raw clip).
+    try:
+        voice_dst.write_bytes(voice_src.read_bytes())
+        push(f"[train.audio] voice sample copied → {voice_dst}")
+    except OSError as e:
+        push(f"[train.audio] warn: could not copy voice sample to "
+             f"{voice_dst}: {e}")
+
+    audio_elapsed = round(time.time() - audio_t0, 2)
+    p["audio_elapsed_seconds"] = audio_elapsed
+    p["output_audio_lora_path"] = str(audio_lora_path)
+    push(f"[train.audio] done: {audio_lora_path} (elapsed {audio_elapsed}s)")
 
 
 def run_job_inner(job: dict) -> None:
@@ -6701,6 +6966,98 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": f"train upload failed: {exc}"}, 500)
             return
 
+        # ====== Train Character — voice clip upload (optional, single file)
+        # Mirrors /train/upload but for the audio clip used by the optional
+        # voice-LoRA phase. Stores as `state/train_character/<job_id>/voice.<ext>`
+        # — single file per dataset, re-upload overwrites. Server-side
+        # duration validation is skipped on purpose (no ffprobe dependency);
+        # the UI's <audio controls> preview is the user's verification.
+        if path == "/train/upload-voice" and ctype.startswith("multipart/form-data"):
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = 0
+            if clen <= 0:
+                self._json({"error": "Content-Length required"}, 411); return
+            if clen > TRAIN_VOICE_MAX_BYTES:
+                self._json({
+                    "error": f"voice upload too large (max "
+                             f"{TRAIN_VOICE_MAX_BYTES // (1024*1024)} MB)"
+                }, 413)
+                return
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile, headers=self.headers,
+                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
+                )
+                # job_id is required: the voice clip must attach to an
+                # existing dataset. The Train UI always uploads the first
+                # image before exposing the voice section, so a job_id is
+                # always available client-side.
+                requested_id = (form.getvalue("job_id") or "").strip() if "job_id" in form else ""
+                if not requested_id:
+                    self._json({
+                        "error": "job_id required — upload at least one "
+                                 "image first to create a dataset"
+                    }, 400)
+                    return
+                try:
+                    train_job_id = _safe_job_id(requested_id)
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400); return
+                ds = _train_dataset_dir(train_job_id)
+                if not ds.is_dir():
+                    self._json({
+                        "error": f"dataset not found for job_id {train_job_id!r}"
+                    }, 404)
+                    return
+
+                if "file" not in form:
+                    self._json({"error": "no field 'file'"}, 400); return
+                fld = form["file"]
+                if not getattr(fld, "filename", None):
+                    self._json({"error": "no filename"}, 400); return
+                ext = Path(fld.filename).suffix.lower()
+                if ext not in TRAIN_VOICE_EXTS:
+                    self._json({
+                        "error": f"unsupported audio type {ext!r}; want one of "
+                                 f"{sorted(TRAIN_VOICE_EXTS)}"
+                    }, 400)
+                    return
+
+                # Single file per dataset — remove any prior `voice.*` so we
+                # don't accumulate dead files when the user re-uploads with
+                # a different extension.
+                for prior_ext in TRAIN_VOICE_EXTS:
+                    prior = ds / f"voice{prior_ext}"
+                    if prior.is_file():
+                        try:
+                            prior.unlink()
+                        except OSError:
+                            pass
+
+                dest = ds / f"voice{ext}"
+                data = fld.file.read()
+                if len(data) > TRAIN_VOICE_MAX_BYTES:
+                    self._json({
+                        "error": f"voice upload too large (max "
+                                 f"{TRAIN_VOICE_MAX_BYTES // (1024*1024)} MB)"
+                    }, 413)
+                    return
+                dest.write_bytes(data)
+                self._json({
+                    "ok": True,
+                    "job_id": train_job_id,
+                    "filename": dest.name,
+                    "path": str(dest),
+                    "size": dest.stat().st_size,
+                    "min_seconds": TRAIN_VOICE_MIN_SECONDS,
+                    "max_seconds": TRAIN_VOICE_MAX_SECONDS,
+                })
+            except Exception as exc:
+                self._json({"error": f"voice upload failed: {exc}"}, 500)
+            return
+
         # JSON-body endpoint for the manual Image Studio. Lives BEFORE
         # the urlencoded body parsing because the body is JSON, not form
         # data. Drives `/image/generate` — the panel-side counterpart to
@@ -7053,6 +7410,19 @@ class Handler(BaseHTTPRequestHandler):
                     "error": f"not enough images: {len(image_files)} (need >= {TRAIN_MIN_IMAGES})"
                 }, 400)
                 return
+            # If the user opted into voice training, a clip must exist on
+            # disk before we queue the job — defensive guard so the worker
+            # doesn't have to fail mid-flight. The Train tab also disables
+            # the toggle when no clip is uploaded, but the API is the
+            # source of truth.
+            train_audio_raw = (form.get("train_audio", ["false"])[0] or "false").lower()
+            wants_audio = train_audio_raw in ("1", "true", "yes", "on")
+            if wants_audio and _existing_voice_file(ds) is None:
+                self._json({
+                    "error": "voice clip required when train_audio is true — "
+                             "upload one via /train/upload-voice first"
+                }, 400)
+                return
             # Make sure the form has the canonical image_count so make_job's
             # estimate is right even if the JS forgot to set it.
             form["mode"] = ["train"]
@@ -7066,6 +7436,32 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "queued_id": job["id"],
                         "train_job_id": train_job_id,
                         "params": job["params"]})
+            return
+
+        # Remove the (single) voice clip from a pending dataset. Used by
+        # the Train tab "remove" button. Safe to call even if no clip
+        # exists — returns ok in that case so the UI can stay idempotent.
+        if path == "/train/remove-voice":
+            train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
+            if not train_job_id:
+                self._json({"error": "train_job_id required"}, 400); return
+            try:
+                train_job_id = _safe_job_id(train_job_id)
+            except ValueError as e:
+                self._json({"error": str(e)}, 400); return
+            ds = _train_dataset_dir(train_job_id)
+            removed: list[str] = []
+            for ext in TRAIN_VOICE_EXTS:
+                p = ds / f"voice{ext}"
+                if p.is_file():
+                    try:
+                        p.unlink()
+                        removed.append(p.name)
+                    except OSError as e:
+                        self._json({"error": f"could not delete: {e}"}, 500)
+                        return
+            self._json({"ok": True, "job_id": train_job_id,
+                        "removed": removed})
             return
 
         # Remove a single image from a pending dataset (before training has
@@ -8467,8 +8863,14 @@ HTML = r"""<!doctype html>
        the video and carousel both fluid-fit, so a wider stage just
        means a bigger player + more cards visible. */
     .layout {
+      /* Two-column grid. The right column is sized to 16/9 of the
+         available viewport height so a flex-grow video player fills it
+         edge-to-edge with no side black bars. The left column gets
+         whatever width is left over via 1fr — anywhere from ~420px
+         (tight) on a wide viewport to ~580px+ on narrower viewports.
+         Lower bound of 420px so the composer doesn't get squeezed. */
       flex: 1 1 auto; display: grid;
-      grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+      grid-template-columns: minmax(420px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
       gap: 14px; padding: 14px; min-height: 0;
     }
     .form-pane, .stage-pane {
@@ -9005,6 +9407,35 @@ HTML = r"""<!doctype html>
       background: rgba(140, 160, 220, 0.04);
       border: 1px solid rgba(140, 160, 220, 0.06);
     }
+    /* Silent character — no audio LoRA on disk. The badge sits next to
+       the other meta chips; the avatar overlay is a small muted-speaker
+       icon in the top-right so it reads at a glance from the grid. */
+    .characters-silent-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10.5px;
+      letter-spacing: 0.02em;
+      padding: 2px 7px;
+      border-radius: 4px;
+      color: #ffb84a;
+      background: rgba(255, 168, 0, 0.08);
+      border: 1px solid rgba(255, 168, 0, 0.28);
+    }
+    .characters-silent-badge .ph { width: 11px; height: 11px; }
+    .characters-card-silent-overlay {
+      position: absolute;
+      top: 8px; right: 8px;
+      width: 26px; height: 26px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: rgba(15, 18, 32, 0.78);
+      border: 1px solid rgba(255, 168, 0, 0.45);
+      color: #ffb84a;
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+    }
+    .characters-card-silent-overlay .ph { width: 14px; height: 14px; }
+    .characters-card { position: relative; }
 
     /* ---- Compose state ----
        The form-pane is now capped at ~420px (2026-05-15 polish) so
@@ -9674,6 +10105,140 @@ HTML = r"""<!doctype html>
       color: var(--text);
       letter-spacing: 0;
     }
+    /* ---- Voice (optional) section ----
+       Mirrors the image drop zone visually (same dashed border, hover +
+       dragover treatment) so the two slots read as siblings. The empty
+       state shows a music-notes icon + browse CTA; once uploaded, the
+       loaded state shows the filename + the <audio controls> preview. */
+    .train-voice-drop {
+      border: 1.5px dashed var(--ph-border-strong);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.015);
+      transition: border-color var(--t-fast), background var(--t-fast);
+      min-height: 96px;
+      padding: 14px;
+      cursor: pointer;
+      position: relative;
+    }
+    .train-voice-drop:hover {
+      border-color: var(--accent);
+      background: rgba(90, 124, 255, 0.04);
+    }
+    .train-voice-drop.dragover {
+      border-color: var(--accent);
+      border-style: solid;
+      background: rgba(90, 124, 255, 0.10);
+    }
+    .train-voice-drop.has-file { cursor: default; }
+    .train-voice-empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 8px 8px;
+      font-size: 12px;
+      pointer-events: none;
+    }
+    .train-voice-empty .picker-icon {
+      font-size: 24px; margin-bottom: 4px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .train-voice-empty .picker-icon .ph { width: 24px; height: 24px; }
+    .train-voice-empty .picker-cta {
+      font-size: 13px;
+      color: var(--text);
+      opacity: 0.95;
+      margin-bottom: 4px;
+    }
+    .train-voice-loaded {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    /* HTML `hidden` is `display: none` by default but our flex display
+       rule above (and the empty state's block) would otherwise override
+       it. Explicitly defer to `hidden` so toggling `el.hidden` does the
+       right thing. */
+    .train-voice-loaded[hidden], .train-voice-empty[hidden],
+    .train-voice-steps[hidden] { display: none; }
+    .train-voice-fileline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12.5px;
+    }
+    .train-voice-icon { width: 16px; height: 16px; color: var(--accent-bright); flex-shrink: 0; }
+    .train-voice-filename {
+      font-family: var(--ph-font-mono);
+      letter-spacing: 0;
+      color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .train-voice-meta {
+      color: var(--muted);
+      font-size: 11px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .train-voice-remove { flex-shrink: 0; padding: 4px 8px; }
+    .train-voice-remove .ph { width: 11px; height: 11px; }
+    .train-voice-audio {
+      width: 100%;
+      height: 32px;
+      filter: invert(0.86) hue-rotate(180deg);
+    }
+    .train-voice-controls {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .train-voice-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      user-select: none;
+      width: 100%;
+      white-space: nowrap;
+    }
+    .train-voice-toggle input[type="checkbox"] {
+      cursor: pointer;
+      flex-shrink: 0;
+      margin: 0;
+      /* The global `input` selector sets width:100% + padding;
+         override here so the checkbox renders at its native size. */
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      appearance: auto;
+      -webkit-appearance: auto;
+    }
+    .train-voice-toggle input[type="checkbox"]:disabled { cursor: not-allowed; }
+    .train-voice-toggle-label { color: var(--text); white-space: nowrap; }
+    .train-voice-toggle-hint {
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .train-voice-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .train-voice-help {
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.45;
+      margin: 10px 0 0;
+    }
+
     /* Trained LoRA list — one row per finished LoRA, dense and scannable. */
     .train-lora-list { display: flex; flex-direction: column; gap: 6px; }
     .train-lora-row {
@@ -10279,15 +10844,19 @@ HTML = r"""<!doctype html>
       background:
         radial-gradient(circle at 70% -10%, rgba(47,129,247,0.08) 0%, transparent 45%),
         linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
-      padding: 14px 14px 0;
+      padding: 14px;
       gap: 14px;
     }
-    /* Player surface — wraps the <video>/<img> and all overlays. One
-       elevated card with rounded corners and an accent ring on focus. */
+    /* Player surface — wraps the <video>/<img> and all overlays.
+       Width fills the stage-pane content area (which is sized by the
+       grid column to be exactly the player's natural 16:9 width at
+       58vh tall). aspect-ratio drives height; no max-height cap so the
+       box is true 16:9 with the video filling it edge-to-edge. */
     .player-surface {
       position: relative;
-      flex: 1 1 auto;
-      min-height: 0;
+      flex: 0 0 auto;
+      width: 100%;
+      aspect-ratio: 16 / 9;
       border-radius: var(--r-lg);
       overflow: hidden;
       background: black;
@@ -10298,13 +10867,15 @@ HTML = r"""<!doctype html>
     .player-wrap {
       flex: 1 1 auto;
       display: flex; align-items: center; justify-content: center;
-      background: black; min-height: 0; position: relative;
+      background: black; position: relative;
       overflow: hidden;
       width: 100%;
+      height: 100%;
     }
     .player-wrap video,
     .player-wrap img {
-      max-width: 100%; max-height: 100%; width: auto; height: auto;
+      width: 100%; height: 100%;
+      object-fit: cover;
       display: block;
     }
     .player-wrap.empty {
@@ -10449,14 +11020,21 @@ HTML = r"""<!doctype html>
 
     /* Carousel wrap — composer-card visual language. One elevated panel
        with a section header (title + filter chips + visible/hidden
-       segment all inline), then the scrolling card row beneath. */
+       segment all inline), then the scrolling card row beneath. Flexes
+       to fill all remaining vertical inside the stage-pane so the bottom
+       of the viewport is never dead space — more rows of thumbnails
+       become visible on tall viewports. */
     .carousel-wrap {
-      flex: 0 0 auto;
+      flex: 1 1 auto;
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
       padding: 12px 14px 14px;
       background: var(--panel);
       border: 1px solid var(--border-strong);
       border-radius: var(--r-lg);
       box-shadow: var(--shadow-1);
+      overflow: hidden;
     }
     .carousel-head {
       display: flex;
@@ -10545,10 +11123,23 @@ HTML = r"""<!doctype html>
     .carousel {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      /* Implicit rows must size to content, not to the grid container's
+         remaining height (which would squeeze them to a fraction of one
+         row when many cards fit a constrained flex parent). max-content
+         forces each row to fit its tallest child (~16:9 thumb + filename
+         row ≈ 150px). overflow-y on the grid container then scrolls
+         excess rows. */
+      grid-auto-rows: max-content;
       gap: 10px;
-      max-height: max(220px, 26vh);
+      /* Flex to fill all remaining vertical inside carousel-wrap (which
+         itself flexes to fill the stage-pane below the player). The
+         min-height: 0 is the magic that lets a flex/grid child shrink
+         below its content size so the parent's flex sizing wins. */
+      flex: 1 1 auto;
+      min-height: 0;
       overflow-y: auto;
       padding-right: 4px;
+      align-content: start;
     }
     .carousel::-webkit-scrollbar { width: 8px; height: 8px; }
     .carousel::-webkit-scrollbar-thumb {
@@ -10602,6 +11193,7 @@ HTML = r"""<!doctype html>
     .car-thumb-wrap {
       position: relative;
       width: 100%;
+      aspect-ratio: 16 / 9;
       overflow: hidden;
       border-top-left-radius: inherit;
       border-top-right-radius: inherit;
@@ -12286,7 +12878,35 @@ HTML = r"""<!doctype html>
     main.layout {
       gap: 0;
       padding: 0;
-      grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+      /* Right column = exact 16:9 player width at ~58vh tall + stage-pane's
+         28px of side padding. Capped at 70vw to keep things sane on
+         ultrawides. Left column = 1fr (takes the rest). This eliminates the
+         pillarbox: the player fills the column edge-to-edge with no side
+         panel-bg margins. */
+      grid-template-columns: minmax(0, 1fr) min(70vw, calc(58vh * 16 / 9 + 28px));
+      /* Two rows: top fills the leftover vertical (form scroll has room),
+         bottom is the bottomPane's natural height. This kills the dead
+         zone where row-2 used to size to bottomPane content only,
+         leaving stage-pane to span and create blank space below
+         bottomPane in the left column. */
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+    /* Stage-pane is pinned to column 2 and spans both grid rows so the
+       carousel uses the full vertical of the viewport (kills the
+       bottom-right dead zone where row-2 col-2 used to show as empty
+       page-bg). Explicit grid-column avoids the auto-placement quirk
+       where `-1` row span confuses Chrome's row-major auto-flow. */
+    main.layout > .stage-pane {
+      grid-column: 2 / 3;
+      grid-row: 1 / span 2;
+    }
+    main.layout > .form-pane {
+      grid-column: 1 / 2;
+      grid-row: 1 / 2;
+    }
+    main.layout > #bottomPane {
+      grid-column: 1 / 2;
+      grid-row: 2 / 3;
     }
     .form-pane,
     .stage-pane {
@@ -12651,6 +13271,8 @@ HTML = r"""<!doctype html>
 <symbol id="ph-file-text" viewBox="0 0 256 256"><path d="M200,224H56a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h96l56,56V216A8,8,0,0,1,200,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="136" x2="160" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="168" x2="160" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-file-pdf" viewBox="0 0 256 256"><polyline points="216 152 184 152 184 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="208" y1="184" x2="184" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,192H64a20,20,0,0,0,0-40H48v56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M112,152v56h16a28,28,0,0,0,0-56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M48,112V40a8,8,0,0,1,8-8h96l56,56v24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 32 152 88 208 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="ph-folder-simple" viewBox="0 0 256 256"><path d="M224,208H32V72a8,8,0,0,1,8-8H92.69a8,8,0,0,1,5.65,2.34L128,96h88a8,8,0,0,1,8,8V208Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-music-notes" viewBox="0 0 256 256"><circle cx="180" cy="184" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="52" cy="200" r="28" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="80 200 80 56 208 24 208 184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="88" x2="208" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="ph-speaker-slash" viewBox="0 0 256 256"><line x1="48" y1="40" x2="208" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M80,168H32a8,8,0,0,1-8-8V96a8,8,0,0,1,8-8H80l72-56V147" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M152,179v45L94.4,179.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </defs>
 </svg>
 
@@ -13422,7 +14044,8 @@ HTML = r"""<!doctype html>
           <div class="characters-empty-title">No characters yet</div>
           <div class="characters-empty-body">
             Train one in the <a href="#" onclick="workflowSwitch('train'); return false;">Train tab</a> —
-            once a face + audio LoRA pair lands in <code>mlx_models/loras/</code> it shows up here automatically.
+            once a <code>&lt;trigger&gt;_v2.safetensors</code> LoRA lands in <code>mlx_models/loras/</code> it shows up here automatically.
+            Add a matching <code>.audio.safetensors</code> for voice; without it the character is silent.
           </div>
         </div>
       </div>
@@ -13646,6 +14269,61 @@ HTML = r"""<!doctype html>
         </details>
       </div>
 
+      <!-- ============== VOICE (OPTIONAL) ==============
+           A second, optional dataset slot: one short voice clip used to
+           train a paired audio LoRA via lora_lab.train_audio. Skipping
+           this leaves the character "silent" — still usable for video
+           but won't speak/sing. The drop zone reuses the same border /
+           drop affordance as the image dataset so the two slots read
+           as siblings, not different surfaces. -->
+      <div class="composer-card train-card">
+        <h2>Voice
+          <span class="h2-hint">optional · a short clean clip becomes the character's voice</span>
+        </h2>
+        <div class="train-voice-drop" id="trainVoiceDrop">
+          <div class="train-voice-empty" id="trainVoiceEmpty">
+            <div class="picker-icon"><svg class="ph"><use href="#ph-music-notes"/></svg></div>
+            <div class="picker-cta">Drop a voice clip here, or <strong>click to browse</strong></div>
+            <div class="hint">WAV / MP3 / M4A / FLAC · up to 50 MB · one file. Aim for 5–30 seconds, clean, single speaker.</div>
+          </div>
+          <div class="train-voice-loaded" id="trainVoiceLoaded" hidden>
+            <div class="train-voice-fileline">
+              <svg class="ph train-voice-icon" aria-hidden="true"><use href="#ph-music-notes"/></svg>
+              <span class="train-voice-filename" id="trainVoiceFilename">voice.wav</span>
+              <span class="train-voice-meta" id="trainVoiceMeta">—</span>
+              <button type="button" class="qchip train-voice-remove" id="trainVoiceRemoveBtn" onclick="trainVoiceRemove(event)" title="Remove voice clip">
+                <svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg>
+              </button>
+            </div>
+            <audio id="trainVoiceAudio" controls preload="metadata" class="train-voice-audio"></audio>
+          </div>
+          <input type="file" id="trainVoiceFileInput" accept="audio/wav,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/flac,.wav,.mp3,.m4a,.flac" style="display:none">
+        </div>
+
+        <div class="train-voice-controls">
+          <label class="train-voice-toggle" id="trainVoiceToggleWrap">
+            <input type="checkbox" id="trainVoiceToggle" disabled onchange="trainVoiceToggleChanged()">
+            <span class="train-voice-toggle-label">Train voice LoRA</span>
+            <span class="train-voice-toggle-hint" id="trainVoiceToggleHint">upload a clip to enable</span>
+          </label>
+
+          <div class="train-voice-steps" id="trainVoiceStepsRow" hidden>
+            <span class="mf-label">Audio steps</span>
+            <div class="pill-group cols-3" id="trainVoicePresetGroup">
+              <button type="button" class="pill-btn" data-voice-preset="smoke"><span>Smoke <span class="rec-badge">100</span></span><span class="sub">~50 min wall</span></button>
+              <button type="button" class="pill-btn active" data-voice-preset="standard"><span>Standard <span class="rec-badge">250</span></span><span class="sub">~2 h 5 min wall</span></button>
+              <button type="button" class="pill-btn" data-voice-preset="long"><span>Long <span class="rec-badge">500</span></span><span class="sub">~4 h 10 min wall</span></button>
+            </div>
+            <div class="hint" style="margin-top:6px">Estimates assume ~30 s/step on M4 Max — measured value lives in lora-lab and may drift.</div>
+          </div>
+        </div>
+
+        <p class="train-voice-help">
+          A 5–30 second voice clip (clean, single speaker) gives the character its own voice.
+          Skip this and the character will be silent — you can still use them for video but they won't speak/sing.
+        </p>
+      </div>
+
       <!-- Estimate strip — wall time + RAM peak update as inputs
            change. Hidden until at least one image is in the dataset:
            before that, the estimate row is misleading ("— · —" reads
@@ -13679,7 +14357,7 @@ HTML = r"""<!doctype html>
           <span class="qchip-spacer"></span>
         </div>
         <div class="actions">
-          <button type="button" class="primary" id="trainStartBtn" onclick="trainStart()" disabled>Start training</button>
+          <button type="button" class="primary" id="trainStartBtn" onclick="trainStart()" disabled>Train Character</button>
           <button type="button" class="danger" onclick="api('/stop','POST').then(poll)">Stop</button>
         </div>
       </div>
@@ -15013,6 +15691,20 @@ const TRAIN = {
     high:   { steps: 5000, rank: 32, resolution: 768, seconds_per_step: 3.0, ram_peak_gb: 28,
               label: 'High',   subtitle: '~4 h · rank 32 · 768px' },
   },
+  // Voice (optional) state. `voiceFile` is the server-saved record once
+  // an upload completes; `voiceEnabled` mirrors the toggle. The audio
+  // step presets share the same chip pattern as the face presets.
+  voiceFile: null,           // {filename, path, size, audioUrl}
+  voiceEnabled: false,        // default OFF; auto-flips ON after upload
+  voicePreset: 'standard',    // 'smoke' | 'standard' | 'long'
+  voicePresets: {
+    smoke:    { steps: 100, label: 'Smoke',    sub: '~50 min wall' },
+    standard: { steps: 250, label: 'Standard', sub: '~2 h 5 min wall' },
+    long:     { steps: 500, label: 'Long',     sub: '~4 h 10 min wall' },
+  },
+  // ~30 s/step on M4 Max. Mirrors TRAIN_AUDIO_SECONDS_PER_STEP py-side;
+  // these labels are guidance not contract.
+  voiceSecondsPerStep: 30,
   initialised: false,
 };
 
@@ -15108,17 +15800,33 @@ function charactersRenderGrid() {
     const img = c.sample_image_url
       ? `<img class="characters-card-img" src="${charactersEscapeAttr(c.sample_image_url)}" alt="${charactersEscapeAttr(c.name || c.trigger)}" loading="lazy">`
       : `<div class="characters-card-placeholder">${charactersEscapeHtml((c.name || c.trigger || '?').slice(0, 1).toUpperCase())}</div>`;
+    // Silent characters: muted-speaker overlay on the avatar + a small
+    // "Silent" pill in the chip row. has_voice is set server-side by
+    // list_characters() based on whether <trigger>.audio.safetensors
+    // exists alongside the face LoRA.
+    const silentOverlay = c.has_voice
+      ? ''
+      : `<span class="characters-card-silent-overlay" title="No voice LoRA — character is silent">
+           <svg class="ph" aria-hidden="true"><use href="#ph-speaker-slash"/></svg>
+         </span>`;
+    const silentBadge = c.has_voice
+      ? ''
+      : `<span class="characters-silent-badge" title="No voice LoRA on disk — train one via the Train tab">
+           <svg class="ph" aria-hidden="true"><use href="#ph-speaker-slash"/></svg>Silent
+         </span>`;
     return `
       <div class="characters-card" role="button" tabindex="0"
            data-character-id="${charactersEscapeAttr(c.id)}"
            onclick="charactersOpenCompose('${charactersEscapeAttr(c.id)}')"
            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();charactersOpenCompose('${charactersEscapeAttr(c.id)}')}">
         ${img}
+        ${silentOverlay}
         <div class="characters-card-meta">
           <div class="characters-card-name">${charactersEscapeHtml(c.name || c.trigger)}</div>
           <div class="characters-card-chips">
             <code class="characters-trigger-chip">${charactersEscapeHtml(c.trigger)}</code>
             <span class="characters-pronoun-chip">${charactersEscapeHtml((c.pronoun || 'they') + ' · ' + (c.subject_noun || 'person'))}</span>
+            ${silentBadge}
           </div>
         </div>
       </div>`;
@@ -15181,6 +15889,42 @@ function charactersOpenCompose(id) {
   if (trigEl) trigEl.textContent = c.trigger;
   const pronounEl = document.getElementById('charactersComposePronoun');
   if (pronounEl) pronounEl.textContent = `${c.pronoun || 'they'} · ${c.subject_noun || 'person'}`;
+
+  // Silent indicator in the compose head. Reuses the same badge style as
+  // the grid card so the state is obvious wherever the character is shown.
+  let silentEl = document.getElementById('charactersComposeSilent');
+  const chipRow = pronounEl ? pronounEl.parentElement : null;
+  if (!c.has_voice) {
+    if (!silentEl && chipRow) {
+      silentEl = document.createElement('span');
+      silentEl.id = 'charactersComposeSilent';
+      silentEl.className = 'characters-silent-badge';
+      silentEl.title = 'No voice LoRA — train one via the Train tab';
+      silentEl.innerHTML =
+        '<svg class="ph" aria-hidden="true"><use href="#ph-speaker-slash"/></svg>Silent';
+      chipRow.appendChild(silentEl);
+    } else if (silentEl) {
+      silentEl.hidden = false;
+    }
+  } else if (silentEl) {
+    silentEl.hidden = true;
+  }
+
+  // Silent characters can't benefit from audio_skip_step (no audio LoRA
+  // to skip-guidance). Force Turbo off and disable the checkbox so users
+  // aren't confused by a no-op. The label gets a tooltip explaining why.
+  const turboCb = document.getElementById('charactersTurbo');
+  if (turboCb) {
+    turboCb.disabled = !c.has_voice;
+    if (!c.has_voice) {
+      turboCb.checked = false;
+      turboCb.title =
+        'This character has no voice LoRA — Turbo (audio skip-guidance) ' +
+        'is unavailable. Train a voice via the Train tab to enable.';
+    } else {
+      turboCb.title = '';
+    }
+  }
 
   // Clear the prompt + toast for the new selection. Focus the input.
   const ta = document.getElementById('charactersPrompt');
@@ -15376,6 +16120,7 @@ function trainInit() {
     trainWireDropZone();
     trainWirePresetButtons();
     trainWireAdvancedFields();
+    trainWireVoice();
     // Initial trigger value — JS-side generator (instant); /train/suggest-trigger
     // exists for non-JS callers.
     const t = document.getElementById('trainTrigger');
@@ -15392,6 +16137,7 @@ function trainInit() {
   trainRefreshLoraList();
   trainUpdateEstimate();
   trainUpdateButtonState();
+  trainUpdateStartLabel();
   trainCheckPreflight();
   trainGuidanceRestore();
 }
@@ -15818,13 +16564,24 @@ async function trainStart() {
   const resVal = document.getElementById('trainResolution').value;
   if (resVal) fd.set('resolution', resVal);
 
+  // Voice phase — only sent when the toggle is on AND a clip is uploaded.
+  // /train/start re-validates voice presence server-side and 400s if the
+  // clip is missing.
+  if (TRAIN.voiceEnabled && TRAIN.voiceFile) {
+    fd.set('train_audio', 'true');
+    const vp = TRAIN.voicePresets[TRAIN.voicePreset]
+            || TRAIN.voicePresets.standard;
+    fd.set('audio_steps', String(vp.steps));
+  }
+
+  const restoreLabel = () => { if (btn) btn.textContent = trainStartLabelText(); };
   if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
   try {
     const r = await fetch('/train/start', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok || !j.ok) {
       if (status) status.textContent = 'Failed to enqueue: ' + (j.error || r.status);
-      if (btn) { btn.disabled = false; btn.textContent = 'Start training'; }
+      if (btn) { btn.disabled = false; restoreLabel(); }
       return;
     }
     if (status) status.textContent = `Queued · job ${j.queued_id}. Watch the Now / Queue pane for progress.`;
@@ -15832,15 +16589,218 @@ async function trainStart() {
     // job's files stay on disk — only our local mirror is cleared.
     TRAIN.jobId = null;
     TRAIN.images = [];
+    TRAIN.voiceFile = null;
+    TRAIN.voiceEnabled = false;
     trainRenderThumbs();
+    trainRenderVoice();
     trainUpdateEstimate();
-    if (btn) btn.textContent = 'Start training';
+    restoreLabel();
     // Refresh queue poll immediately so the new job card appears without
     // waiting for the next 1.5s tick.
     if (typeof poll === 'function') poll();
   } catch (e) {
     if (status) status.textContent = 'Enqueue failed: ' + (e.message || 'unknown');
-    if (btn) { btn.disabled = false; btn.textContent = 'Start training'; }
+    if (btn) { btn.disabled = false; restoreLabel(); }
+  }
+}
+
+// ============================================================
+// Voice (optional) — drop zone + toggle + audio-step presets
+// ============================================================
+
+function trainStartLabelText() {
+  return (TRAIN.voiceEnabled && TRAIN.voiceFile)
+    ? 'Train Character + Voice'
+    : 'Train Character';
+}
+
+function trainUpdateStartLabel() {
+  const btn = document.getElementById('trainStartBtn');
+  if (!btn) return;
+  // Don't override 'Submitting…' mid-request.
+  if (btn.textContent === 'Submitting…') return;
+  btn.textContent = trainStartLabelText();
+}
+
+function trainWireVoice() {
+  const drop = document.getElementById('trainVoiceDrop');
+  const input = document.getElementById('trainVoiceFileInput');
+  if (drop && input) {
+    drop.addEventListener('click', (e) => {
+      // Don't re-open the picker if the user clicks the remove button or
+      // interacts with the <audio> element.
+      if (e.target.closest('.train-voice-remove')) return;
+      if (e.target.closest('audio')) return;
+      input.click();
+    });
+    drop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      drop.classList.add('dragover');
+    });
+    drop.addEventListener('dragleave', () =>
+      drop.classList.remove('dragover'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('dragover');
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (files && files.length) trainVoiceUpload(files[0]);
+    });
+    input.addEventListener('change', () => {
+      if (input.files && input.files.length) trainVoiceUpload(input.files[0]);
+      input.value = '';
+    });
+  }
+  // Voice preset chips.
+  document.querySelectorAll('#trainVoicePresetGroup .pill-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      TRAIN.voicePreset = b.dataset.voicePreset || 'standard';
+      document.querySelectorAll('#trainVoicePresetGroup .pill-btn').forEach(x =>
+        x.classList.toggle('active', x === b));
+    });
+  });
+  trainRenderVoice();
+}
+
+async function trainVoiceUpload(file) {
+  if (!file) return;
+  const status = document.getElementById('trainStatus');
+  // The voice endpoint requires a dataset (job_id) — the user must drop
+  // at least one image first. Guard with a friendly message.
+  if (!TRAIN.jobId) {
+    if (status) status.textContent =
+      'Upload at least one training image before adding a voice clip.';
+    return;
+  }
+  // Quick client-side extension + size check (server re-validates).
+  const ext = (file.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+  if (!['.wav', '.mp3', '.m4a', '.flac'].includes(ext)) {
+    if (status) status.textContent =
+      `Unsupported audio type ${ext} — use WAV / MP3 / M4A / FLAC.`;
+    return;
+  }
+  if (file.size > 50 * 1024 * 1024) {
+    if (status) status.textContent =
+      `Voice clip too large (${(file.size / 1024 / 1024).toFixed(1)} MB) — max 50 MB.`;
+    return;
+  }
+  try {
+    const fd = new FormData();
+    fd.append('job_id', TRAIN.jobId);
+    fd.append('file', file, file.name);
+    const r = await fetch('/train/upload-voice', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) {
+      if (status) status.textContent =
+        'Voice upload failed: ' + (j.error || r.status);
+      return;
+    }
+    // Build a local object URL for the audio preview so we can play
+    // immediately without round-tripping through /train/voice-file (which
+    // doesn't exist yet — preview is local-only).
+    const audioUrl = URL.createObjectURL(file);
+    TRAIN.voiceFile = {
+      filename: j.filename,
+      path: j.path,
+      size: j.size,
+      audioUrl,
+      originalName: file.name,
+    };
+    TRAIN.voiceEnabled = true;     // auto-on after a successful upload
+    trainRenderVoice();
+    trainUpdateStartLabel();
+    if (status) status.textContent =
+      `Voice clip ready (${(j.size / 1024 / 1024).toFixed(2)} MB). ` +
+      'Press play above to preview, then start training.';
+  } catch (e) {
+    if (status) status.textContent =
+      'Voice upload failed: ' + (e.message || 'unknown');
+  }
+}
+
+async function trainVoiceRemove(ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const f = TRAIN.voiceFile;
+  // Free the local object URL before dropping the reference.
+  if (f && f.audioUrl) {
+    try { URL.revokeObjectURL(f.audioUrl); } catch (_) {}
+  }
+  if (TRAIN.jobId) {
+    try {
+      const fd = new URLSearchParams();
+      fd.set('train_job_id', TRAIN.jobId);
+      await fetch('/train/remove-voice', { method: 'POST', body: fd });
+    } catch (e) {
+      console.warn('remove-voice error', e);
+    }
+  }
+  TRAIN.voiceFile = null;
+  TRAIN.voiceEnabled = false;
+  trainRenderVoice();
+  trainUpdateStartLabel();
+}
+
+function trainVoiceToggleChanged() {
+  const cb = document.getElementById('trainVoiceToggle');
+  TRAIN.voiceEnabled = !!(cb && cb.checked);
+  trainRenderVoice();
+  trainUpdateStartLabel();
+}
+
+function trainRenderVoice() {
+  const drop = document.getElementById('trainVoiceDrop');
+  const empty = document.getElementById('trainVoiceEmpty');
+  const loaded = document.getElementById('trainVoiceLoaded');
+  const audio = document.getElementById('trainVoiceAudio');
+  const nameEl = document.getElementById('trainVoiceFilename');
+  const metaEl = document.getElementById('trainVoiceMeta');
+  const toggle = document.getElementById('trainVoiceToggle');
+  const toggleHint = document.getElementById('trainVoiceToggleHint');
+  const stepsRow = document.getElementById('trainVoiceStepsRow');
+  const f = TRAIN.voiceFile;
+  if (f) {
+    if (drop) drop.classList.add('has-file');
+    if (empty) empty.hidden = true;
+    if (loaded) loaded.hidden = false;
+    if (audio) {
+      if (audio.src !== f.audioUrl) audio.src = f.audioUrl;
+    }
+    if (nameEl) nameEl.textContent = f.originalName || f.filename;
+    if (metaEl) {
+      const sizeKB = (f.size / 1024).toFixed(0);
+      const sizeStr = f.size > 1024 * 1024
+        ? `${(f.size / 1024 / 1024).toFixed(2)} MB`
+        : `${sizeKB} KB`;
+      // Once the <audio> metadata loads we can append duration.
+      metaEl.textContent = sizeStr;
+      if (audio) {
+        audio.addEventListener('loadedmetadata', () => {
+          if (Number.isFinite(audio.duration)) {
+            metaEl.textContent = `${audio.duration.toFixed(1)} s · ${sizeStr}`;
+          }
+        }, { once: true });
+      }
+    }
+    if (toggle) {
+      toggle.disabled = false;
+      toggle.checked = !!TRAIN.voiceEnabled;
+    }
+    if (toggleHint) {
+      toggleHint.textContent = TRAIN.voiceEnabled
+        ? '(adds ~25–125 min depending on preset)'
+        : '(uploaded but training skipped)';
+    }
+    if (stepsRow) stepsRow.hidden = !TRAIN.voiceEnabled;
+  } else {
+    if (drop) drop.classList.remove('has-file');
+    if (empty) empty.hidden = false;
+    if (loaded) loaded.hidden = true;
+    if (audio) audio.removeAttribute('src');
+    if (toggle) {
+      toggle.disabled = true;
+      toggle.checked = false;
+    }
+    if (toggleHint) toggleHint.textContent = 'upload a clip to enable';
+    if (stepsRow) stepsRow.hidden = true;
   }
 }
 
