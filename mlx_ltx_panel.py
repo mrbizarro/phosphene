@@ -1386,6 +1386,9 @@ def _read_lora_sidecar(safetensors_path: Path) -> dict:
         "civitai_version_id": None,
         "civitai_url": None,         # link back to source page (for "read instructions")
         "downloaded_at": None,
+        # Optional local guardrail for style LoRAs that over-learn particle /
+        # mesh artifacts. When present, make_job appends these to Avoid.
+        "artifact_negative_prompt": "",
         # `kind` discriminates source: "train_character" for LoRAs produced
         # by Phosphene's in-app trainer, anything else (or absent) for
         # CivitAI / manual installs. The picker uses this to badge trained
@@ -1459,6 +1462,41 @@ def list_user_loras() -> list[dict]:
             "is_curated": False,
         })
     return out
+
+
+def _lora_artifact_negative_prompt(loras: list[dict]) -> str:
+    """Collect sidecar-defined artifact Avoid terms for active LoRAs.
+
+    Some style LoRAs intentionally learn lighting / grade but also pick up
+    unwanted dataset habits like glowing particle fields or tiled mesh
+    textures. A local sidecar can carry `artifact_negative_prompt` so the
+    panel applies that guard whenever the LoRA is active, without hard-coding
+    one-off LoRA names in the helper.
+    """
+    additions: list[str] = []
+    seen: set[str] = set()
+    for entry in loras or []:
+        path_raw = str((entry or {}).get("path") or "").strip()
+        if not path_raw:
+            continue
+        try:
+            strength = float((entry or {}).get("strength", 1.0))
+        except (TypeError, ValueError):
+            strength = 1.0
+        if strength == 0:
+            continue
+        path = Path(path_raw)
+        if not path.is_file():
+            continue
+        neg = str(_read_lora_sidecar(path).get("artifact_negative_prompt") or "").strip()
+        if not neg:
+            continue
+        key = neg.lower()
+        if key in seen:
+            continue
+        additions.append(neg)
+        seen.add(key)
+    return ", ".join(additions)
 
 
 def list_curated_loras() -> list[dict]:
@@ -1701,163 +1739,17 @@ _CHARACTER_DURATION_FRAMES = {
     "10s": 241,
 }
 
-# Framing instruction prepended to the assembled prompt. ECU and CU are
-# the most identity-preserving choices for a trained character; MS / LS
-# work but bias the sampler toward generic body shapes.
-_CHARACTER_FRAMING_TEXT = {
-    "ECU": "extreme close-up",
-    "CU":  "close-up",
-    "MCU": "medium close-up",
-    "MS":  "medium shot",
-    "LS":  "long shot",
+# Quality-to-resolution map for the Characters tab. Nothing else.
+# 2026-05-16 — Salo's call: stop translating the user's request through
+# a 25-field "locked recipe" composer. The Characters endpoint is now a
+# thin wrapper around /queue/add that uses identical defaults; the only
+# things the tab adds are the LoRA stack lookup and the duration→frames
+# / quality→resolution mappings.
+_CHARACTER_QUALITY_RESOLUTION = {
+    "draft":    (736, 416),    # ~3:30 wall for 7s, Q8 HQ, lower per-frame detail
+    "balanced": (1024, 576),   # reserved for a real fast-but-quality-equal tier
+    "high":     (1024, 576),   # locked production recipe
 }
-
-_CHARACTER_DIRECT_JOIN_RE = re.compile(
-    r"^(?:in|inside|on|at|against|under|over|near|beside|with|wearing|"
-    r"seated|standing|looking|holding|playing|walking|running)\b",
-    re.IGNORECASE,
-)
-
-
-def _character_assemble_prompt(character: dict, prompt_body: str,
-                               framing: str) -> str:
-    """Build the full prompt that the helper will see.
-
-    Inserts the trigger word + subject noun automatically so the user
-    only types the scene description. Pronoun + subject_noun fall back
-    to neutral defaults when bundle.json is missing. The sexy_directive
-    flag (set per-character in bundle.json) prepends the validated
-    erotic-tension paragraph for Aria-style triggers.
-    """
-    trigger = character["trigger"]
-    subj = character.get("subject_noun") or "person"
-    pronoun = character.get("pronoun") or "they"
-    pronoun_subject = pronoun.capitalize() if pronoun else "Their"
-    pronoun_possessive = (
-        "His" if pronoun.lower() == "he"
-        else "Her" if pronoun.lower() == "she"
-        else "Their"
-    )
-    # Framing param retained in the signature for back-compat with
-    # callers/sidecars, but no longer affects the assembled prompt.
-    # Salo's call 2026-05-15: user owns the full prompt. Server-side
-    # composers were silently rewriting the user's intent (auto-suffix
-    # 'Photorealistic, cinematic, atmospheric.' + head-lock clause +
-    # framing prefix). All gone. Trigger word is pre-populated in the
-    # frontend textarea; if the user wants a medium shot, they write
-    # "medium shot" in the prompt body themselves.
-    body = (prompt_body or "").strip().rstrip(".")
-    parts: list[str] = []
-    if character.get("sexy_directive"):
-        # Validated language for trigger-preserving sultry shots.
-        # Matches the memory note on Aria — quiet seduction, knowing
-        # half-smile, sultry presence. Kept ONLY for sexy_directive
-        # characters because the language was validated against
-        # specific bundle metadata.
-        parts.append(
-            f"Cinematic close-up of a stunning sultry {trigger} {subj}, "
-            f"quiet seduction, knowing half-smile, "
-            + (f"{body}." if body else "")
-        )
-        parts.append("Professional cinematography, photorealistic.")
-        parts.append(
-            f"{pronoun_possessive} head is steady and locked in position throughout the entire shot, "
-            f"only natural micro-movements of breathing and eyes."
-        )
-    else:
-        # Non-sultry path: pass the user's body through verbatim.
-        # No auto-prefix, no auto-suffix, no framing word. The trigger
-        # word is pre-populated in the frontend textarea so it's already
-        # in `body` by the time it lands here. If the user wants
-        # cinematography hints, framing words, lighting cues — they
-        # write them. The composer's job is to NOT silently rewrite
-        # the user's intent.
-        parts.append(body or trigger)
-    return " ".join(s.strip() for s in parts if s.strip())
-
-
-def _character_build_form(character: dict, prompt: str, duration: str,
-                          quality: str, seed: str = "-1") -> dict:
-    """Translate a Characters-tab submission into a /queue/add form payload.
-
-    The locked recipe defaults (1024x576, quality=high, TC=1.8,
-    stage1=10/stage2=3, cfg=3.0, accel=off, enhance=false) are the
-    production-validated settings for character-LoRA T2V on M-series Macs.
-
-    TC=1.8 vs 2.0: the overnight TC sweep (Salo, 2026-05-15) showed
-    both values produce identical wall-time (TC saturates at 1.8) and
-    NEITHER value introduces artifacts on its own (quality good at
-    every TC 1.0..2.0 in the sweep). 1.8 just removes pointless cache
-    aggressiveness at no quality cost.
-    """
-    frames = _CHARACTER_DURATION_FRAMES.get(duration, 169)
-    # Per-quality resolution + skip-step recipe:
-    #   draft    : 736x416 + Q8 HQ + Turbo (video/audio skip-step = 1).
-    #              Wall ~3:30 for 7s. Same Q8 identity quality as High,
-    #              lower per-frame detail. NO Q4 fallback (Q4 distilled
-    #              produces stretch artifacts at >121f — banned 2026-05-15).
-    #   balanced : currently routes to High recipe. Reserved as a real
-    #              fast-but-quality-equal tier (e.g. stage1 reduction +
-    #              upscale-to-1024) when that's tuned in. Visible label
-    #              kept so the UI contract stays stable.
-    #   high     : 1024x576 + Q8 HQ + Turbo. Wall ~6:00 for 7s.
-    #              Validated locked recipe (see ltx-lora skill).
-    quality_norm = (quality or "high").strip().lower()
-    if quality_norm == "draft":
-        width, height = 736, 416
-        recipe_video_skip, recipe_audio_skip = "1", "1"
-    else:
-        width, height = 1024, 576
-        recipe_video_skip, recipe_audio_skip = "1", "1"
-    # NOTE: both visible 'balanced' and 'high' map to quality=high.
-    # Today balanced silently routes >121f to the Q4 distilled
-    # transformer where current LoRAs lose identity — the two-stage HQ
-    # pipeline is the only one that preserves the trigger faithfully.
-    # We keep two visible labels so we can introduce a real
-    # balanced-grade fast path later without changing the UI contract.
-    _q = quality   # kept for clarity
-    # Stack the face LoRA always; only stack the audio LoRA if this
-    # character actually has one (silent characters don't have an audio
-    # LoRA on disk). The audio LoRA carries lip-sync + voice; without it
-    # the model just won't have an audio track to lip-sync to — the face
-    # identity still locks correctly.
-    lora_stack = [{"path": character["face_lora_path"], "strength": 1.0}]
-    if character.get("audio_lora_path"):
-        lora_stack.append({"path": character["audio_lora_path"], "strength": 1.0})
-    loras_payload = json.dumps(lora_stack)
-    try:
-        seed_str = str(int(seed))
-    except (TypeError, ValueError):
-        seed_str = "-1"
-    return {
-        "mode": ["t2v"],
-        "prompt": [prompt],
-        "negative_prompt": [""],
-        "width": [str(width)],
-        "height": [str(height)],
-        "frames": [str(frames)],
-        "frame_rate": ["24"],
-        "seed": [seed_str],
-        "quality": ["high"],
-        "temporal_mode": ["native"],
-        "stage1_steps": ["10"],
-        "stage2_steps": ["3"],
-        "teacache_thresh": ["1.8"],
-        "cfg_scale": ["3.0"],
-        "bongmath_max_iter": ["100"],
-        "video_skip_step": [recipe_video_skip],
-        "audio_skip_step": [recipe_audio_skip],
-        "upscale": ["fit_720p"],
-        "upscale_method": ["lanczos"],
-        "accel": ["off"],
-        # CRITICAL: enhance=false. Gemma's rewrite strips trigger words
-        # and breaks identity. The user has chosen this character — they
-        # don't want the model second-guessing the prompt.
-        "enhance": ["false"],
-        "hdr": ["false"],
-        "loras": [loras_payload],
-        "label": [f"{character.get('name', character['trigger'])} · {duration} · {quality_norm}"],
-    }
 
 
 # ---- Version check / update notifier ----------------------------------------
@@ -4323,6 +4215,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             job["params"]["quality_choice"] = _quality_choice
         if _full_prompt_override:
             job["params"]["full_prompt_override"] = _full_prompt_override
+    lora_artifact_neg = _lora_artifact_negative_prompt(job["params"].get("loras") or [])
+    if lora_artifact_neg:
+        existing_neg = str(job["params"].get("negative_prompt") or "").strip()
+        if existing_neg:
+            job["params"]["negative_prompt"] = f"{existing_neg}, {lora_artifact_neg}"
+        else:
+            job["params"]["negative_prompt"] = lora_artifact_neg
     return job
 
 
@@ -5012,7 +4911,10 @@ def run_train_job_inner(job: dict) -> None:
         "steps": spec["steps"],
         "resolution": spec["resolution"],
         "image_count": len(image_files),
-        "recommended_strength": 1.0,
+        # Character LoRAs are identity carriers and use 1.0 by default.
+        # Style LoRAs are taste/lighting deltas; stacked at 1.0 they can
+        # over-impose dataset texture habits, so default them lower.
+        "recommended_strength": 0.3 if is_style else 1.0,
         "base_model": "LTXV 2.3",
         "created_at": time.time(),
         "elapsed_sec": elapsed,
@@ -8199,13 +8101,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "id": job["id"]})
             return
 
-        # ====== Characters — assemble prompt + submit a render job =========
-        # The Characters tab posts here with prompt_body + duration +
-        # quality + framing. We look up the character, assemble the full
-        # prompt (auto-injecting the trigger word, subject noun, and
-        # production recipe), then push a normal mode=t2v job into the
-        # queue. From the worker's POV this is indistinguishable from a
-        # /queue/add submission — same params shape, same render path.
+        # ====== Characters — thin wrapper around /queue/add ================
+        # 2026-05-16 rewrite (Salo): the prior version translated the user's
+        # request through a 25-field "locked recipe" composer + an auto
+        # negative_prompt to fight LoRA-baked artifacts. That made the
+        # Characters tab path diverge from /queue/add and introduced its
+        # own visual damage on top of LoRA-level issues.
+        #
+        # This endpoint now does ONLY:
+        #   1. look up the character → resolve face + (optional) audio LoRA
+        #   2. map duration string → frames (5s/7s/10s)
+        #   3. map quality string → width/height (draft = 736x416, else 1024x576)
+        #   4. take the user's prompt verbatim — no prefix, no suffix, no
+        #      negative-prompt injection, no framing word
+        #   5. build the same form payload /queue/add accepts and call
+        #      make_job() directly (same code path as the Manual tab)
         if path.startswith("/characters/") and path.endswith("/generate"):
             cid_raw = path[len("/characters/"):-len("/generate")]
             try:
@@ -8216,93 +8126,93 @@ class Handler(BaseHTTPRequestHandler):
             char = chars.get(cid)
             if not char:
                 self._json({"error": f"character {cid!r} not found"}, 404); return
-            prompt_body = (form.get("prompt_body", [""])[0] or "").strip()
+
+            # User's prompt — accept either field name for back-compat.
+            prompt = (
+                form.get("full_prompt", [""])[0]
+                or form.get("prompt", [""])[0]
+                or form.get("prompt_body", [""])[0]
+                or ""
+            ).strip()
+            if not prompt:
+                self._json({"error": "prompt required"}, 400); return
+
             duration = (form.get("duration", ["7s"])[0] or "7s").strip()
             if duration not in _CHARACTER_DURATION_FRAMES:
                 self._json({"error": f"duration must be one of "
                             f"{sorted(_CHARACTER_DURATION_FRAMES)}"}, 400); return
-            # Framing is no longer required (2026-05-15 — Salo's call: the
-            # composer was rewriting the user's intent). Accept the field
-            # if it's still being sent for back-compat, but ignore values
-            # we don't recognise instead of erroring out.
-            framing = (form.get("framing", [""])[0] or "").strip().upper()
-            if framing and framing not in _CHARACTER_FRAMING_TEXT:
-                framing = ""
+            frames = _CHARACTER_DURATION_FRAMES[duration]
+
             quality = (form.get("quality", ["high"])[0] or "high").strip().lower()
-            if quality not in ("draft", "balanced", "high"):
+            if quality not in _CHARACTER_QUALITY_RESOLUTION:
                 self._json({"error": "quality must be draft, balanced or high"}, 400); return
+            width, height = _CHARACTER_QUALITY_RESOLUTION[quality]
+
             seed = (form.get("seed", ["-1"])[0] or "-1").strip()
             try:
-                int(seed)
+                seed_int = int(seed)
             except (TypeError, ValueError):
                 self._json({"error": "seed must be an integer"}, 400); return
-            full_prompt_override = (
-                form.get("full_prompt", [""])[0]
-                or form.get("prompt", [""])[0]
-                or ""
-            ).strip()
-            full_prompt = (
-                full_prompt_override
-                if full_prompt_override
-                else _character_assemble_prompt(char, prompt_body, framing)
-            )
-            job_form = _character_build_form(char, full_prompt, duration, quality, seed)
 
-            # Forward optional exact-replay knobs when a caller is trying to
-            # clone a known-good sidecar through the Characters endpoint.
-            try:
-                for field, min_value in (
-                    ("stage1_steps", 1),
-                    ("stage2_steps", 0),
-                    ("bongmath_max_iter", 0),
-                    ("video_skip_step", 0),
-                    ("audio_skip_step", 0),
-                ):
-                    raw = (form.get(field, [""])[0] or "").strip()
-                    if raw == "":
-                        continue
-                    value = int(raw)
-                    if value < min_value:
-                        raise ValueError(f"{field} must be >= {min_value}")
-                    job_form[field] = [str(value)]
-                for field, min_value in (
-                    ("teacache_thresh", 0.0),
-                    ("cfg_scale", 0.0),
-                ):
-                    raw = (form.get(field, [""])[0] or "").strip()
-                    if raw == "":
-                        continue
-                    value = float(raw)
-                    if value < min_value:
-                        raise ValueError(f"{field} must be >= {min_value}")
-                    job_form[field] = [str(value)]
-            except (TypeError, ValueError) as exc:
-                self._json({"error": str(exc)}, 400); return
+            # LoRA stack: face always, audio when the character has one.
+            lora_stack = [{"path": char["face_lora_path"], "strength": 1.0}]
+            if char.get("audio_lora_path"):
+                lora_stack.append({"path": char["audio_lora_path"], "strength": 1.0})
 
-            # Stamp Characters-origin metadata onto the job form BEFORE make_job
-            # sees it so the sidecar's params dict records enough state for a
-            # future "Load Params" click to re-open the Characters compose
-            # state with everything restored. source="characters" is the
-            # branch flag; the rest is the compose state verbatim.
+            # Pass-through optional caller overrides (replay / Load Params)
+            # — same fields /queue/add accepts. No invented panel-specific
+            # transforms. Negative prompt is the user's responsibility; we
+            # default to empty (matches /queue/add and /tmp/bizarro_talking_reel.py).
+            def _val(key, default):
+                v = form.get(key, [""])[0]
+                return v if v else default
+
+            job_form = {
+                "mode": ["t2v"],
+                "prompt": [prompt],
+                "negative_prompt": [_val("negative_prompt", "")],
+                "width": [str(width)],
+                "height": [str(height)],
+                "frames": [str(frames)],
+                "frame_rate": ["24"],
+                "seed": [str(seed_int)],
+                "quality": ["high"],
+                "temporal_mode": ["native"],
+                "stage1_steps": [_val("stage1_steps", "10")],
+                "stage2_steps": [_val("stage2_steps", "3")],
+                "teacache_thresh": [_val("teacache_thresh", "1.8")],
+                "cfg_scale": [_val("cfg_scale", "3.0")],
+                "bongmath_max_iter": [_val("bongmath_max_iter", "100")],
+                "video_skip_step": [_val("video_skip_step", "1")],
+                "audio_skip_step": [_val("audio_skip_step", "1")],
+                "upscale": ["fit_720p"],
+                "upscale_method": ["lanczos"],
+                "accel": ["off"],
+                "enhance": ["false"],   # CRITICAL: don't let Gemma strip the trigger
+                "hdr": ["false"],
+                "loras": [json.dumps(lora_stack)],
+                "label": [f"{char.get('name', char['trigger'])} · {duration} · {quality}"],
+            }
+
+            # Minimal Characters-origin metadata for Load Params restoration.
             job_form["character_id"] = [cid]
             job_form["source"] = ["characters"]
-            job_form["framing"] = [framing]
             job_form["duration"] = [duration]
-            job_form["prompt_body"] = [prompt_body]
             job_form["quality_choice"] = [quality]
-            if full_prompt_override:
-                job_form["full_prompt_override"] = [full_prompt_override]
+            # prompt_body kept as a back-compat alias to the verbatim prompt
+            # so older Load-Params restorers still find something.
+            job_form["prompt_body"] = [prompt]
             job = make_job(job_form)
             with QUEUE_COND:
                 STATE["queue"].append(job)
                 QUEUE_COND.notify_all()
             persist_queue()
             push(f"characters: queued {cid} duration={duration} quality={quality} "
-                 f"framing={framing} job_id={job['id']}")
+                 f"job_id={job['id']}")
             self._json({
                 "ok": True,
                 "job_id": job["id"],
-                "assembled_prompt": full_prompt,
+                "assembled_prompt": prompt,
                 "character": {
                     "id": cid,
                     "name": char.get("name"),
