@@ -10542,27 +10542,8 @@ HTML = r"""<!doctype html>
       align-items: center;
     }
 
-    /* Advanced disclosure inside the compose card — reference image,
-       audio, and extra LoRAs. Collapsed by default. */
-    .characters-advanced {
-      margin: 14px 0 4px;
-      border: 1px solid var(--ph-border-soft, var(--border));
-      border-radius: var(--r-md, 8px);
-      overflow: hidden;
-    }
-    .characters-advanced > summary {
-      cursor: pointer;
-      list-style: none;
-      padding: 10px 14px;
-      font-size: 13px;
-      color: var(--muted);
-      background: var(--panel-2);
-      user-select: none;
-    }
-    .characters-advanced > summary::-webkit-details-marker { display: none; }
-    .characters-advanced[open] > summary { border-bottom: 1px solid var(--ph-border-soft, var(--border)); }
-    .characters-advanced-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
-    .characters-adv-row { display: flex; flex-direction: column; gap: 6px; }
+    /* Reference audio row inside the Characters compose card. */
+    .characters-adv-row { display: flex; flex-direction: column; gap: 6px; margin: 14px 0 4px; }
     .characters-adv-label { font-size: 12px; color: var(--text); font-weight: 600; }
     .characters-adv-hint { color: var(--muted); font-weight: 400; }
     .characters-adv-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -10571,13 +10552,10 @@ HTML = r"""<!doctype html>
     .characters-adv-fname { font-family: "SF Mono", monospace; font-size: 11px; color: var(--muted); }
     .characters-adv-clear { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
     .characters-adv-clear:hover { color: #ff7773; }
-    .characters-adv-loras { width: 100%; display: flex; flex-direction: column; gap: 6px; }
-    .characters-extra-lora-row { display: grid; grid-template-columns: 1fr 80px 28px; gap: 6px; align-items: center; }
-    .characters-extra-lora-row select,
-    .characters-extra-lora-row input { background: var(--panel-2); border: 1px solid var(--border-strong, var(--border)); color: var(--text); padding: 6px 8px; border-radius: 4px; font-size: 12px; }
-    .characters-extra-lora-row button { background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 4px; }
-    .characters-extra-lora-row button:hover { border-color: #ff7773; color: #ff7773; }
-    .characters-adv-add-lora { align-self: flex-start; margin-top: 4px; }
+    /* Slot the Manual tab's #lorasDetails picker lives in when the
+       Characters compose card is active. The picker brings its own
+       styling. */
+    .characters-lora-slot { margin-top: 14px; }
 
     .characters-compose-card {
       background: var(--ph-elev-1, var(--panel));
@@ -15281,41 +15259,27 @@ HTML = r"""<!doctype html>
             </div>
           </div>
 
-          <!-- Advanced: reference image (i2v), reference audio (i2v_clean_audio),
-               and extra LoRAs (style stacks etc.). Collapsed by default to keep
-               the surface minimal for the common case. -->
-          <details class="characters-advanced">
-            <summary>Advanced — reference image, audio, extra LoRAs</summary>
-            <div class="characters-advanced-body">
-              <div class="characters-adv-row">
-                <label class="characters-adv-label">Reference image <span class="characters-adv-hint">(switches to i2v — character animates from this still)</span></label>
-                <div class="characters-adv-control">
-                  <input type="file" id="charactersImageFile" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="charactersHandleImageUpload(event)">
-                  <button type="button" class="characters-adv-pick-btn" onclick="document.getElementById('charactersImageFile').click()">Pick image…</button>
-                  <span class="characters-adv-fname" id="charactersImageFname">none</span>
-                  <button type="button" class="characters-adv-clear" id="charactersImageClear" hidden onclick="charactersClearImage()">×</button>
-                </div>
-              </div>
-
-              <div class="characters-adv-row">
-                <label class="characters-adv-label">Reference audio <span class="characters-adv-hint">(with image: lip-sync to this audio; without image: ignored)</span></label>
-                <div class="characters-adv-control">
-                  <input type="file" id="charactersAudioFile" accept="audio/wav,audio/mpeg,audio/mp4,audio/x-m4a,.wav,.mp3,.m4a,.flac" style="display:none" onchange="charactersHandleAudioUpload(event)">
-                  <button type="button" class="characters-adv-pick-btn" onclick="document.getElementById('charactersAudioFile').click()">Pick audio…</button>
-                  <span class="characters-adv-fname" id="charactersAudioFname">none</span>
-                  <button type="button" class="characters-adv-clear" id="charactersAudioClear" hidden onclick="charactersClearAudio()">×</button>
-                </div>
-              </div>
-
-              <div class="characters-adv-row">
-                <label class="characters-adv-label">Extra LoRAs <span class="characters-adv-hint">(stack a style LoRA like cinematronx alongside the character)</span></label>
-                <div class="characters-adv-control characters-adv-loras" id="charactersExtraLoras">
-                  <!-- rows injected by JS -->
-                </div>
-                <button type="button" class="characters-adv-pick-btn characters-adv-add-lora" onclick="charactersAddExtraLora()">+ add LoRA</button>
-              </div>
+          <!-- Reference audio (optional) — drop a clip and the character
+               lip-syncs to it via i2v_clean_audio. Image-to-video was
+               considered and dropped 2026-05-16 (not needed for the
+               Characters surface). -->
+          <div class="characters-adv-row">
+            <label class="characters-adv-label">Reference audio <span class="characters-adv-hint">(optional — character lip-syncs to this clip)</span></label>
+            <div class="characters-adv-control">
+              <input type="file" id="charactersAudioFile" accept="audio/wav,audio/mpeg,audio/mp4,audio/x-m4a,.wav,.mp3,.m4a,.flac" style="display:none" onchange="charactersHandleAudioUpload(event)">
+              <button type="button" class="characters-adv-pick-btn" onclick="document.getElementById('charactersAudioFile').click()">Pick audio…</button>
+              <span class="characters-adv-fname" id="charactersAudioFname">none</span>
+              <button type="button" class="characters-adv-clear" id="charactersAudioClear" hidden onclick="charactersClearAudio()">×</button>
             </div>
-          </details>
+          </div>
+
+          <!-- LoRA picker portal — the Manual tab's #lorasDetails picker
+               moves in here when the Characters tab is the active mode.
+               Same picker, same _activeLoras state, same library — just
+               reparented. The character's OWN face + audio LoRAs are
+               always auto-stacked on the backend; anything the user
+               adds here is extra (e.g. cinematronx style). -->
+          <div id="loraPickerCharactersSlot" class="characters-lora-slot"></div>
 
           <button type="button" id="charactersGenerateBtn" class="characters-generate-btn"
                   onclick="charactersGenerate()">
@@ -16490,19 +16454,24 @@ function setMode(mode) {
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 
-// Move the unified LoRA picker between its two homes (Option A portal).
-// "video" → goes inside #genForm (its declared position), "studio" →
-// goes inside #studioSection. Idempotent: a re-portal to the same
-// destination is a no-op. The hidden #lorasJson input is a SEPARATE
-// element that stays inside #genForm regardless, so the video form's
-// FormData(genForm) keeps picking it up. Image Studio's submit
-// (imgStudioGenerate) reads _activeLoras directly when posting.
+// Move the unified LoRA picker between its homes (Option A portal).
+//   "video"      → goes inside #genForm (declared position)
+//   "studio"     → goes inside #studioSection
+//   "characters" → goes inside #loraPickerCharactersSlot (Characters compose card)
+// Idempotent: re-portal to the same destination is a no-op. The hidden
+// #lorasJson input is a SEPARATE element that stays inside #genForm
+// regardless, so the video form's FormData(genForm) keeps picking it
+// up. Image Studio's imgStudioGenerate() and the Characters tab's
+// charactersGenerate() both read _activeLoras directly when posting.
 function _portalLoraPicker(dest) {
   const node = document.getElementById('lorasDetails');
-  const videoSlot = document.getElementById('loraPickerVideoSlot');
-  const studioSlot = document.getElementById('loraPickerStudioSlot');
   if (!node) return;
-  const target = (dest === 'studio') ? studioSlot : videoSlot;
+  const slots = {
+    "video":      document.getElementById('loraPickerVideoSlot'),
+    "studio":     document.getElementById('loraPickerStudioSlot'),
+    "characters": document.getElementById('loraPickerCharactersSlot'),
+  };
+  const target = slots[dest] || slots["video"];
   if (!target || node.parentElement === target) {
     if (typeof renderLorasList === 'function') renderLorasList();
     return;
@@ -17058,15 +17027,15 @@ window.CHARACTERS = {
   selected: null,      // currently-composing character (object from list)
   duration: '7s',      // 5s | 7s | 10s | 15s
   quality: 'high',     // draft | high
-  // Advanced state (Salo 2026-05-16): reference image / audio for i2v
-  // and i2v_clean_audio modes, plus extra LoRAs to stack on top of the
-  // character's own face+audio LoRAs.
-  imagePath: null,     // server-side path returned by /upload
-  imageName: null,     // original filename for display
-  audioPath: null,
-  audioName: null,
-  extraLoras: [],      // [{ path, strength }]  — strength clamped 0..2
-  availableLoras: [],  // populated on demand by charactersLoadAvailableLoras
+  // Reference audio for i2v_clean_audio mode (character lip-syncs to
+  // this clip). Image-to-video deliberately omitted on the Characters
+  // surface per Salo 2026-05-16.
+  audioPath: null,     // server-side path returned by /upload
+  audioName: null,     // original filename for display
+  // Extra LoRAs are NOT tracked here — the Characters tab portals the
+  // Manual tab's existing #lorasDetails picker into its compose card
+  // and reads window._activeLoras directly on submit. One source of
+  // truth, no duplicated picker UI.
   loading: false,
   initialised: false,
 };
@@ -17280,11 +17249,15 @@ function charactersOpenCompose(id) {
   }
   const toast = document.getElementById('charactersToast');
   if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
-  // Reset advanced state when switching characters.
-  charactersClearImage();
+  // Reset audio state when switching characters.
   charactersClearAudio();
-  window.CHARACTERS.extraLoras = [];
-  charactersRenderExtraLoras();
+  // Portal the unified LoRA picker into this compose card. Same picker
+  // the Manual tab uses (#lorasDetails) — moved here while the user is
+  // composing a character clip, so stack-on-top-of-character LoRAs
+  // (cinematronx style, etc.) use the same UI everywhere.
+  if (typeof _portalLoraPicker === 'function') {
+    _portalLoraPicker('characters');
+  }
 }
 
 function charactersBackToGrid() {
@@ -17293,62 +17266,41 @@ function charactersBackToGrid() {
   const compose = document.getElementById('charactersComposeState');
   if (grid) grid.hidden = false;
   if (compose) compose.hidden = true;
+  // Move the LoRA picker back to its declared home (Manual tab #genForm)
+  // so that tab's FormData submit still picks up #lorasJson.
+  if (typeof _portalLoraPicker === 'function') {
+    _portalLoraPicker('video');
+  }
 }
 
 // Preview removed — the user's prompt IS what the model sees, verbatim.
 // Stub kept so legacy oninput hooks calling it don't error.
 function charactersUpdatePreview() { /* no-op (preview block removed) */ }
 
-// ---- Advanced section: reference image / audio uploads + extra LoRAs ----
-
-async function charactersHandleImageUpload(ev) {
-  const file = ev.target.files && ev.target.files[0];
-  if (!file) return;
-  await charactersUploadFile(file, 'image');
-  ev.target.value = '';
-}
+// ---- Reference audio upload (Characters compose card) -----------------
 
 async function charactersHandleAudioUpload(ev) {
   const file = ev.target.files && ev.target.files[0];
   if (!file) return;
-  await charactersUploadFile(file, 'audio');
-  ev.target.value = '';
-}
-
-// Single shared upload — /upload accepts both `image` and `audio` field
-// names (panel 2026-05-16). Returns {ok, path}.
-async function charactersUploadFile(file, kind) {
-  const fnameEl  = document.getElementById('characters' + (kind === 'image' ? 'Image' : 'Audio') + 'Fname');
-  const clearEl  = document.getElementById('characters' + (kind === 'image' ? 'Image' : 'Audio') + 'Clear');
+  const fnameEl = document.getElementById('charactersAudioFname');
+  const clearEl = document.getElementById('charactersAudioClear');
   if (fnameEl) fnameEl.textContent = 'uploading…';
   try {
     const fd = new FormData();
-    fd.append(kind, file);
+    fd.append('audio', file);  // /upload accepts both `image` and `audio` field names
     const r = await fetch('/upload', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
-    if (kind === 'image') {
-      window.CHARACTERS.imagePath = j.path;
-      window.CHARACTERS.imageName = file.name;
-    } else {
-      window.CHARACTERS.audioPath = j.path;
-      window.CHARACTERS.audioName = file.name;
-    }
+    window.CHARACTERS.audioPath = j.path;
+    window.CHARACTERS.audioName = file.name;
     if (fnameEl) fnameEl.textContent = file.name;
     if (clearEl) clearEl.hidden = false;
   } catch (e) {
     if (fnameEl) fnameEl.textContent = 'upload failed: ' + (e.message || e);
   }
+  ev.target.value = '';
 }
 
-function charactersClearImage() {
-  window.CHARACTERS.imagePath = null;
-  window.CHARACTERS.imageName = null;
-  const fnameEl = document.getElementById('charactersImageFname');
-  const clearEl = document.getElementById('charactersImageClear');
-  if (fnameEl) fnameEl.textContent = 'none';
-  if (clearEl) clearEl.hidden = true;
-}
 function charactersClearAudio() {
   window.CHARACTERS.audioPath = null;
   window.CHARACTERS.audioName = null;
@@ -17356,69 +17308,6 @@ function charactersClearAudio() {
   const clearEl = document.getElementById('charactersAudioClear');
   if (fnameEl) fnameEl.textContent = 'none';
   if (clearEl) clearEl.hidden = true;
-}
-
-// Lazy-load the LoRA list so the picker can offer real choices.
-async function charactersLoadAvailableLoras() {
-  if (window.CHARACTERS.availableLoras && window.CHARACTERS.availableLoras.length) {
-    return window.CHARACTERS.availableLoras;
-  }
-  try {
-    const r = await fetch('/loras', { credentials: 'same-origin' });
-    const j = await r.json();
-    const list = Array.isArray(j) ? j : (j.loras || []);
-    window.CHARACTERS.availableLoras = list.filter(l => l.path && /\.safetensors$/i.test(l.path));
-    return window.CHARACTERS.availableLoras;
-  } catch (e) {
-    return [];
-  }
-}
-
-async function charactersAddExtraLora() {
-  await charactersLoadAvailableLoras();
-  window.CHARACTERS.extraLoras.push({ path: '', strength: 1.0 });
-  charactersRenderExtraLoras();
-}
-
-function charactersRemoveExtraLora(idx) {
-  window.CHARACTERS.extraLoras.splice(idx, 1);
-  charactersRenderExtraLoras();
-}
-
-function charactersUpdateExtraLora(idx, key, val) {
-  const row = window.CHARACTERS.extraLoras[idx];
-  if (!row) return;
-  if (key === 'path') row.path = String(val || '').trim();
-  if (key === 'strength') {
-    let s = parseFloat(val);
-    if (isNaN(s)) s = 1.0;
-    row.strength = Math.max(0, Math.min(2.0, s));
-  }
-}
-
-function charactersRenderExtraLoras() {
-  const host = document.getElementById('charactersExtraLoras');
-  if (!host) return;
-  const opts = (window.CHARACTERS.availableLoras || []).map(
-    l => `<option value="${charactersEscapeAttr(l.path)}">${charactersEscapeHtml(l.name || l.path.split('/').pop())}</option>`
-  ).join('');
-  host.innerHTML = window.CHARACTERS.extraLoras.map((r, i) => `
-    <div class="characters-extra-lora-row">
-      <select onchange="charactersUpdateExtraLora(${i}, 'path', this.value)">
-        <option value="">— pick a LoRA —</option>
-        ${opts}
-      </select>
-      <input type="number" min="0" max="2" step="0.05" value="${r.strength}"
-             onchange="charactersUpdateExtraLora(${i}, 'strength', this.value)"
-             title="strength (0-2)">
-      <button type="button" onclick="charactersRemoveExtraLora(${i})" title="remove">×</button>
-    </div>
-  `).join('');
-  // Restore the selected path values after the innerHTML rewrite.
-  host.querySelectorAll('select').forEach((sel, i) => {
-    const r = window.CHARACTERS.extraLoras[i];
-    if (r && r.path) sel.value = r.path;
-  });
 }
 
 async function charactersGenerate() {
@@ -17443,12 +17332,17 @@ async function charactersGenerate() {
   fd.set('prompt_body', prompt_body);
   fd.set('duration', window.CHARACTERS.duration);
   fd.set('quality',  window.CHARACTERS.quality);
-  // Advanced: reference image / audio / extra LoRAs.
-  if (window.CHARACTERS.imagePath) fd.set('image', window.CHARACTERS.imagePath);
+  // Reference audio (i2v_clean_audio mode) — optional.
   if (window.CHARACTERS.audioPath) fd.set('audio', window.CHARACTERS.audioPath);
-  if (window.CHARACTERS.extraLoras && window.CHARACTERS.extraLoras.length) {
-    const cleaned = window.CHARACTERS.extraLoras.filter(r => r.path);
-    if (cleaned.length) fd.set('extra_loras', JSON.stringify(cleaned));
+  // Extra LoRAs come from the portaled #lorasDetails picker — read
+  // _activeLoras directly so we share state with the Manual tab. The
+  // character's OWN face + audio LoRAs are auto-stacked on the
+  // backend, so only the picker-selected ones go in extra_loras.
+  if (typeof _activeLoras !== 'undefined' && Array.isArray(_activeLoras) && _activeLoras.length) {
+    const extras = _activeLoras
+      .filter(l => l && l.path)
+      .map(l => ({ path: l.path, strength: (typeof l.strength === 'number' ? l.strength : 1.0) }));
+    if (extras.length) fd.set('extra_loras', JSON.stringify(extras));
   }
 
   try {
