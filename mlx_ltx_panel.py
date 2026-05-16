@@ -8162,14 +8162,25 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._json({"error": "seed must be an integer"}, 400); return
 
+            # Character LoRA strength (applied to BOTH face + audio LoRAs).
+            # Default 0.8: Aria/Bizarro/Salo v2 LoRAs were trained to 5000
+            # steps (vs Lightricks-recommended 2000), so they over-bake
+            # training-time visual quirks at strength 1.0. Dropping to 0.8
+            # noticeably reduces sparkles/mesh without hurting identity.
+            try:
+                char_strength = float((form.get("character_strength", ["0.8"])[0] or "0.8"))
+            except (TypeError, ValueError):
+                char_strength = 0.8
+            char_strength = max(0.0, min(2.0, char_strength))
+
             # LoRA stack: face always, audio when the character has one.
             # Extra LoRAs (style LoRAs like cinematronx, etc.) can be
             # appended via the `extra_loras` form field — JSON array of
             # `{path, strength}` objects. Strengths clamped to [0, 2.0]
             # to prevent footguns.
-            lora_stack = [{"path": char["face_lora_path"], "strength": 1.0}]
+            lora_stack = [{"path": char["face_lora_path"], "strength": char_strength}]
             if char.get("audio_lora_path"):
-                lora_stack.append({"path": char["audio_lora_path"], "strength": 1.0})
+                lora_stack.append({"path": char["audio_lora_path"], "strength": char_strength})
             extra_loras_raw = (form.get("extra_loras", [""])[0] or "").strip()
             if extra_loras_raw:
                 try:
@@ -10556,6 +10567,14 @@ HTML = r"""<!doctype html>
        Characters compose card is active. The picker brings its own
        styling. */
     .characters-lora-slot { margin-top: 14px; }
+
+    /* Character LoRA strength row — single slider + value badge. */
+    .characters-strength-row { margin: 14px 0 4px; }
+    .characters-strength-label { font-size: 12px; color: var(--text); font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+    .characters-strength-hint { color: var(--muted); font-weight: 400; font-size: 11px; }
+    .characters-strength-control { margin-top: 6px; display: flex; align-items: center; gap: 12px; }
+    .characters-strength-control input[type=range] { flex: 1 1 auto; accent-color: var(--accent, #2f81f7); }
+    .characters-strength-value { font-family: "SF Mono", monospace; font-size: 12px; color: var(--accent-2, #5eeaff); min-width: 42px; text-align: right; }
 
     .characters-compose-card {
       background: var(--ph-elev-1, var(--panel));
@@ -15259,6 +15278,28 @@ HTML = r"""<!doctype html>
             </div>
           </div>
 
+          <!-- Character LoRA strength. Default 0.8 — slightly under 1.0
+               because Aria/Bizarro/Salo v2 LoRAs are mildly over-trained
+               (5000 steps vs Lightricks-recommended 2000) and bake some
+               training-time visual quirks (sparkles, occasional mesh).
+               At 0.8 the identity still locks but the baked artifacts
+               fade noticeably. The slider is exposed so power users can
+               dial up to 1.0 for max identity or down to 0.5 to escape
+               artifacts when prompts trigger them. v3 retrains with the
+               corrected recipe should let us safely return to 1.0 default. -->
+          <div class="characters-strength-row">
+            <label for="charactersStrength" class="characters-strength-label">
+              Character LoRA strength
+              <span class="characters-strength-hint">(lower = less identity lock-in but fewer baked-in artifacts)</span>
+            </label>
+            <div class="characters-strength-control">
+              <input type="range" id="charactersStrength"
+                     min="0.4" max="1.2" step="0.05" value="0.8"
+                     oninput="charactersUpdateStrengthDisplay(this.value)">
+              <span class="characters-strength-value" id="charactersStrengthValue">0.80</span>
+            </div>
+          </div>
+
           <!-- Reference audio (optional) — drop a clip and the character
                lip-syncs to it via i2v_clean_audio. Image-to-video was
                considered and dropped 2026-05-16 (not needed for the
@@ -17027,6 +17068,9 @@ window.CHARACTERS = {
   selected: null,      // currently-composing character (object from list)
   duration: '7s',      // 5s | 7s | 10s | 15s
   quality: 'high',     // draft | high
+  // Character LoRA strength (applied to both face_lora and audio_lora).
+  // Default 0.8 reduces over-trained baked artifacts at small identity cost.
+  charStrength: 0.8,
   // Reference audio for i2v_clean_audio mode (character lip-syncs to
   // this clip). Image-to-video deliberately omitted on the Characters
   // surface per Salo 2026-05-16.
@@ -17310,6 +17354,14 @@ function charactersClearAudio() {
   if (clearEl) clearEl.hidden = true;
 }
 
+function charactersUpdateStrengthDisplay(val) {
+  const v = parseFloat(val);
+  if (!isFinite(v)) return;
+  window.CHARACTERS.charStrength = v;
+  const out = document.getElementById('charactersStrengthValue');
+  if (out) out.textContent = v.toFixed(2);
+}
+
 async function charactersGenerate() {
   const c = window.CHARACTERS.selected;
   if (!c) return;
@@ -17332,6 +17384,9 @@ async function charactersGenerate() {
   fd.set('prompt_body', prompt_body);
   fd.set('duration', window.CHARACTERS.duration);
   fd.set('quality',  window.CHARACTERS.quality);
+  // Character LoRA strength — passed through so the backend can apply
+  // it to both face_lora and audio_lora at job-build time.
+  fd.set('character_strength', String(window.CHARACTERS.charStrength || 0.8));
   // Reference audio (i2v_clean_audio mode) — optional.
   if (window.CHARACTERS.audioPath) fd.set('audio', window.CHARACTERS.audioPath);
   // Extra LoRAs come from the portaled #lorasDetails picker — read
