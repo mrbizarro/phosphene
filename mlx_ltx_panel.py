@@ -1731,12 +1731,15 @@ def list_styles() -> list[dict]:
 
 
 # Duration in seconds → frames the LTX 2.3 pipeline accepts. The
-# constraint is `frames % 8 == 1`; 121 / 169 / 241 satisfy that and
-# correspond to 5s / 7s / 10s at 24 fps.
+# constraint is `frames % 8 == 1`; 121 / 169 / 241 / 361 satisfy that and
+# correspond to 5s / 7s / 10s / 15s at 24 fps. 15s pushes the helper
+# past its usual sweet spot but works fine — Salo measured 9.5min for
+# 10s/241f on Q8 HQ, so 15s/361f extrapolates to ~14min.
 _CHARACTER_DURATION_FRAMES = {
     "5s": 121,
     "7s": 169,
     "10s": 241,
+    "15s": 361,
 }
 
 # Quality-to-resolution map for the Characters tab. Nothing else.
@@ -7405,9 +7408,14 @@ class Handler(BaseHTTPRequestHandler):
                     fp=self.rfile, headers=self.headers,
                     environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
                 )
-                if "image" not in form:
-                    self._json({"error": "no field 'image'"}, 400); return
-                fld = form["image"]
+                # Accept either field name — the endpoint is generic
+                # (reference images for i2v, audio clips for i2v_clean_audio,
+                # whatever). Originally `image` only; `audio` added 2026-05-16
+                # for Characters-tab i2v_clean_audio uploads.
+                field_name = "image" if "image" in form else ("audio" if "audio" in form else None)
+                if field_name is None:
+                    self._json({"error": "no field 'image' or 'audio'"}, 400); return
+                fld = form[field_name]
                 if not getattr(fld, "filename", None):
                     self._json({"error": "no filename"}, 400); return
                 UPLOADS.mkdir(parents=True, exist_ok=True)
@@ -8155,9 +8163,57 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "seed must be an integer"}, 400); return
 
             # LoRA stack: face always, audio when the character has one.
+            # Extra LoRAs (style LoRAs like cinematronx, etc.) can be
+            # appended via the `extra_loras` form field — JSON array of
+            # `{path, strength}` objects. Strengths clamped to [0, 2.0]
+            # to prevent footguns.
             lora_stack = [{"path": char["face_lora_path"], "strength": 1.0}]
             if char.get("audio_lora_path"):
                 lora_stack.append({"path": char["audio_lora_path"], "strength": 1.0})
+            extra_loras_raw = (form.get("extra_loras", [""])[0] or "").strip()
+            if extra_loras_raw:
+                try:
+                    extras = json.loads(extra_loras_raw)
+                    if not isinstance(extras, list):
+                        raise ValueError("extra_loras must be a JSON array")
+                    for entry in extras:
+                        if not isinstance(entry, dict) or "path" not in entry:
+                            raise ValueError("each extra_loras entry must be {path, strength}")
+                        path_val = str(entry["path"]).strip()
+                        if not path_val:
+                            continue
+                        # Defense-in-depth: the LoRA file must live under
+                        # mlx_models/loras/ — no path traversal.
+                        if not Path(path_val).resolve().is_relative_to(LORAS_DIR.resolve()):
+                            raise ValueError(f"extra LoRA must be inside {LORAS_DIR}")
+                        try:
+                            strength = float(entry.get("strength", 1.0))
+                        except (TypeError, ValueError):
+                            strength = 1.0
+                        strength = max(0.0, min(2.0, strength))
+                        lora_stack.append({"path": path_val, "strength": strength})
+                except (json.JSONDecodeError, ValueError) as exc:
+                    self._json({"error": f"extra_loras invalid: {exc}"}, 400); return
+
+            # Optional image / audio paths for i2v and i2v+clean-audio modes.
+            # Frontend uploads files via /upload, gets back a path, and
+            # passes it here. Mode auto-switches:
+            #   image + audio  → i2v_clean_audio (character lip-syncs to audio)
+            #   image only     → i2v             (character animates from still)
+            #   audio only     → t2v + audio     (audio drives generation; rare)
+            #   neither        → t2v             (default)
+            image_path = (form.get("image", [""])[0] or "").strip()
+            audio_path = (form.get("audio", [""])[0] or "").strip()
+            if image_path and not Path(image_path).exists():
+                self._json({"error": f"image not found: {image_path}"}, 400); return
+            if audio_path and not Path(audio_path).exists():
+                self._json({"error": f"audio not found: {audio_path}"}, 400); return
+            if image_path and audio_path:
+                mode = "i2v_clean_audio"
+            elif image_path:
+                mode = "i2v"
+            else:
+                mode = "t2v"
 
             # Pass-through optional caller overrides (replay / Load Params)
             # — same fields /queue/add accepts. No invented panel-specific
@@ -8168,7 +8224,7 @@ class Handler(BaseHTTPRequestHandler):
                 return v if v else default
 
             job_form = {
-                "mode": ["t2v"],
+                "mode": [mode],
                 "prompt": [prompt],
                 "negative_prompt": [_val("negative_prompt", "")],
                 "width": [str(width)],
@@ -8193,6 +8249,10 @@ class Handler(BaseHTTPRequestHandler):
                 "loras": [json.dumps(lora_stack)],
                 "label": [f"{char.get('name', char['trigger'])} · {duration} · {quality}"],
             }
+            if image_path:
+                job_form["image"] = [image_path]
+            if audio_path:
+                job_form["audio"] = [audio_path]
 
             # Minimal Characters-origin metadata for Load Params restoration.
             job_form["character_id"] = [cid]
@@ -9095,7 +9155,13 @@ def _avg_elapsed(kind: str | None = None) -> float | None:
 # math. Single source of truth for what the user sees.
 
 # Captures step counter in tqdm `Denoising: 12%|...| 1/8 [00:30<03:36, 30.89s/it]`.
-_DENOISE_RE = re.compile(r"Denoising[^|]*\|[^|]*\|\s*(\d+)\s*/\s*(\d+)")
+# HQ two-stage path emits TWO distinct denoise blocks per job:
+#   Stage 1 (res2s guided): `Denoising (res2s guided): K/10 ...`
+#   Stage 2 (refine):       `Denoising: K/3 ...`
+# Group 1 captures the optional " (suffix)" so we can tell them apart.
+_DENOISE_RE = re.compile(
+    r"Denoising(\s*\([^)]*\))?:[^|]*\|[^|]*\|\s*(\d+)\s*/\s*(\d+)"
+)
 _PER_IT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*s/it")
 
 
@@ -9103,21 +9169,46 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
     """Walk the helper log tail (newest-to-oldest) and surface the latest
     phase-defining markers. The panel clears STATE['log'] when a new job
     becomes current (worker_loop), so any log lines passed in are already
-    scoped to the running job — no cross-job filtering needed here."""
-    denoise_step = denoise_total = None
+    scoped to the running job — no cross-job filtering needed here.
+
+    Two-stage HQ awareness: we track stage 1 (res2s-guided) and stage 2
+    (refine) separately. Without this the progress bar resets to ~30%
+    when stage 2 emits its first denoise event, because the formula
+    sees `step 1 / 3` and recomputes within = 1/3. With it, we report
+    `denoise_step = stage1_steps + stage2_step` and `denoise_total =
+    stage1_steps + stage2_steps`, giving one monotonic bar across the
+    whole render.
+    """
+    stage1_step = stage1_total = None  # latest seen for stage 1
+    stage2_step = stage2_total = None  # latest seen for stage 2
     last_per_it = None
     decode_started = decode_done = generate_done = upscale_done = pipe_loaded = False
     for ln in reversed(log_lines or []):
         if not isinstance(ln, str) or not ln:
             continue
-        if denoise_step is None:
-            m = _DENOISE_RE.search(ln)
-            if m:
-                denoise_step = int(m.group(1))
-                denoise_total = int(m.group(2))
-                pit = _PER_IT_RE.search(ln)
-                if pit:
-                    last_per_it = float(pit.group(1))
+        # Track BOTH stages' latest events (each kept separately so we
+        # don't overwrite stage 1 with a later stage 2 match).
+        m = _DENOISE_RE.search(ln)
+        if m:
+            suffix = (m.group(1) or "").strip()
+            step = int(m.group(2))
+            total = int(m.group(3))
+            # Suffix presence = stage 1 (e.g. " (res2s guided)").
+            # No suffix = stage 2 refine.
+            if suffix:
+                if stage1_step is None:
+                    stage1_step, stage1_total = step, total
+                    if last_per_it is None:
+                        pit = _PER_IT_RE.search(ln)
+                        if pit:
+                            last_per_it = float(pit.group(1))
+            else:
+                if stage2_step is None:
+                    stage2_step, stage2_total = step, total
+                    if last_per_it is None:
+                        pit = _PER_IT_RE.search(ln)
+                        if pit:
+                            last_per_it = float(pit.group(1))
         if not decode_started and "step:decode_and_save start" in ln:
             decode_started = True
         if not decode_done and "step:decode_and_save done" in ln:
@@ -9128,9 +9219,32 @@ def _parse_progress_signals(log_lines: list[str]) -> dict:
             upscale_done = True
         if not pipe_loaded and "step:get_pipe done" in ln:
             pipe_loaded = True
+
+    # Combine stage 1 + stage 2 into a single monotonic denoise counter.
+    # If we've seen stage 2 emit a step, stage 1 is implicitly complete
+    # (helper runs them in strict sequence) — so use stage1_total or
+    # fall back to a sensible default.
+    if stage2_step is not None:
+        # We're in stage 2. Stage 1 is done — count it as fully complete.
+        s1_done = stage1_total if stage1_total is not None else stage2_total
+        denoise_step = (s1_done or 0) + stage2_step
+        denoise_total = (s1_done or 0) + (stage2_total or 0)
+    elif stage1_step is not None:
+        # Only stage 1 has produced events. Project the eventual total
+        # if we can guess stage 2 (default 3 — caller passes real value
+        # via _compute_progress, see below).
+        denoise_step = stage1_step
+        denoise_total = stage1_total
+    else:
+        denoise_step = denoise_total = None
+
     return {
         "denoise_step": denoise_step,
         "denoise_total": denoise_total,
+        "stage1_step": stage1_step,
+        "stage1_total": stage1_total,
+        "stage2_step": stage2_step,
+        "stage2_total": stage2_total,
         "last_per_it_sec": last_per_it,
         "decode_started": decode_started,
         "decode_done": decode_done,
@@ -9226,8 +9340,22 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
         # tqdm emits a 0/N line at the very start before any step has
         # completed — that's still "preparing" UX-wise. Switch to the
         # "Denoising step K / N" label only once a step is actually done.
+        # signals' denoise_step/total are already stage1+stage2 combined
+        # for HQ two-stage runs, so the label reads monotonically:
+        # `step 1 / 13` ... `step 10 / 13` (end of stage 1) ... `step 13 / 13`.
         phase = "denoise"
         ds = signals["denoise_step"]; dt = signals["denoise_total"] or 1
+        # If we know both stage1_steps + stage2_steps from params and the
+        # observed total doesn't already include them (e.g. stage 2 hasn't
+        # emitted yet), use the param total — gives a stable upper bound
+        # from the moment denoise begins instead of jumping when stage 2
+        # arrives. p["stage2_steps"] defaults to 0 for non-HQ paths.
+        try:
+            param_total = int(p.get("stage1_steps") or 0) + int(p.get("stage2_steps") or 0)
+        except (TypeError, ValueError):
+            param_total = 0
+        if param_total > dt:
+            dt = param_total
         phase_label = f"Denoising · step {ds} / {dt}"
     else:
         phase = "setup"
@@ -9245,6 +9373,15 @@ def _compute_progress(current: dict | None, log_lines: list[str]) -> dict | None
     elif phase == "denoise":
         ds = signals["denoise_step"] or 0
         dt = signals["denoise_total"] or 1
+        # Same trick as the phase_label: if params declare a higher
+        # total (stage1+stage2 combined), use that so % math doesn't
+        # snap when stage 2 hasn't started emitting yet.
+        try:
+            param_total = int(p.get("stage1_steps") or 0) + int(p.get("stage2_steps") or 0)
+        except (TypeError, ValueError):
+            param_total = 0
+        if param_total > dt:
+            dt = param_total
         within = ds / dt if dt else 0
         pct = setup_w + within * den_w
     elif phase == "decode":
@@ -10404,6 +10541,43 @@ HTML = r"""<!doctype html>
       flex-wrap: wrap;
       align-items: center;
     }
+
+    /* Advanced disclosure inside the compose card — reference image,
+       audio, and extra LoRAs. Collapsed by default. */
+    .characters-advanced {
+      margin: 14px 0 4px;
+      border: 1px solid var(--ph-border-soft, var(--border));
+      border-radius: var(--r-md, 8px);
+      overflow: hidden;
+    }
+    .characters-advanced > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--muted);
+      background: var(--panel-2);
+      user-select: none;
+    }
+    .characters-advanced > summary::-webkit-details-marker { display: none; }
+    .characters-advanced[open] > summary { border-bottom: 1px solid var(--ph-border-soft, var(--border)); }
+    .characters-advanced-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+    .characters-adv-row { display: flex; flex-direction: column; gap: 6px; }
+    .characters-adv-label { font-size: 12px; color: var(--text); font-weight: 600; }
+    .characters-adv-hint { color: var(--muted); font-weight: 400; }
+    .characters-adv-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .characters-adv-pick-btn { background: var(--panel-2); border: 1px solid var(--border-strong, var(--border)); color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+    .characters-adv-pick-btn:hover { border-color: var(--accent, #2f81f7); }
+    .characters-adv-fname { font-family: "SF Mono", monospace; font-size: 11px; color: var(--muted); }
+    .characters-adv-clear { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
+    .characters-adv-clear:hover { color: #ff7773; }
+    .characters-adv-loras { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+    .characters-extra-lora-row { display: grid; grid-template-columns: 1fr 80px 28px; gap: 6px; align-items: center; }
+    .characters-extra-lora-row select,
+    .characters-extra-lora-row input { background: var(--panel-2); border: 1px solid var(--border-strong, var(--border)); color: var(--text); padding: 6px 8px; border-radius: 4px; font-size: 12px; }
+    .characters-extra-lora-row button { background: transparent; border: 1px solid var(--border); color: var(--muted); cursor: pointer; border-radius: 4px; }
+    .characters-extra-lora-row button:hover { border-color: #ff7773; color: #ff7773; }
+    .characters-adv-add-lora { align-self: flex-start; margin-top: 4px; }
 
     .characters-compose-card {
       background: var(--ph-elev-1, var(--panel));
@@ -15107,6 +15281,42 @@ HTML = r"""<!doctype html>
             </div>
           </div>
 
+          <!-- Advanced: reference image (i2v), reference audio (i2v_clean_audio),
+               and extra LoRAs (style stacks etc.). Collapsed by default to keep
+               the surface minimal for the common case. -->
+          <details class="characters-advanced">
+            <summary>Advanced — reference image, audio, extra LoRAs</summary>
+            <div class="characters-advanced-body">
+              <div class="characters-adv-row">
+                <label class="characters-adv-label">Reference image <span class="characters-adv-hint">(switches to i2v — character animates from this still)</span></label>
+                <div class="characters-adv-control">
+                  <input type="file" id="charactersImageFile" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="charactersHandleImageUpload(event)">
+                  <button type="button" class="characters-adv-pick-btn" onclick="document.getElementById('charactersImageFile').click()">Pick image…</button>
+                  <span class="characters-adv-fname" id="charactersImageFname">none</span>
+                  <button type="button" class="characters-adv-clear" id="charactersImageClear" hidden onclick="charactersClearImage()">×</button>
+                </div>
+              </div>
+
+              <div class="characters-adv-row">
+                <label class="characters-adv-label">Reference audio <span class="characters-adv-hint">(with image: lip-sync to this audio; without image: ignored)</span></label>
+                <div class="characters-adv-control">
+                  <input type="file" id="charactersAudioFile" accept="audio/wav,audio/mpeg,audio/mp4,audio/x-m4a,.wav,.mp3,.m4a,.flac" style="display:none" onchange="charactersHandleAudioUpload(event)">
+                  <button type="button" class="characters-adv-pick-btn" onclick="document.getElementById('charactersAudioFile').click()">Pick audio…</button>
+                  <span class="characters-adv-fname" id="charactersAudioFname">none</span>
+                  <button type="button" class="characters-adv-clear" id="charactersAudioClear" hidden onclick="charactersClearAudio()">×</button>
+                </div>
+              </div>
+
+              <div class="characters-adv-row">
+                <label class="characters-adv-label">Extra LoRAs <span class="characters-adv-hint">(stack a style LoRA like cinematronx alongside the character)</span></label>
+                <div class="characters-adv-control characters-adv-loras" id="charactersExtraLoras">
+                  <!-- rows injected by JS -->
+                </div>
+                <button type="button" class="characters-adv-pick-btn characters-adv-add-lora" onclick="charactersAddExtraLora()">+ add LoRA</button>
+              </div>
+            </div>
+          </details>
+
           <button type="button" id="charactersGenerateBtn" class="characters-generate-btn"
                   onclick="charactersGenerate()">
             <span class="characters-generate-label">Generate</span>
@@ -16846,8 +17056,17 @@ function trainActivePresets() {
 window.CHARACTERS = {
   list: [],            // [{id, name, trigger, pronoun, subject_noun, sample_image_url, ...}]
   selected: null,      // currently-composing character (object from list)
-  duration: '7s',      // 5s | 7s | 10s
+  duration: '7s',      // 5s | 7s | 10s | 15s
   quality: 'high',     // draft | high
+  // Advanced state (Salo 2026-05-16): reference image / audio for i2v
+  // and i2v_clean_audio modes, plus extra LoRAs to stack on top of the
+  // character's own face+audio LoRAs.
+  imagePath: null,     // server-side path returned by /upload
+  imageName: null,     // original filename for display
+  audioPath: null,
+  audioName: null,
+  extraLoras: [],      // [{ path, strength }]  — strength clamped 0..2
+  availableLoras: [],  // populated on demand by charactersLoadAvailableLoras
   loading: false,
   initialised: false,
 };
@@ -16865,6 +17084,7 @@ const CHARACTERS_DURATION = [
   ['5s',  '5s',  '5 seconds'],
   ['7s',  '7s',  '7 seconds'],
   ['10s', '10s', '10 seconds'],
+  ['15s', '15s', '15 seconds — slower (~14min)'],
 ];
 const CHARACTERS_QUALITY = [
   ['draft',    'Draft',    'Draft — 736x416, Q8 + Turbo, ~3:30 wall, lower detail'],
@@ -17060,6 +17280,11 @@ function charactersOpenCompose(id) {
   }
   const toast = document.getElementById('charactersToast');
   if (toast) { toast.hidden = true; toast.textContent = ''; toast.classList.remove('error'); }
+  // Reset advanced state when switching characters.
+  charactersClearImage();
+  charactersClearAudio();
+  window.CHARACTERS.extraLoras = [];
+  charactersRenderExtraLoras();
 }
 
 function charactersBackToGrid() {
@@ -17073,6 +17298,128 @@ function charactersBackToGrid() {
 // Preview removed — the user's prompt IS what the model sees, verbatim.
 // Stub kept so legacy oninput hooks calling it don't error.
 function charactersUpdatePreview() { /* no-op (preview block removed) */ }
+
+// ---- Advanced section: reference image / audio uploads + extra LoRAs ----
+
+async function charactersHandleImageUpload(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  await charactersUploadFile(file, 'image');
+  ev.target.value = '';
+}
+
+async function charactersHandleAudioUpload(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  await charactersUploadFile(file, 'audio');
+  ev.target.value = '';
+}
+
+// Single shared upload — /upload accepts both `image` and `audio` field
+// names (panel 2026-05-16). Returns {ok, path}.
+async function charactersUploadFile(file, kind) {
+  const fnameEl  = document.getElementById('characters' + (kind === 'image' ? 'Image' : 'Audio') + 'Fname');
+  const clearEl  = document.getElementById('characters' + (kind === 'image' ? 'Image' : 'Audio') + 'Clear');
+  if (fnameEl) fnameEl.textContent = 'uploading…';
+  try {
+    const fd = new FormData();
+    fd.append(kind, file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (kind === 'image') {
+      window.CHARACTERS.imagePath = j.path;
+      window.CHARACTERS.imageName = file.name;
+    } else {
+      window.CHARACTERS.audioPath = j.path;
+      window.CHARACTERS.audioName = file.name;
+    }
+    if (fnameEl) fnameEl.textContent = file.name;
+    if (clearEl) clearEl.hidden = false;
+  } catch (e) {
+    if (fnameEl) fnameEl.textContent = 'upload failed: ' + (e.message || e);
+  }
+}
+
+function charactersClearImage() {
+  window.CHARACTERS.imagePath = null;
+  window.CHARACTERS.imageName = null;
+  const fnameEl = document.getElementById('charactersImageFname');
+  const clearEl = document.getElementById('charactersImageClear');
+  if (fnameEl) fnameEl.textContent = 'none';
+  if (clearEl) clearEl.hidden = true;
+}
+function charactersClearAudio() {
+  window.CHARACTERS.audioPath = null;
+  window.CHARACTERS.audioName = null;
+  const fnameEl = document.getElementById('charactersAudioFname');
+  const clearEl = document.getElementById('charactersAudioClear');
+  if (fnameEl) fnameEl.textContent = 'none';
+  if (clearEl) clearEl.hidden = true;
+}
+
+// Lazy-load the LoRA list so the picker can offer real choices.
+async function charactersLoadAvailableLoras() {
+  if (window.CHARACTERS.availableLoras && window.CHARACTERS.availableLoras.length) {
+    return window.CHARACTERS.availableLoras;
+  }
+  try {
+    const r = await fetch('/loras', { credentials: 'same-origin' });
+    const j = await r.json();
+    const list = Array.isArray(j) ? j : (j.loras || []);
+    window.CHARACTERS.availableLoras = list.filter(l => l.path && /\.safetensors$/i.test(l.path));
+    return window.CHARACTERS.availableLoras;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function charactersAddExtraLora() {
+  await charactersLoadAvailableLoras();
+  window.CHARACTERS.extraLoras.push({ path: '', strength: 1.0 });
+  charactersRenderExtraLoras();
+}
+
+function charactersRemoveExtraLora(idx) {
+  window.CHARACTERS.extraLoras.splice(idx, 1);
+  charactersRenderExtraLoras();
+}
+
+function charactersUpdateExtraLora(idx, key, val) {
+  const row = window.CHARACTERS.extraLoras[idx];
+  if (!row) return;
+  if (key === 'path') row.path = String(val || '').trim();
+  if (key === 'strength') {
+    let s = parseFloat(val);
+    if (isNaN(s)) s = 1.0;
+    row.strength = Math.max(0, Math.min(2.0, s));
+  }
+}
+
+function charactersRenderExtraLoras() {
+  const host = document.getElementById('charactersExtraLoras');
+  if (!host) return;
+  const opts = (window.CHARACTERS.availableLoras || []).map(
+    l => `<option value="${charactersEscapeAttr(l.path)}">${charactersEscapeHtml(l.name || l.path.split('/').pop())}</option>`
+  ).join('');
+  host.innerHTML = window.CHARACTERS.extraLoras.map((r, i) => `
+    <div class="characters-extra-lora-row">
+      <select onchange="charactersUpdateExtraLora(${i}, 'path', this.value)">
+        <option value="">— pick a LoRA —</option>
+        ${opts}
+      </select>
+      <input type="number" min="0" max="2" step="0.05" value="${r.strength}"
+             onchange="charactersUpdateExtraLora(${i}, 'strength', this.value)"
+             title="strength (0-2)">
+      <button type="button" onclick="charactersRemoveExtraLora(${i})" title="remove">×</button>
+    </div>
+  `).join('');
+  // Restore the selected path values after the innerHTML rewrite.
+  host.querySelectorAll('select').forEach((sel, i) => {
+    const r = window.CHARACTERS.extraLoras[i];
+    if (r && r.path) sel.value = r.path;
+  });
+}
 
 async function charactersGenerate() {
   const c = window.CHARACTERS.selected;
@@ -17096,6 +17443,13 @@ async function charactersGenerate() {
   fd.set('prompt_body', prompt_body);
   fd.set('duration', window.CHARACTERS.duration);
   fd.set('quality',  window.CHARACTERS.quality);
+  // Advanced: reference image / audio / extra LoRAs.
+  if (window.CHARACTERS.imagePath) fd.set('image', window.CHARACTERS.imagePath);
+  if (window.CHARACTERS.audioPath) fd.set('audio', window.CHARACTERS.audioPath);
+  if (window.CHARACTERS.extraLoras && window.CHARACTERS.extraLoras.length) {
+    const cleaned = window.CHARACTERS.extraLoras.filter(r => r.path);
+    if (cleaned.length) fd.set('extra_loras', JSON.stringify(cleaned));
+  }
 
   try {
     const r = await fetch(`/characters/${encodeURIComponent(c.id)}/generate`, {
