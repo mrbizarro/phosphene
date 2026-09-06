@@ -964,6 +964,15 @@
         <span id="usage-note-text">loading…</span>
       </div>
       <div class="kpi-grid" id="usage-tiles" aria-label="Usage headline stats"></div>
+      <!-- Growth: installs over time (cumulative, all-time) against renders
+           per day (30d). One chart, two axes, so "is it growing" is one
+           glance; weekly active installs ride the caption. -->
+      <div class="usage-growth" id="usage-growth" hidden>
+        <h3>Growth <span class="h2-sub" id="usage-growth-sub">installs, all time · renders per day, 30d</span></h3>
+        <div class="chart-wrap" style="height:260px">
+          <canvas id="chart-usage-growth" aria-label="Installs over time and renders per day"></canvas>
+        </div>
+      </div>
       <!-- Pack-flip alert. A pack going true→false across boots is the
            "my H3 vanished" bug class; red when it has happened at all. -->
       <div class="usage-alert is-clear" id="usage-packflip">
@@ -2586,11 +2595,20 @@
     // Headline tiles. Null values render as "—" rather than 0 so
     // "we have no data" never masquerades as "the number is zero".
     const t = u.tiles || {};
+    // "All time" is since the first install that ever pinged — the fleet
+    // has a first day and the tile says which, so the number is not read
+    // as "since the app existed".
+    const firstDay = (((u.growth || {}).installs_by_day || [])[0] || {}).date;
+    const since = firstDay ? 'since ' + firstDay : 'all time';
     const tiles = [
+      { label: 'Total renders', value: fmt(t.total_renders),
+        sub: isFleet ? 'completed · all installs · ' + since : 'completed · this machine · ' + since, hero: true },
+      { label: isFleet ? 'Total installs' : 'Installs',
+        value: fmt(t.total_installs), sub: isFleet ? 'ever booted · ' + since : 'this machine' },
       { label: isFleet ? 'Weekly active installs' : 'Active this week',
         value: fmt(t.weekly_active_installs),
-        sub: isFleet ? 'unique installs · 7d' : 'this machine · 7d', hero: true },
-      { label: 'Renders this week', value: fmt(t.renders_7d), sub: 'completed + failed · 7d' },
+        sub: isFleet ? 'unique installs · 7d' : 'this machine · 7d' },
+      { label: 'Renders', value: fmt(t.renders_7d), sub: 'completed + failed · 14d' },
       { label: 'H3 share', value: fmtPct(t.h3_share_pct), sub: 'of renders · 14d' },
       { label: 'Error rate', value: fmtPct(t.error_rate_pct), sub: 'failed renders · 14d' },
       { label: 'Refused', value: fmt(t.refusals_7d), sub: 'declined on purpose · 7d' },
@@ -2604,6 +2622,8 @@
           <div class="delta">${escapeHtml(k.sub)}</div>
         </div>`).join('');
     }
+
+    renderUsageGrowth(u.growth || {}, isFleet);
 
     // Pack-flip alert — the H3-vanished detector. Any true→false
     // transition on any pack counts; h3 is called out by name because
@@ -2635,6 +2655,61 @@
     paintDist('#usage-versions', u.versions, 'version');
     paintDist('#usage-chips', u.chips, 'chip');
     paintDist('#usage-ram', u.ram, 'ram_gb');
+  }
+
+  // Growth chart: cumulative installs (line, left axis) against renders per
+  // day (bars, right axis). Installs are all-time so the line is the shape of
+  // the whole project; renders are 30 days so the bars stay readable.
+  function renderUsageGrowth(g, isFleet) {
+    const box = $('#usage-growth');
+    const id = 'chart-usage-growth';
+    const el = document.getElementById(id);
+    if (!box || !el) return;
+    const inst = Array.isArray(g.installs_by_day) ? g.installs_by_day : [];
+    const rend = Array.isArray(g.renders_by_day) ? g.renders_by_day : [];
+    const weeks = Array.isArray(g.active_by_week) ? g.active_by_week : [];
+    if (!inst.length && !rend.length) { box.hidden = true; return; }
+    box.hidden = false;
+    destroyChart(id);
+    // One date axis: the union of both series, cumulative installs carried
+    // forward across days with no new install.
+    const dates = [...new Set([...inst.map(p => p.date), ...rend.map(p => p.date)])].sort();
+    const cum = new Map(inst.map(p => [p.date, p.cumulative]));
+    const rmap = new Map(rend.map(p => [p.date, p.count]));
+    let last = null;
+    const instData = dates.map(d => { if (cum.has(d)) last = cum.get(d); return last; });
+    const rendData = dates.map(d => rmap.has(d) ? rmap.get(d) : null);
+    const sub = $('#usage-growth-sub');
+    if (sub) {
+      const first = weeks[0], now = weeks[weeks.length - 1];
+      const wau = (first && now && weeks.length > 1)
+        ? ` · weekly active ${fmt(first.installs)} → ${fmt(now.installs)} over ${weeks.length} weeks` : '';
+      sub.textContent = (isFleet ? 'installs, all time · renders per day, 30d' : 'this machine · renders per day, 30d') + wau;
+    }
+    charts[id] = new Chart(el.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: dates.map(d => d.slice(5)),
+        datasets: [
+          { type: 'line', label: 'installs (cumulative)', data: instData, yAxisID: 'y',
+            borderColor: '#7c9cff', backgroundColor: 'rgba(124,156,255,.15)', fill: true,
+            tension: 0.25, pointRadius: 0, borderWidth: 2, spanGaps: true },
+          { type: 'bar', label: 'renders / day', data: rendData, yAxisID: 'y2',
+            backgroundColor: 'rgba(233,105,255,.55)', borderWidth: 0 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: true, position: 'bottom' } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 10, autoSkip: true }, grid: { display: false } },
+          y: { position: 'left', beginAtZero: true, title: { display: true, text: 'installs' } },
+          y2: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                title: { display: true, text: 'renders / day' } },
+        },
+      },
+    });
   }
 
   async function loadUsage(force) {

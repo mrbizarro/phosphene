@@ -13099,6 +13099,11 @@ def _usage_local_report() -> dict:
     refused_7d = 0
     active_7d = False
 
+    total_renders = 0
+    renders_by_day: dict[str, int] = {}
+    first_boot_ts = None
+    d30 = now - 30 * 86400
+
     for rec in recs:
         try:
             ts = float(rec.get("ts") or 0)
@@ -13109,6 +13114,8 @@ def _usage_local_report() -> dict:
         if ts >= d7:
             active_7d = True
         if ev == "app_boot":
+            if first_boot_ts is None or ts < first_boot_ts:
+                first_boot_ts = ts
             if ts >= d14:
                 day = time.strftime("%Y-%m-%d", time.localtime(ts))
                 boots_by_day[day] = boots_by_day.get(day, 0) + 1
@@ -13119,6 +13126,11 @@ def _usage_local_report() -> dict:
                 ram_key = str(props.get("ram_gb") or "unknown")
                 rams[ram_key] = rams.get(ram_key, 0) + 1
         elif ev in ("render_completed", "render_failed"):
+            if ev == "render_completed":
+                total_renders += 1
+                if ts >= d30:
+                    day = time.strftime("%Y-%m-%d", time.localtime(ts))
+                    renders_by_day[day] = renders_by_day.get(day, 0) + 1
             if ts >= d7:
                 renders_7d += 1
             if ts >= d14:
@@ -13164,12 +13176,18 @@ def _usage_local_report() -> dict:
                  "for fleet data"),
         "tiles": {
             "weekly_active_installs": 1 if active_7d else 0,
+            "total_renders": total_renders,
+            "total_installs": 1 if first_boot_ts else 0,
             "renders_7d": renders_7d,
             "h3_share_pct": round(100.0 * h3_14d / tot_14d, 1) if tot_14d else None,
             "error_rate_pct": (round(100.0 * fail_14d / (ok_14d + fail_14d), 1)
                                if (ok_14d + fail_14d) else None),
             "refusals_7d": refused_7d,
         },
+        "growth": _usage_growth_block(
+            [(time.strftime("%Y-%m-%d", time.localtime(first_boot_ts)), 1)] if first_boot_ts else [],
+            [(d, renders_by_day[d]) for d in sorted(renders_by_day)],
+            []),
         "boots_by_day": [{"date": d, "count": boots_by_day[d]}
                          for d in sorted(boots_by_day)],
         "engines": _usage_rank(engines, "engine", 8),
@@ -13239,7 +13257,46 @@ _USAGE_FLEET_QUERIES = {
         "properties['to'] AS now_, count() AS c FROM events "
         "WHERE event = 'pack_state_change' AND timestamp > now() - INTERVAL 7 DAY "
         "GROUP BY pack, was, now_ ORDER BY c DESC",
+    # ---- Growth (2026-09-06). All-time, no window: the numbers the owner
+    # asks for first ("how many renders have we done") and the curves that
+    # say whether the app is growing. An install is a distinct_id, and it is
+    # NEW on the day of its first boot — app_installed fires once per
+    # install but only since it existed, so first-boot is the honest date.
+    "total_renders":
+        "SELECT count() FROM events WHERE event = 'render_completed'",
+    "total_installs":
+        "SELECT count(DISTINCT distinct_id) FROM events WHERE event = 'app_boot'",
+    "installs_by_day":
+        "SELECT d, count() AS c FROM (SELECT distinct_id, toDate(min(timestamp)) AS d "
+        "FROM events WHERE event = 'app_boot' GROUP BY distinct_id) "
+        "GROUP BY d ORDER BY d",
+    "renders_by_day":
+        "SELECT toDate(timestamp) AS d, count() AS c FROM events "
+        "WHERE event = 'render_completed' AND timestamp > now() - INTERVAL 30 DAY "
+        "GROUP BY d ORDER BY d",
+    "active_by_week":
+        "SELECT toStartOfWeek(timestamp) AS w, count(DISTINCT distinct_id) AS c "
+        "FROM events WHERE event = 'app_boot' AND timestamp > now() - INTERVAL 12 WEEK "
+        "GROUP BY w ORDER BY w",
 }
+
+
+def _usage_growth_block(installs_by_day: list, renders_by_day: list,
+                        active_by_week: list) -> dict:
+    """The dashboard's growth series, one shape for fleet and local.
+
+    installs_by_day carries the cumulative count alongside the day's new
+    installs so the page draws the curve without re-summing; the last
+    cumulative value equals total installs by construction."""
+    inst, running = [], 0
+    for d, c in installs_by_day:
+        running += int(c)
+        inst.append({"date": str(d), "new": int(c), "cumulative": running})
+    return {
+        "installs_by_day": inst,
+        "renders_by_day": [{"date": str(d), "count": int(c)} for d, c in renders_by_day],
+        "active_by_week": [{"week": str(w), "installs": int(c)} for w, c in active_by_week],
+    }
 
 
 def _usage_fleet_query_one(hogql: str, key: str) -> list:
@@ -13332,6 +13389,8 @@ def _usage_fleet_report() -> dict | None:
         "tiles": {
             "weekly_active_installs": _scalar("wau"),
             "daily_active_installs": _scalar("dau"),
+            "total_renders": _scalar("total_renders"),
+            "total_installs": _scalar("total_installs"),
             "renders_7d": ok_n + fail_n,
             "h3_share_pct": round(100.0 * h3 / tot, 1) if tot else None,
             "error_rate_pct": (round(100.0 * fail_n / (ok_n + fail_n), 1)
@@ -13340,6 +13399,13 @@ def _usage_fleet_report() -> dict | None:
             # aggregator's render_refused branch for why.
             "refusals_7d": sum(r["count"] for r in refusals),
         },
+        "growth": _usage_growth_block(
+            [(r[0], r[1]) for r in (res.get("installs_by_day") or [])
+             if isinstance(r, (list, tuple)) and len(r) >= 2],
+            [(r[0], r[1]) for r in (res.get("renders_by_day") or [])
+             if isinstance(r, (list, tuple)) and len(r) >= 2],
+            [(r[0], r[1]) for r in (res.get("active_by_week") or [])
+             if isinstance(r, (list, tuple)) and len(r) >= 2]),
         "boots_by_day": [{"date": str(r[0]), "count": int(r[1])}
                          for r in (res.get("boots_by_day") or [])
                          if isinstance(r, (list, tuple)) and len(r) >= 2],
