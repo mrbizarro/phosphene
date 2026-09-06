@@ -9989,3 +9989,14 @@
 .sbe-track.is-ripple .sbe-clip.is-drag { box-shadow: 0 0 0 2px var(--warning), var(--shadow-2); }
 .sbe-track.is-ripple::after { content: 'ripple · everything after slides'; position: absolute; right: 8px; top: 4px;
   font-size: var(--fs-sm, 12px); color: var(--warning); pointer-events: none; z-index: 30; }
+
+/* ---- LoRA browser: one toolbar, compact controls ------------------------------- */
+.civitai-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
+.civitai-seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 999px; overflow: hidden; background: var(--panel); }
+.civitai-seg .pill-btn { border: 0; border-radius: 0; padding: 5px 12px; width: auto; flex: 0 0 auto; font-size: 12px; margin: 0; }
+.civitai-seg .pill-btn + .pill-btn { border-left: 1px solid var(--border); }
+.civitai-seg .pill-btn.active { background: var(--accent); color: #fff; }
+.civitai-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.civitai-chips .pill-btn { width: auto; flex: 0 0 auto; padding: 3px 9px; font-size: 11px; border-radius: 999px; margin: 0; }
+.civitai-chips .toggle-pill { margin-left: auto; }
+.civitai-toolbar .toggle-pill { margin-left: auto; }

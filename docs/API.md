@@ -62,7 +62,7 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 | `window_invariants` | What must not change between windows (who, where, light, lens). Re-injected into every later window. |
 | `loras` | JSON-encoded array | See LoRA payload below. |
 
-**LoRA payload:** the `loras` field is a JSON-encoded array of `{path, strength}` objects. Stack as many as needed:
+**LoRA payload:** the `loras` field is a JSON-encoded array of `{path, strength}` objects. Stack as many as needed: On Hailuo H3, stacking needs the engine's repeatable `--lora` (`/status.h3.loras.max_stack` > 1); an older pack takes one adapter and the `h3_lora_slot` field decides whether it goes to Turbo or to the LoRA.
 
 ```json
 [

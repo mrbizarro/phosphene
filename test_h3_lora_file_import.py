@@ -99,6 +99,16 @@ def _kohya_header() -> bytes:
     return len(encoded).to_bytes(8, "little") + encoded
 
 
+def _diffusers_header() -> bytes:
+    """The one layout the lane still refuses: split to_q/to_k/to_v with no alpha in the file."""
+    header = {
+        "transformer.blocks.0.attn.to_q.lora_A.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [0, 4]},
+        "transformer.blocks.0.attn.to_q.lora_B.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [4, 8]},
+    }
+    encoded = json.dumps(header).encode("utf-8")
+    return len(encoded).to_bytes(8, "little") + encoded + b"\0" * 8
+
+
 class TestH3LoraFileImport(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="phos-h3-lora-import-")
@@ -120,13 +130,15 @@ class TestH3LoraFileImport(unittest.TestCase):
         self.assertEqual(result["layout"], "bare")
         self.assertFalse(result["converted"])
 
-    def test_refuses_raw_kohya_and_leaves_no_file(self):
-        payload = _kohya_header()
-
-        with self.assertRaisesRegex(RuntimeError, "kohya.*alpha"):
-            P.import_h3_lora_file("raw-kohya.safetensors", payload)
-
-        self.assertEqual(list(self.dir.iterdir()), [])
+    def test_a_kohya_file_is_converted_on_import(self):
+        """kohya is CONVERTED now, not refused (test_h3_lora_kohya.py pins the
+        arithmetic). The import lands a bare-layout file plus its sidecar."""
+        result = P.import_h3_lora_file("raw-kohya.safetensors", _kohya_header())
+        self.assertEqual(result["layout"], "kohya")
+        self.assertTrue(result["converted"])
+        names = sorted(p.name for p in self.dir.iterdir())
+        self.assertEqual(names, ["raw-kohya.json", "raw-kohya.safetensors"])
+        self.assertEqual(P._h3_lora_layout(self.dir / "raw-kohya.safetensors")["layout"], "bare")
 
     def test_refuses_non_safetensors_uploads(self):
         with self.assertRaisesRegex(ValueError, "\.safetensors"):
@@ -253,8 +265,8 @@ class TestH3LoraFileImport(unittest.TestCase):
         self.assertNotIn(str(os.getpid()), message)
 
     def test_a_refusal_leaves_no_staging_directory_behind(self):
-        with self.assertRaises(RuntimeError):
-            P.import_h3_lora_file("doomed.safetensors", _kohya_header())
+        with self.assertRaises(Exception):
+            P.import_h3_lora_file("doomed.safetensors", _diffusers_header())
         self.assertEqual(list(self.dir.iterdir()), [])
 
     def test_a_successful_import_writes_a_sidecar_like_the_civitai_path(self):

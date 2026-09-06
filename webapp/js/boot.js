@@ -421,7 +421,7 @@ function _maybeAutoLoadAllForEmptyFilter(mode) {
   outputsLoadAll().then(() => {
     const visible = filteredMainOutputs();
     if (visible.length && !visible.some(o => o.path === activePath)) {
-      selectOutput(visible[0].path);
+      selectOutput(visible[0].path, { autoplay: false });   // not a click
     }
   });
   return true;
@@ -447,7 +447,7 @@ function setMainOutputsFilter(mode) {
   const visible = filteredMainOutputs();
   // If the active selection was filtered out, switch to the first match.
   if (visible.length && !visible.some(o => o.path === activePath)) {
-    selectOutput(visible[0].path);
+    selectOutput(visible[0].path, { autoplay: false });   // not a click
   }
   renderCarousel();
   // Reset scroll position on filter change so the user lands at the
@@ -499,7 +499,7 @@ function _autoMainOutputsFilterForMode(mode) {
   // off-filter (e.g. mode=image but the viewer is showing a video).
   const visible = filteredMainOutputs();
   if (visible.length && !visible.some(o => o.path === activePath)) {
-    selectOutput(visible[0].path);
+    selectOutput(visible[0].path, { autoplay: false });   // not a click
   }
 }
 

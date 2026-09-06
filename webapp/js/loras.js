@@ -199,7 +199,9 @@ function renderH3LoraSlot() {
   const lora = _h3ActiveUserLora();
   const turboOn = (document.getElementById('h3_turbo') || {}).value === '1';
   const onH3 = (typeof currentEngine === 'function') && currentEngine() === 'h3';
-  const conflict = !!(onH3 && lora && turboOn);
+  // A runner that stacks takes Turbo AND the LoRA — no slot to choose.
+  const stacks = !!(H3 && H3.loras && Number(H3.loras.max_stack || 1) > 1);
+  const conflict = !!(onH3 && lora && turboOn && !stacks);
   row.hidden = !conflict;
   if (!conflict) {
     // No conflict = no choice to remember. Reset so a later render can't

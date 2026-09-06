@@ -1,5 +1,32 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-06 — v4.10.5 ships.** H3 LoRA stacking (engine `codex/h3-engine-v2`
+> at 21e8824 = live-preview merged: repeatable `--lora`, the qkv-permute fix),
+> kohya conversion, the LoRA browser toolbar + kind filter + deeper search +
+> no key prompt on Hugging Face, the autoplay fix. Proof render: Turbo v4 +
+> a character LoRA, native 1344×768×73f, both adapters on 208 modules,
+> 20.8 min wall (6 forwards × 177 s + 166 s VAE decode; the tier's Turbo
+> chip must price SIX forwards — see `_h3_retune_turbo_estimates`).
+
+> **🧩 2026-09-06 — H3 LoRAs stack (on dev, rides the next release).** The
+> H3 runner took ONE `--lora`; Turbo and a character LoRA could not both
+> run. Engine (`mrbizarro/minimax-h3-mlx`, commit on `codex/live-preview`,
+> to be merged to the shipped `codex/h3-engine-v2`): `LoRALinear` holds N
+> adapters, `apply_lora` appends to an existing wrapper instead of nesting
+> (nesting hid the quantized base's `scales` from `plan()` → applied=0),
+> `--lora` is `action="append"` in generate_staged and serve_staged, the
+> draft-cache key carries the sorted set, adaLN deltas accumulate;
+> `tests/test_lora_stack.py`. Panel: `h3_supports_lora_stack()` probes the
+> runner's help text ("Repeat the flag to stack adapters"), `max_stack`
+> is 4 on a stacking runner and 1 on an old pack, the argv posts Turbo
+> then every user LoRA as its own `--lora PATH:SCALE`, the Turbo-or-LoRA
+> slot control only renders for a single-slot pack, and a combined
+> strength above 1.5 logs the community's motion-coherence warning.
+> `test_h3_lora_stack.py`. **Also found:** the shipped `codex/h3-engine-v2`
+> lacks 9c0f0bf (2026-08-15: the unconditional qkv permute measured
+> ORTHOGONAL to the adapter, cosine +0.012, running on every LoRA incl.
+> Turbo) — the merge that ships stacking ships that fix too.
+
 > **🪶 2026-09-06 — low-RAM block streaming for ≤24 GB Macs (on dev, rides the next release).**
 > The vendored engine already had `low_ram_streaming` (BlockStreamer); the
 > helper never used it. Now `LTX_LOW_RAM_STREAM` (panel sets it when
@@ -55,6 +82,13 @@
 > the same sidecar and layout probe as a CivitAI install. 22 H3 characters
 > at the time of writing. `test_hf_loras` pins lane detection, names, the
 > catalog shape and the install.
+> **Then the browser itself.** Results carry a `kind` (character / style /
+> motion / speed / other, from the repo's name and tags; actions count as
+> motion) and the modal filters in place with counts and a "with example"
+> toggle. The controls are one toolbar — Source and Engine as segmented
+> controls, NSFW at the right, the search line, the kind chips — instead of
+> three stacked rows of full-width pills. An empty query runs the model's
+> three spellings and merges (87 H3 results, 16 characters, vs 50 and 1).
 
 > **🎬 2026-09-05 — Editor v2 on dev/beta, UNRELEASED: speed, titles, transitions, the Director, sliding windows.**
 > From the long-form editing brief (the measured gaps only, built our way).

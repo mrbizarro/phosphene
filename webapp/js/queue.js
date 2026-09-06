@@ -2407,7 +2407,7 @@ async function poll() {
     // destroy the last estimate one line before the seamless swap can use it.
     if (stageMayAutoSelectOutput()) {
       const visible = filteredMainOutputs();
-      if (visible.length) selectOutput(visible[0].path);
+      if (visible.length) selectOutput(visible[0].path, { autoplay: false });
     }
     // If the saved filter (from localStorage) selects a kind that's not
     // in /status's top-60, the carousel is empty on boot and the user
@@ -3059,6 +3059,12 @@ function stageMayAutoSelectOutput() {
 }
 function selectOutput(path, options) {
   options = options || {};
+  // AUTOPLAY IS FOR A CLICK, NOT FOR BOOT. The stage selects the newest
+  // output on load and after every refresh or filter change; those used to
+  // build the player with `autoplay`, so the panel opened already playing
+  // the last clip, sound and all. A selection the person did not make shows
+  // the clip paused on its first frame; a click plays.
+  const autoplay = options.autoplay !== false;
   activePath = path;
   const _uev = (typeof window !== 'undefined') ? window.event : null;
   const userSelected = !!(_uev && _uev.isTrusted);
@@ -3120,7 +3126,7 @@ function selectOutput(path, options) {
   } else if (liveBackdrop) {
     wrap.innerHTML =
       `<img class="player-handoff-backdrop" src="${escapeHtml(liveBackdrop)}" alt="">` +
-      `<video class="player-handoff-media" controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+      `<video class="player-handoff-media" controls${autoplay ? ' autoplay' : ''} src="${escapeHtml(playerSrc)}"></video>`;
     const handoffVideo = wrap.querySelector('.player-handoff-media');
     _wireStageMutePersistence(handoffVideo);
     const revealFinished = () => {
@@ -3139,7 +3145,7 @@ function selectOutput(path, options) {
     // settles; controls must never stay transparent forever.
     setTimeout(revealFinished, 4000);
   } else {
-    wrap.innerHTML = `<video controls autoplay src="${escapeHtml(playerSrc)}"></video>`;
+    wrap.innerHTML = `<video controls${autoplay ? ' autoplay' : ''} src="${escapeHtml(playerSrc)}"></video>`;
     _wireStageMutePersistence(wrap.querySelector('video'));
   }
   // Surface aspect adapts to actual media dimensions so vertical clips

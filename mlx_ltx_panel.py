@@ -6585,6 +6585,11 @@ _hf_lora_catalog_cache: dict[str, tuple[float, list]] = {}
 _HF_H3_RE = re.compile(r"minima[xc][_ -]?h3|hailuo[_ -]?h3", re.I)
 _HF_LTX_RE = re.compile(r"ltx[_ -]?2\.?[35]|ltx[_ -]?video|ltxv", re.I)
 HF_LORA_DEFAULT_QUERY = {"h3": "MiniMax H3 LoRA", "ltx": "LTX-2.3 LoRA"}
+# The HF search matches repo ids, and people spell the model three ways; an
+# empty query runs all three and merges, so a character repo named
+# `Minimax_H3-Someone` shows beside `minimax-h3-turbo-lora`.
+HF_LORA_DEFAULT_SEARCHES = {"h3": ("Minimax_H3", "MiniMax-H3", "MiniMax H3 LoRA", "Hailuo H3 LoRA"),
+                            "ltx": ("LTX-2.3", "LTX-2.5", "LTXV LoRA", "LTX-Video LoRA")}
 
 
 def hf_lora_lane_of_repo(repo_id: str, tags=None) -> str | None:
@@ -6598,6 +6603,45 @@ def hf_lora_lane_of_repo(repo_id: str, tags=None) -> str | None:
     if _HF_LTX_RE.search(tail) or _HF_LTX_RE.search(tagtxt):
         return "ltx"
     return None
+
+
+# WHAT KIND OF LoRA. Read from the repo name and its tags — the only things the
+# listing carries. A character is a name (two capitalised words, or the word
+# itself); speed is the distilled / accelerator family; style and motion by
+# their words; everything else is "other". Used by the browser's filter row.
+HF_LORA_KINDS = ("character", "style", "motion", "speed", "other")
+_HF_KIND_WORDS = {
+    "speed": r"turbo|lightx2v|distill|accel|acc[_ -]?lora|step|fast|pdd|speed",
+    "motion": r"motion|camera|transition|dance|danc|dolly|orbit|zoom|action|walk|run|jump|fight|drift|move|pose|drop|shake|twerk|kiss|lick|suck|blow|strip|undress|helper|slider",
+    "style": r"style|realism|realistic|anime|cartoon|toon|cinematic|film|noir|vintage|painterly|pixar|ghibli|aesthetic|look|lighting|grade|vhs|retro|detail|enhanc|texture",
+}
+_HF_CHAR_WORDS = r"character|person|celebrit|actor|actress|face|identity|likeness|portrait"
+# Words that mean "not a person": model names, precisions, tools, packs.
+_HF_TECH_WORDS = r"minimax|hailuo|h3|ltx|ltxv|int[48]|fp[48]|fp16|bf16|nvfp|gguf|convrot|controlnet|control|union|clipproj|proj|vae|encoder|decoder|qwen|vl|heretic|quant|q[48]|pruned|dit|transformer|model|weights|comfy|comfyui|workflow|lora|loras|text|embeddings|embedding|ref|patch|showcase|tests|test|acc|omni|bridge|semantic|upscaler|latent|i2v|t2v|r2v|ref2v|fl2v|a2v|v\d+"
+# Anything bigger than this is a checkpoint, not a LoRA (the largest adapter
+# in the wild, the LightX2V repack, is 1.96 GB).
+HF_LORA_MAX_BYTES = 2_500_000_000
+
+
+def hf_lora_kind(repo_id: str, tags=None) -> str:
+    tail = (repo_id or "").split("/")[-1]
+    stripped = hf_lora_pretty_name(repo_id)
+    text = (tail + " " + " ".join(str(t) for t in (tags or []))).lower()
+    for kind in ("speed", "motion", "style"):
+        if re.search(_HF_KIND_WORDS[kind], text):
+            return kind
+    if re.search(_HF_CHAR_WORDS, text):
+        return "character"
+    # "Megan Fox", "The Dude — Jeff Bridges", "Sydney Sweeney": two to four
+    # capitalised alphabetic words and not one of them model jargon.
+    words = [w for w in re.split(r"[ \-—_]+", stripped) if w]
+    particles = {"de", "da", "del", "della", "di", "van", "von", "der", "den", "la", "le", "du", "y", "e", "the", "of", "and", "al", "bin"}
+    caps = [w for w in words if w.isalpha() and w[:1].isupper()]
+    if 2 <= len(words) <= 5 and len(caps) >= 2 \
+            and all(w.isalpha() and (w[:1].isupper() or w.lower() in particles) for w in words) \
+            and not any(re.fullmatch(_HF_TECH_WORDS, w.lower()) for w in words):
+        return "character"
+    return "other"
 
 
 def hf_lora_pretty_name(repo_id: str) -> str:
@@ -6646,7 +6690,16 @@ def hf_lora_catalog(lane: str = "h3", q: str = "", force: bool = False) -> list[
     elif kind == "author":
         repos = _hf_api_get(f"/api/models?author={urllib.parse.quote(value)}&limit=200&sort=likes&direction=-1")
     else:
-        repos = _hf_api_get(f"/api/models?search={urllib.parse.quote(value)}&limit=60&sort=likes&direction=-1")
+        searches = HF_LORA_DEFAULT_SEARCHES.get(lane, (value,)) if not (q or "").strip() else (value,)
+        seen: dict[str, dict] = {}
+        for term in searches:
+            try:
+                for m in (_hf_api_get(f"/api/models?search={urllib.parse.quote(term)}&limit=200&sort=likes&direction=-1") or []):
+                    if isinstance(m, dict) and m.get("id") and m["id"] not in seen:
+                        seen[m["id"]] = m
+            except Exception:                                      # noqa: BLE001
+                continue
+        repos = list(seen.values())[:320]                          # the lane filter and the size filter below do the real narrowing
     wanted = [m for m in (repos or []) if isinstance(m, dict) and m.get("id")
               and (kind == "repo" or hf_lora_lane_of_repo(m["id"], m.get("tags")) == lane)]
     import concurrent.futures as _cf
@@ -6657,9 +6710,10 @@ def hf_lora_catalog(lane: str = "h3", q: str = "", force: bool = False) -> list[
         except Exception:                                          # noqa: BLE001
             return None
         sib = info.get("siblings") or []
-        weights = [s for s in sib if str(s.get("rfilename", "")).lower().endswith(".safetensors")]
+        weights = [s for s in sib if str(s.get("rfilename", "")).lower().endswith(".safetensors")
+                   and 0 < int(s.get("size") or 0) <= HF_LORA_MAX_BYTES]
         if not weights:
-            return None
+            return None                                  # no LoRA-sized weights: a checkpoint or a pack
         w = max(weights, key=lambda s: int(s.get("size") or 0))
         prev = next((s for s in sib if str(s.get("rfilename", "")).lower().endswith((".mp4", ".webm", ".mov"))), None)
         if prev is None:
@@ -6679,6 +6733,7 @@ def hf_lora_catalog(lane: str = "h3", q: str = "", force: bool = False) -> list[
             "base_model": "MiniMax H3" if lane == "h3" else "LTXV 2.3",
             "lane": lane, "hf_url": "https://huggingface.co/" + rid, "civitai_url": None,
             "trigger_words": [], "description": "", "nsfw": False,
+            "kind": hf_lora_kind(rid, list(info.get("tags") or m.get("tags") or [])),
         }
     items: list[dict] = []
     with _cf.ThreadPoolExecutor(max_workers=8) as ex:
@@ -6879,7 +6934,8 @@ def _civitai_download(download_url: str, meta: dict) -> dict:
     sidecar_data = {
         "name": meta.get("name") or target.stem,
         "description": meta.get("description") or "",
-        "trigger_words": list(meta.get("trigger_words") or []),
+        "trigger_words": (list(meta.get("trigger_words") or [])
+                          or list(layout_info.get("trigger_words") or [])),
         "recommended_strength": float(meta.get("recommended_strength") or 1.0),
         "preview_url": meta.get("preview_url"),
         "base_model": (meta.get("base_model")
@@ -9854,6 +9910,34 @@ def h3_supports_first_frame() -> bool:
     return _h3_runner_has_flag("--first-frame")
 
 
+# The phrase the stackable runner's `--lora` help carries. Probing the help
+# text rather than the flag is what tells a repeatable `--lora` from the
+# single-slot one: both spell the flag identically.
+H3_LORA_STACK_MARKER = "Repeat the flag to stack adapters"
+H3_LORA_STACK_LIMIT = 4
+
+
+def h3_supports_lora_stack() -> bool:
+    """Whether the INSTALLED runner takes `--lora` more than once.
+
+    Stacking landed on the engine after Turbo did, so a pack that predates it
+    has exactly one adapter slot and a second `--lora` is an argparse error
+    30 s into the render. Same probe as every other capability: the script
+    text, cached per runner mtime."""
+    return h3_supports_lora() and _h3_runner_has_flag(H3_LORA_STACK_MARKER)
+
+
+def h3_lora_max_stack() -> int:
+    """How many user adapters a render may carry on the installed runner."""
+    return H3_LORA_STACK_LIMIT if h3_supports_lora_stack() else H3_LORA_MAX_STACK
+
+
+def h3_lora_stack_note() -> str:
+    if h3_supports_lora_stack():
+        return H3_LORA_STACK_OK_NOTE
+    return H3_LORA_STACK_NOTE
+
+
 def h3_supports_lora() -> bool:
     """Whether the INSTALLED runner accepts the shared `--lora PATH:SCALE`.
 
@@ -10084,6 +10168,14 @@ H3_LORA_IMPORT_LOCK = threading.Lock()
 H3_LORA_STACK_NOTE = (
     "H3's runner has ONE adapter slot (`--lora` takes a single path), so a "
     "LoRA and Turbo can't both run. Pick which one this render uses.")
+# The sentence for a runner that stacks (h3_supports_lora_stack). The 1.5
+# figure is the community's working rule for H3, not a measurement of ours:
+# above it the combined update starts to break motion coherence.
+H3_LORA_STACK_OK_NOTE = (
+    "LoRAs stack on H3: each keeps its own strength and Turbo rides along. "
+    "Keep the strengths' total near 1.5 or under, and avoid two LoRAs that "
+    "pull the same thing (two faces, two styles).")
+H3_LORA_STACK_STRENGTH_ADVISORY = 1.5
 
 # Namespaces other runtimes wrap the DiT in. Longest-first so
 # "model.diffusion_model." wins over "diffusion_model." on a file that has
@@ -10703,14 +10795,20 @@ def _h3_lora_layout(path: Path) -> dict:
                 "LIGHTX2V_LORA_FIX.md."),
         }
     if not a_names and any(k.endswith(_H3_LORA_KOHYA_SUFFIX) for k in keys):
+        # Convertible, not refused (2026-09-06): the character LoRAs people
+        # actually train for H3 come out of kohya-style trainers in exactly
+        # this shape, and the two things the runner cannot read — the naming
+        # and the `.alpha` scalar — are both mechanical. `_h3_lora_convert_kohya`
+        # renames the keys onto the runner's modules and folds alpha/rank into
+        # lora_B, so strength 1.0 means "as trained", same as every other file.
+        n_down = len([k for k in keys if k.endswith(_H3_LORA_KOHYA_SUFFIX)])
         return {
-            "layout": "kohya", "prefix": "", "pairs": 0,
-            "ok": False, "convertible": False,
+            "layout": "kohya", "prefix": "", "pairs": n_down,
+            "ok": False, "convertible": True,
             "reason": (
-                "this LoRA uses kohya `lora_down` / `lora_up` naming and ships "
-                "its own `.alpha` scalars. The H3 loader reads lora_A / lora_B "
-                "and applies no alpha, so a plain rename would run it at the "
-                "wrong strength — it needs manual conversion."),
+                "this LoRA uses kohya `lora_down` / `lora_up` naming with "
+                "`.alpha` scalars; it is rewritten onto the runner's lora_A / "
+                "lora_B names with alpha/rank folded into lora_B."),
         }
     if not pairs:
         return {
@@ -10807,6 +10905,94 @@ def _h3_lora_strip_prefix(path: Path, prefix: str) -> int:
     return n_renamed
 
 
+# kohya module names → the runner's checkpoint names. Underscores are the
+# trainer's separator AND part of the module names (`out_proj`, `qkv_proj`),
+# so the map is by known target, never by a blind `_`→`.` rewrite.
+_H3_KOHYA_MODULE_RE = re.compile(
+    r"^lora_unet_(?:(token_refiner)_)?blocks_(\d+)_(attn_qkv_proj|attn_out_proj|mlp_fc1|mlp_fc2)$")
+_H3_KOHYA_TAILS = {"attn_qkv_proj": "attn.qkv_proj", "attn_out_proj": "attn.out_proj",
+                   "mlp_fc1": "mlp.fc1", "mlp_fc2": "mlp.fc2"}
+
+
+def _h3_kohya_module_name(name: str) -> str | None:
+    m = _H3_KOHYA_MODULE_RE.match(name)
+    if not m:
+        return None
+    refiner, idx, tail = m.groups()
+    return f"{'token_refiner.' if refiner else ''}blocks.{int(idx)}.{_H3_KOHYA_TAILS[tail]}"
+
+
+def _h3_lora_convert_kohya(path: Path) -> dict:
+    """Rewrite a kohya-format H3 adapter in place into the runner's layout.
+
+    `lora_down` is A, `lora_up` is B, and kohya applies the update as
+    (alpha / rank) · B @ A. The runner applies no alpha, so the quotient is
+    folded into B in float32 and cast back — the file then reads at strength
+    1.0 exactly as it trained. Original metadata is kept and extended with
+    `converted_from`, so the operation is visible afterwards; modules the
+    runner has no target for are dropped and counted. The temp file must
+    classify as bare with the same pair count before it replaces the original."""
+    import mlx.core as mx
+    header, _ = _safetensors_header(path)
+    meta = {str(k): str(v) for k, v in (header.get("__metadata__") or {}).items()}
+    tensors = mx.load(str(path))
+    out: dict = {}
+    folded: dict[str, float] = {}
+    dropped: list[str] = []
+    names = sorted({k[: -len(_H3_LORA_KOHYA_SUFFIX)] for k in tensors
+                    if k.endswith(_H3_LORA_KOHYA_SUFFIX)})
+    for name in names:
+        down = tensors.get(f"{name}.lora_down.weight")
+        up = tensors.get(f"{name}.lora_up.weight")
+        target = _h3_kohya_module_name(name)
+        if down is None or up is None or target is None:
+            dropped.append(name)
+            continue
+        rank = int(down.shape[0])
+        alpha_t = tensors.get(f"{name}.alpha")
+        alpha = float(alpha_t.item()) if alpha_t is not None else float(rank)
+        q = alpha / rank if rank else 1.0
+        b = up
+        if abs(q - 1.0) > 1e-6:
+            b = (up.astype(mx.float32) * q).astype(up.dtype)
+        out[f"{target}{_H3_LORA_A_SUFFIX}"] = down
+        out[f"{target}{_H3_LORA_B_SUFFIX}"] = b
+        folded[target] = q
+    if not out:
+        raise RuntimeError(f"{path.name}: kohya file has no module the H3 runner can take "
+                           f"({len(dropped)} unknown module names, e.g. {dropped[:2]})")
+    quotients = sorted(set(round(v, 6) for v in folded.values()))
+    meta.update({
+        "converted_from": "kohya",
+        "converted_by": "phosphene",
+        "alpha_over_rank": ",".join(f"{v:g}" for v in quotients),
+        "converted_modules": str(len(out) // 2),
+        "dropped_modules": str(len(dropped)),
+    })
+    # mx.save_safetensors appends ".safetensors" to any other name, so the
+    # temp file keeps the suffix and carries its marker in the stem.
+    tmp = path.with_name(path.stem + ".kohya-tmp.safetensors")
+    try:
+        mx.save_safetensors(str(tmp), out, metadata=meta)
+        check = _h3_lora_layout(tmp)
+        if check["layout"] != "bare" or check["pairs"] != len(out) // 2:
+            raise RuntimeError(
+                f"post-conversion check failed (layout={check['layout']}, "
+                f"pairs={check['pairs']}) — leaving the original untouched.")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        del tensors, out
+    trigger = (meta.get("modelspec.trigger_phrase") or "").strip()
+    return {"pairs": len(folded), "dropped": len(dropped), "alpha_over_rank": quotients,
+            "trigger_words": [trigger] if trigger else []}
+
+
 def _h3_lora_prepare(path: Path) -> dict:
     """Make `path` loadable by the H3 runner, or raise saying why it can't be.
 
@@ -10821,6 +11007,26 @@ def _h3_lora_prepare(path: Path) -> dict:
                 "pairs": info["pairs"]}
     if not info["convertible"]:
         raise RuntimeError(f"{path.name}: {info['reason']}")
+    if info["layout"] == "kohya":
+        done = _h3_lora_convert_kohya(path)
+        push(f"[h3:lora] {path.name}: kohya → runner layout, {done['pairs']} modules, "
+             f"alpha/rank {', '.join(f'{q:g}' for q in done['alpha_over_rank'])} folded into lora_B"
+             + (f", {done['dropped']} module(s) without a target dropped" if done['dropped'] else ""))
+        # A sidecar that already sits next to the file (a download that was
+        # refused at render time by an older build) learns the trigger phrase
+        # the trainer wrote into the file, if it has none of its own.
+        try:
+            sc = path.with_suffix(".json")
+            if done["trigger_words"] and sc.is_file():
+                data = json.loads(sc.read_text(encoding="utf-8"))
+                if not data.get("trigger_words"):
+                    data["trigger_words"] = done["trigger_words"]
+                    data["lora_layout"] = "kohya"
+                    atomic_write_text(sc, json.dumps(data, indent=2))
+        except Exception:                                          # noqa: BLE001
+            pass
+        return {"layout": "kohya", "converted": True, "prefix": "",
+                "pairs": done["pairs"], "trigger_words": done["trigger_words"]}
     n = _h3_lora_strip_prefix(path, info["prefix"])
     push(f"[h3:lora] {path.name}: stripped `{info['prefix']}` from {n} keys "
          f"(ComfyUI repack → bare layout; tensors untouched)")
@@ -10944,10 +11150,10 @@ def h3_loras_status() -> dict:
         "dir": str(_h3_loras_dir()),
         "count": len(entries),
         "usable": len(usable),
-        "max_stack": H3_LORA_MAX_STACK,
+        "max_stack": h3_lora_max_stack(),
         "slots": list(H3_LORA_SLOTS),
         "default_slot": H3_LORA_SLOT_DEFAULT,
-        "note": H3_LORA_STACK_NOTE,
+        "note": h3_lora_stack_note(),
         "base_model": _CIVITAI_VIDEO_FAMILIES["h3"][0],
     }
 
@@ -20641,7 +20847,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # the render) would carry Turbo's pinned 4 sigma points on a render
         # that is not using the 4-step distillation adapter. Announced, never
         # silent — the whole reason h3_lora_slot is an explicit field.
-        if (_h3_turbo and _h3_lora_slot == "user"
+        if (_h3_turbo and _h3_lora_slot == "user" and not h3_supports_lora_stack()
                 and any(_lora_is_h3_lane((e or {}).get("path"))
                         for e in (job["params"].get("loras") or []))):
             _h3_turbo = False
@@ -22487,6 +22693,7 @@ def run_h3_job_inner(job: dict) -> None:
         lora_slot = H3_LORA_SLOT_DEFAULT
     user_lora: Path | None = None
     user_lora_strength = 1.0
+    user_lora_stack: list[tuple[Path, float]] = []
     _h3_lora_root = _h3_loras_dir()
     _picked: list[tuple[Path, float]] = []
     _foreign: list[str] = []
@@ -22525,32 +22732,52 @@ def run_h3_job_inner(job: dict) -> None:
                 "This render picks a LoRA, and "
                 + _h3_runner_behind("--lora", paths["runner"],
                                     "Or un-pick the LoRA and render again."))
-        if len(_picked) > H3_LORA_MAX_STACK:
+        _stack_ok = h3_supports_lora_stack()
+        _max_stack = h3_lora_max_stack()
+        if len(_picked) > _max_stack:
+            if _stack_ok:
+                raise RenderRefused(
+                    "h3_lora_slots",
+                    f"H3 stacks up to {_max_stack} LoRAs per render and "
+                    f"{len(_picked)} are picked "
+                    f"({', '.join(pp.name for pp, _ in _picked)}). Un-pick some.")
             raise RenderRefused(
                 "h3_lora_slots",
                 f"H3's runner has {H3_LORA_MAX_STACK} adapter slot — `--lora` "
                 f"takes a single path — and {len(_picked)} LoRAs are picked "
                 f"({', '.join(pp.name for pp, _ in _picked)}). Stacking is an "
                 f"LTX capability; on H3, pick one.")
+        # Layout gate, per file. Idempotent — a file already in bare layout is
+        # inspected and returned untouched; a ComfyUI repack is renamed in
+        # place here if it wasn't already renamed at install time (hand-copied
+        # files never went through the download path); a diffusers-namespace
+        # file raises with the sentence naming the alpha problem.
+        _stack_layouts = []
+        for _pp, _ps in _picked:
+            _stack_layouts.append(_h3_lora_prepare(_pp).get("layout"))
         user_lora, user_lora_strength = _picked[0]
-        # Layout gate. Idempotent — a file already in bare layout is inspected
-        # and returned untouched; a ComfyUI repack is renamed in place here if
-        # it wasn't already renamed at install time (hand-copied files never
-        # went through the download path); a diffusers-namespace file raises
-        # with the sentence naming the alpha problem.
-        _layout = _h3_lora_prepare(user_lora)
+        user_lora_stack = list(_picked)
         p["h3_lora_path"] = str(user_lora)
         p["h3_lora_strength"] = user_lora_strength
-        p["h3_lora_layout"] = _layout.get("layout")
+        p["h3_lora_layout"] = _stack_layouts[0]
+        if len(_picked) > 1:
+            p["h3_lora_stack"] = [{"path": str(pp), "strength": ps, "layout": ly}
+                                  for (pp, ps), ly in zip(_picked, _stack_layouts)]
+            _total = sum(abs(ps) for _, ps in _picked)
+            if _total > H3_LORA_STACK_STRENGTH_ADVISORY:
+                push(f"[h3] {len(_picked)} LoRAs stacked at a combined strength of "
+                     f"{_total:.2f} — above {H3_LORA_STACK_STRENGTH_ADVISORY:g} the "
+                     f"stack tends to break motion. Lower one if the clip judders.")
 
     # ---- Turbo: the 4-step distillation LoRA -----------------------------
     # make_job already gated this and pinned `steps`, but re-resolve the adapter
     # HERE: the queue can sit for an hour and a job must not reach the runner
     # with a --lora path that stopped resolving in the meantime.
     turbo = bool(p.get("h3_turbo"))
-    if turbo and user_lora is not None:
-        # ONE slot, two claimants. Both outcomes are stated out loud; neither
-        # is chosen for the user behind their back.
+    if turbo and user_lora is not None and not h3_supports_lora_stack():
+        # ONE slot, two claimants (a runner that predates stacking). Both
+        # outcomes are stated out loud; neither is chosen for the user behind
+        # their back. A stacking runner takes both — see the argv below.
         if lora_slot == "user":
             turbo = False
             p["h3_turbo"] = False
@@ -22774,14 +23001,17 @@ def run_h3_job_inner(job: dict) -> None:
         # CLI still requires PATH:SCALE; 1.0 means "as repacked". Never pass
         # the raw v0.1 file here — its missing alpha/rank fold renders noise.
         cmd += h3_turbo_argv(turbo_paths)
-    elif user_lora is not None:
-        # The SAME flag Turbo rides — one slot, and this render spent it here.
+    if user_lora is not None and (not turbo or h3_supports_lora_stack()):
+        # The SAME flag Turbo rides. On a stacking runner every `--lora` is one
+        # more adapter on the same base layers, Turbo first; on the single-slot
+        # runner this branch only runs when Turbo did not spend the slot.
         # `PATH:SCALE` is the runner's own spelling (lora.parse_spec), and the
         # scale is the picker's strength: 1.0 means "as trained" for a
         # checkpoint that ships alpha == rank, which is the only namespace this
         # lane accepts (the diffusers/PEFT one, whose alpha is NOT in the file,
         # is refused upstream in _h3_lora_prepare).
-        cmd += ["--lora", f"{user_lora}:{user_lora_strength:g}"]
+        for _pp, _ps in (user_lora_stack if h3_supports_lora_stack() else [(user_lora, user_lora_strength)]):
+            cmd += ["--lora", f"{_pp}:{_ps:g}"]
 
     env = os.environ.copy()
     # The runner pipes raw RGB into `ffmpeg` from PATH (minimax_h3_mlx.media);

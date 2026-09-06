@@ -1300,6 +1300,9 @@ async function refreshCivitaiAccessUI() {
 function renderCivitaiAuthBanner(haveKey, mode) {
   const box = document.getElementById('civitaiAuthBanner');
   if (!box) return;
+  // The key is CivitAI's; on the Hugging Face source the banner stays hidden
+  // even when the access probe answers after the source switch.
+  if (typeof _civitaiSource !== 'undefined' && _civitaiSource === 'huggingface') { box.style.display = 'none'; return; }
   // Three visual modes: 'view' (default), 'edit' (showing input), 'err' (last save failed).
   const m = mode || (haveKey ? 'view' : 'edit');
   box.style.display = '';
@@ -1385,6 +1388,8 @@ function civitaiSetSource(src) {
   // needs neither.
   const title = document.getElementById('civitaiModalTitle');
   const banner = document.getElementById('civitaiAuthBanner');
+  const kr = document.getElementById('civitaiKindRow');
+  if (kr) kr.style.display = (_civitaiSource === 'huggingface') ? 'flex' : 'none';
   if (_civitaiSource === 'huggingface') {
     if (title) title.textContent = `Browse Hugging Face for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'} LoRAs`;
     if (banner) banner.style.display = 'none';
@@ -1395,12 +1400,43 @@ function civitaiSetSource(src) {
   if (_civitaiSearching) { _civitaiRerun = true; return; }
   civitaiSearch();
 }
+// ---- kind filter (Hugging Face source only) -------------------------------------
+let _civitaiKind = 'all';
+let _hfLoraItems = [];
+function civitaiSetKind(kind) {
+  if (kind) _civitaiKind = kind;
+  document.querySelectorAll('#civitaiKindRow [data-civitai-kind]').forEach(b =>
+    b.classList.toggle('active', b.dataset.civitaiKind === _civitaiKind));
+  _hfLoraPaint();
+}
+function _hfLoraPaint() {
+  const grid = document.getElementById('civitaiGrid');
+  const status = document.getElementById('civitaiStatus');
+  const withEx = !!(document.getElementById('civitaiWithExample') || {}).checked;
+  const items = _hfLoraItems.filter(it => (_civitaiKind === 'all' || (it.kind || 'other') === _civitaiKind) && (!withEx || it.preview_url));
+  renderCivitaiGrid(items, false);
+  const counts = {};
+  _hfLoraItems.forEach(it => { const k = it.kind || 'other'; counts[k] = (counts[k] || 0) + 1; });
+  document.querySelectorAll('#civitaiKindRow [data-civitai-kind]').forEach(b => {
+    const k = b.dataset.civitaiKind; const n = k === 'all' ? _hfLoraItems.length : (counts[k] || 0);
+    b.textContent = { all: 'All', character: 'Characters', style: 'Styles', motion: 'Motion', speed: 'Speed', other: 'Other' }[k] + (n ? ` · ${n}` : '');
+  });
+  if (_hfLoraItems.length && !items.length) {
+    grid.innerHTML = `<div class="hint">Nothing of that kind in these results${withEx ? ' with an example' : ''}. Try another filter or a different search.</div>`;
+  }
+  if (status) {
+    status.textContent = `${items.length} of ${_hfLoraItems.length} LoRAs on Hugging Face — a card plays the repo's own example when it has one. Read the repo before you install; Phosphene lists what matches, nothing more.`;
+    status.className = 'civitai-status-line';
+  }
+}
 function civitaiSourceRowSync() {
   const row = document.getElementById('civitaiSourceRow');
   if (!row) return;
   const show = _civitaiContext === 'video';
   row.style.display = show ? 'flex' : 'none';
   if (!show) _civitaiSource = 'civitai';
+  const kr = document.getElementById('civitaiKindRow');
+  if (kr) kr.style.display = (show && _civitaiSource === 'huggingface') ? 'flex' : 'none';
 }
 // Hugging Face source: the whole catalog for the lane comes at once (no
 // paging), filtered by the query on the server.
@@ -1417,13 +1453,14 @@ async function _hfLoraSearch(grid, status, loadMore) {
     status.className = 'civitai-status-line err';
     return;
   }
-  renderCivitaiGrid(data.items, false);
+  _hfLoraItems = data.items || [];
   loadMore.style.display = 'none';
-  if ((data.items || []).length === 0) {
+  if (_hfLoraItems.length === 0) {
+    renderCivitaiGrid([], false);
     grid.innerHTML = `<div class="hint">Nothing on Hugging Face for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'}${q ? ` matching "${escapeHtml(q)}"` : ''}. Try a name, <code>author:someone</code>, or <code>owner/repo</code>.</div>`;
+    status.textContent = '';
   } else {
-    status.textContent = `${data.items.length} LoRA${data.items.length === 1 ? '' : 's'} on Hugging Face — a card plays the repo's own example when it has one. Read the repo before you install; Phosphene lists what matches, nothing more.`;
-    status.className = 'civitai-status-line';
+    civitaiSetKind();
   }
 }
 
@@ -1867,7 +1904,7 @@ async function cancelDownload() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
-  civitaiSetSource, civitaiSourceRowSync,
+  civitaiSetSource, civitaiSourceRowSync, civitaiSetKind,
   normalizeLivePreview, _liveStageMediaHeld, _showLiveReturnChip, _hideLiveStageChrome,
   _restoreSelectedOutputAfterLive, _handoffLiveStageToOutput, returnToLiveRender, _renderLiveStageFrame,
   renderLiveStage, renderNowPreview, stopEarly, markNoVoiceTouched,

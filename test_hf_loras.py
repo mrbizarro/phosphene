@@ -79,3 +79,36 @@ def test_routes_registered():
     from panel import routes_loras  # noqa: F401
     from panel.routes import GET_ROUTES, POST_ROUTES
     assert "/hf/loras" in GET_ROUTES and "/hf/loras/download" in POST_ROUTES
+
+
+def test_kind_from_name_and_tags():
+    k = p.hf_lora_kind
+    assert k("Someone/Minimax_H3-Megan_Fox") == "character"
+    assert k("Someone/Minimax_H3-The_Dude-Jeff_Bridges") == "character"
+    assert k("larryvrh/MiniMax-H3-Turbo-Lora") == "speed"
+    assert k("x/minimax-h3-lightx2v-4step") == "speed"
+    assert k("x/LTX-2.3-Latin_dance") == "motion"
+    assert k("x/valiantcat-LTX-2.3-Transition-LORA") == "motion"
+    assert k("x/Realism-People-LoRA") == "style"
+    assert k("x/Minimax_H3-Titty_Drop") == "motion"          # an action, not a person
+    assert k("x/some-repo", ["character"]) == "character"
+    # base models, precisions and tools are never "characters"
+    assert k("MiniMaxAI/MiniMax-H3") == "other"
+    assert k("x/nvfp4-INT4-INT8-Convrot") == "other"
+    assert k("x/PinkCherry_MiniMax-H3") == "other"
+    assert k("x/Fun-ControlNet-Union") == "other"
+    assert k("x/ClipProj-MiniMax-H3") == "other"
+    assert k("x/Minimax_H3-Ana_de_Armas") == "character"
+
+
+def test_catalog_skips_checkpoint_sized_repos(monkeypatch):
+    def fake_get(path, timeout=20.0):
+        if "/api/models?" in path:
+            return [{"id": "MiniMaxAI/MiniMax-H3", "likes": 6949}, {"id": "Someone/Minimax_H3-Megan_Fox", "likes": 3}]
+        if "MiniMaxAI" in path:
+            return {"siblings": [{"rfilename": "transformer.safetensors", "size": 40_000_000_000}, {"rfilename": "clip.mp4", "size": 5}]}
+        return {"siblings": [{"rfilename": "lora.safetensors", "size": 155_000_000}]}
+    monkeypatch.setattr(p, "_hf_api_get", fake_get)
+    p._hf_lora_catalog_cache.clear()
+    items = p.hf_lora_catalog("h3", "", force=True)
+    assert [i["id"] for i in items] == ["Someone/Minimax_H3-Megan_Fox"]

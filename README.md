@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.4.** The LoRA browser searches **Hugging Face** too, the way it searches CivitAI: a name, an author (`author:someone`) or an `owner/repo`, for Hailuo H3 or LTX; each card plays the repo's own example when it has one, and Install works as before. No API key. Includes 4.10.2 (Macs with 24 GB or less stream the video model from disk) and 4.10.1 (continuity for one-takes). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.10.5.** **LoRAs stack on Hailuo H3**: pick a character LoRA and keep Turbo on, or combine several LoRAs, each with its own strength (the Update brings the engine change with it). LoRAs in the kohya trainer format install and render now instead of being refused. The LoRA browser has one compact toolbar with a **Characters / Styles / Motion / Speed** filter, searches Hugging Face deeper, and no longer asks for a CivitAI key on the Hugging Face source. The panel no longer opens with the last clip already playing. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

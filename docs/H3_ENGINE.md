@@ -311,6 +311,21 @@ the conflict; setting it to `user` is the explicit opt-out — Turbo is released
 the step count goes back to the tier's, and both facts are logged. Stacking two
 LoRAs is refused the same way.
 
+**Stacking (runner with the repeatable `--lora`, 2026-09-06+).** The runtime
+adapter keeps every delta out of the base weight, so N adapters are a sum:
+`y = base(x) + Σ scale_i · (x @ A_iᵀ) @ B_iᵀ`. `generate_staged.py` takes
+`--lora PATH[:SCALE]` any number of times, Turbo first, and the panel posts
+Turbo plus up to four user LoRAs on a runner whose `--lora` help carries
+"Repeat the flag to stack adapters" (`h3_supports_lora_stack`, probed from the
+script text like every other capability). `/status.h3.loras.max_stack` reports
+the live limit, so the slot control disappears on a stacking runner and stays
+for an old pack. The community rule the panel repeats in its advisory: keep
+the strengths' total near 1.5 or under, and never stack two LoRAs that pull
+the same axis (two faces, two styles). A second `apply_lora` appends to the
+existing wrapper rather than nesting one — nesting hid the quantized base's
+`scales` from `plan()` and skipped every module (`tests/test_lora_stack.py`
+in the engine tree pins this).
+
 **Key layouts.** Three exist in the wild and only two work:
 
 | Layout | Keys | What happens |
