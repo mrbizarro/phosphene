@@ -13274,9 +13274,12 @@ _USAGE_FLEET_QUERIES = {
         "SELECT toDate(timestamp) AS d, count() AS c FROM events "
         "WHERE event = 'render_completed' AND timestamp > now() - INTERVAL 30 DAY "
         "GROUP BY d ORDER BY d",
+    # Complete weeks only: the running week would read as a collapse
+    # ("552 → 106") on a Sunday morning.
     "active_by_week":
         "SELECT toStartOfWeek(timestamp) AS w, count(DISTINCT distinct_id) AS c "
         "FROM events WHERE event = 'app_boot' AND timestamp > now() - INTERVAL 12 WEEK "
+        "AND toStartOfWeek(timestamp) < toStartOfWeek(now()) "
         "GROUP BY w ORDER BY w",
 }
 
