@@ -251,11 +251,11 @@ Callers should surface `weak` **before** a render is spent finding out, and shou
 
 ### `GET /hf/loras`
 
-A Hugging Face org's LoRAs as a browsable source beside CivitAI. `?source=playtime&lane=h3|ltx&q=<name filter>&refresh=1`.
-The org's repos are listed through the public HF API, kept by lane from the repo name (`Minimax_H3-…` → h3, `LTX-2.3-…` → ltx),
-and each repo's largest `.safetensors` plus its example clip become one item in the same shape the CivitAI grid renders
+Hugging Face as a browsable source beside CivitAI. `?lane=h3|ltx&q=<a name, author:someone, or owner/repo>&refresh=1`.
+Phosphene names no org: the query is a search (empty = the lane's default search term), an author listing, or one repo;
+results are kept by lane from the repo name and tags, and each repo's largest `.safetensors` plus its example clip become one item in the same shape the CivitAI grid renders
 (`name`, `creator`, `likes`, `size_kb`, `preview_url` / `preview_type`, `download_url`, `filename`, `base_model`, `hf_url`, `source: "huggingface"`).
-Cached ten minutes. Sources: `playtime` (Playtime-AI).
+Cached ten minutes per lane and query.
 
 ### `POST /hf/loras/download`
 

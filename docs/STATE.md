@@ -45,10 +45,12 @@
 > +101), keeping the steadier clip and hiding the other; the planner brief
 > states the light once and forbids a beat that implies another hour.
 > **Same day, a second LoRA source.** The LoRA browser has a source row:
-> CivitAI, or **Playtime-AI · Hugging Face** — the org that carries the H3
-> character LoRAs CivitAI no longer does, one repo each with the weights and
-> an example clip. `hf_lora_catalog` lists the org through the public API,
-> keeps a lane by repo name, and each card plays the author's own clip;
+> CivitAI, or **Hugging Face**, searched the same way — a name, an author
+> (`author:someone`) or an `owner/repo`. Phosphene names no org and endorses
+> nothing (the owner's call: the H3 character LoRAs live in third-party
+> repos now, and listing one by name would read as ours). `hf_lora_catalog`
+> searches the public API, keeps a lane by repo name and tags, and each card
+> plays the repo's own clip when it has one;
 > Install goes through `_hf_lora_download` into the lane's directory with
 > the same sidecar and layout probe as a CivitAI install. 22 H3 characters
 > at the time of writing. `test_hf_loras` pins lane detection, names, the

@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.3.** The LoRA browser has a second source: **Playtime-AI on Hugging Face**, the org that carries the Hailuo H3 character LoRAs CivitAI no longer does — each card plays the author's own example clip, Install works as before, no API key. Includes 4.10.2 (Macs with 24 GB or less stream the video model from disk) and 4.10.1 (continuity for one-takes). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.10.4.** The LoRA browser searches **Hugging Face** too, the way it searches CivitAI: a name, an author (`author:someone`) or an `owner/repo`, for Hailuo H3 or LTX; each card plays the repo's own example when it has one, and Install works as before. No API key. Includes 4.10.2 (Macs with 24 GB or less stream the video model from disk) and 4.10.1 (continuity for one-takes). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

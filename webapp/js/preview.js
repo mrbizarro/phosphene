@@ -1376,17 +1376,17 @@ function closeCivitaiModal() {
 let _civitaiSource = 'civitai';
 let _civitaiRerun = false;      // a source or family change landed mid-search
 function civitaiSetSource(src) {
-  _civitaiSource = (src === 'playtime') ? 'playtime' : 'civitai';
+  _civitaiSource = (src === 'huggingface') ? 'huggingface' : 'civitai';
   document.querySelectorAll('#civitaiSourceRow [data-civitai-source]').forEach(b =>
     b.classList.toggle('active', b.dataset.civitaiSource === _civitaiSource));
   const q = document.getElementById('civitaiQuery');
-  if (q) q.placeholder = _civitaiSource === 'playtime' ? 'Filter by name…' : 'Search by name, style, creator…';
+  if (q) q.placeholder = _civitaiSource === 'huggingface' ? 'Search Hugging Face — a name, author:someone, or owner/repo' : 'Search by name, style, creator…';
   // The heading and the CivitAI key banner belong to CivitAI; Hugging Face
   // needs neither.
   const title = document.getElementById('civitaiModalTitle');
   const banner = document.getElementById('civitaiAuthBanner');
-  if (_civitaiSource === 'playtime') {
-    if (title) title.textContent = `Playtime-AI on Hugging Face — ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'} character LoRAs`;
+  if (_civitaiSource === 'huggingface') {
+    if (title) title.textContent = `Browse Hugging Face for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'} LoRAs`;
     if (banner) banner.style.display = 'none';
   } else {
     if (title) title.textContent = `Browse CivitAI for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX 2.3'} LoRAs`;
@@ -1406,7 +1406,6 @@ function civitaiSourceRowSync() {
 // paging), filtered by the query on the server.
 async function _hfLoraSearch(grid, status, loadMore) {
   const params = new URLSearchParams();
-  params.set('source', _civitaiSource);
   params.set('lane', _civitaiFamily === 'h3' ? 'h3' : 'ltx');
   const q = document.getElementById('civitaiQuery').value.trim();
   if (q) params.set('q', q);
@@ -1421,9 +1420,9 @@ async function _hfLoraSearch(grid, status, loadMore) {
   renderCivitaiGrid(data.items, false);
   loadMore.style.display = 'none';
   if ((data.items || []).length === 0) {
-    grid.innerHTML = `<div class="hint">Nothing from ${escapeHtml(data.label || 'this source')} for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'}${q ? ` matching "${escapeHtml(q)}"` : ''}.</div>`;
+    grid.innerHTML = `<div class="hint">Nothing on Hugging Face for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'}${q ? ` matching "${escapeHtml(q)}"` : ''}. Try a name, <code>author:someone</code>, or <code>owner/repo</code>.</div>`;
   } else {
-    status.textContent = `${data.items.length} LoRA${data.items.length === 1 ? '' : 's'} from ${data.label} — each card plays the author's own example.`;
+    status.textContent = `${data.items.length} LoRA${data.items.length === 1 ? '' : 's'} on Hugging Face — a card plays the repo's own example when it has one. Read the repo before you install; Phosphene lists what matches, nothing more.`;
     status.className = 'civitai-status-line';
   }
 }

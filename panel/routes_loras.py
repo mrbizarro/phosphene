@@ -509,24 +509,21 @@ def post_loras_rename(h, path, qs, ctype) -> None:
 
 @get("/hf/loras")
 def get_hf_loras(h, parsed) -> None:
-    """A Hugging Face org's LoRAs for one lane, in the CivitAI grid's shape.
-    `?source=playtime&lane=h3|ltx&q=<name filter>&refresh=1`."""
+    """LoRAs on Hugging Face for one lane, in the CivitAI grid's shape.
+    `?lane=h3|ltx&q=<a name, author:someone, or owner/repo>&refresh=1`."""
     qs = P.parse_qs(parsed.query)
-    source = (qs.get("source", ["playtime"])[0] or "playtime").strip().lower()
     lane = (qs.get("lane", ["h3"])[0] or "h3").strip().lower()
-    q = (qs.get("q", [""])[0] or "").strip().lower()
-    if source not in P.HF_LORA_SOURCES or lane not in ("h3", "ltx"):
-        h._json({"ok": False, "error": "unknown source or lane", "items": []}, 400)
+    q = (qs.get("q", [""])[0] or "").strip()
+    if lane not in ("h3", "ltx"):
+        h._json({"ok": False, "error": "unknown lane", "items": []}, 400)
         return
     try:
-        items = P.hf_lora_catalog(source, lane, force=qs.get("refresh", ["0"])[0] == "1")
+        items = P.hf_lora_catalog(lane, q, force=qs.get("refresh", ["0"])[0] == "1")
     except Exception as exc:                                       # noqa: BLE001
         h._json({"ok": False, "error": f"Hugging Face could not be reached: {exc}", "items": []}, 502)
         return
-    if q:
-        items = [i for i in items if q in i["name"].lower() or q in i["id"].lower()]
-    src = P.HF_LORA_SOURCES[source]
-    h._json({"ok": True, "source": source, "label": src["label"], "url": src["url"],
+    kind, value = P.hf_lora_query_params(lane, q)
+    h._json({"ok": True, "label": "Hugging Face", "query": {"kind": kind, "value": value},
                 "lane": lane, "items": items, "has_more": False})
 
 

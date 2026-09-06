@@ -4185,12 +4185,12 @@
     <div class="civitai-family-row" id="civitaiFamilyRow" style="display:none;
          margin: 4px 0 8px; display:flex; gap:6px; flex-wrap:wrap;">
     </div>
-    <!-- WHERE THE LoRAs COME FROM. CivitAI, or an org on Hugging Face that
-         publishes character LoRAs with example clips (Playtime-AI carries the
-         H3 characters CivitAI no longer does). Video context only. -->
+    <!-- WHERE THE LoRAs COME FROM. CivitAI, or Hugging Face searched the same
+         way — a name, an author, or an owner/repo. Phosphene names no org and
+         endorses nothing; what shows is what matches. Video context only. -->
     <div class="civitai-family-row" id="civitaiSourceRow" style="display:none; margin: 4px 0 8px; gap:6px; flex-wrap:wrap;">
       <button type="button" class="pill-btn active" data-civitai-source="civitai" onclick="civitaiSetSource('civitai')">CivitAI</button>
-      <button type="button" class="pill-btn" data-civitai-source="playtime" onclick="civitaiSetSource('playtime')" title="Character LoRAs with example clips, from the Playtime-AI org on Hugging Face">Playtime-AI · Hugging Face</button>
+      <button type="button" class="pill-btn" data-civitai-source="huggingface" onclick="civitaiSetSource('huggingface')" title="Search Hugging Face for LoRAs — a name, an author (author:someone) or an owner/repo">Hugging Face</button>
     </div>
     <div class="civitai-search-bar">
       <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"

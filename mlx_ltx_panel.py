@@ -6573,38 +6573,36 @@ def _civitai_search(query: str = "", nsfw: bool = False,
 
 
 # ---------------------------------------------------------------------------
-# HUGGING FACE LoRA SOURCES — an org's repos as a browsable catalog
+# HUGGING FACE — a LoRA browser beside the CivitAI one
 # ---------------------------------------------------------------------------
-# CivitAI no longer carries the character LoRAs people want for H3; the
-# Playtime-AI org on Hugging Face does, one repo per LoRA with the weights, an
-# example clip and a two-line card. This lists an org's repos through the
-# public HF API, keeps the ones for a lane by name, and installs one the way
-# a CivitAI download does — same directory, same sidecar, same layout probe —
-# so the picker cannot tell where it came from.
-HF_LORA_SOURCES: dict[str, dict] = {
-    "playtime": {"author": "Playtime-AI", "label": "Playtime-AI · Hugging Face",
-                 "url": "https://huggingface.co/Playtime-AI"},
-}
+# Phosphene names no org and endorses nothing: the user searches Hugging Face
+# the way they search CivitAI — a name, an author (`author:someone`), or an
+# `owner/repo` — and the panel shows the repos that carry a LoRA for the lane,
+# with the repo's own example clip when it has one. Installing one lands the
+# file where a CivitAI download lands, with the same sidecar and layout probe.
 HF_LORA_CATALOG_TTL = 600
 _hf_lora_catalog_cache: dict[str, tuple[float, list]] = {}
-_HF_H3_RE = re.compile(r"minima[xc][_ -]?h3", re.I)
-_HF_LTX_RE = re.compile(r"ltx[_ -]?2\.?[35]", re.I)
+_HF_H3_RE = re.compile(r"minima[xc][_ -]?h3|hailuo[_ -]?h3", re.I)
+_HF_LTX_RE = re.compile(r"ltx[_ -]?2\.?[35]|ltx[_ -]?video|ltxv", re.I)
+HF_LORA_DEFAULT_QUERY = {"h3": "MiniMax H3 LoRA", "ltx": "LTX-2.3 LoRA"}
 
 
-def hf_lora_lane_of_repo(repo_id: str) -> str | None:
-    """Which lane a repo's LoRA is for, from its name: 'h3', 'ltx', or None
-    (an image LoRA, a showcase repo — not ours to list)."""
+def hf_lora_lane_of_repo(repo_id: str, tags=None) -> str | None:
+    """Which lane a repo's LoRA is for, from its name (and tags when the
+    listing carries them): 'h3', 'ltx', or None (an image LoRA, a showcase —
+    not ours to list)."""
     tail = (repo_id or "").split("/")[-1]
-    if _HF_H3_RE.search(tail):
+    tagtxt = " ".join(str(t) for t in (tags or []))
+    if _HF_H3_RE.search(tail) or _HF_H3_RE.search(tagtxt):
         return "h3"
-    if _HF_LTX_RE.search(tail):
+    if _HF_LTX_RE.search(tail) or _HF_LTX_RE.search(tagtxt):
         return "ltx"
     return None
 
 
 def hf_lora_pretty_name(repo_id: str) -> str:
     tail = (repo_id or "").split("/")[-1]
-    tail = re.sub(r"^(minima[xc][_ -]?h3|ltx[_ -]?2\.?[35])([_ -]?(dev(_and_sulphur)?|sulphur))?[_ -]*", "", tail, flags=re.I)
+    tail = re.sub(r"^(minima[xc][_ -]?h3|hailuo[_ -]?h3|ltx[_ -]?2\.?[35]|ltxv?)([_ -]?(dev(_and_sulphur)?|sulphur|lora))?[_ -]*", "", tail, flags=re.I)
     return tail.replace("_", " ").replace("-", " — ").strip() or repo_id
 
 
@@ -6619,18 +6617,38 @@ def _hf_api_get(path: str, timeout: float = 20.0) -> object:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
-def hf_lora_catalog(source: str = "playtime", lane: str = "h3", force: bool = False) -> list[dict]:
-    """Every LoRA the org publishes for `lane`, in the shape the CivitAI grid
-    already renders. Cached ten minutes; the per-repo file listings are
-    fetched in parallel."""
-    src = HF_LORA_SOURCES.get(source) or HF_LORA_SOURCES["playtime"]
-    key = f"{source}:{lane}"
+def hf_lora_query_params(lane: str, q: str) -> tuple[str, str | None]:
+    """The HF listing call for what the user typed: an `owner/repo` is fetched
+    directly, `author:name` (or a huggingface.co/name URL) lists that author,
+    anything else is a search; empty means the lane's own default search."""
+    q = (q or "").strip()
+    m = re.match(r"^(?:https?://huggingface\.co/)?([\w.-]+)/([\w.-]+)/?$", q)
+    if m and not q.lower().startswith("author:"):
+        return ("repo", f"{m.group(1)}/{m.group(2)}")
+    m = re.match(r"^(?:author:|https?://huggingface\.co/)([\w.-]+)/?$", q, re.I)
+    if m:
+        return ("author", m.group(1))
+    return ("search", q or HF_LORA_DEFAULT_QUERY.get(lane, "LoRA"))
+
+
+def hf_lora_catalog(lane: str = "h3", q: str = "", force: bool = False) -> list[dict]:
+    """Repos on Hugging Face that carry a LoRA for `lane`, in the shape the
+    CivitAI grid renders. Cached ten minutes per (lane, query); the per-repo
+    file listings are fetched in parallel."""
+    kind, value = hf_lora_query_params(lane, q)
+    key = f"{lane}:{kind}:{value}"
     now = time.time()
     hit = _hf_lora_catalog_cache.get(key)
     if hit and not force and now - hit[0] < HF_LORA_CATALOG_TTL:
         return hit[1]
-    repos = _hf_api_get(f"/api/models?author={urllib.parse.quote(src['author'])}&limit=200&sort=lastModified&direction=-1")
-    wanted = [m for m in (repos or []) if isinstance(m, dict) and hf_lora_lane_of_repo(m.get("id", "")) == lane]
+    if kind == "repo":
+        repos = [{"id": value}]
+    elif kind == "author":
+        repos = _hf_api_get(f"/api/models?author={urllib.parse.quote(value)}&limit=200&sort=likes&direction=-1")
+    else:
+        repos = _hf_api_get(f"/api/models?search={urllib.parse.quote(value)}&limit=60&sort=likes&direction=-1")
+    wanted = [m for m in (repos or []) if isinstance(m, dict) and m.get("id")
+              and (kind == "repo" or hf_lora_lane_of_repo(m["id"], m.get("tags")) == lane)]
     import concurrent.futures as _cf
     def one(m):
         rid = m["id"]
@@ -6647,11 +6665,12 @@ def hf_lora_catalog(source: str = "playtime", lane: str = "h3", force: bool = Fa
         if prev is None:
             prev = next((s for s in sib if str(s.get("rfilename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))), None)
         base = "https://huggingface.co/" + rid + "/resolve/main/"
+        owner = rid.split("/")[0]
         return {
             "id": rid, "source": "huggingface", "name": hf_lora_pretty_name(rid),
-            "creator": src["author"], "likes": int(m.get("likes") or 0),
-            "downloads": int(m.get("downloads") or 0),
-            "updated": str(m.get("lastModified") or "")[:10],
+            "creator": owner, "likes": int(info.get("likes") or m.get("likes") or 0),
+            "downloads": int(info.get("downloads") or m.get("downloads") or 0),
+            "updated": str(info.get("lastModified") or m.get("lastModified") or "")[:10],
             "size_kb": int(int(w.get("size") or 0) / 1024),
             "filename": w["rfilename"],
             "download_url": base + urllib.parse.quote(w["rfilename"]),
@@ -6666,8 +6685,7 @@ def hf_lora_catalog(source: str = "playtime", lane: str = "h3", force: bool = Fa
         for it in ex.map(one, wanted):
             if it:
                 items.append(it)
-    items.sort(key=lambda x: (-x["likes"], x["updated"]), reverse=False)
-    items.sort(key=lambda x: x["likes"], reverse=True)
+    items.sort(key=lambda x: (x["likes"], x["updated"]), reverse=True)
     _hf_lora_catalog_cache[key] = (now, items)
     return items
 

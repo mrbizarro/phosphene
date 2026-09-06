@@ -19,9 +19,17 @@ def test_pretty_names():
     assert p.hf_lora_pretty_name("Playtime-AI/Minimax_H3-Megan_Fox") == "Megan Fox"
 
 
+def test_query_kinds():
+    assert p.hf_lora_query_params("h3", "") == ("search", "MiniMax H3 LoRA")
+    assert p.hf_lora_query_params("h3", "megan") == ("search", "megan")
+    assert p.hf_lora_query_params("h3", "author:Someone") == ("author", "Someone")
+    assert p.hf_lora_query_params("h3", "https://huggingface.co/Someone") == ("author", "Someone")
+    assert p.hf_lora_query_params("h3", "Someone/Minimax_H3-Thing") == ("repo", "Someone/Minimax_H3-Thing")
+
+
 def test_catalog_lists_the_lane_with_previews(monkeypatch):
     def fake_get(path, timeout=20.0):
-        if path.startswith("/api/models?author="):
+        if path.startswith("/api/models?author=") or path.startswith("/api/models?search="):
             return [{"id": "Playtime-AI/Minimax_H3-Megan_Fox", "likes": 37, "downloads": 0, "lastModified": "2026-08-29T00:00:00"},
                     {"id": "Playtime-AI/LTX-2.3-Ted", "likes": 7},
                     {"id": "Playtime-AI/Krea_2-Emma_Watson", "likes": 6},
@@ -34,7 +42,7 @@ def test_catalog_lists_the_lane_with_previews(monkeypatch):
         return {"siblings": []}
     monkeypatch.setattr(p, "_hf_api_get", fake_get)
     p._hf_lora_catalog_cache.clear()
-    items = p.hf_lora_catalog("playtime", "h3", force=True)
+    items = p.hf_lora_catalog("h3", "author:Playtime-AI", force=True)
     assert [i["name"] for i in items] == ["Megan Fox"]                # showcase has no weights; LTX/Krea are other lanes
     it = items[0]
     assert it["source"] == "huggingface" and it["lane"] == "h3" and it["base_model"] == "MiniMax H3"
