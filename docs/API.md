@@ -249,6 +249,20 @@ Callers should surface `weak` **before** a render is spent finding out, and shou
 
 `GET /train/list` carries the same verdict plus **`adapter_advice`** — one sentence naming what to do about it, empty when the verdict is `ok` or `unknown`. It is hardware-aware: on a sub-64 GB Mac it does **not** say "train again on High", because that machine cannot reach the graded recipe (see the profile section below). The panel's Train tab renders it as a banner above the trained-character chips and in the finished job's history row; a verdict a user cannot act on is a measurement, not an answer (#62).
 
+### `GET /hf/loras`
+
+A Hugging Face org's LoRAs as a browsable source beside CivitAI. `?source=playtime&lane=h3|ltx&q=<name filter>&refresh=1`.
+The org's repos are listed through the public HF API, kept by lane from the repo name (`Minimax_H3-…` → h3, `LTX-2.3-…` → ltx),
+and each repo's largest `.safetensors` plus its example clip become one item in the same shape the CivitAI grid renders
+(`name`, `creator`, `likes`, `size_kb`, `preview_url` / `preview_type`, `download_url`, `filename`, `base_model`, `hf_url`, `source: "huggingface"`).
+Cached ten minutes. Sources: `playtime` (Playtime-AI).
+
+### `POST /hf/loras/download`
+
+Form `repo`, `filename`, `meta` (the item JSON). Downloads through `huggingface_hub` (the saved HF token when present)
+into the lane's LoRA directory, runs the H3 layout probe, and writes the same sidecar a CivitAI install writes plus
+`source`, `hf_repo`, `hf_url`. Returns `{ ok, skipped, name, path, sidecar_path, lane, layout, converted }`.
+
 ### `GET /loras/updates`
 
 Asks CivitAI whether any installed LoRA with a `civitai_id` in its sidecar has a

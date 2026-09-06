@@ -1181,7 +1181,8 @@ async function openCivitaiModal(context) {
   // Resolve the gate before searching so a stale checked box can never add
   // nsfw=true while Settings is still loading.
   await refreshCivitaiAccessUI();
-  await civitaiSearch();
+  await civitaiSourceRowSync();
+  civitaiSearch();
 }
 
 // Render the family-filter pill row when the response carries
@@ -1371,6 +1372,62 @@ function closeCivitaiModal() {
   document.getElementById('civitaiModal').style.display = 'none';
 }
 
+// ---- the source: CivitAI, or a Hugging Face org --------------------------------
+let _civitaiSource = 'civitai';
+let _civitaiRerun = false;      // a source or family change landed mid-search
+function civitaiSetSource(src) {
+  _civitaiSource = (src === 'playtime') ? 'playtime' : 'civitai';
+  document.querySelectorAll('#civitaiSourceRow [data-civitai-source]').forEach(b =>
+    b.classList.toggle('active', b.dataset.civitaiSource === _civitaiSource));
+  const q = document.getElementById('civitaiQuery');
+  if (q) q.placeholder = _civitaiSource === 'playtime' ? 'Filter by name…' : 'Search by name, style, creator…';
+  // The heading and the CivitAI key banner belong to CivitAI; Hugging Face
+  // needs neither.
+  const title = document.getElementById('civitaiModalTitle');
+  const banner = document.getElementById('civitaiAuthBanner');
+  if (_civitaiSource === 'playtime') {
+    if (title) title.textContent = `Playtime-AI on Hugging Face — ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'} character LoRAs`;
+    if (banner) banner.style.display = 'none';
+  } else {
+    if (title) title.textContent = `Browse CivitAI for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX 2.3'} LoRAs`;
+    try { refreshCivitaiAccessUI(); } catch (_) {}
+  }
+  if (_civitaiSearching) { _civitaiRerun = true; return; }
+  civitaiSearch();
+}
+function civitaiSourceRowSync() {
+  const row = document.getElementById('civitaiSourceRow');
+  if (!row) return;
+  const show = _civitaiContext === 'video';
+  row.style.display = show ? 'flex' : 'none';
+  if (!show) _civitaiSource = 'civitai';
+}
+// Hugging Face source: the whole catalog for the lane comes at once (no
+// paging), filtered by the query on the server.
+async function _hfLoraSearch(grid, status, loadMore) {
+  const params = new URLSearchParams();
+  params.set('source', _civitaiSource);
+  params.set('lane', _civitaiFamily === 'h3' ? 'h3' : 'ltx');
+  const q = document.getElementById('civitaiQuery').value.trim();
+  if (q) params.set('q', q);
+  const r = await fetch('/hf/loras?' + params.toString());
+  const data = await r.json();
+  if (!data.ok) {
+    grid.innerHTML = '';
+    status.textContent = data.error || 'Could not load the catalog.';
+    status.className = 'civitai-status-line err';
+    return;
+  }
+  renderCivitaiGrid(data.items, false);
+  loadMore.style.display = 'none';
+  if ((data.items || []).length === 0) {
+    grid.innerHTML = `<div class="hint">Nothing from ${escapeHtml(data.label || 'this source')} for ${_civitaiFamily === 'h3' ? 'Hailuo H3' : 'LTX'}${q ? ` matching "${escapeHtml(q)}"` : ''}.</div>`;
+  } else {
+    status.textContent = `${data.items.length} LoRA${data.items.length === 1 ? '' : 's'} from ${data.label} — each card plays the author's own example.`;
+    status.className = 'civitai-status-line';
+  }
+}
+
 async function civitaiSearch() {
   if (_civitaiSearching) return;
   _civitaiSearching = true;
@@ -1383,6 +1440,13 @@ async function civitaiSearch() {
   loadMore.style.display = 'none';
   _civitaiCursor = '';
   try {
+    // `_civitaiSource` lives at module level; the contract tests extract this
+    // function alone, so read it defensively rather than assume the module.
+    const _src = (typeof _civitaiSource === 'string') ? _civitaiSource : 'civitai';
+    if (_src !== 'civitai') {
+      await _hfLoraSearch(grid, status, loadMore);
+      return;
+    }
     const params = new URLSearchParams();
     const q = document.getElementById('civitaiQuery').value.trim();
     if (q) params.set('query', q);
@@ -1414,6 +1478,7 @@ async function civitaiSearch() {
     status.className = 'civitai-status-line err';
   } finally {
     _civitaiSearching = false;
+    if (typeof _civitaiRerun !== 'undefined' && _civitaiRerun) { _civitaiRerun = false; civitaiSearch(); }
   }
 }
 
@@ -1484,14 +1549,16 @@ function renderCivitaiGrid(items, append) {
         <div class="ttl" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</div>
         <div class="meta">
           <span>by ${escapeHtml(it.creator)}</span>
-          <span>↓ ${dl}</span>
+          ${it.source === 'huggingface' ? `<span title="likes on Hugging Face">♥ ${Number(it.likes || 0)}</span>` : `<span>↓ ${dl}</span>`}
           <span>${sizeMb} MB</span>
           ${it.nsfw ? '<span class="nsfw-badge">NSFW</span>' : ''}
         </div>
         ${triggers ? `<div class="meta"><span title="trigger words">trigger: ${escapeHtml(triggers)}</span></div>` : ''}
         ${it.civitai_url
           ? `<div class="meta"><a class="civitai-source-link" href="${escapeHtml(it.civitai_url)}" target="_blank" rel="noopener" title="Open the original CivitAI page — usage notes, examples, comments">Read instructions on CivitAI <svg class="ph" aria-hidden="true" style="margin-left:3px;vertical-align:-2px"><use href="#ph-arrow-square-out"/></svg></a></div>`
-          : ''}
+          : (it.hf_url
+              ? `<div class="meta"><a class="civitai-source-link" href="${escapeHtml(it.hf_url)}" target="_blank" rel="noopener" title="Open the Hugging Face repo — the author's example clip and notes">Open on Hugging Face <svg class="ph" aria-hidden="true" style="margin-left:3px;vertical-align:-2px"><use href="#ph-arrow-square-out"/></svg></a></div>`
+              : '')}
       </div>
       <div class="actions">
         <button type="button" class="primary-btn" data-id="${it.id}">Install</button>
@@ -1508,10 +1575,16 @@ async function civitaiInstall(btn, item) {
   const origLabel = btn.textContent;
   btn.textContent = 'Downloading…';
   const fd = new FormData();
-  fd.set('download_url', item.download_url);
+  const fromHf = item.source === 'huggingface';
+  if (fromHf) {
+    fd.set('repo', item.id);
+    fd.set('filename', item.filename);
+  } else {
+    fd.set('download_url', item.download_url);
+  }
   fd.set('meta', JSON.stringify(item));
   try {
-    const r = await fetch('/civitai/download', {
+    const r = await fetch(fromHf ? '/hf/loras/download' : '/civitai/download', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: new URLSearchParams(fd),
@@ -1795,6 +1868,7 @@ async function cancelDownload() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  civitaiSetSource, civitaiSourceRowSync,
   normalizeLivePreview, _liveStageMediaHeld, _showLiveReturnChip, _hideLiveStageChrome,
   _restoreSelectedOutputAfterLive, _handoffLiveStageToOutput, returnToLiveRender, _renderLiveStageFrame,
   renderLiveStage, renderNowPreview, stopEarly, markNoVoiceTouched,

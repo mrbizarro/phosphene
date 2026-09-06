@@ -507,6 +507,52 @@ def post_loras_rename(h, path, qs, ctype) -> None:
         h._json({"ok": False, "error": str(exc)}, 400)
 
 
+@get("/hf/loras")
+def get_hf_loras(h, parsed) -> None:
+    """A Hugging Face org's LoRAs for one lane, in the CivitAI grid's shape.
+    `?source=playtime&lane=h3|ltx&q=<name filter>&refresh=1`."""
+    qs = P.parse_qs(parsed.query)
+    source = (qs.get("source", ["playtime"])[0] or "playtime").strip().lower()
+    lane = (qs.get("lane", ["h3"])[0] or "h3").strip().lower()
+    q = (qs.get("q", [""])[0] or "").strip().lower()
+    if source not in P.HF_LORA_SOURCES or lane not in ("h3", "ltx"):
+        h._json({"ok": False, "error": "unknown source or lane", "items": []}, 400)
+        return
+    try:
+        items = P.hf_lora_catalog(source, lane, force=qs.get("refresh", ["0"])[0] == "1")
+    except Exception as exc:                                       # noqa: BLE001
+        h._json({"ok": False, "error": f"Hugging Face could not be reached: {exc}", "items": []}, 502)
+        return
+    if q:
+        items = [i for i in items if q in i["name"].lower() or q in i["id"].lower()]
+    src = P.HF_LORA_SOURCES[source]
+    h._json({"ok": True, "source": source, "label": src["label"], "url": src["url"],
+                "lane": lane, "items": items, "has_more": False})
+
+
+@post("/hf/loras/download")
+def post_hf_loras_download(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    def f(k):
+        v = form.get(k, "")
+        return (v[0] if isinstance(v, list) and v else (v if isinstance(v, str) else "")) or ""
+    repo, filename = f("repo").strip(), f("filename").strip()
+    try:
+        meta = P.json.loads(f("meta") or "{}")
+    except P.json.JSONDecodeError:
+        meta = {}
+    if not repo or "/" not in repo or not filename:
+        h._json({"ok": False, "error": "repo and filename are required"}, 400)
+        return
+    try:
+        h._json(P._hf_lora_download(repo, filename, meta if isinstance(meta, dict) else {}))
+    except Exception as exc:                                       # noqa: BLE001
+        h._json({"ok": False, "error": str(exc)}, 400)
+
+
 @post("/civitai/download")
 def post_civitai_download(h, path, qs, ctype) -> None:
     P._analytics_feature("civitai_download")

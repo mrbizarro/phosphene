@@ -6572,6 +6572,155 @@ def _civitai_search(query: str = "", nsfw: bool = False,
     }
 
 
+# ---------------------------------------------------------------------------
+# HUGGING FACE LoRA SOURCES — an org's repos as a browsable catalog
+# ---------------------------------------------------------------------------
+# CivitAI no longer carries the character LoRAs people want for H3; the
+# Playtime-AI org on Hugging Face does, one repo per LoRA with the weights, an
+# example clip and a two-line card. This lists an org's repos through the
+# public HF API, keeps the ones for a lane by name, and installs one the way
+# a CivitAI download does — same directory, same sidecar, same layout probe —
+# so the picker cannot tell where it came from.
+HF_LORA_SOURCES: dict[str, dict] = {
+    "playtime": {"author": "Playtime-AI", "label": "Playtime-AI · Hugging Face",
+                 "url": "https://huggingface.co/Playtime-AI"},
+}
+HF_LORA_CATALOG_TTL = 600
+_hf_lora_catalog_cache: dict[str, tuple[float, list]] = {}
+_HF_H3_RE = re.compile(r"minima[xc][_ -]?h3", re.I)
+_HF_LTX_RE = re.compile(r"ltx[_ -]?2\.?[35]", re.I)
+
+
+def hf_lora_lane_of_repo(repo_id: str) -> str | None:
+    """Which lane a repo's LoRA is for, from its name: 'h3', 'ltx', or None
+    (an image LoRA, a showcase repo — not ours to list)."""
+    tail = (repo_id or "").split("/")[-1]
+    if _HF_H3_RE.search(tail):
+        return "h3"
+    if _HF_LTX_RE.search(tail):
+        return "ltx"
+    return None
+
+
+def hf_lora_pretty_name(repo_id: str) -> str:
+    tail = (repo_id or "").split("/")[-1]
+    tail = re.sub(r"^(minima[xc][_ -]?h3|ltx[_ -]?2\.?[35])([_ -]?(dev(_and_sulphur)?|sulphur))?[_ -]*", "", tail, flags=re.I)
+    return tail.replace("_", " ").replace("-", " — ").strip() or repo_id
+
+
+def _hf_api_get(path: str, timeout: float = 20.0) -> object:
+    import urllib.request as _ur
+    req = _ur.Request("https://huggingface.co" + path, headers={"Accept": "application/json",
+                                                              "User-Agent": "Phosphene"})
+    tok = _active_hf_token()
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    with _ur.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def hf_lora_catalog(source: str = "playtime", lane: str = "h3", force: bool = False) -> list[dict]:
+    """Every LoRA the org publishes for `lane`, in the shape the CivitAI grid
+    already renders. Cached ten minutes; the per-repo file listings are
+    fetched in parallel."""
+    src = HF_LORA_SOURCES.get(source) or HF_LORA_SOURCES["playtime"]
+    key = f"{source}:{lane}"
+    now = time.time()
+    hit = _hf_lora_catalog_cache.get(key)
+    if hit and not force and now - hit[0] < HF_LORA_CATALOG_TTL:
+        return hit[1]
+    repos = _hf_api_get(f"/api/models?author={urllib.parse.quote(src['author'])}&limit=200&sort=lastModified&direction=-1")
+    wanted = [m for m in (repos or []) if isinstance(m, dict) and hf_lora_lane_of_repo(m.get("id", "")) == lane]
+    import concurrent.futures as _cf
+    def one(m):
+        rid = m["id"]
+        try:
+            info = _hf_api_get(f"/api/models/{rid}?blobs=true")
+        except Exception:                                          # noqa: BLE001
+            return None
+        sib = info.get("siblings") or []
+        weights = [s for s in sib if str(s.get("rfilename", "")).lower().endswith(".safetensors")]
+        if not weights:
+            return None
+        w = max(weights, key=lambda s: int(s.get("size") or 0))
+        prev = next((s for s in sib if str(s.get("rfilename", "")).lower().endswith((".mp4", ".webm", ".mov"))), None)
+        if prev is None:
+            prev = next((s for s in sib if str(s.get("rfilename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))), None)
+        base = "https://huggingface.co/" + rid + "/resolve/main/"
+        return {
+            "id": rid, "source": "huggingface", "name": hf_lora_pretty_name(rid),
+            "creator": src["author"], "likes": int(m.get("likes") or 0),
+            "downloads": int(m.get("downloads") or 0),
+            "updated": str(m.get("lastModified") or "")[:10],
+            "size_kb": int(int(w.get("size") or 0) / 1024),
+            "filename": w["rfilename"],
+            "download_url": base + urllib.parse.quote(w["rfilename"]),
+            "preview_url": (base + urllib.parse.quote(prev["rfilename"])) if prev else None,
+            "preview_type": ("video" if prev and str(prev["rfilename"]).lower().endswith((".mp4", ".webm", ".mov")) else ("image" if prev else None)),
+            "base_model": "MiniMax H3" if lane == "h3" else "LTXV 2.3",
+            "lane": lane, "hf_url": "https://huggingface.co/" + rid, "civitai_url": None,
+            "trigger_words": [], "description": "", "nsfw": False,
+        }
+    items: list[dict] = []
+    with _cf.ThreadPoolExecutor(max_workers=8) as ex:
+        for it in ex.map(one, wanted):
+            if it:
+                items.append(it)
+    items.sort(key=lambda x: (-x["likes"], x["updated"]), reverse=False)
+    items.sort(key=lambda x: x["likes"], reverse=True)
+    _hf_lora_catalog_cache[key] = (now, items)
+    return items
+
+
+def _hf_lora_download(repo_id: str, filename: str, meta: dict) -> dict:
+    """Install one LoRA from a Hugging Face repo into its lane's directory,
+    with the same sidecar and layout probe a CivitAI install gets."""
+    from huggingface_hub import hf_hub_download                     # noqa: PLC0415
+    lane = (meta.get("lane") or hf_lora_lane_of_repo(repo_id) or "ltx")
+    loras_dir = _safe_h3_loras_dir() if lane == "h3" else _safe_loras_dir()
+    safe_fname = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name).strip("_")
+    if not safe_fname.lower().endswith(".safetensors"):
+        safe_fname += ".safetensors"
+    target = loras_dir / safe_fname
+    if target.is_file() and target.stat().st_size > 1024:
+        return {"ok": True, "skipped": True, "name": meta.get("name") or target.stem,
+                "path": str(target), "lane": lane, "converted": False}
+    push(f"[huggingface] downloading {meta.get('name') or safe_fname} from {repo_id}")
+    stage = STATE_DIR / "hf_lora_stage"
+    stage.mkdir(parents=True, exist_ok=True)
+    got = hf_hub_download(repo_id=repo_id, filename=filename, token=_active_hf_token() or None,
+                          local_dir=str(stage / re.sub(r"[^A-Za-z0-9._-]+", "_", repo_id)))
+    loras_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(got, target)
+    layout_info = {"layout": None, "converted": False, "prefix": ""}
+    if lane == "h3":
+        try:
+            layout_info = _h3_lora_prepare(target)
+        except Exception as exc:                                   # noqa: BLE001
+            push(f"[huggingface] layout probe failed: {exc}")
+    sidecar = target.with_suffix(".json")
+    data = {
+        "name": meta.get("name") or target.stem, "description": meta.get("description") or "",
+        "trigger_words": list(meta.get("trigger_words") or []),
+        "recommended_strength": float(meta.get("recommended_strength") or 1.0),
+        "preview_url": meta.get("preview_url"), "preview_type": meta.get("preview_type"),
+        "base_model": meta.get("base_model") or ("MiniMax H3" if lane == "h3" else "LTXV 2.3"),
+        "source": "huggingface", "hf_repo": repo_id,
+        "hf_url": meta.get("hf_url") or ("https://huggingface.co/" + repo_id),
+        "downloaded_at": iso_now(),
+        "lora_layout": layout_info.get("layout"),
+        "lora_converted_prefix": (layout_info.get("prefix") or None) if layout_info.get("converted") else None,
+    }
+    try:
+        atomic_write_text(sidecar, json.dumps(data, indent=2))
+    except Exception as exc:                                       # noqa: BLE001
+        push(f"[huggingface] WARN: could not write sidecar ({exc})")
+    push(f"[huggingface] installed → {target.name}")
+    return {"ok": True, "skipped": False, "name": data["name"], "path": str(target),
+            "sidecar_path": str(sidecar), "size_bytes": target.stat().st_size, "lane": lane,
+            "layout": layout_info.get("layout"), "converted": bool(layout_info.get("converted"))}
+
+
 def _civitai_download(download_url: str, meta: dict) -> dict:
     """Download a CivitAI .safetensors into the right LoRA dir for its base
     model and write a sidecar JSON. Returns

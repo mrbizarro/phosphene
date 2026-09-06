@@ -44,6 +44,15 @@
 > per part and the runner retakes a drifting part once (lock doubled, seed
 > +101), keeping the steadier clip and hiding the other; the planner brief
 > states the light once and forbids a beat that implies another hour.
+> **Same day, a second LoRA source.** The LoRA browser has a source row:
+> CivitAI, or **Playtime-AI · Hugging Face** — the org that carries the H3
+> character LoRAs CivitAI no longer does, one repo each with the weights and
+> an example clip. `hf_lora_catalog` lists the org through the public API,
+> keeps a lane by repo name, and each card plays the author's own clip;
+> Install goes through `_hf_lora_download` into the lane's directory with
+> the same sidecar and layout probe as a CivitAI install. 22 H3 characters
+> at the time of writing. `test_hf_loras` pins lane detection, names, the
+> catalog shape and the install.
 
 > **🎬 2026-09-05 — Editor v2 on dev/beta, UNRELEASED: speed, titles, transitions, the Director, sliding windows.**
 > From the long-form editing brief (the measured gaps only, built our way).
