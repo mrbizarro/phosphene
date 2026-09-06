@@ -47,9 +47,13 @@ class StreamingIsPerJob(unittest.TestCase):
 class EveryPipelineGetsTheFlag(unittest.TestCase):
     def test_t2v_i2v_extend_constructors_pass_low_ram_streaming(self):
         self.assertGreaterEqual(SRC.count("low_ram_streaming=_stream_for(loras)"), 3)
-        for ctor in ("ImageToVideoPipeline(", "ExtendPipeline(", "TextToVideoPipeline("):
-            i = SRC.index("pipe = " + ctor)
-            self.assertIn("low_ram_streaming=_stream_for(loras)", SRC[i:i + 400], ctor)
+        # Constructed through _construct_pipeline since 4.10.6, so the class is
+        # the first argument, not the callee (test_pipeline_construct_kwargs.py).
+        import re
+        for ctor in ("ImageToVideoPipeline", "ExtendPipeline", "TextToVideoPipeline"):
+            m = re.search(r"_construct_pipeline\(\s*" + ctor + ",", SRC)
+            self.assertIsNotNone(m, ctor)
+            self.assertIn("low_ram_streaming=_stream_for(loras)", SRC[m.start():m.start() + 400], ctor)
 
     def test_cache_policy_keeps_the_cache_off_while_streaming(self):
         i = SRC.index("def apply_mlx_cache_policy")

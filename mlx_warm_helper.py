@@ -695,6 +695,25 @@ def _resolve_lora_path(path: str) -> str:
     return chosen
 
 
+def _construct_pipeline(cls, **kwargs):
+    """Build a pipeline, passing only the constructor kwargs THIS vendored
+    class accepts.
+
+    4.10.2 added `low_ram_streaming=` to every pipeline construction. The
+    text/image pipelines take it through `BasePipeline`; `RetakePipeline`
+    (the Extend lane) declares its own `__init__` without it, so every Extend
+    render on 4.10.2–4.10.5 died at construction with "unexpected keyword
+    argument 'low_ram_streaming'" — 35 failures from one install in the fleet
+    on the day 4.10.4 shipped. A dropped kwarg is logged, never fatal."""
+    accepted = _filter_unsupported_kwargs(cls.__init__, dict(kwargs))
+    dropped = sorted(set(kwargs) - set(accepted))
+    if dropped:
+        emit({"event": "log",
+              "line": f"{cls.__name__} does not take {', '.join(dropped)} on this engine; "
+                      f"constructing without."})
+    return cls(**accepted)
+
+
 def _filter_unsupported_kwargs(fn, kwargs: dict) -> dict:
     """Return `kwargs` with any keys the target callable doesn't accept removed.
 
@@ -1304,7 +1323,8 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     _ac()
                 emit({"event": "log",
                       "line": "Loading I2V pipeline (first job is the slow one)..."})
-                pipe = ImageToVideoPipeline(
+                pipe = _construct_pipeline(
+                    ImageToVideoPipeline,
                     model_dir=i2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                     low_ram_streaming=_stream_for(loras),
                 )
@@ -1331,7 +1351,8 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                     _ac()
                 emit({"event": "log",
                       "line": f"Loading Extend pipeline (heavier — uses dev transformer at {ext_dir})..."})
-                pipe = ExtendPipeline(
+                pipe = _construct_pipeline(
+                    ExtendPipeline,
                     model_dir=ext_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                     low_ram_streaming=_stream_for(loras),
                     dev_transformer=ext_dev,
@@ -1355,7 +1376,8 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                 _ac()
             emit({"event": "log",
                   "line": "Loading T2V pipeline (first job is the slow one)..."})
-            pipe = TextToVideoPipeline(
+            pipe = _construct_pipeline(
+                TextToVideoPipeline,
                 model_dir=t2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
                 low_ram_streaming=_stream_for(loras),
             )
