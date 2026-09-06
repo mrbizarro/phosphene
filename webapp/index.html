@@ -1055,6 +1055,45 @@
                warning; h3_visible_tiers() swaps the old warning back in for a
                pack whose runner has no --chain-prompts. -->
           <div class="engine-hint" id="h3TierNote" data-h3-only hidden></div>
+          <!-- ONE TAKE — the third axis, for BOTH engines: a length past a
+               single clip. Same strip language as Quality and Length above
+               (q-chip: name / spec / foot), so it reads as one more length
+               choice, not a hidden mode. Picking a take locks the engine's
+               own Length strip (a take IS the length), opens the beats box
+               and prices the render from /take/estimate. Ids are unchanged
+               from the Customize era (#takeGroup, data-take, #beatsRow,
+               #beats_text, #takeEstimate) so setTakeSeconds / sbSetTake /
+               Load Params keep working. -->
+          <div class="take-axes" id="takeAxes">
+            <div class="qs-label h3-axis-label">
+              <span class="qs-name">One take</span>
+              <span class="qs-meta" id="takeHint">longer than one clip · the shot never cuts · <a href="/docs/prompting" target="_blank" rel="noopener">how to write the beats</a></span>
+            </div>
+            <div class="quality-strip pill-group" id="takeGroup">
+              <button type="button" class="q-chip pill-btn pill-quality active" data-take="0" onclick="setTakeSeconds(0)" title="One clip at the length chosen above.">
+                <span class="ql-name">Off</span><span class="q-spec ql-spec sub">one clip</span><span class="ql-tier">length above</span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="30" onclick="setTakeSeconds(30)" title="30 seconds, one continuous shot: 6 beats of 5 s, 2 parts on H3.">
+                <span class="ql-name">30 s</span><span class="q-spec ql-spec sub">6 beats</span><span class="ql-tier">2 parts</span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="45" onclick="setTakeSeconds(45)" title="45 seconds, one continuous shot: 9 beats of 5 s, 3 parts on H3.">
+                <span class="ql-name">45 s</span><span class="q-spec ql-spec sub">9 beats</span><span class="ql-tier">3 parts</span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="60" onclick="setTakeSeconds(60)" title="One minute, one continuous shot: 12 beats of 5 s, 4 parts on H3.">
+                <span class="ql-name">1 min</span><span class="q-spec ql-spec sub">12 beats</span><span class="ql-tier">4 parts</span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="90" onclick="setTakeSeconds(90)" title="A minute and a half, one continuous shot: 18 beats of 5 s, 6 parts on H3.">
+                <span class="ql-name">1½ min</span><span class="q-spec ql-spec sub">18 beats</span><span class="ql-tier">6 parts</span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="120" onclick="setTakeSeconds(120)" title="Two minutes, one continuous shot: 24 beats of 5 s, 8 parts on H3.">
+                <span class="ql-name">2 min</span><span class="q-spec ql-spec sub">24 beats</span><span class="ql-tier">8 parts</span></button>
+            </div>
+            <div class="take-beats" id="beatsRow" hidden>
+              <div class="qs-label h3-axis-label">
+                <span class="qs-name">Beats</span>
+                <span class="qs-meta" id="beatsHint">one line per 5 seconds · a blank line holds the moment</span>
+              </div>
+              <textarea id="beats_text" class="sb-textarea" rows="6" spellcheck="false"
+                oninput="beatsInput()"
+                placeholder="she pushes off down the sunlit avenue&#10;a van sweeps past, pigeons burst up ahead&#10;she drops off the kerb into the road&#10;…"></textarea>
+              <div class="take-estimate" id="takeEstimate" aria-live="polite"></div>
+            </div>
+          </div>
 
           <!-- ========== PER-WINDOW PROMPTS (chained lengths only) ==========
                The fix for the public report — @Wizard_1981, v3.6.0: "10s and
@@ -1586,31 +1625,10 @@
                  frames at 12fps, then exports a normal 24fps file with
                  motion interpolation. This is explicit because dialogue,
                  lip-sync, and fast motion need user judgment. -->
-            <!-- ONE TAKE. The length control for anything longer than one
-                 pass, on either engine. Picks a length, writes beats, shows
-                 the real time; the engine's own length pills lock while it is
-                 on, because a take IS the length. -->
-            <div class="cz-control" id="takeRow">
-              <div class="cz-label">One take
-                <span class="cz-label-hint" id="takeHint">longer than a single clip · the world changes, the shot never cuts · <a href="/docs/prompting" target="_blank" rel="noopener">how to write the beats</a></span>
-              </div>
-              <div class="pill-group cols-3" id="takeGroup">
-                <button type="button" class="pill-btn active" data-take="0" onclick="setTakeSeconds(0)"><span>Off</span><span class="sub">one clip</span></button>
-                <button type="button" class="pill-btn" data-take="30" onclick="setTakeSeconds(30)"><span>30 s</span><span class="sub">6 beats</span></button>
-                <button type="button" class="pill-btn" data-take="45" onclick="setTakeSeconds(45)"><span>45 s</span><span class="sub">9 beats</span></button>
-                <button type="button" class="pill-btn" data-take="60" onclick="setTakeSeconds(60)"><span>1 min</span><span class="sub">12 beats</span></button>
-                <button type="button" class="pill-btn" data-take="90" onclick="setTakeSeconds(90)"><span>1½ min</span><span class="sub">18 beats</span></button>
-                <button type="button" class="pill-btn" data-take="120" onclick="setTakeSeconds(120)"><span>2 min</span><span class="sub">24 beats</span></button>
-              </div>
-              <div class="cz-control" id="beatsRow" hidden>
-                <div class="cz-label">Beats
-                  <span class="cz-label-hint" id="beatsHint">one line per 5 seconds · a blank line holds the moment</span></div>
-                <textarea id="beats_text" class="sb-textarea" rows="6" spellcheck="false"
-                  oninput="beatsInput()"
-                  placeholder="she pushes off down the sunlit avenue&#10;a van sweeps past, pigeons burst up ahead&#10;she drops off the kerb into the road&#10;…"></textarea>
-                <div class="take-estimate" id="takeEstimate" aria-live="polite"></div>
-              </div>
-            </div>
+            <!-- ONE TAKE used to live here, in Customize. It is the length
+                 control for anything longer than one clip, so it sits with
+                 the other lengths now — #takeAxes, right under the engine's
+                 Quality / Length strips. -->
 
             <div class="cz-control" id="temporalRow" data-ltx-only>
               <div class="cz-label">Long clips

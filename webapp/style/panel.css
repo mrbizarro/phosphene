@@ -9980,6 +9980,13 @@
 .lora-update-badge { cursor: pointer; }
 
 /* ---- One take ---------------------------------------------------------------- */
+/* One take — the third axis under Quality / Length, same grid rhythm as
+   .h3-axes; the beats box opens beneath the strip when a take is picked. */
+.take-axes { display: grid; gap: 8px; margin-top: 2px; }
+.take-axes .h3-axis-label { margin: 2px 0 -2px 0; }
+.take-axes .take-beats { display: grid; gap: 6px; }
+.take-axes .take-beats[hidden] { display: none !important; }
+.take-axes .sb-textarea { width: 100%; box-sizing: border-box; }
 .take-locked { opacity: .45; pointer-events: none; }
 .take-locked::after { content: ''; }
 #beatsRow { margin-top: 8px; }
