@@ -264,7 +264,7 @@ window._liveStagePendingOutput = null;
 // REMIX_MODES — the IC-LoRA reference tools grouped under the single "Remix"
 // mode pill. These are REAL backend modes (the #mode field + the dispatch see
 // them); "remix" itself is a UI-only pseudo-mode that resolves to one of these.
-globalThis.REMIX_MODES = ['ingredients', 'control', 'restore'];
+globalThis.REMIX_MODES = ['ingredients', 'control', 'restore', 'upscale'];
 
 // Main right-pane gallery kind filter (All / Videos / Photos). Independent
 // of `filterMode` (which is visible/hidden) and independent of

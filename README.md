@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.7.** **Extend renders again** (every Extend render since 4.10.2 stopped before it started; fixed). **One take is where the lengths are**: the 30 s to 2 min continuous-shot control sits under Quality and Length now instead of inside Customize. The stats page gets all-time totals and a growth chart. Includes 4.10.6 (Browse CivitAI search works again) and 4.10.5 (LoRAs stack on Hailuo H3). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.10.8.** **LTX Upscale**: any finished clip, an H3 draft above all, re-rendered at twice its size by the LTX-2.5 Pixel Spatial Upscaler with real generated detail, keeping its sound — a button on every video card, a Remix mode, and an **LTX ×2** option in the H3 form that queues the upscale behind the draft in one click. Presets Faithful (face and lips stay), Quick and Re-imagine. Also in this line: Extend renders again (broken since 4.10.2), One take sits under Quality and Length, LoRAs stack on Hailuo H3, Browse CivitAI search works again. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

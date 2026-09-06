@@ -173,7 +173,7 @@ including image and training jobs.
 | Field | Type | Example | Notes |
 |---|---|---|---|
 | `engine` | string | `"ltx"` | `ltx` or `h3` |
-| `mode` | string | `"i2v"` | `t2v`, `i2v`, `extend`, `keyframe`, `a2v`, `restore`, `ingredients`, `control`, `image`, `train` |
+| `mode` | string | `"i2v"` | `t2v`, `i2v`, `extend`, `keyframe`, `a2v`, `restore`, `ingredients`, `control`, `upscale`, `image`, `train` |
 | `tier` | string | `"standard"` | LTX quality (`quick`/`balanced`/`standard`/`high`) or the H3 composite cell (`standard_5s`, `high_10s`, …) |
 | `duration_bucket` | string | `"5-15m"` | Legacy 5-value bucket, kept one more release for dashboard continuity, then removed in favour of `wall_sec_bucket` |
 | `wall_sec_bucket` | int | `480` | The lower edge of a log-spaced ladder (`15, 30, 45, 60, 90, 120, 180, 240, 300, 420, 600, 900, 1200, 1800, 2400, 3600, 5400`). Sharp enough to see a performance regression, far too coarse to be a timing fingerprint. Absent when the wall clock is unknown |
@@ -197,7 +197,7 @@ including image and training jobs.
 | `character_used` | bool | `true` | A cast character drove this render |
 | `audio_mode` | string | `"joint"` | `joint` / `none` (external audio replaces the generated track) / `a2v_dub` / `h3_native` |
 | `first_render` | bool | `true` | Present once per install, on its first successful render ever — the activation funnel without a join |
-| `source` | string | `"storyboard"` | v4.9.7 — which surface queued the job. **Closed vocabulary**: `form`, `batch`, `storyboard`, `characters`, `image_studio`, `retry`, `api`, `unknown`. Makes "how much of the rendering is Storyboard" a one-click breakdown |
+| `source` | string | `"storyboard"` | v4.9.7 — which surface queued the job. **Closed vocabulary**: `form`, `batch`, `storyboard`, `characters`, `image_studio`, `retry`, `api`, `chain` (an Upscale ×2 queued automatically behind an H3 draft), `unknown`. Makes "how much of the rendering is Storyboard" a one-click breakdown |
 
 ### `render_failed`
 

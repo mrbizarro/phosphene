@@ -1471,6 +1471,22 @@ CURATED_LORAS: dict[str, dict] = {
         "is_hdr_toggle": False,
         "is_restore_lora": True,        # hide from the LoRA picker (mode-driven)
     },
+    "upscale_x2": {
+        "id": "upscale_x2",
+        "name": "Pixel Spatial Upscaler ×2 (LTX-2.5)",
+        "description": "Lightricks' LTX-2.5 IC-LoRA that re-renders a finished "
+                       "clip at twice the size, inventing real detail instead of "
+                       "interpolating pixels. Drives the Upscale ×2 mode; takes "
+                       "the source clip on the IC reference channel. Gated on "
+                       "HF (license click) — mirrored on the Phosphene release.",
+        "repo_id": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler",
+        "local_path": str(LORAS_DIR / "ic" / "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"),
+        "default_strength": 1.0,
+        "trigger_words": [],
+        "is_curated": True,
+        "is_hdr_toggle": False,
+        "is_restore_lora": True,        # hide from the LoRA picker (mode-driven)
+    },
     # Ingredients — the FLAGSHIP multi-reference IC-LoRA. 2-8 reference images
     # (a face + a prop + a location) are tiled into ONE "reference sheet", the
     # sheet is repeated to N frames as the IC video_conditioning, and the model
@@ -9508,7 +9524,10 @@ def ltx_tiers_payload() -> dict:
 # crop, no distortion. The `wide_5s` tier renders 1024×576, which IS 16:9, and
 # compute_upscale_plan takes the pure-scale path for it: 1.25× to 720p, 1.875×
 # to 1080p, no pad filter at all.
-H3_UPSCALE_MODES = ("off", "fit_720p", "fit_1080p")
+# "ltx_x2" is not an ffmpeg pass: the draft ships native and an Upscale ×2
+# job (LTX-2.5 Pixel Spatial Upscaler) is queued behind it — "H3 mind, LTX
+# pixels" as one Generate click. compute_upscale_plan returns None for it.
+H3_UPSCALE_MODES = ("off", "fit_720p", "fit_1080p", "ltx_x2")
 H3_UPSCALE_DEFAULT = "fit_720p"
 # ORIENTATION — H3's canvases are all landscape, which left vertical social
 # formats unreachable on this engine (owner-reported 2026-08-15). Portrait is
@@ -11422,12 +11441,26 @@ def _h3_export_notes(w: int, h: int) -> dict[str, str]:
     Export row can never disagree with the ffmpeg command that runs. Memoised
     per canvas because /status polls this on a timer; the plan does no I/O, the
     cache is just politeness."""
-    key = (int(w), int(h))
+    _adapter_ok = Path(CURATED_LORAS["upscale_x2"]["local_path"]).exists()
+    key = (int(w), int(h), _adapter_ok)
     hit = _H3_EXPORT_NOTES.get(key)
     if hit is not None:
         return hit
     out: dict[str, str] = {}
     for mode in H3_UPSCALE_MODES:
+        if mode == "ltx_x2":
+            try:
+                _cap = int(tier_max_dim("i2v") or 0)
+            except Exception:                                  # noqa: BLE001
+                _cap = 0
+            _sc = min(2.0, _cap / float(max(w, h))) if _cap else 2.0
+            _tw, _th = ltx_floor_canvas(int(w * _sc), int(h * _sc))
+            out[mode] = (f"LTX ×2: after the draft, an Upscale ×2 job is queued that re-renders "
+                         f"it at {_tw}×{_th} with LTX-2.5 generated detail and keeps the sound. "
+                         "Faithful preset: about the draft's time again."
+                         + ("" if _adapter_ok else
+                            " Needs the 0.3 GB Upscale adapter first — Settings → Models."))
+            continue
         plan = compute_upscale_plan(w, h, mode)
         if not plan:
             out[mode] = ""          # "off" — the native file ships untouched
@@ -12589,7 +12622,7 @@ def _analytics_wall_sec_bucket(seconds):
 
 
 _ANALYTICS_SOURCES = ("form", "batch", "storyboard", "characters",
-                      "image_studio", "retry", "api", "unknown")
+                      "image_studio", "retry", "api", "chain", "unknown")
 
 
 def _analytics_source(p: dict, job: dict | None = None) -> str:
@@ -13714,6 +13747,57 @@ def _probe_video_dims(path: str) -> tuple[int, int]:
     except Exception:
         pass
     return 0, 0
+
+
+def _probe_video_frames(path: str) -> int:
+    """Frame count of a video via ffprobe (0 when unknown)."""
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-select_streams", "v:0",
+             "-count_packets", "-show_entries", "stream=nb_read_packets",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return int(out.splitlines()[0]) if out else 0
+    except Exception:
+        return 0
+
+
+def _video_has_audio(path: str) -> bool:
+    try:
+        out = subprocess.run(
+            [str(FFPROBE), "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        return "audio" in out
+    except Exception:
+        return False
+
+
+def _mux_audio_from(video_path: Path, audio_source: str) -> bool:
+    """Copy the source clip's audio track onto `video_path` (video stream
+    untouched). The whole point of the H3 → LTX ×2 lane: H3 wrote the
+    dialogue and the sound; the upscaler must not throw them away."""
+    if not _video_has_audio(audio_source):
+        return False
+    tmp = video_path.with_name(video_path.stem + ".mux.mp4")
+    try:
+        r = subprocess.run(
+            [str(FFMPEG), "-y", "-loglevel", "error",
+             "-i", str(video_path), "-i", str(audio_source),
+             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
+             "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(tmp)],
+            capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not tmp.is_file():
+            push(f"Upscale: audio mux failed ({(r.stderr or '')[-160:].strip()}); clip kept silent")
+            tmp.unlink(missing_ok=True)
+            return False
+        tmp.replace(video_path)
+        return True
+    except Exception as exc:                                   # noqa: BLE001
+        push(f"Upscale: audio mux failed ({exc}); clip kept silent")
+        return False
 
 
 def _native_render_for(src: Path) -> Path:
@@ -15349,7 +15433,7 @@ def compute_upscale_plan(w: int, h: int, mode: str | None,
     avoid double-upscaling and to plan a downscale-only pass for the
     fit_720p target on a model-upscaled source."""
     mode = (mode or "off").strip().lower()
-    if mode in ("", "off", "native"):
+    if mode in ("", "off", "native", "ltx_x2"):
         return None
     # Effective dims of the file the helper actually wrote. The model-based
     # upscale (Sharper) doubles them inside the helper before VAE decode.
@@ -20122,7 +20206,7 @@ def _clamp_stage_steps_to_tables(job: dict) -> None:
     except Exception:                                       # noqa: BLE001
         pass
     if not hq and p.get("mode") not in ("extend", "keyframe", "restore",
-                                        "ingredients", "control"):
+                                        "ingredients", "control", "upscale"):
         try:
             _s1, _ = resolve_distilled_schedule(
                 mv, preset=(p.get("schedule_preset") or None))
@@ -20839,6 +20923,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # be in this allowlist or the path silently no-ops on /queue/add
             # (the known make_job allowlist trap — see CLAUDE.md).
             "restore_video_path": f("restore_video_path", ""),
+            # Upscale ×2 (v4.11): the finished clip to re-render at twice the
+            # size, and how tightly LTX must keep its shot. Same allowlist trap.
+            "upscale_source_path": f("upscale_source_path", ""),
+            "keep_shot": f("keep_shot", ""),
+        "upscale_quant": f("upscale_quant", ""),
+        "upscale_steps": f("upscale_steps", ""),
+        "upscale_lora_mode": f("upscale_lora_mode", ""),
+        "upscale_start": f("upscale_start", ""),
             # ingredients (multi-reference) mode — JSON list of 2-8 uploaded
             # image paths + the action description. SAME allowlist trap: both
             # MUST be here or they silently no-op on /queue/add (the panel UI
@@ -22688,6 +22780,35 @@ def _h3_clip_is_complete(path: Path, started_at: float) -> bool:
         return False
 
 
+def _chain_upscale_after_h3(job: dict, p: dict, native_path: Path) -> None:
+    """Queue the Upscale ×2 job for a draft whose form asked for "LTX ×2".
+
+    Same door as /queue/add (make_job), so every allowlist and refusal
+    applies; the preset (keep_shot) and seed travel from the draft's form.
+    The draft stays in the gallery — the ×2 lands beside it as its own card."""
+    try:
+        form = {
+            "mode": "upscale",
+            "engine": "ltx",
+            "upscale_source_path": str(native_path),
+            "keep_shot": str(p.get("keep_shot") or "1.0"),
+            "seed": str(p.get("seed") if p.get("seed") not in (None, "") else "-1"),
+            "prompt": "",
+            "label": f"{p.get('label') or native_path.stem} · LTX ×2",
+        }
+        nxt = make_job(form)
+        nxt["params"]["source"] = "chain"
+        nxt["params"]["chained_from"] = job.get("id")
+        with QUEUE_COND:
+            STATE["queue"].append(nxt)
+            QUEUE_COND.notify_all()
+        persist_queue()
+        push(f"[h3] LTX ×2 queued behind the draft → job {nxt['id']}")
+    except Exception as exc:                                   # noqa: BLE001
+        push(f"[h3] could not queue the LTX ×2 pass: {exc} — the draft is in "
+             "the gallery; use its Upscale ×2 button.")
+
+
 def run_h3_job_inner(job: dict) -> None:
     """Render one job on the Hailuo H3 engine (optional subprocess pack).
 
@@ -23577,6 +23698,8 @@ def run_h3_job_inner(job: dict) -> None:
     job["output_path"] = str(final_target)
     p["elapsed_seconds"] = elapsed
     push(f"[h3] done in {elapsed}s → {final_target.name}")
+    if h3_upscale_mode == "ltx_x2":
+        _chain_upscale_after_h3(job, p, native_path)
     if p.get("open_when_done"):
         subprocess.run(["open", str(final_target)], check=False)
 
@@ -23848,7 +23971,7 @@ def run_job_inner(job: dict) -> None:
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
-    if ltx_quality_uses_hq(quality) or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control"):
+    if ltx_quality_uses_hq(quality) or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control", "upscale"):
         p["accel"] = "off"
     # RETIRED CONTROL, FORCED OFF (fleet bug, 15 events / 4 installs). The
     # Boost/Turbo row lost its UI in v4.0.5, but the hidden #accel input
@@ -23874,7 +23997,7 @@ def run_job_inner(job: dict) -> None:
     #   - extend / keyframe use stage1_steps + stage2_steps via two-stage path
     #   - every HQ-pipeline quality uses two-stage HQ with its own schedule
     #   - a2v uses A2VidPipelineTwoStage's stage1/stage2 walks
-    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control") and not ltx_quality_uses_hq(quality) and int(p.get("steps", 8)) < 8:
+    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control", "upscale") and not ltx_quality_uses_hq(quality) and int(p.get("steps", 8)) < 8:
         raise RuntimeError(
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
@@ -24301,6 +24424,161 @@ def run_job_inner(job: dict) -> None:
             subprocess.run(["open", str(final_out)], check=False)
         return
 
+    if mode == "upscale":
+        # Upscale ×2 (v4.11): "H3 mind, LTX 2.5 pixels." Any finished clip is
+        # the IC reference; LTX-2.5's Pixel Spatial Upscaler re-renders it at
+        # twice the size in ONE pass at the target resolution, then the
+        # source's own audio is muxed back. `keep_shot` is the reference's
+        # attention strength: 1.0 keeps the shot (LTX only paints detail),
+        # lower lets it re-imagine — the owner's eye decides the default.
+        src = p.get("upscale_source_path") or p.get("restore_video_path") or ""
+        if not src or not Path(src).exists():
+            raise RuntimeError(
+                f"source clip for Upscale ×2 not found: {src!r}. Pick a finished "
+                "clip in the Outputs gallery (or paste a path).")
+        source = Path(src)
+        adapter = CURATED_LORAS["upscale_x2"]
+        adapter_path = adapter.get("local_path") or ""
+        if not (adapter_path and Path(adapter_path).exists()):
+            raise RenderRefused(
+                "pack_missing",
+                "Upscale ×2 needs the LTX-2.5 Pixel Spatial Upscaler adapter, which "
+                "isn't downloaded on this Mac yet. Open Settings → Models and "
+                "download it, then render again.")
+        sw, sh = _probe_video_dims(src)
+        if not (sw and sh):
+            raise RuntimeError(f"could not read the size of {source.name}")
+        src_frames = _probe_video_frames(src)
+        # The clip's own frame rate (H3 renders at 24, LTX at 24/25): the
+        # reference loader takes the first N frames, so the output must tick
+        # at the same rate for the carried-over soundtrack to stay in sync.
+        src_fps = float(FPS)
+        try:
+            _r = subprocess.run(
+                [str(FFPROBE), "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", src],
+                capture_output=True, text=True, timeout=30).stdout.strip()
+            _n, _d = _r.split("/") if "/" in _r else (_r, "1")
+            if float(_d) > 0 and 1.0 <= float(_n) / float(_d) <= 120.0:
+                src_fps = round(float(_n) / float(_d), 3)
+        except Exception:                                      # noqa: BLE001
+            pass
+        cap = int(tier_max_dim("i2v") or 0) or max(sw, sh) * 2
+        scale = min(2.0, cap / float(max(sw, sh)))
+        if scale < 1.25:
+            raise RenderRefused(
+                "hardware_tier",
+                f"Upscale ×2 can't go above {cap}px on the {SYSTEM_CAPS['label']} "
+                f"tier, and {source.name} is already {sw}×{sh}. Use a smaller "
+                "source clip.")
+        up_w, up_h = ltx_floor_canvas(int(sw * scale), int(sh * scale))
+        # LTX's grid is 1+8k frames and the IC reference loader rounds the
+        # source DOWN to that grid, so the target must match it exactly or
+        # the last latent frame renders unconditioned. A 72-frame H3 clip
+        # becomes 65 frames (0.3 s trimmed at the tail); the soundtrack is
+        # trimmed to match at mux time.
+        frames = int(p.get("frames") or 0) or src_frames or 49
+        frames = min(frames, src_frames or frames)
+        frames = max(9, 1 + 8 * ((frames - 1) // 8))
+        try:
+            keep = float(p.get("keep_shot") or 1.0)
+        except (TypeError, ValueError):
+            keep = 1.0
+        keep = max(0.3, min(1.0, keep))
+        prompt = (p.get("prompt") or "").strip()
+        if not prompt:
+            # The source's own prompt is the best description of the shot.
+            try:
+                _sc = json.loads(Path(str(source) + ".json").read_text(encoding="utf-8"))
+                prompt = str(((_sc.get("params") or {}).get("prompt")) or "").strip()
+            except Exception:                                  # noqa: BLE001
+                prompt = ""
+        if not prompt:
+            prompt = "The same shot, sharper and more detailed."
+        quant = "q8" if (SYSTEM_CAPS.get("allows_q8") and not hq_surface_missing()) else "q4"
+        if p.get("upscale_quant") in ("q4", "q8"):        # experiment override
+            quant = str(p["upscale_quant"])
+        # Where the render starts. "source" (default): the clip's own latent,
+        # upsampled ×2, refined for a few steps — identity and motion are the
+        # clip's, the adapter adds detail, and the wall time is those few
+        # full-res steps. "noise": the adapter's reference-only recipe, a full
+        # re-render at 2× (sharper invention, faces drift, ~2× slower).
+        # Presets (keep_shot), set by the owner's eye on 2026-09-06:
+        # Faithful 1.0 → 3 refine steps from the clip's own latent (the
+        # sharpness of the from-noise examples, face stays hers; 5:26 for 5 s
+        # on M4 Max — 1 step was "kind of blurry", 2 steps in between);
+        # Quick 0.8 → 2 steps (3:44, a touch softer); Re-imagine 0.4 → the
+        # adapter's own recipe, a 4-step render from noise (6:35, sharpest,
+        # faces drift).
+        if p.get("upscale_start") in ("noise", "source"):
+            start_from = str(p["upscale_start"])
+        else:
+            start_from = "noise" if keep < 0.5 else "source"
+        refine_steps = 3 if keep >= 0.95 else 2
+        if p.get("upscale_steps") and start_from == "source":
+            refine_steps = max(1, min(7, int(p["upscale_steps"])))
+        up_model_dir = ltx_model_dir(quant)
+        ltx_pack_preflight(quant, "Upscale ×2")
+        out_name = f"{source.stem}_x2_{stamp}.mp4"
+        final_out = OUTPUT / out_name
+        job["raw_path"] = str(final_out)
+        job_spec = {
+            "action": "generate_restore",
+            "id": job["id"],
+            "params": {
+                "model_dir": up_model_dir,
+                "prompt": prompt,
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(final_out),
+                "height": up_h,
+                "width": up_w,
+                "frames": frames,
+                "frame_rate": src_fps,
+                "seed": p["seed"],
+                "video_conditioning": [[src, keep]],
+                "conditioning_attention_strength": keep,
+                "single_stage": start_from == "noise",
+                "source_video": src if start_from == "source" else "",
+                "refine_steps": refine_steps if start_from == "source" else None,
+                # Q4 cannot hold a fused adapter (see the helper); Q8 can, at a
+                # measured 22.6% loss. Exact runtime attachment on request.
+                "lora_mode": ("unfused" if (quant == "q4" or p.get("upscale_lora_mode") == "unfused")
+                              else "fused"),
+                "loras": [{"path": adapter_path,
+                           "strength": float(adapter.get("default_strength") or 1.0)}],
+                # Fewer distilled steps keep the output closer to the
+                # reference (the adapter card says so) AND cut the wall time
+                # in proportion — the reference already carries the shot.
+                "stage1_steps": int(p.get("upscale_steps") or p.get("stage1_steps") or 4),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+            },
+        }
+        push(f"Upscale ×2 via helper: id={job['id']} src={source.name} {sw}×{sh} → "
+             f"{up_w}×{up_h} {frames}f · keep-the-shot {keep:.2f} · {quant.upper()} distilled · "
+             + (f"from the clip's own latent, {refine_steps}-step refine + Pixel Spatial Upscaler"
+                if start_from == "source" else "full re-render from noise + Pixel Spatial Upscaler"))
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        muxed = _mux_audio_from(final_out, src)
+        sidecar = {
+            "output": str(final_out), "raw_output": str(final_out),
+            "params": {**p, "command": "upscale", "keep_shot": keep,
+                       "source_size": [sw, sh], "audio_from_source": muxed},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
+            "fps": src_fps, "model": up_model_dir, "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
+        }
+        write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
+        job["output_path"] = str(final_out)
+        push(f"Upscale ×2 done in {sidecar['elapsed_sec']}s → {final_out.name}"
+             + (" (source audio kept)" if muxed else ""))
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(final_out)], check=False)
+        return
     if mode == "ingredients":
         # Ingredients (multi-reference) — the FLAGSHIP IC-LoRA feature. 2-8
         # subject images (a face + a prop + a location) are composed into ONE

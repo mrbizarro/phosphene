@@ -224,6 +224,34 @@
       ]
     },
     {
+      "_comment": "Pixel Spatial Upscaler x2 IC-LoRA - the OFFICIAL Lightricks LTX-2.5 adapter behind the Upscale x2 mode (a finished clip, typically an H3 draft, rides the IC reference channel and the 2.5 base re-renders it at twice the canvas with generated detail). The upstream repo is GATED (license click), so like the 2.5 packs the bytes come from the `mirror` block on the weights-ltx25-v1 release - one 327,322,640-byte safetensors (sha256 984851b769ea2bcb4c9e0a239a7676239e42c6a6001ddc69943b41ff0b283c1d, verified against the Hub's LFS oid before publishing) plus the LTX-2.x Community License text the adapter carries in its own metadata. Metadata reference_downscale_factor=2 (the IC loader halves the reference; handled in iclora_utils). `repo_id` is attribution; `download_include` is inert on the mirror lane and kept so the entry stays shaped like every other.",
+      "key": "ic_upscale_x2",
+      "kind": "optional",
+      "name": "Upscale x2 IC-LoRA (LTX-2.5, official)",
+      "blurb": "Optional, 0.3 GB. Powers the Upscale x2 mode - re-renders a clip (an H3 draft, say) at twice the size with real generated detail and keeps its sound. Mirrored on the Phosphene release, no HF token.",
+      "repo_id": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler",
+      "local_dir": "mlx_models/loras/ic",
+      "size_gb": 0.33,
+      "mirror": {
+        "kind": "github-release",
+        "release_repo": "mrbizarro/Phosphene",
+        "tag": "weights-ltx25-v1",
+        "manifest_asset": "ic_upscale_x2__phosphene_release_manifest.json"
+      },
+      "files": [
+        "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors",
+        "LICENSE-LTX-2.x-Community"
+      ],
+      "file_sizes": {
+        "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors": 327322640
+      },
+      "download_include": [
+        "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors",
+        "LICENSE-LTX-2.x-Community"
+      ],
+      "publish_scope": "files"
+    },
+    {
       "_comment": "LTX-2.5 Q4. Built by us (scripts/convert_ltx_mlx.py -> scripts/quantize_ltx.py) from the official Lightricks bf16 release, not by dgrauet. Mirrored through a GitHub release rather than HuggingFace, so deep-verify reads sha256 from the in-pack phosphene_quant_manifest.json (verify_source 'manifest') instead of the HF checksum API — which is why that manifest is listed as a required file. temporal_upscaler and duration_head ship because 2.5 has them and they are tiny; the x1.5 spatial upscaler does not exist for 2.5.",
       "_mirror_comment": "PUBLISHED 2026-08-12. `repo_id` names a HuggingFace repo that DOES NOT EXIST and never will — our HF token is read-only and this pack is our own quantisation of a gated upstream. It is kept only as the pack's stable identity string (the panel shows it, and `_expected_meta` never calls the HF API for a verify_source 'manifest' pack). The bytes come from the `mirror` block: GitHub release assets, sharded at 1.9 GB because the cap is 2 GiB, fetched + reassembled + sha256-verified by scripts/fetch_pack_release.py. `download_include` is inert on this lane (the release manifest is the allowlist) and is kept only so the entry stays shaped like every other.",
       "key": "q4_25",

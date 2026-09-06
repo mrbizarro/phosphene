@@ -2783,6 +2783,7 @@ function updateCustomizeSummary() {
     // actually folded away on H3 is the export target, so that is what it says.
     if (up === 'fit_720p') parts.push('720p export');
     else if (up === 'fit_1080p') parts.push('1080p export');
+    else if (up === 'ltx_x2') parts.push('LTX ×2 after');
     else parts.push('native export');
     el.textContent = parts.join(' · ');
     return;

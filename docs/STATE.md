@@ -1,15 +1,12 @@
 # Phosphene — project state, history, open work
 
-> **🚀 2026-09-06 — v4.10.7 ships (cherry-picked onto main; dev still carries
-> the unreleased Upscale ×2).** Extend fixed — every Extend render on
-> 4.10.2–4.10.6 died at construction ("RetakePipeline.__init__() got an
-> unexpected keyword argument 'low_ram_streaming'"; `_construct_pipeline`
-> builds each pipeline with the kwargs its class accepts,
-> `test_pipeline_construct_kwargs.py`). One take moved out of Customize to a
-> third strip under Quality / Length (`#takeAxes`, ids unchanged). /stats:
-> Total renders + Total installs (all-time) and a Growth chart
-> (`test_stats_growth.py`); first fleet read 19,443 renders / 1,315 installs
-> since 2026-08-09.
+> **🚀 2026-09-06 — v4.10.8 ships (dev promoted whole; main = dev tree).**
+> Upscale ×2 / LTX Upscale goes public: the card button, Remix → Upscale ×2,
+> and LTX ×2 in the H3 form (chain), presets Faithful (3 refine steps from
+> the clip) / Quick (2) / Re-imagine (4 from noise); engine tag
+> `v0.14.19+ltx25.7`, adapter `ic_upscale_x2` (0.33 GB) fetched by Update
+> from the weights-ltx25-v1 mirror. Also carries v4.10.7 (Extend fix, One
+> take strip, stats totals + growth), v4.10.6 and v4.10.5.
 
 > **🩹 2026-09-06 — v4.10.6 ships: Browse CivitAI search.** Any word typed
 > into the LoRA browser returned nothing ("turbo" → 0 while "Minimax H3
@@ -24,6 +21,66 @@
 > `test_spicy_contract` green; verified live against civitai.com. Promoted
 > by cherry-pick onto origin/main (dev carries the unreleased Upscale ×2
 > headline).
+
+> **🔍 2026-09-06 — Upscale ×2 with LTX-2.5 (on dev, HEADLINE — waits for
+> owner USE before public).** "H3 mind, LTX pixels": a finished clip (an H3
+> draft above all) goes through the LTX-2.5 Pixel Spatial Upscaler IC-LoRA
+> and comes out at twice the size with generated detail and its own sound.
+> Three doors: the **Upscale ×2** button on every video card, **Remix →
+> Upscale ×2** for any clip, and **LTX ×2** in the H3 form's Upscale row —
+> which queues the ×2 behind the draft by itself (one Generate click; job
+> `source=chain`). Presets, not a slider: **Faithful** (face and lips stay,
+> 1 refine step), **Balanced** (2 steps), **Re-imagine** (the adapter's own
+> 4-step re-render from noise — sharpest, faces drift). Measured on M4 Max,
+> 640×384 5 s draft → 1280×768: draft 4:19 + Faithful 2:17 = **6:36**;
+> Balanced 3:44; Re-imagine 6:35 (8 steps looked identical to 4). The
+> per-step cost is attention-bound: Q4 is no faster than Q8 (≈87–92 s/step
+> at that canvas), so speed came from starting at the clip's own latent
+> (fork `v0.14.19+ltx25.7`: `ICLoraPipeline.generate(source_video=…)` —
+> Stage 1 skipped, VAE encode → pack's spatial ×2 latent upsampler →
+> control-aware refine of N tail steps with the adapter + the clip as
+> reference). Fused Q4 destroys the adapter (fork measures ~150 % delta
+> loss) → helper `lora_mode="unfused"` on the IC lane, routed for Q4; Q8
+> fused == unfused by eye. **Bug found on the way:** the helper built
+> ICLoraPipeline without `gemma_model_id`, so every IC lane (Colorize,
+> Ingredients, Control) on a 2.5 checkpoint encoded prompts with Gemma 3
+> from the HF cache; now `GEMMA_PATH`. Adapter: gated on HF (owner clicked
+> the license; token account has access), 327,322,640 B, sha256
+> `984851b7…283c1d`, `reference_downscale_factor=2`; `required_files.json`
+> `ic_upscale_x2` with a mirror block on `weights-ltx25-v1` — **asset not
+> published yet** (`publish_pack_release.py --repo-key ic_upscale_x2`, owner
+> call); until then the mode refuses by name (`pack_missing`) and
+> `ltx25_weights.sh` fetches it best-effort. Frames snap DOWN to 1+8k (an
+> H3 72 f clip → 65 f, ≤0.3 s trimmed; audio muxed `-shortest`), fps from
+> the source. `_h3_export_notes` carries the LTX ×2 sentence per canvas.
+> Gates `--fast` green; `test_control_discoverability` counts 6
+> `ltx_floor_canvas(` call sites now. Analytics: mode `upscale`, source
+> `chain` (docs/ANALYTICS.md).
+
+> **📈 2026-09-06 — /stats gets totals and growth (on dev).** Two new tiles,
+> **Total renders** (completed, all installs, since the first day the fleet
+> pinged) and **Total installs**, plus a Growth chart: cumulative installs by
+> first-boot day against renders per day (30 d), weekly actives in the
+> caption. Fleet queries `total_renders`, `total_installs`, `installs_by_day`,
+> `renders_by_day`, `active_by_week` (no window on the totals); the local
+> aggregator produces the same shape. First fleet read: **19,443 renders,
+> 1,315 installs since 2026-08-09**, weekly actives 298 → 552 over four full
+> weeks. Also: the "Renders this week" tile was a 14-day count wearing a 7-day
+> label (the `outcomes` query is 14 DAY); it now says 14d. `test_stats_growth.py`.
+
+> **🩹 2026-09-06 — Extend has been dead since 4.10.2 (on dev, hotfix
+> candidate).** The fleet read after v4.10.5 showed 35 `render_failed` on
+> 4.10.4 from one install, all "RetakePipeline.__init__() got an unexpected
+> keyword argument 'low_ram_streaming'": the low-RAM streaming change passed
+> the kwarg to every pipeline and the vendored RetakePipeline (Extend) has its
+> own __init__ without it, so EVERY Extend render on 4.10.2–4.10.5 fails at
+> construction, on every Mac. Fix: `_construct_pipeline` builds each pipeline
+> with the kwargs its class accepts (same introspection as generate kwargs),
+> logging what it dropped; `test_pipeline_construct_kwargs.py`. Rest of the
+> read: 4.10.4 is the most-booted version a day after release (42 installs
+> today), H3 12 ok / 1 failed on 4.10.x, refusals only `image_ram`; the big
+> 7-day error counts ("model incomplete, missing 9 files" 176, "Missing 262
+> parameters" 121) are ONE 4.9.3 install each, not a release defect.
 
 > **🚀 2026-09-06 — v4.10.5 ships.** H3 LoRA stacking (engine `codex/h3-engine-v2`
 > at 21e8824 = live-preview merged: repeatable `--lora`, the qkv-permute fix),

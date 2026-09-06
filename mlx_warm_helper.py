@@ -2474,7 +2474,7 @@ def configure_acceleration(mode: str) -> str:
 # of letting it surface as an un-triageable TypeError mid-render.
 #
 # 2026-08-12: this is a FORK BUILD, not an upstream tag. The vendored checkout
-# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.6` — v0.14.19 plus
+# is mrbizarro/ltx-2-mlx at the immutable tag `v0.14.19+ltx25.7` — v0.14.19 plus
 # the LTX-2.5 port (keyframe pos-emb, Gemma 4 tower, ancestral sampler). The
 # release segment stays 0.14.19 because that is genuinely what it branches from;
 # the `+ltx25.N` local segment is what makes the two distinguishable.
@@ -2499,7 +2499,7 @@ def configure_acceleration(mode: str) -> str:
 # — a skew gate blind to the one skew that mattered. Bumping the pin here
 # without bumping the packages (or the reverse) puts it back into permanent
 # SKEW warnings, so the two move together or not at all.
-_LTX_EXPECTED_VERSION = "0.14.19+ltx25.6"
+_LTX_EXPECTED_VERSION = "0.14.19+ltx25.7"
 
 
 def _detect_ltx_version() -> dict:
@@ -3876,11 +3876,48 @@ for line in sys.__stdin__:
             # ICLoraPipeline — it loads its own DiT + VAE at init, so holding
             # the t2v / i2v caches just doubles the memory footprint.
             release_pipelines("restore render incoming")
-            pipe = ICLoraPipeline(
-                model_dir=Path(model_dir),
-                lora_paths=resolved,
-                low_memory=LOW_MEMORY,
-            )
+            # gemma_model_id was never passed here, so every IC lane (Colorize,
+            # Ingredients, Control, Upscale ×2) encoded its prompt with the
+            # class default — Gemma 3 from the HF cache — even on an LTX-2.5
+            # checkpoint, whose text encoder is the Gemma 4 fine-tune the
+            # panel hands us in LTX_GEMMA. The references carried the shot so
+            # nobody noticed; the prompt was the part being ignored.
+            # lora_mode "unfused": keep the adapter as a runtime wrapper instead
+            # of folding it into the quantized weights. Fusing re-quantizes
+            # W + B@A back onto the int grid — the fork measures 22.6% of this
+            # upscaler's delta lost at int8 and ~150% at int4 (i.e. nothing of
+            # the adapter survives on Q4). The native loader attaches
+            # `_pending_loras` exactly, at any bit width; the IC pipeline's own
+            # fuse step is skipped by handing it an empty list, so the reference
+            # downscale factor it would have read from the file is set by hand.
+            lora_mode = str(p.get("lora_mode") or "fused")
+            if lora_mode == "unfused":
+                try:
+                    _install_lora_fusion_patches()
+                except Exception:                                  # noqa: BLE001
+                    pass
+                from ltx_pipelines_mlx.iclora_utils import read_lora_reference_downscale_factor
+                pipe = ICLoraPipeline(
+                    model_dir=Path(model_dir),
+                    lora_paths=[],
+                    gemma_model_id=GEMMA_PATH,
+                    low_memory=LOW_MEMORY,
+                )
+                pipe._pending_loras = list(resolved)
+                for _lp, _ in resolved:
+                    _scale = read_lora_reference_downscale_factor(_lp)
+                    if _scale != 1:
+                        pipe.reference_downscale_factor = _scale
+                emit({"event": "log",
+                      "line": f"IC-LoRA applied UNFUSED (exact runtime wrapper), "
+                              f"reference downscale ×{pipe.reference_downscale_factor}"})
+            else:
+                pipe = ICLoraPipeline(
+                    model_dir=Path(model_dir),
+                    lora_paths=resolved,
+                    gemma_model_id=GEMMA_PATH,
+                    low_memory=LOW_MEMORY,
+                )
             emit({"event": "log",
                   "line": f"step:generate_restore {p['width']}x{p['height']} "
                           f"{num_frames}f @{float(p.get('frame_rate', 24.0)):.1f}fps "
@@ -3914,6 +3951,23 @@ for line in sys.__stdin__:
             # asked for it, so the pipeline default still wins otherwise.
             if p.get("skip_stage_2"):
                 kwargs["skip_stage_2"] = True
+            # Upscale ×2 (v4.11): one pass at the full target size — the
+            # reference IS the low-res clip, so a half-res stage 1 would only
+            # throw its detail away — and the "keep the shot" slider rides on
+            # the reference's attention strength.
+            if p.get("single_stage"):
+                kwargs["single_stage"] = True
+            if p.get("conditioning_attention_strength") is not None:
+                kwargs["conditioning_attention_strength"] = float(
+                    p["conditioning_attention_strength"])
+            # Upscale ×2 from the clip itself (Stage 1 skipped, see
+            # ICLoraPipeline.generate): the clip's latent is upsampled and only
+            # `refine_steps` of the distilled tail run at full res.
+            if p.get("source_video"):
+                kwargs["source_video"] = str(p["source_video"])
+                kwargs.pop("single_stage", None)
+            if p.get("refine_steps") is not None:
+                kwargs["refine_steps"] = int(p["refine_steps"])
             kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
             # Ingredients is single-stage ONLY (the public Space's recipe). If the
             # imported pipeline package is an older/pinned build whose

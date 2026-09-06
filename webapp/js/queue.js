@@ -930,6 +930,11 @@ function updateDerived() {
   // drive the output, but the prompt + seed still apply).
   const _restoreSection = document.getElementById('restoreSection');
   if (_restoreSection) _restoreSection.classList.toggle('show', currentMode === 'restore');
+  // Upscale ×2 — its own source picker + "keep the shot" slider. The source
+  // drives dims (×2, capped) and length, so the sizing/quick-metrics rows
+  // are hidden below, like Extend.
+  const _upscaleSection = document.getElementById('upscaleSection');
+  if (_upscaleSection) _upscaleSection.classList.toggle('show', currentMode === 'upscale');
   // Ingredients (multi-reference) — its own multi-image picker + action field.
   // Like Colorize it KEEPS the sizing/quick-metrics rows (frames apply; the
   // sheet drives the rest).
@@ -949,12 +954,13 @@ function updateDerived() {
     maybeScaleTouchedKeyframeTiming(window._kfTimingLastFrames, f);
   }
   syncKeyframeTiming();
-  document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend');
+  document.getElementById('sizingSection').classList.toggle('show', currentMode !== 'extend' && currentMode !== 'upscale');
   // quickMetricsRow (Duration / Frames / Seed) doesn't apply to Extend
   // (extend_seconds drives the new content; the source video provides
-  // the rest). Hide it in extend, show otherwise.
+  // the rest) nor to Upscale ×2 (source dims ×2 + source length). Hide it
+  // there, show otherwise.
   const qmr = document.getElementById('quickMetricsRow');
-  if (qmr) qmr.classList.toggle('show', currentMode !== 'extend');
+  if (qmr) qmr.classList.toggle('show', currentMode !== 'extend' && currentMode !== 'upscale');
   document.getElementById('audioSection').classList.toggle('show', mode === 'i2v_clean_audio');
   // I2V audio source picker (Advanced) — only relevant in I2V flow.
   // In T2V/Extend/FFLF the model generates audio jointly; there's nothing
@@ -2429,6 +2435,9 @@ async function poll() {
     // Colorize (restore) source dropdown — same video-only list as Extend.
     const restoreSel = document.getElementById('restoreSrcSelect');
     if (restoreSel) restoreSel.innerHTML = _videoOpts;
+    // Upscale ×2 source dropdown — same video-only list.
+    const upscaleSel = document.getElementById('upscaleSrcSelect');
+    if (upscaleSel) upscaleSel.innerHTML = _videoOpts;
     // Control (Union) control-video dropdown — same video-only list.
     const controlSel = document.getElementById('controlSrcSelect');
     if (controlSel) controlSel.innerHTML = _videoOpts;
@@ -3228,6 +3237,10 @@ function selectOutput(path, options) {
   //   about the next render and says nothing about this clip.
   const outIsH3 = !!(o && o.engine === 'h3');
   if (useExtBtn) useExtBtn.style.display = (isPhoto || outIsH3) ? 'none' : '';
+  // Upscale ×2 is video-only but engine-agnostic: an H3 draft is exactly the
+  // clip it was built for.
+  const useUpBtn = document.getElementById('useAsUpscaleBtn');
+  if (useUpBtn) useUpBtn.style.display = isPhoto ? 'none' : '';
   if (animBtn) animBtn.style.display = isPhoto ? '' : 'none';
   // "Finish at …" — for a completed H3 render that has a higher canvas to be
   // committed at. Decided from o.engine / o.h3_tier (both sidecar-derived,
@@ -3432,6 +3445,28 @@ function useAsExtendSourcePath(path) {
   document.querySelector('aside.form-pane').scrollTop = 0;
 }
 function useAsExtendSource() { if (!activePath) return alert('Pick an output first.'); useAsExtendSourcePath(activePath); }
+// Upscale ×2 — same hand-off shape as Extend: switch to the Remix tool,
+// point the picker at this clip, scroll the form to the top.
+function useAsUpscaleSourcePath(path) {
+  setMode('upscale');
+  const inp = document.getElementById('upscale_source_path');
+  if (inp) inp.value = path;
+  const sel = document.getElementById('upscaleSrcSelect');
+  if (sel) sel.value = path;
+  updateDerived();
+  const pane = document.querySelector('aside.form-pane');
+  if (pane) pane.scrollTop = 0;
+}
+function useAsUpscaleSource() { if (!activePath) return alert('Pick an output first.'); useAsUpscaleSourcePath(activePath); }
+// Upscale ×2 presets — one hidden number (keep_shot) the server maps to how
+// the render starts; the pills are the only thing the user touches.
+function setUpscalePreset(btn) {
+  const v = (btn && btn.dataset && btn.dataset.keep) || '1.0';
+  const inp = document.getElementById('keep_shot');
+  if (inp) inp.value = v;
+  document.querySelectorAll('#upscalePresetGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b === btn));
+}
 
 async function loadParams() {
   if (!activePath) return;
@@ -4555,7 +4590,7 @@ Object.assign(globalThis, {
   retryJob, renderCarousel, findOutputByPath, stageMayAutoSelectOutput,
   selectOutput, openExpandLightbox, closeExpandLightbox, phosToast,
   animateActive, hide, openOutputsFolder, hideActive,
-  useAsExtendSource, loadParams, _flashActionDone, closeOutputInfoModal,
+  useAsExtendSource, useAsUpscaleSource, useAsUpscaleSourcePath, setUpscalePreset, loadParams, _flashActionDone, closeOutputInfoModal,
   togglePause, openBatch, closeBatch, queueBatch,
   // inline-handler targets: generated markup resolves these through the
   // global scope (the v4.9.0 regression, PR #69)

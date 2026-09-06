@@ -39,3 +39,10 @@ else
   echo '=================================================================='
   exit 1
 fi
+
+# Upscale x2 adapter (0.3 GB, optional): the LTX-2.5 Pixel Spatial Upscaler
+# IC-LoRA behind Remix -> Upscale x2. Gated on the Hub, mirrored on the same
+# release. BEST-EFFORT: a miss must never fail the install - the panel offers
+# it in Settings -> Models and the mode refuses by name until it lands.
+$PY scripts/fetch_pack_release.py --repo-key ic_upscale_x2 \
+  || echo 'WARN: Upscale x2 adapter fetch failed - video still works; download it later from Settings -> Models.'

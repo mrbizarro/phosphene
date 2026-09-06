@@ -394,6 +394,13 @@
              LTX IC-LoRAs elsewhere recognises it here. -->
         <button type="button" class="mode-chip pill-btn" data-remix="control" title="Union Control IC-LoRA — the render copies the motion, camera move, composition and pose of a clip you supply, while the prompt repaints the subject and scene. Feed it an ordinary video, or a pose / depth / canny sequence you already have.">Motion Control<span class="mc-sub sub">its motion → your scene</span></button>
         <button type="button" class="mode-chip pill-btn" data-remix="restore" title="Colorize IC-LoRA — adds natural color to a black-and-white or desaturated clip.">Colorize<span class="mc-sub sub">B&amp;W clip → color</span></button>
+        <!-- Upscale ×2 — the LTX-2.5 Pixel Spatial Upscaler IC-LoRA. A
+             generative 2× enlarge: the source clip rides the reference
+             channel and the 2.5 base re-renders every pixel at twice the
+             canvas (up to this Mac's i2v cap). The natural partner of an H3
+             draft: H3 does the story and the sound at a small canvas, LTX
+             2.5 does the pixels. Works on any clip in Outputs. -->
+        <button type="button" class="mode-chip pill-btn" data-remix="upscale" title="LTX Upscale — LTX-2.5 Pixel Spatial Upscaler IC-LoRA. Re-renders a clip at twice its size with real generated detail (not a filter). Made for H3 drafts, works on any clip.">LTX Upscale<span class="mc-sub sub">any clip → 2× sharper</span></button>
       </div>
     </div>
 
@@ -693,6 +700,41 @@
             <select id="restoreSrcSelect" onchange="document.getElementById('restore_video_path').value=this.value"></select>
             <input name="restore_video_path" id="restore_video_path" placeholder="/path/to/blackandwhite.mp4" style="margin-top:6px">
             <div class="hint" style="margin-top:6px">Pick a black-and-white or washed-out clip. The prompt below describes the colors to paint in (e.g. "golden warm sunlight, blue sky, green grass"). Output matches the source's resolution + length. Runs on Q4 — no Q8 needed.</div>
+          </div>
+
+          <!-- Upscale ×2 (upscale) — source-video picker + one slider. The
+               LTX-2.5 Pixel Spatial Upscaler IC-LoRA re-renders the clip at
+               2× (capped at this Mac's i2v canvas; frames + prompt come from
+               the source and its sidecar). The slider is the IC reference
+               strength: 1.0 keeps the shot exactly, lower lets LTX
+               re-imagine detail (faces, textures) more freely. Audio from the
+               source is carried over. Shown/hidden by updateDerived() when
+               currentMode === 'upscale'. -->
+          <div class="mode-only" id="upscaleSection">
+            <h2>Clip to upscale</h2>
+            <select id="upscaleSrcSelect" onchange="document.getElementById('upscale_source_path').value=this.value"></select>
+            <input name="upscale_source_path" id="upscale_source_path" placeholder="/path/to/draft.mp4" style="margin-top:6px">
+            <!-- Presets, not a slider: the number (keep_shot) maps server-side
+                 to how the render starts — Faithful/Balanced refine the clip's
+                 own latent for 1/2 steps, Re-imagine is the adapter's full
+                 re-render from noise. Times measured on an M4 Max for a 5 s
+                 640×384 draft → 1280×768. -->
+            <div class="pill-group cols-3" id="upscalePresetGroup" style="margin-top:10px">
+              <button type="button" class="pill-btn active" data-keep="1.0" onclick="setUpscalePreset(this)"
+                      title="Sharp generated detail on the clip's own frames — the face stays hers, expressions can shift a touch. About 5.5 min per 5 s on an M4 Max.">
+                <span>Faithful</span><span class="sub">sharp, face stays</span>
+              </button>
+              <button type="button" class="pill-btn" data-keep="0.8" onclick="setUpscalePreset(this)"
+                      title="Same recipe with one step less — a touch softer, noticeably faster. About 3.75 min per 5 s on an M4 Max.">
+                <span>Quick</span><span class="sub">a touch softer</span>
+              </button>
+              <button type="button" class="pill-btn" data-keep="0.4" onclick="setUpscalePreset(this)"
+                      title="Full re-render at 2× from the clip as reference — the sharpest detail; faces drift from the draft. About 7 min per 5 s on an M4 Max.">
+                <span>Re-imagine</span><span class="sub">sharpest, faces drift</span>
+              </button>
+            </div>
+            <input type="hidden" name="keep_shot" id="keep_shot" value="1.0">
+            <div class="hint" style="margin-top:6px">Doubles the clip's size with generated detail, not a filter — an H3 draft comes out with LTX-2.5 pixels and keeps its sound. Length and (if empty) the prompt come from the source (up to 0.3 s may be trimmed at the tail to fit LTX's frame grid). Output is capped at this Mac's Image-to-Video canvas. Times on the presets are for a 5 s 640×384 draft on an M4 Max (Faithful ≈ 5.5 min, Quick ≈ 3.75, Re-imagine ≈ 6.5); slower Macs take longer in proportion.</div>
           </div>
 
           <!-- Ingredients (multi-reference) — the flagship IC-LoRA. Pick 2-8
@@ -1463,7 +1505,7 @@
               <div class="cz-label">Upscale
                 <span class="cz-label-hint">after the render · no crop</span>
               </div>
-              <div class="pill-group cols-3" id="h3UpscaleGroup">
+              <div class="pill-group cols-4" id="h3UpscaleGroup">
                 <button type="button" class="pill-btn" data-h3-upscale="off"
                         title="Ship the tier's native canvas with no post-process.">
                   <span>Native</span><span class="sub">as rendered</span>
@@ -1475,6 +1517,13 @@
                 <button type="button" class="pill-btn" data-h3-upscale="fit_1080p"
                         title="Scale to 1920×1080 — no crop, no distortion. A 16:9 tier scales clean; anything else is padded.">
                   <span>1080p fit</span><span class="sub">scale + pad</span>
+                </button>
+                <!-- "H3 mind, LTX pixels": the draft ships native and an Upscale
+                     ×2 job (LTX-2.5 Pixel Spatial Upscaler) is queued behind it.
+                     Not a resize — generated detail, the draft's own sound. -->
+                <button type="button" class="pill-btn" data-h3-upscale="ltx_x2"
+                        title="Queue an Upscale ×2 pass (LTX-2.5 Pixel Spatial Upscaler) right after the draft: twice the size with generated detail, keeps the sound. Faithful preset — the face and lips stay as drafted.">
+                  <span>LTX ×2</span><span class="sub">generated detail</span>
                 </button>
               </div>
               <!-- What THIS tier + THIS export target will actually do: "pure
@@ -3258,6 +3307,16 @@
             <path d="M3 8 L13 8 M9 4 L13 8 L9 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <span class="po-act-label">Extend</span>
+        </button>
+        <!-- Upscale ×2 — hands this clip to the LTX-2.5 Pixel Spatial
+             Upscaler lane (Remix → Upscale ×2). Video-only; the natural
+             next step after an H3 draft. -->
+        <button id="useAsUpscaleBtn" class="po-act" type="button"
+                onclick="useAsUpscaleSource()" title="LTX Upscale — re-render this clip at 2× with LTX-2.5 (generated detail, keeps the sound)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 13 L13 3 M8 3 L13 3 L13 8 M3 8 L3 13 L8 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="po-act-label">LTX Upscale</span>
         </button>
         <!-- Pull a good accident from the Video tab into a film. Hidden until
              at least one board exists on disk — nothing about Storyboard shows
