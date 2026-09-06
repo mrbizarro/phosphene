@@ -1507,7 +1507,7 @@ async function civitaiSearch() {
     if (data.has_more) loadMore.style.display = '';
     if ((data.items || []).length === 0) {
       const meta = _civitaiContextMeta(_civitaiContext, _civitaiFamily);
-      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${civitaiNsfwRequested() ? '' : ' (try Show NSFW for more)'}.</div>`;
+      grid.innerHTML = `<div class="hint">${meta.empty} "${escapeHtml(q || '')}"${civitaiNsfwRequested() ? '' : ' (try Show NSFW for more)'}. Try one shorter word — CivitAI matches whole words in the title and tags — or switch the engine pill above.</div>`;
     }
   } catch (e) {
     status.textContent = 'Network error: ' + (e.message || e);

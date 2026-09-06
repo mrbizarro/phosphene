@@ -8444,7 +8444,11 @@
     .civitai-search-bar {
       display: flex; gap: 8px; margin-bottom: 12px; align-items: center;
     }
-    .civitai-search-bar input[type="text"] { flex: 1; }
+    .civitai-search-bar { position: relative; }
+    .civitai-search-bar input[type="text"],
+    .civitai-search-bar input[type="search"] { flex: 1; padding-left: 32px; min-height: 36px; }
+    .civitai-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+                           color: var(--dim, #7a8194); pointer-events: none; }
     .civitai-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
       gap: 12px; margin-top: 10px;

@@ -6380,15 +6380,42 @@ def _civitai_request(path: str, params: dict | None = None,
     api_key = _active_civitai_key()
     if api_key:
         req.add_header("Authorization", f"Bearer {api_key}")
-    try:
-        # Use the auth-stripping opener: the base host is hardcoded civitai.com
-        # so the initial request is safe, but this guards against a redirect
-        # response steering the Bearer token off-domain.
-        with _civitai_opener().open(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            return json.loads(body)
-    except Exception as exc:
-        raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+    # CivitAI's API throws the occasional 502/503/504 on a perfectly good
+    # request (owner hit "HTTP error 503" mid-search). Three attempts with a
+    # short back-off turn that into a pause instead of a dead search, and
+    # the message a user finally sees says what to do, not a status code.
+    import urllib.error
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            with _civitai_opener().open(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                return json.loads(body)
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code in (500, 502, 503, 504, 429) and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if exc.code in (500, 502, 503, 504):
+                raise RuntimeError("CivitAI is busy right now (it answered "
+                                   f"{exc.code}). Try again in a few seconds.") from exc
+            if exc.code == 429:
+                raise RuntimeError("CivitAI is rate-limiting this Mac — wait a minute "
+                                   "and search again.") from exc
+            if exc.code in (401, 403):
+                raise RuntimeError("CivitAI refused the request (401/403) — check the "
+                                   "CivitAI API key in Settings.") from exc
+            raise RuntimeError(f"CivitAI answered HTTP {exc.code}.") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError("Could not reach civitai.com — check the connection "
+                               "and try again.") from exc
+        except Exception as exc:                               # noqa: BLE001
+            raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+    raise RuntimeError(f"{type(last).__name__}: {last}")
 
 
 # Sub-families for the image context. Each entry maps a UI family-pill id
@@ -6494,16 +6521,54 @@ def _civitai_search(query: str = "", nsfw: bool = False,
         "baseModels": base_models_filter,
         "limit": limit,
         "sort": "Most Downloaded",
-        # nsfw=True lets the API include NSFW results; the user's CivitAI
-        # account-level filter (if any) is unaffected. We surface the
-        # boolean on each item so the front end can render a warning.
         "nsfw": "true" if nsfw else "false",
     }
-    if query.strip():
-        params["query"] = query.strip()
-    if cursor:
-        params["cursor"] = cursor
-    raw = _civitai_request("/models", params=params)
+    q = query.strip()
+    if q:
+        # CivitAI's text search (`query`) is a different backend from the
+        # browse listing and it does NOT honour `baseModels`: the two
+        # together return an empty page for every word ("turbo" → 0 while
+        # "Minimax H3 Turbo Loras" sits on page one of the un-queried list).
+        # So a typed search drops the server-side base filter, nudges the
+        # search with the engine's own word (the backend ranks "minimax
+        # turbo" all-H3), and the base-model filter is applied HERE on the
+        # results, paging until the page is full or the well runs dry.
+        _hint_words = {"h3": "minimax", "ltx": "ltx", "qwen": "qwen",
+                       "hidream": "hidream"}
+        # One engine → one hinted search. "All" → one hinted search per
+        # engine in the context, merged (a bare "anime" search fills its
+        # pages with SDXL LoRAs and the base filter leaves nothing).
+        _hints = ([_hint_words.get(fam, "")] if fam
+                  else [_hint_words.get(k, "") for k in (_fam_map or {}).keys()] or [""])
+        params.pop("baseModels", None)
+        params["limit"] = 50
+        _want = {bm.lower() for bm in base_models_filter}
+        raw_items: list[dict] = []
+        _seen: set = set()
+        raw = {}
+        for _hint in _hints:
+            _p = dict(params)
+            _p["query"] = (f"{_hint} {q}" if _hint and _hint not in q.lower() else q)
+            if cursor:
+                _p["cursor"] = cursor
+            for _page in range(4):
+                raw = _civitai_request("/models", params=_p)
+                for m in (raw.get("items") or []):
+                    _bm = str(((m.get("modelVersions") or [{}])[0]).get("baseModel") or "").lower()
+                    if _bm in _want and m.get("id") not in _seen:
+                        _seen.add(m.get("id"))
+                        raw_items.append(m)
+                _next = (raw.get("metadata") or {}).get("nextCursor")
+                if len(raw_items) >= limit or not _next:
+                    break
+                _p["cursor"] = _next
+            if len(raw_items) >= limit:
+                break
+        raw = {**raw, "items": raw_items[:limit]}
+    else:
+        if cursor:
+            params["cursor"] = cursor
+        raw = _civitai_request("/models", params=params)
     items = []
     for m in (raw.get("items") or []):
         versions = m.get("modelVersions") or []

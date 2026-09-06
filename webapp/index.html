@@ -4204,10 +4204,19 @@
       <button type="button" class="pill-btn" data-civitai-kind="other" onclick="civitaiSetKind('other')">Other</button>
       <label class="toggle-pill" title="Only repos that ship an example clip or image"><input type="checkbox" id="civitaiWithExample" onchange="civitaiSetKind()"><span class="toggle-dot"></span><span>With example</span></label>
     </div>
-    <div class="civitai-search-bar">
-      <input type="text" id="civitaiQuery" placeholder="Search by name, style, creator…"
+    <!-- A search bar that reads as one: magnifier, a placeholder that says
+         where it searches, and a Search button — the bare input was mistaken
+         for a filter box. -->
+    <div class="civitai-search-bar" role="search">
+      <svg class="civitai-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M10.5 10.5 L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <input type="search" id="civitaiQuery" placeholder="Search CivitAI — a name, a style, a creator… then Enter"
+             aria-label="Search CivitAI"
              oninput="if(this._t) clearTimeout(this._t); this._t = setTimeout(civitaiSearch, 350)"
              onkeydown="if(event.key==='Enter'){ event.preventDefault(); civitaiSearch(); }">
+      <button type="button" class="pill-btn" onclick="civitaiSearch()" title="Search CivitAI">Search</button>
     </div>
     <div class="civitai-grid" id="civitaiGrid">
       <div class="hint">Loading…</div>

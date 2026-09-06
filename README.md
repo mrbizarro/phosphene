@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.5.** **LoRAs stack on Hailuo H3**: pick a character LoRA and keep Turbo on, or combine several LoRAs, each with its own strength (the Update brings the engine change with it). LoRAs in the kohya trainer format install and render now instead of being refused. The LoRA browser has one compact toolbar with a **Characters / Styles / Motion / Speed** filter, searches Hugging Face deeper, and no longer asks for a CivitAI key on the Hugging Face source. The panel no longer opens with the last clip already playing. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.10.6.** **Browse CivitAI search works again**: typing a word in the LoRA browser used to come back empty for every engine (CivitAI ignores the engine filter on text searches — the panel now filters the results itself), the search bar looks like a search bar, and the occasional "HTTP 503" from CivitAI is retried instead of ending the search. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

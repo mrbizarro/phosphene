@@ -1,5 +1,19 @@
 # Phosphene — project state, history, open work
 
+> **🩹 2026-09-06 — v4.10.6 ships: Browse CivitAI search.** Any word typed
+> into the LoRA browser returned nothing ("turbo" → 0 while "Minimax H3
+> Turbo Loras" was on page one un-queried): CivitAI's text search ignores
+> `baseModels` and answers an empty page when both are sent. Typed searches
+> now drop the server-side base filter, hint the query with the engine's
+> word ("minimax turbo" ranks all-H3), and filter base models on the
+> results while paging; "All" runs one hinted search per engine and merges
+> ("anime" on Video: 0 → 24). CivitAI's intermittent 502/503/504 is retried
+> ×3 with back-off and the message says what to do. The search bar has a
+> magnifier, a placeholder that names CivitAI, and a Search button.
+> `test_spicy_contract` green; verified live against civitai.com. Promoted
+> by cherry-pick onto origin/main (dev carries the unreleased Upscale ×2
+> headline).
+
 > **🚀 2026-09-06 — v4.10.5 ships.** H3 LoRA stacking (engine `codex/h3-engine-v2`
 > at 21e8824 = live-preview merged: repeatable `--lora`, the qkv-permute fix),
 > kohya conversion, the LoRA browser toolbar + kind filter + deeper search +

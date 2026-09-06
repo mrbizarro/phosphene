@@ -279,7 +279,7 @@ def get_civitai_search(h, parsed) -> None:
             results["available_families"] = list(_fams.keys())
         h._json(results)
     except Exception as exc:
-        h._json({"error": f"civitai search failed: {exc}",
+        h._json({"error": f"CivitAI search failed — {exc}",
                     "items": []}, 502)
 
 
