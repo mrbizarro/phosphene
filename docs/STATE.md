@@ -1,5 +1,16 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-06 — v4.10.7 ships (cherry-picked onto main; dev still carries
+> the unreleased Upscale ×2).** Extend fixed — every Extend render on
+> 4.10.2–4.10.6 died at construction ("RetakePipeline.__init__() got an
+> unexpected keyword argument 'low_ram_streaming'"; `_construct_pipeline`
+> builds each pipeline with the kwargs its class accepts,
+> `test_pipeline_construct_kwargs.py`). One take moved out of Customize to a
+> third strip under Quality / Length (`#takeAxes`, ids unchanged). /stats:
+> Total renders + Total installs (all-time) and a Growth chart
+> (`test_stats_growth.py`); first fleet read 19,443 renders / 1,315 installs
+> since 2026-08-09.
+
 > **🩹 2026-09-06 — v4.10.6 ships: Browse CivitAI search.** Any word typed
 > into the LoRA browser returned nothing ("turbo" → 0 while "Minimax H3
 > Turbo Loras" was on page one un-queried): CivitAI's text search ignores

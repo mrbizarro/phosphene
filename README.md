@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.6.** **Browse CivitAI search works again**: typing a word in the LoRA browser used to come back empty for every engine (CivitAI ignores the engine filter on text searches — the panel now filters the results itself), the search bar looks like a search bar, and the occasional "HTTP 503" from CivitAI is retried instead of ending the search. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.10.7.** **Extend renders again** (every Extend render since 4.10.2 stopped before it started; fixed). **One take is where the lengths are**: the 30 s to 2 min continuous-shot control sits under Quality and Length now instead of inside Customize. The stats page gets all-time totals and a growth chart. Includes 4.10.6 (Browse CivitAI search works again) and 4.10.5 (LoRAs stack on Hailuo H3). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 
