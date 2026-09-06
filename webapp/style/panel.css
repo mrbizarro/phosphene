@@ -5418,6 +5418,10 @@
       display: flex; flex-direction: column; gap: 14px;
     }
     .cz-control { display: block; }
+    /* `display: block` beats the UA's [hidden] rule, so a row the JS folds
+       (#sbTakeRow when another shot count is chosen) kept rendering. Restate
+       the fold for every .cz-control rather than one id at a time. */
+    .cz-control[hidden] { display: none !important; }
     .cz-label {
       font-size: 11px; font-weight: 600;
       color: var(--muted);
@@ -5540,7 +5544,9 @@
        small so the bar height stays low. */
     .mode-bar {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      /* Eight chips on LTX: two full rows of four. Five columns left the
+         second row three chips wide with two empty cells, every time. */
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 4px;
       padding: 4px;
       background: var(--panel);
@@ -5561,6 +5567,10 @@
       transition: var(--t-fast);
       letter-spacing: 0;
       text-align: center;
+      /* The name never breaks ("One / Shot" in a narrow pane); the sub-line
+         below it may. */
+      white-space: nowrap;
+      min-width: 0;
     }
     .mode-bar .mode-chip:hover {
       color: var(--text);
@@ -5579,6 +5589,7 @@
       letter-spacing: 0.02em;
       text-transform: none;
       opacity: 0.85;
+      white-space: normal;
     }
     .mode-bar .mode-chip.active .mc-sub {
       color: var(--accent-bright);
@@ -5596,6 +5607,13 @@
        to LTX brings its modes with it. Driven entirely by the ENGINES
        registry, so a third engine scopes itself with no new CSS. */
     .mode-bar .mode-chip.eng-foreign { display: none; }
+    /* On any other engine most of those chips are folded (H3 shows three), and
+       a fixed four-column grid would leave a hole. auto-fit lays the chips
+       that ARE there across one row — a hidden chip generates no grid item,
+       so it claims no cell. LTX keeps its two rows of four above. */
+    body:not([data-engine="ltx"]) .mode-bar {
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    }
 
     /* The Remix sub-row has THREE tools, not five. It inherited `.mode-bar`'s
        5-column grid, so each tool got 3/5 of a column's worth of room and the
@@ -9979,11 +9997,31 @@
 .ghost-btn.small { padding: 3px 9px; font-size: var(--fs-sm, 12px); }
 .lora-update-badge { cursor: pointer; }
 
-/* ---- One take ---------------------------------------------------------------- */
-/* One take — the third axis under Quality / Length, same grid rhythm as
-   .h3-axes; the beats box opens beneath the strip when a take is picked. */
-.take-axes { display: grid; gap: 8px; margin-top: 2px; }
+/* ---- One Shot ---------------------------------------------------------------- */
+/* One Shot — its own mode's panel (#takeAxes), opened by setMode('oneshot').
+   Same grid rhythm as .h3-axes and the Character strip: label rows, one
+   chip strip, then the beats box, the anchor image, the two continuity pill
+   pairs, the estimate and the engine note. `display: grid` beats the UA's
+   [hidden] rule, so the fold is restated — the same lesson .quality-strip
+   learned. */
+.take-axes { display: grid; gap: 8px; margin-top: 2px; min-width: 0; }
+.take-axes[hidden] { display: none !important; }
+/* Nothing in here may hold a width of its own: a grid child defaults to
+   min-width:auto, and five chips of min-content made the panel ~404px wide
+   and clipped it in a 1100px pane. */
+.take-axes > *, .take-axes .q-chip, .take-axes .pill-group { min-width: 0; }
+.take-axes .quality-strip.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .take-axes .h3-axis-label { margin: 2px 0 -2px 0; }
+/* Label rows: the name never touches the hint. The hint may wrap, right-aligned
+   under itself. */
+.take-axes .qs-label { gap: 10px; }
+.take-axes .qs-label .qs-name { flex: 0 0 auto; white-space: nowrap; }
+.take-axes .qs-label .qs-meta { min-width: 0; white-space: normal; text-align: right; }
+.take-axes a { color: var(--accent-bright); }
+/* The Beats row carries its split button on the right of the label. */
+.take-axes .beats-label { align-items: center; }
+.take-axes .beats-label .qs-meta { flex: 1 1 auto; }
+.take-axes .beats-label .ghost-btn { flex: 0 0 auto; white-space: nowrap; }
 .take-axes .take-beats { display: grid; gap: 6px; }
 .take-axes .take-beats[hidden] { display: none !important; }
 .take-axes .sb-textarea { width: 100%; box-sizing: border-box; }
@@ -9991,6 +10029,33 @@
 .take-locked::after { content: ''; }
 #beatsRow { margin-top: 8px; }
 .take-estimate { margin-top: 6px; font-size: var(--fs-sm, 12px); color: var(--muted); min-height: 1.2em; }
+/* The part labels are written per engine by oneshotRefreshLabels(). */
+.oneshot-panel #takeGroup .q-chip { justify-content: flex-start; min-height: 56px; }
+.oneshot-panel #takeGroup .q-chip .ql-tier { white-space: nowrap; color: var(--muted); }
+.oneshot-panel .oneshot-anchor { display: grid; gap: 6px; margin-top: 4px; }
+.oneshot-panel .oneshot-anchor-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 32px; }
+.oneshot-panel .oneshot-anchor-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: var(--r-sm); border: 1px solid var(--border); }
+.oneshot-panel .oneshot-anchor-thumb[hidden] { display: none !important; }
+.oneshot-panel .oneshot-anchor-name { font-size: var(--fs-sm, 12px); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.oneshot-panel .oneshot-toggles { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 4px; }
+.oneshot-panel .oneshot-toggle { display: grid; gap: 6px; min-width: 0; }
+/* A toggle's header stacks the name over its hint: side by side, the name
+   wrapped to three lines beside a three-line hint in half a panel. */
+.oneshot-panel .oneshot-toggle .qs-label { flex-direction: column; align-items: flex-start; gap: 2px; }
+.oneshot-panel .oneshot-toggle .qs-meta { font-family: inherit; white-space: normal; text-align: left; }
+.oneshot-panel .oneshot-toggle .pill-group { margin-bottom: 0; }
+.oneshot-panel .oneshot-note { font-size: var(--fs-sm, 12px); color: var(--muted); }
+/* A shot IS the length: while One Shot is open the engine's own Length
+   strip (and its label) is folded, on both engines. A body class rather than
+   `hidden`, because setEngine re-shows those strips by id on every switch. */
+body.oneshot-mode #ltxAxes,
+body.oneshot-mode #h3LengthLabel,
+body.oneshot-mode #h3LengthGroup { display: none !important; }
+/* Two toggles side by side need more than a narrow pane gives them; 720px
+   was too late — at 1100px each half was already a column of wrapped words. */
+@media (max-width: 1100px) {
+  .oneshot-panel .oneshot-toggles { grid-template-columns: minmax(0, 1fr); }
+}
 
 .sb-beats-label { margin-top: 8px; font-size: var(--fs-sm, 12px); color: var(--muted); }
 .sb-beats-label .sub { opacity: .8; margin-left: 6px; }

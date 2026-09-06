@@ -348,6 +348,14 @@
            toggle inside another mode. Q8-only — hidden on cap_tier="q4". -->
       <button type="button" class="mode-chip pill-btn" data-mode="character">Character<span class="mc-sub sub">trained face + voice</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="i2v">Image<span class="mc-sub sub">image + prompt</span></button>
+      <!-- ONE SHOT — a different way of making a video, not a length on the
+           clip form: one continuous shot of 30 s – 2 min that never cuts,
+           written as beats. A UI mode like Character: the hidden #mode input
+           ships t2v (or i2v when an anchor image is set) and make_job reads
+           take_seconds + beats. setMode('oneshot') in boot.js opens the One
+           Shot panel (#takeAxes); every other mode closes it and zeroes
+           take_seconds, so a normal clip never carries a take. -->
+      <button type="button" class="mode-chip pill-btn" data-mode="oneshot">One Shot<span class="mc-sub sub">30 s – 2 min · never cuts</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe">FFLF<span class="mc-sub sub">first + last</span></button>
       <!-- Multi-keyframe shares backend mode="keyframe"; the form dropdown
            chooses any total anchor count from 3–8. -->
@@ -959,11 +967,16 @@
              make_job allowlist — a field that isn't listed there silently
              no-ops on /queue/add (the known trap). setH3Tier keeps the three
              in sync, so there is exactly one state, spelled three ways. -->
-        <!-- ONE TAKE: a length past a single pass, and one beat per five
-             seconds. make_job turns it into the windows chain (LTX) or
-             15 s parts that continue from each other (H3). -->
+        <!-- ONE SHOT: a length past a single pass, and one beat per five
+             seconds. make_job turns it into parts that continue from each
+             other's last frame (15 s parts on H3, 10 s parts on LTX). The two
+             continuity toggles are read by make_job as on/off: light lock
+             appends the continuity sentence to every beat, retake allows one
+             re-render of a part whose light drifted. -->
         <input type="hidden" name="take_seconds" id="take_seconds" value="0">
         <input type="hidden" name="beats" id="beats" value="">
+        <input type="hidden" name="take_light_lock" id="take_light_lock" value="on">
+        <input type="hidden" name="take_retake" id="take_retake" value="on">
         <input type="hidden" name="h3_tier" id="h3_tier" value="draft_3s">
         <input type="hidden" name="h3_quality" id="h3_quality" value="draft">
         <input type="hidden" name="h3_length" id="h3_length" value="3s">
@@ -1082,7 +1095,7 @@
                than a strip itself. -->
           <div class="h3-axes" id="h3TierGroup" hidden>
             <div class="quality-strip pill-group" id="h3QualityGroup"></div>
-            <div class="qs-label h3-axis-label">
+            <div class="qs-label h3-axis-label" id="h3LengthLabel">
               <span class="qs-name">Length</span>
               <span class="qs-meta" id="h3LengthMeta"></span>
             </div>
@@ -1097,44 +1110,92 @@
                warning; h3_visible_tiers() swaps the old warning back in for a
                pack whose runner has no --chain-prompts. -->
           <div class="engine-hint" id="h3TierNote" data-h3-only hidden></div>
-          <!-- ONE TAKE — the third axis, for BOTH engines: a length past a
-               single clip. Same strip language as Quality and Length above
-               (q-chip: name / spec / foot), so it reads as one more length
-               choice, not a hidden mode. Picking a take locks the engine's
-               own Length strip (a take IS the length), opens the beats box
-               and prices the render from /take/estimate. Ids are unchanged
-               from the Customize era (#takeGroup, data-take, #beatsRow,
-               #beats_text, #takeEstimate) so setTakeSeconds / sbSetTake /
-               Load Params keep working. -->
-          <div class="take-axes" id="takeAxes">
+          <!-- ONE SHOT — its own mode, its own panel. Visible ONLY in One Shot
+               mode (setMode('oneshot') removes `hidden`; every other mode
+               puts it back). A different way of making a video from the clip
+               modes above: one continuous shot of 30 s – 2 min, written as
+               beats, rendered as parts that continue from each other's last
+               frame. The engine's own Length strip is folded while this is
+               open — a shot IS the length. Ids are unchanged from the strip
+               era (#takeAxes, #takeGroup, data-take, #beatsRow, #beats_text,
+               #takeEstimate) so setTakeSeconds / sbSetTake / Load Params
+               keep working. The part labels are written by
+               oneshotRefreshLabels() from document.body.dataset.engine (15 s
+               parts on H3, 10 s on LTX) and refreshed on every setEngine. -->
+          <div class="take-axes oneshot-panel" id="takeAxes" hidden>
             <div class="qs-label h3-axis-label">
-              <span class="qs-name">One take</span>
-              <span class="qs-meta" id="takeHint">longer than one clip · the shot never cuts · <a href="/docs/prompting" target="_blank" rel="noopener">how to write the beats</a></span>
+              <span class="qs-name">Length</span>
+              <span class="qs-meta" id="takeHint">one continuous shot · the camera never cuts · <a href="/docs/prompting" target="_blank" rel="noopener">how to write the beats</a></span>
             </div>
-            <div class="quality-strip pill-group" id="takeGroup">
-              <button type="button" class="q-chip pill-btn pill-quality active" data-take="0" onclick="setTakeSeconds(0)" title="One clip at the length chosen above.">
-                <span class="ql-name">Off</span><span class="q-spec ql-spec sub">one clip</span><span class="ql-tier">length above</span></button>
-              <button type="button" class="q-chip pill-btn pill-quality" data-take="30" onclick="setTakeSeconds(30)" title="30 seconds, one continuous shot: 6 beats of 5 s, 2 parts on H3.">
-                <span class="ql-name">30 s</span><span class="q-spec ql-spec sub">6 beats</span><span class="ql-tier">2 parts</span></button>
-              <button type="button" class="q-chip pill-btn pill-quality" data-take="45" onclick="setTakeSeconds(45)" title="45 seconds, one continuous shot: 9 beats of 5 s, 3 parts on H3.">
-                <span class="ql-name">45 s</span><span class="q-spec ql-spec sub">9 beats</span><span class="ql-tier">3 parts</span></button>
-              <button type="button" class="q-chip pill-btn pill-quality" data-take="60" onclick="setTakeSeconds(60)" title="One minute, one continuous shot: 12 beats of 5 s, 4 parts on H3.">
-                <span class="ql-name">1 min</span><span class="q-spec ql-spec sub">12 beats</span><span class="ql-tier">4 parts</span></button>
-              <button type="button" class="q-chip pill-btn pill-quality" data-take="90" onclick="setTakeSeconds(90)" title="A minute and a half, one continuous shot: 18 beats of 5 s, 6 parts on H3.">
-                <span class="ql-name">1½ min</span><span class="q-spec ql-spec sub">18 beats</span><span class="ql-tier">6 parts</span></button>
-              <button type="button" class="q-chip pill-btn pill-quality" data-take="120" onclick="setTakeSeconds(120)" title="Two minutes, one continuous shot: 24 beats of 5 s, 8 parts on H3.">
-                <span class="ql-name">2 min</span><span class="q-spec ql-spec sub">24 beats</span><span class="ql-tier">8 parts</span></button>
+            <div class="quality-strip pill-group cols-5" id="takeGroup">
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="30" onclick="setTakeSeconds(30)" title="30 seconds, one continuous shot: 6 beats of 5 s.">
+                <span class="ql-name">30 s</span><span class="q-spec ql-spec sub">6 beats</span><span class="ql-tier take-parts"></span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="45" onclick="setTakeSeconds(45)" title="45 seconds, one continuous shot: 9 beats of 5 s.">
+                <span class="ql-name">45 s</span><span class="q-spec ql-spec sub">9 beats</span><span class="ql-tier take-parts"></span></button>
+              <button type="button" class="q-chip pill-btn pill-quality active" data-take="60" onclick="setTakeSeconds(60)" title="One minute, one continuous shot: 12 beats of 5 s.">
+                <span class="ql-name">1 min</span><span class="q-spec ql-spec sub">12 beats</span><span class="ql-tier take-parts"></span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="90" onclick="setTakeSeconds(90)" title="A minute and a half, one continuous shot: 18 beats of 5 s.">
+                <span class="ql-name">1½ min</span><span class="q-spec ql-spec sub">18 beats</span><span class="ql-tier take-parts"></span></button>
+              <button type="button" class="q-chip pill-btn pill-quality" data-take="120" onclick="setTakeSeconds(120)" title="Two minutes, one continuous shot: 24 beats of 5 s.">
+                <span class="ql-name">2 min</span><span class="q-spec ql-spec sub">24 beats</span><span class="ql-tier take-parts"></span></button>
             </div>
             <div class="take-beats" id="beatsRow" hidden>
-              <div class="qs-label h3-axis-label">
+              <!-- The split button sits IN the label row, on the right: it
+                   is a tool for this box, not a row of its own. It only
+                   splits sentences, and its name says so. -->
+              <div class="qs-label h3-axis-label beats-label">
                 <span class="qs-name">Beats</span>
-                <span class="qs-meta" id="beatsHint">one line per 5 seconds · a blank line holds the moment</span>
+                <span class="qs-meta" id="beatsHint">one line per 5 seconds — what happens in that moment</span>
+                <button type="button" class="ghost-btn small" id="beatsPrefillBtn" onclick="takePrefillClick()"
+                        title="Splits the prompt above into one beat per line — a start to edit, not the final word.">Split my prompt into beats</button>
               </div>
               <textarea id="beats_text" class="sb-textarea" rows="6" spellcheck="false"
                 oninput="beatsInput()"
                 placeholder="she pushes off down the sunlit avenue&#10;a van sweeps past, pigeons burst up ahead&#10;she drops off the kerb into the road&#10;…"></textarea>
-              <div class="take-estimate" id="takeEstimate" aria-live="polite"></div>
             </div>
+            <!-- Start frame (optional). The SAME hidden `image` field as
+                 Image mode, through the same /upload path (pickerUploadFile),
+                 so when it is set the hidden #mode becomes i2v and the shot
+                 starts from this frame. Image mode's own picker stays folded
+                 in this mode; this is the only surface for it here. -->
+            <div class="oneshot-anchor" id="oneshotAnchor">
+              <div class="qs-label h3-axis-label">
+                <span class="qs-name">Start frame</span>
+                <span class="qs-meta">optional · the shot starts from this picture</span>
+              </div>
+              <div class="oneshot-anchor-row">
+                <img class="oneshot-anchor-thumb" id="oneshotAnchorThumb" alt="" hidden>
+                <button type="button" class="ghost-btn small" id="oneshotAnchorPick" onclick="document.getElementById('oneshotAnchorFile').click()">Choose an image</button>
+                <button type="button" class="ghost-btn small" id="oneshotAnchorClear" onclick="oneshotClearAnchor()" hidden>Clear</button>
+                <span class="oneshot-anchor-name sub" id="oneshotAnchorName"></span>
+                <input type="file" id="oneshotAnchorFile" accept="image/*" hidden onchange="oneshotAnchorPicked(this)">
+              </div>
+            </div>
+            <!-- Continuity. Both default ON; make_job reads on/off. -->
+            <div class="oneshot-toggles">
+              <div class="oneshot-toggle">
+                <div class="qs-label h3-axis-label">
+                  <span class="qs-name">Lock the light</span>
+                  <span class="qs-meta">keeps the time of day and weather the same in every line</span>
+                </div>
+                <div class="pill-group cols-2" id="takeLightLockGroup">
+                  <button type="button" class="pill-btn active" data-take-light="on" onclick="setTakeLightLock('on')"><span>On</span><span class="sub">same light, every line</span></button>
+                  <button type="button" class="pill-btn" data-take-light="off" onclick="setTakeLightLock('off')"><span>Off</span><span class="sub">lines as written</span></button>
+                </div>
+              </div>
+              <div class="oneshot-toggle">
+                <div class="qs-label h3-axis-label">
+                  <span class="qs-name">Redo a part that drifts</span>
+                  <span class="qs-meta">if a part changes the light, it is rendered once more</span>
+                </div>
+                <div class="pill-group cols-2" id="takeRetakeGroup">
+                  <button type="button" class="pill-btn active" data-take-retake="on" onclick="setTakeRetake('on')"><span>On</span><span class="sub">once more, at most</span></button>
+                  <button type="button" class="pill-btn" data-take-retake="off" onclick="setTakeRetake('off')"><span>Off</span><span class="sub">keep the first pass</span></button>
+                </div>
+              </div>
+            </div>
+            <div class="take-estimate" id="takeEstimate" aria-live="polite"></div>
+            <div class="oneshot-note" id="takeEngineNote"></div>
           </div>
 
           <!-- ========== PER-WINDOW PROMPTS (chained lengths only) ==========
@@ -1674,10 +1735,9 @@
                  frames at 12fps, then exports a normal 24fps file with
                  motion interpolation. This is explicit because dialogue,
                  lip-sync, and fast motion need user judgment. -->
-            <!-- ONE TAKE used to live here, in Customize. It is the length
-                 control for anything longer than one clip, so it sits with
-                 the other lengths now — #takeAxes, right under the engine's
-                 Quality / Length strips. -->
+            <!-- ONE SHOT used to live here, in Customize, then as a length
+                 strip under Quality / Length. It is its own mode now — the
+                 One Shot chip in the mode bar opens #takeAxes. -->
 
             <div class="cz-control" id="temporalRow" data-ltx-only>
               <div class="cz-label">Long clips
@@ -2797,14 +2857,14 @@
             <span class="ql-name">24</span><span class="q-spec ql-spec sub">a film</span></button>
           <button type="button" class="q-chip pill-btn" data-sb-shots="36">
             <span class="ql-name">36</span><span class="q-spec ql-spec sub">long</span></button>
-          <!-- ONE TAKE: a film that is one shot. The planner writes beats
+          <!-- ONE SHOT: a film that is one shot. The planner writes beats
                (one per 5 s) instead of shots; the render is the Video tab's
-               take. -->
+               One Shot. -->
           <button type="button" class="q-chip pill-btn" data-sb-shots="take" title="One continuous shot that never cuts — the planner writes one beat per five seconds and the world changes around the subject">
-            <span class="ql-name">1</span><span class="q-spec ql-spec sub">one take</span></button>
+            <span class="ql-name">1</span><span class="q-spec ql-spec sub">One Shot</span></button>
         </div>
         <div class="cz-control" id="sbTakeRow" hidden>
-          <div class="cz-label">How long <span class="cz-label-hint">one beat per 5 seconds · the camera never cuts</span></div>
+          <div class="cz-label">One Shot length <span class="cz-label-hint">one beat per 5 seconds · the camera never cuts</span></div>
           <div class="pill-group cols-5" id="sbTakeGroup">
             <button type="button" class="pill-btn" data-sb-take="30"><span>30 s</span><span class="sub">6 beats</span></button>
             <button type="button" class="pill-btn" data-sb-take="45"><span>45 s</span><span class="sub">9 beats</span></button>

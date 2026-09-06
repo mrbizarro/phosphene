@@ -585,10 +585,24 @@ def validate_storyboard_detail(
                 f"{where}: {pacing}.",
                 n=n_for_ui, field="prompt")
 
+        # A ONE SHOT (take_seconds + beats) is never rejected for its beat
+        # count — take_beats_for() pads blanks and trims extras at job time —
+        # but a take_seconds that is present and not one of TAKE_SECONDS is
+        # an error: shot_to_job would drop the take and render a normal clip
+        # of the wrong length, silently.
+        _ts_raw = s.get("take_seconds")
+        if _ts_raw not in (None, "", 0, "0", "off", False) \
+                and take_seconds_of(s) is None:
+            add("bad_take_seconds",
+                f"{where}: take_seconds must be one of {', '.join(map(str, TAKE_SECONDS))} "
+                f"(got {_ts_raw!r})",
+                n=n_for_ui, field="take_seconds", take_seconds=_ts_raw,
+                valid=list(TAKE_SECONDS))
+
         dur = s.get("duration_s")
         # A take shot is as long as the take (up to 2 min); every other shot
         # is one clip and stops at 60.
-        _dur_cap = max(TAKE_SECONDS) if s.get("take_seconds") in TAKE_SECONDS else 60
+        _dur_cap = max(TAKE_SECONDS) if take_seconds_of(s) else 60
         if not isinstance(dur, (int, float)) or not (0 < float(dur) <= _dur_cap):
             add("bad_duration",
                 f"{where}: duration_s must be between 0 and {_dur_cap} (got {dur!r})",
@@ -782,9 +796,10 @@ def shot_render_secs(shot: dict, policy_pass: dict, *, h3_cost=None) -> float:
     """
     dur = float(shot.get("duration_s") or 0)
     quality = policy_pass.get("quality", "balanced")
-    if shot.get("take_seconds") in TAKE_SECONDS and shot_engine(shot) == "h3":
+    take_secs = take_seconds_of(shot)
+    if take_secs and shot_engine(shot) == "h3":
         # A take on H3 is parts of 15 s; price the parts, not the duration.
-        parts = -(-(int(shot["take_seconds"]) // TAKE_BEAT_SECONDS) // 3)
+        parts = take_parts(shot)
         qk = h3_quality_for(quality)
         got = None
         if h3_cost is not None:
@@ -794,6 +809,12 @@ def shot_render_secs(shot: dict, policy_pass: dict, *, h3_cost=None) -> float:
                 got = None
         per = float(got) if got else _H3_SECS_PER_VIDEO_SEC.get(qk, 109.0) * _H3_LENGTH_SECONDS["15s"]
         return per * parts
+    if take_secs:
+        # A take on LTX is 10 s parts (two beats each; 45 s ends on a one-beat
+        # part) rendered back to back, and the parts add up to the take — so
+        # it is priced by the take's own seconds, never by a `duration_s` a
+        # hand edit may have left behind.
+        return float(take_secs) * _SECS_PER_VIDEO_SEC.get(quality, 60.0)
     if shot_engine(shot) == "h3":
         lk = h3_length_for(dur)
         qk = h3_quality_for(quality)
@@ -1319,24 +1340,95 @@ CHARACTER_QUALITY_FOR_PASS: dict[str, str] = {
 
 
 # ---- ONE TAKE on the board --------------------------------------------------
-# A film that is one shot: the planner writes one movement per five-second
-# beat (as it does for a soundtrack slot), and the board keeps ONE shot that
-# carries the beats. shot_to_job turns it into the panel's take fields, so the
-# render is the same take a person gets from the Video tab.
+# A shot that is one unbroken take: `take_seconds` (30 / 45 / 60 / 90 / 120)
+# plus `beats`, one prompt per five seconds. Two ways it gets onto a board:
+#   * the WHOLE FILM is one take — the planner writes N beat-shots and
+#     `collapse_take` folds them into one shot (the Video tab's take, by way
+#     of the Storyboard door);
+#   * ONE SHOT inside an ordinary film — the planner chooses it as a cinematic
+#     tool (a walk-and-talk, a chase, a confession; "One Shot" in the UI) and
+#     emits the shot with `take_seconds` + `beats` of its own, among normal
+#     3 / 5 / 10 s shots. It stays ONE shot: one card, one job, one clip.
+# Either way shot_to_job turns it into the panel's take fields and the panel
+# renders it as parts that continue from each other's last frame: 15 s parts
+# (three beats) on H3, 10 s parts (two beats) on LTX. The part sizes here
+# mirror mlx_ltx_panel.take_plan and exist so the estimate can count parts
+# without importing the panel.
 TAKE_BEAT_SECONDS = 5
 TAKE_SECONDS = (30, 45, 60, 90, 120)
+TAKE_BEATS_PER_PART = {"h3": 3, "ltx": 2}
+
+
+def take_seconds_of(shot: dict) -> int | None:
+    """The take length a shot carries, or None when it is an ordinary shot.
+
+    Strict on purpose: only a value in TAKE_SECONDS counts. Anything else
+    (None, 0, "off", 40) is not a take — `validate_storyboard_detail` reports
+    a present-but-illegal value as `bad_take_seconds`, so a hand-edited board
+    cannot silently render a normal clip where a take was meant.
+    """
+    if not isinstance(shot, dict):
+        return None
+    raw = shot.get("take_seconds")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        secs = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return secs if secs in TAKE_SECONDS else None
+
+
+def take_beats_for(shot: dict, seconds: int | None = None) -> list[str]:
+    """Exactly take_seconds/5 beat prompts for a take shot: extras are dropped,
+    missing ones are blank (the panel holds the previous moment on a blank
+    beat). A newline-separated string is accepted as well as a list, so a
+    beats box pasted by hand shapes up the same way the planner's list does.
+    `[]` for a shot that is not a take."""
+    secs = seconds if seconds in TAKE_SECONDS else take_seconds_of(shot)
+    if not secs:
+        return []
+    n = secs // TAKE_BEAT_SECONDS
+    raw = shot.get("beats")
+    if isinstance(raw, str):
+        items = [ln.strip() for ln in raw.splitlines()]
+    elif isinstance(raw, (list, tuple)):
+        items = [str(b or "").strip() for b in raw]
+    else:
+        items = []
+    items = items[:n]
+    return items + [""] * (n - len(items))
+
+
+def take_parts(shot: dict) -> int:
+    """How many renders the panel makes for a take shot on its engine: beats
+    in threes on H3 (15 s parts), in twos on LTX (10 s parts). 0 for an
+    ordinary shot. 45 s on LTX is 5 parts (2,2,2,2,1), matching take_plan."""
+    secs = take_seconds_of(shot)
+    if not secs:
+        return 0
+    per = TAKE_BEATS_PER_PART.get(shot_engine(shot), TAKE_BEATS_PER_PART["ltx"])
+    return -(-(secs // TAKE_BEAT_SECONDS) // per)
 
 
 def collapse_take(shots: list[dict], seconds: int) -> list[dict]:
     """The planner's N beat-shots become ONE take shot: the first shot's
     identity (mode, character, refs, title) with `beats` = every shot's own
-    prompt, padded to the take's beat count, `duration_s` = the take."""
+    prompt, padded to the take's beat count, `duration_s` = the take.
+
+    A beat-shot that is itself a take (the planner chose a One Shot inside a
+    film that was then asked to be one take) contributes its own beats in
+    order rather than just its first, so nothing it wrote is dropped."""
     beats_n = max(1, int(seconds) // TAKE_BEAT_SECONDS)
     items = [s for s in (shots or []) if isinstance(s, dict)]
     if not items:
         return []
     first = dict(items[0])
-    beats = [str(s.get("prompt") or "").strip() for s in items][:beats_n]
+    beats: list[str] = []
+    for s in items:
+        nested = [b for b in take_beats_for(s) if b] if take_seconds_of(s) else []
+        beats += nested or [str(s.get("prompt") or "").strip()]
+    beats = beats[:beats_n]
     beats += [""] * (beats_n - len(beats))
     first.update({
         "n": 1,
@@ -1501,13 +1593,22 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # identifies itself in the bottom pane with no bottom-pane code at all. `session_tag`
     # carries the provenance the badge and the gallery group on. Both keys are already in
     # make_job's allowlist — no allowlist edit, which is the point.
-    # ONE TAKE. The shot carries `take_seconds` + `beats`; the panel's make_job
-    # does the rest (LTX: the windows chain; H3: 15 s parts that continue).
-    if shot.get("take_seconds") in TAKE_SECONDS:
-        job["take_seconds"] = str(int(shot["take_seconds"]))
-        job["beats"] = json.dumps([str(b or "") for b in (shot.get("beats") or [])])
+    # ONE TAKE / ONE SHOT. The shot carries `take_seconds` + `beats`; the
+    # panel's make_job does the rest (parts by last-frame handoff: 10 s on
+    # LTX, 15 s on H3). Exactly ONE job for the whole take — the split into
+    # parts is the panel's, never the board's. The beats go out padded /
+    # trimmed to the take's count, and each written beat is composed the way
+    # the main prompt is (trigger, wardrobe, framing, eyeline, place): a later
+    # part is rendered from ITS beats alone, so a location that reached only
+    # beat 1 would be a different room by part 2.
+    take_secs = take_seconds_of(shot)
+    if take_secs:
+        job["take_seconds"] = str(take_secs)
+        job["beats"] = json.dumps([
+            compose_shot_prompt(dict(shot, prompt=b), locations, wardrobe) if b else ""
+            for b in take_beats_for(shot, take_secs)])
         if engine != "h3":
-            job["frames"] = int(shot["take_seconds"]) * 24 + 1
+            job["frames"] = take_secs * 24 + 1
     # ANCHOR STILL. When the shot has a still, the video STARTS from it: the
     # ordinary i2v path with the still as the image, anchored (the strict
     # pin, not Inspire). LTX only — H3's i2v is a different contract.
@@ -1522,8 +1623,11 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # Extend cannot re-inject an image per window, so an anchored long shot is
     # anchored by its first window only — the still opens it, the chain
     # carries it. See ltx_windows.py.
+    # A take is exempt: it is parts by last-frame handoff, not the chain, and
+    # the panel overrules a stray windows flag on a take anyway — this keeps
+    # the job dict honest about what will run.
     if long_windows and engine != "h3" and int(job.get("frames") or 0) > 121 \
-            and job["mode"] in ("t2v", "i2v"):
+            and job["mode"] in ("t2v", "i2v") and not take_secs:
         job["temporal_mode"] = "windows"
         inv = [s for s in (style.strip(), str((shot.get("location") or "")).strip()) if s]
         if inv:

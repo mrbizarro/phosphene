@@ -427,6 +427,63 @@ fingers gripping objects, and never ask for on-screen text.
 """
 
 
+# ONE SHOT — a take that never cuts, offered to the planner as a cinematic tool it may
+# reach for INSIDE an ordinary film. Before this the only way a take reached the board
+# was the whole film being one (`_sb_take_concept` in the panel + collapse_take); the
+# owner's ask was that the director could plan one shot of a film as a real one-shot
+# "so it looks really like a real movie instead of just 5-second clips one after the
+# other". The field names stay `take_seconds` + `beats` — the same wire the Video tab's
+# take and the whole-film take already use — so the panel renders it with no new path.
+_ONE_SHOT = """\
+ONE SHOT - a take that never cuts, used as a cinematic tool
+
+A One Shot is a single unbroken take of 30 to 120 seconds inside an otherwise ordinary
+film: the camera never cuts, ONE movement happens per 5-second beat, and the WORLD changes
+around the subject (a door opens, a street empties, someone steps into frame) while the
+subject, the camera position and the light stay continuous from one beat into the next.
+It is the right tool for a walk-and-talk, a chase or a POV ride, a monologue or a
+confession, a reveal that needs unbroken time, or an arrival through a place. It is the
+WRONG tool for a montage, for cross-cutting between places, and for anything that needs a
+reverse angle or a second camera position - those are ordinary shots. Use it at most once
+or twice per film, only where unbroken time earns something, and never for the whole film
+unless the brief asks for one take. A One Shot counts as ONE shot in the shot count.
+
+How to write one. The shot object keeps every key above and adds exactly two:
+  "take_seconds"  one of 30, 45, 60, 90, 120
+  "beats"         a list of EXACTLY take_seconds / 5 strings (30 -> 6, 60 -> 12), in
+                  order, each one what happens NEXT in the same unbroken shot. Lead every
+                  beat with the movement (of the subject, the camera or the world), name
+                  the sound in every beat, and state the time of day and the weather ONCE,
+                  in the first beat, and never change them - no 'dawn breaks', no lights
+                  coming on. Every beat starts exactly where the one before it ends: no
+                  new angle, no jump in time.
+"description" is the whole take in one paragraph; "duration_s" equals "take_seconds".
+Every other shot in the film has NEITHER key.
+
+{
+  "n": 3,
+  "title": "Down the corridor",
+  "character_id": null,
+  "duration_s": 30,
+  "camera": "tracking",
+  "face": "medium",
+  "description": "Live-action, cinematic, a medium shot moving backwards ahead of a nurse in pale blue scrubs as she walks the length of a hospital corridor at night under flat fluorescent light, past a wheeled trolley, a closed pharmacy hatch and a waiting man who rises as she passes, to the double doors of a ward, which she pushes open onto a dim room with one lit bed.",
+  "settle": "she stands in the ward doorway, still, the lit bed ahead of her",
+  "soundscape": "Soft soles on vinyl flooring, the fluorescent hum, a distant call bell, the double doors swinging.",
+  "music": "N/A",
+  "take_seconds": 30,
+  "beats": [
+    "Night, flat fluorescent light. She walks straight toward the lens down the empty corridor, soles squeaking on the vinyl, hands loose at her sides.",
+    "A wheeled trolley rolls into frame from the left and she steps around it without slowing, its wheels rattling as it passes.",
+    "The closed pharmacy hatch slides past on her right; her eyes flick to it and then hold the lens again, the fluorescent hum steady.",
+    "A man on a bench rises as she reaches him and falls into step beside her, his coat brushing the wall, a call bell ringing somewhere behind them.",
+    "The corridor bends left and the double doors of the ward come into view ahead; her pace slows and she lifts one hand toward them.",
+    "She pushes the doors open and stops in the doorway, the doors swinging behind her, the one lit bed ahead of her in the dim room."
+  ]
+}
+"""
+
+
 def _build_system_prompt(engine_hint: str, has_characters: bool,
                          allow_hidden: bool = False) -> str:
     dialect = """\
@@ -457,7 +514,8 @@ outside the JSON. The object has exactly two keys:
   "shots": [ <one object per shot, in story order> ]
 }
 
-Each shot object has exactly these nine keys and no others:
+Each shot object has exactly these keys and no others (a One Shot adds two more - see
+ONE SHOT below):
 
   "n"            integer, 1-based, in order
   "title"        2-5 words naming the beat
@@ -539,6 +597,10 @@ WRITE WHAT A LENS COULD SEE. "A testament to human ingenuity", "a symbol of hope
 that feels lived-in", "his face etched with solitude" are unrenderable - they instruct
 nothing. Replace each with the visible fact underneath it.
 """)
+    # The One Shot exemplar is written in the H3 register; on an LTX-only film
+    # the style token would teach the exact word the LTX rules forbid.
+    parts.append(_ONE_SHOT if engine_hint != "ltx"
+                 else _ONE_SHOT.replace("Live-action, cinematic, a medium shot", "A medium shot"))
     if allow_hidden:
         parts.append(
             "FACES: this brief explicitly asked for hidden or obscured faces, so L11 is "
@@ -1080,6 +1142,12 @@ def _shot_to_model_view(shot: Dict[str, Any]) -> Dict[str, Any]:
                      ("eyeline", "eyeline")):
         if shot.get(src):
             out[key] = shot[src]
+    # A ONE SHOT keeps its take on a re-plan. Shown as the model wrote it
+    # (`beat_lines`), not as assembled; a whole-film take collapsed from
+    # beat-shots has only `beats`, which is what it gets.
+    if shot.get("take_seconds"):
+        out["take_seconds"] = shot["take_seconds"]
+        out["beats"] = list(shot.get("beat_lines") or shot.get("beats") or [])
     return out
 
 
@@ -1899,6 +1967,9 @@ def _fix_unbalanced_d(text: str) -> str:
 
 
 def _snap_duration(value: Any, engine: str, default: float) -> float:
+    """An ORDINARY shot's length on its engine's grid. Never called for a One Shot: a
+    take is as long as its `take_seconds` (30-120 s) and this would clamp it to 60 and,
+    on H3, snap it to 15 — see coerce_spec()."""
     try:
         d = float(value)
     except (TypeError, ValueError):
@@ -1909,6 +1980,87 @@ def _snap_duration(value: Any, engine: str, default: float) -> float:
     if engine == "h3":
         d = min(_H3_LENGTHS, key=lambda cand: (abs(cand - d), cand))
     return float(d)
+
+
+# ---- ONE SHOT: carrying `take_seconds` + `beats` through from the model ----------------
+# The table of legal take lengths and the beat length live in storyboard.py (the same
+# numbers the panel's take_plan uses); read from there, never copied — a second copy of
+# a number that has drifted once is the next drift waiting.
+
+def _take_table() -> Tuple[Tuple[int, ...], int]:
+    sb = _storyboard_module()
+    secs = tuple(getattr(sb, "TAKE_SECONDS", ()) or ()) if sb is not None else ()
+    beat = int(getattr(sb, "TAKE_BEAT_SECONDS", 0) or 0) if sb is not None else 0
+    return secs, beat
+
+
+def _coerce_take_seconds(value: Any) -> Optional[int]:
+    """A One Shot's length: the NEAREST legal take (ties to the shorter), or None when the
+    shot is not a take — absent, null, false, 0, "off", or unparseable. "30s" counts."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        secs = float(str(value).strip().lower().rstrip("s"))
+    except (TypeError, ValueError):
+        return None
+    if not secs > 0:
+        return None
+    table, _ = _take_table()
+    if not table:
+        return None
+    return int(min(table, key=lambda t: (abs(t - secs), t)))
+
+
+_BEAT_PREFIX_RE = re.compile(r"^\s*(?:beat\s*\d+\s*[:.)\-]\s*|\d+\s*[:.)]\s+)", re.IGNORECASE)
+
+
+def _beat_items(raw: Any) -> List[str]:
+    """Whatever the model wrote for `beats`, as a flat list of strings: a list of strings,
+    a list of {text|beat|description: ...} objects, a {"1": ..} object, or one
+    newline-separated string. A numbering prefix the model added ("3. ", "Beat 3:") is
+    the model's, not the shot's, and comes off."""
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    items: List[str] = []
+    if isinstance(raw, str):
+        items = [ln.strip() for ln in raw.splitlines()]
+    elif isinstance(raw, (list, tuple)):
+        for b in raw:
+            if isinstance(b, dict):
+                items.append(_first(b, ("text", "beat", "description", "prompt", "action")))
+            elif b is None:
+                items.append("")
+            else:
+                items.append(str(b).strip())
+    return [_BEAT_PREFIX_RE.sub("", b).strip() for b in items]
+
+
+def _coerce_beats(raw: Any, n: int) -> List[str]:
+    """Exactly `n` beat strings. Extras are dropped, missing ones are blank — the panel
+    holds the previous moment on a blank beat — so a miscounted list is padded or
+    trimmed, never rejected."""
+    items = _beat_items(raw)[:max(0, int(n))]
+    return items + [""] * (max(0, int(n)) - len(items))
+
+
+def _assemble_beats(shot: Dict[str, Any], lines: Sequence[str], style: str,
+                    cast: Sequence[Dict[str, str]], sb: Any) -> List[str]:
+    """Each written beat in the shot's own register, as a prompt the panel can hand to a
+    part ON ITS OWN: the camera law, the face law and the soundscape ride on every beat
+    (a later part is rendered from its beats alone, not from the description), the
+    trigger is attached the way the main prompt gets it, and the settle rides on the LAST
+    written beat only — "completely finished before the shot ends" on beat 2 of 12 would
+    stop the take in its tracks. Blank beats stay blank."""
+    out: List[str] = []
+    last = max((i for i, ln in enumerate(lines) if ln), default=-1)
+    for i, line in enumerate(lines):
+        if not line:
+            out.append("")
+            continue
+        view = dict(shot, description=line,
+                    settle=(shot.get("settle") or "") if i == last else "")
+        out.append(_reassemble_prompt(view, style, cast, sb))
+    return out
 
 
 def _normalise_cast(characters: Optional[Iterable[Any]]) -> List[Dict[str, str]]:
@@ -2137,8 +2289,37 @@ def coerce_spec(
             eng = "ltx" if char else "h3"
 
         n = len(shots) + 1
-        dur = _snap_duration(s.get("duration_s") or s.get("duration") or s.get("seconds"),
-                             eng, duration_s)
+        # ONE SHOT? `take_seconds` snaps to the nearest legal take; `beats` shapes up to
+        # exactly take/5 entries (padded or trimmed, never rejected). A take with no
+        # written beat at all is not a take — the model put the key on an ordinary
+        # shot — and is planned as one.
+        take_raw = s.get("take_seconds") if "take_seconds" in s else s.get("take")
+        take = _coerce_take_seconds(take_raw)
+        beat_lines: List[str] = []
+        if take:
+            _, beat_secs = _take_table()
+            beat_lines = _coerce_beats(s.get("beats"), take // max(1, beat_secs))
+            if not any(beat_lines):
+                warnings.append("shot %d asked for a One Shot of %d s but wrote no beats — "
+                                "planned as an ordinary shot" % (idx + 1, take))
+                take, beat_lines = None, []
+            else:
+                if str(take_raw).strip().lower().rstrip("s") != str(take):
+                    warnings.append("shot %d: take_seconds %r is not a legal take length — "
+                                    "snapped to %d s" % (idx + 1, take_raw, take))
+                given = len(_beat_items(s.get("beats")))
+                if given != len(beat_lines):
+                    warnings.append("shot %d wrote %d beats for a %d s One Shot (%d expected) "
+                                    "— %s" % (idx + 1, given, take, len(beat_lines),
+                                              "extras dropped" if given > len(beat_lines)
+                                              else "the missing ones hold the previous moment"))
+        if take:
+            # A One Shot is as long as its take. _snap_duration would clamp it to 60 and,
+            # on H3, snap it to 15 — the exact thing that must not happen to it.
+            dur = float(take)
+        else:
+            dur = _snap_duration(s.get("duration_s") or s.get("duration") or s.get("seconds"),
+                                 eng, duration_s)
         camera, cam_forced = _camera_key(s.get("camera") or s.get("camera_move"))
         if cam_forced and str(s.get("camera") or "").strip():
             warnings.append("shot %d asked for camera %r, which is not one of %s — locked off"
@@ -2243,6 +2424,30 @@ def coerce_spec(
                 shot["prompt"] = _assemble_h3_prompt(
                     "%s The on-screen subject is %s." % (desc, char["trigger"]),
                     sound, music, camera, settle, face)
+        if take:
+            # The face law applies to every beat, not just the description: a later part
+            # is rendered from its beats alone, so a silhouette written into beat 9 is a
+            # silhouette on screen.
+            if face in ("close", "medium"):
+                cleaned: List[str] = []
+                for bi, line in enumerate(beat_lines):
+                    l2, cut = _scrub_face_blocking(line) if line else (line, [])
+                    for c in cut:
+                        warnings.append("shot %d, beat %d: removed face-hiding framing %r"
+                                        % (idx + 1, bi + 1, c[:70]))
+                    cleaned.append(l2)
+                beat_lines = cleaned
+            shot["take_seconds"] = take
+            # `beat_lines` is what the model wrote (what a re-plan is shown); `beats` is
+            # each of them assembled in the shot's register (what the panel renders) —
+            # the same raw/assembled pair `description` / `prompt` already keep.
+            shot["beat_lines"] = beat_lines
+            shot["beats"] = _assemble_beats(shot, beat_lines, style, cast, storyboard_mod)
+            shot["frames"] = take * 24 + 1
+            # The prompt the panel reads first — the light lock, the file name, part 1 —
+            # is the first beat, as collapse_take does for a whole-film take.
+            if shot["beats"][0]:
+                shot["prompt"] = shot["beats"][0]
         shots.append(shot)
 
     if len(shots) != n_shots:

@@ -2593,15 +2593,30 @@ function temporalModeAllowed() {
   const mode = document.getElementById('mode').value;
   return !_qualityUsesHq(q) && currentMode !== 'extend' && currentMode !== 'keyframe' && (mode === 't2v' || mode === 'i2v');
 }
-// ---- ONE TAKE ---------------------------------------------------------------
-// A length past a single clip plus one beat per five seconds. The server does
-// the arithmetic (make_job → take_plan); this only keeps the form honest: the
-// engine's own length pills lock while a take is on, the beats box prefills
-// from the prompt the first time, and the estimate comes from /take/estimate.
+// ---- ONE SHOT ---------------------------------------------------------------
+// One Shot is its own mode (the chip in #modeGroup, setMode('oneshot') in
+// boot.js): one continuous shot of 30 s – 2 min written as beats, one per five
+// seconds, rendered as parts that continue from each other's last frame. The
+// server does the arithmetic (make_job → take_plan); this keeps the form
+// honest: the engine's own length pills fold while the mode is open, the
+// beats box prefills from the prompt the first time, and the estimate comes
+// from /take/estimate. Leaving the mode calls setTakeSeconds(0) so a normal
+// clip never carries take_seconds.
 const TAKE_CHOICES = [0, 30, 45, 60, 90, 120];
+// The last length the user chose, so leaving the mode (which zeroes the
+// hidden field — a normal clip never carries take_seconds) and coming back
+// reopens on THEIR choice, not on the 1 min default every time.
+let _oneshotLastSeconds = 60;
+// A part is what continues from the last frame of the one before it: 15 s
+// (3 beats) on H3, 10 s (2 beats) on LTX. Read from the body's engine so the
+// labels follow the switcher; the server's own number wins in the estimate.
+function takePartSeconds(engine) {
+  return (engine || document.body.dataset.engine || 'ltx') === 'h3' ? 15 : 10;
+}
 function setTakeSeconds(s, beats) {
   s = parseInt(s || 0, 10) || 0;
   if (!TAKE_CHOICES.includes(s)) s = 0;
+  if (s) _oneshotLastSeconds = s;
   const hid = document.getElementById('take_seconds');
   if (hid) hid.value = String(s);
   document.querySelectorAll('#takeGroup .pill-btn').forEach(b =>
@@ -2621,6 +2636,8 @@ function setTakeSeconds(s, beats) {
   } else {
     const b = document.getElementById('beats');
     if (b) b.value = '';
+    const est = document.getElementById('takeEstimate');
+    if (est) est.textContent = '';
   }
   if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
   if (typeof updateDerived === 'function') updateDerived();
@@ -2636,6 +2653,17 @@ function takePrefill(s) {
   while (out.length && !out[out.length - 1]) out.pop();
   return out.join('\n');
 }
+// The "Split my prompt into beats" button: the same prefill, on demand, over
+// whatever is in the box. Explicit because the automatic one only fills an
+// EMPTY box — a user who typed three lines and changed the prompt has no
+// other way to start again from it.
+function takePrefillClick() {
+  const ta = document.getElementById('beats_text');
+  const s = parseInt((document.getElementById('take_seconds') || {}).value || '0', 10) || 0;
+  if (!ta || !s) return;
+  ta.value = takePrefill(s);
+  beatsInput();
+}
 function beatsInput() {
   const ta = document.getElementById('beats_text');
   const out = document.getElementById('beats');
@@ -2648,7 +2676,10 @@ function beatsInput() {
   const n = Math.round(s / 5);
   if (hint && n) {
     const filled = lines.filter(Boolean).length;
-    hint.textContent = `${n} beats of 5 s · ${filled} written` + (filled < n ? ' · a blank line holds the moment' : '') + (lines.length > n ? ` · the last ${lines.length - n} won't fit` : '');
+    const extra = lines.length - n;
+    hint.textContent = `${n} lines of 5 s · ${filled} written`
+      + (filled < n ? ' · leave a line blank to hold on the scene' : '')
+      + (extra > 0 ? ` · ${extra} extra line${extra === 1 ? '' : 's'} will be dropped` : '');
   }
 }
 let _takeRefreshSeq = 0;
@@ -2666,14 +2697,140 @@ async function takeRefresh() {
     const r = await (await fetch(`/take/estimate?engine=${encodeURIComponent(engine)}&quality=${encodeURIComponent(quality)}&seconds=${s}`)).json();
     if (seq !== _takeRefreshSeq) return;
     if (!r.ok) { el.textContent = r.error || ''; return; }
-    const bits = [`${r.beats} beats`];
-    if (r.engine === 'h3') bits.push(`${r.parts} parts of 15 s that continue from each other`);
-    else bits.push('EXPERIMENTAL on LTX: the picture drifts across passes — use H3 for a take you will keep');
+    const eng = r.engine || engine;
+    const partSec = takePartSeconds(eng);
+    // The server's count when it sends one; the same arithmetic otherwise.
+    const parts = parseInt(r.parts, 10) || Math.ceil(s / partSec);
+    const bits = [`${r.beats || Math.round(s / 5)} beats`];
+    bits.push(`${parts} parts of ${partSec} s that continue from ` + (eng === 'h3' ? 'each other' : 'the last frame'));
     if (r.eta) bits.push(`about ${r.eta.replace(/^~/, '').replace(' · batch', '')} on this Mac`);
-    else if (r.engine === 'ltx') bits.push('about 7 min per 5 s at Quick on this Mac');
+    else if (eng === 'ltx') bits.push('about 7 min per 5 s at Quick on this Mac');
     el.textContent = bits.join(' · ');
   } catch (e) { if (seq === _takeRefreshSeq) el.textContent = ''; }
 }
+// ---- the One Shot panel ----------------------------------------------------
+// What setMode('oneshot') opens and every other setMode closes. The mode-level
+// bits (the chip, currentMode, the hidden #mode) stay in boot.js; this owns
+// the panel: its visibility, the per-engine part labels, the anchor image and
+// the two continuity toggles.
+function oneshotActive() {
+  return (typeof currentMode !== 'undefined') && currentMode === 'oneshot';
+}
+// The backend mode a One Shot ships under: i2v when an anchor image is set,
+// t2v otherwise. The same rule Image mode's submit guard applies (an i2v job
+// needs an image), read from the SAME hidden field.
+function oneshotBackendMode() {
+  const img = (document.getElementById('image') || {}).value || '';
+  return String(img).trim() ? 'i2v' : 't2v';
+}
+function oneshotEnter() {
+  const panel = document.getElementById('takeAxes');
+  if (panel) panel.hidden = false;
+  document.body.classList.add('oneshot-mode');
+  oneshotRefreshLabels();
+  oneshotSyncAnchor();
+  setTakeLightLock((document.getElementById('take_light_lock') || {}).value || 'on');
+  setTakeRetake((document.getElementById('take_retake') || {}).value || 'on');
+  const cur = parseInt((document.getElementById('take_seconds') || {}).value || '0', 10) || 0;
+  setTakeSeconds(cur || _oneshotLastSeconds || 60);
+}
+function oneshotLeave() {
+  const panel = document.getElementById('takeAxes');
+  if (panel) panel.hidden = true;
+  document.body.classList.remove('oneshot-mode');
+  const cur = parseInt((document.getElementById('take_seconds') || {}).value || '0', 10) || 0;
+  if (cur) setTakeSeconds(0);
+  // The two continuity fields are hidden inputs in the video form, so
+  // FormData posts them with EVERY clip. Back to their defaults on the way
+  // out, or a normal clip's sidecar carries an "off" that meant nothing.
+  setTakeLightLock('on');
+  setTakeRetake('on');
+}
+// "1 min", "1½ min", "30 s" — the length as the chips name it, for the
+// footer strip and anywhere else the shot is summarised in one line.
+function takeLengthLabel(s) {
+  s = parseInt(s || 0, 10) || 0;
+  if (s < 60) return `${s} s`;
+  const whole = Math.floor(s / 60);
+  const rem = s - whole * 60;
+  if (!rem) return `${whole} min`;
+  if (rem === 30) return `${whole}½ min`;
+  return `${whole} min ${rem} s`;
+}
+// The one-line summary of a One Shot for the footer strip: "1 min · 6 parts
+// of 10 s". The parts follow the engine (15 s on H3, 10 s on LTX); the
+// server's own count wins in the estimate, this is the label.
+function oneshotSummary(s, engine) {
+  s = parseInt(s || 0, 10) || 0;
+  if (!s) return '';
+  const partSec = takePartSeconds(engine);
+  const parts = Math.ceil(s / partSec);
+  return `${takeLengthLabel(s)} · ${parts} part${parts === 1 ? '' : 's'} of ${partSec} s`;
+}
+// The part labels on the length chips and the one-line engine note. Called on
+// entry and from setEngine, because a part is 15 s on H3 and 10 s on LTX.
+function oneshotRefreshLabels() {
+  const engine = document.body.dataset.engine || 'ltx';
+  const partSec = takePartSeconds(engine);
+  document.querySelectorAll('#takeGroup .pill-btn').forEach(b => {
+    const s = parseInt(b.dataset.take, 10) || 0;
+    const el = b.querySelector('.take-parts');
+    if (el && s) {
+      const n = Math.ceil(s / partSec);
+      // One line, so the chip keeps the Quality strip's height.
+      el.textContent = `${n} × ${partSec} s`;
+    }
+  });
+  const note = document.getElementById('takeEngineNote');
+  if (note) {
+    note.textContent = engine === 'h3'
+      ? 'Hailuo H3 — 15-second parts that continue from each other.'
+      : 'LTX — 10-second parts that continue from the last frame.';
+  }
+}
+// The anchor image. One hidden field (#image) for Image mode and One Shot,
+// one upload path (pickerUploadFile), so the server sees exactly the i2v it
+// already knows. This only mirrors that field into the panel's own thumbnail
+// and flips the hidden #mode while the mode is open.
+function oneshotSyncAnchor() {
+  const path = String((document.getElementById('image') || {}).value || '').trim();
+  const thumb = document.getElementById('oneshotAnchorThumb');
+  const clear = document.getElementById('oneshotAnchorClear');
+  const pick = document.getElementById('oneshotAnchorPick');
+  const name = document.getElementById('oneshotAnchorName');
+  if (thumb) {
+    if (path) { thumb.src = `/image?path=${encodeURIComponent(path)}&w=160`; thumb.hidden = false; }
+    else { thumb.removeAttribute('src'); thumb.hidden = true; }
+  }
+  if (clear) clear.hidden = !path;
+  if (pick) pick.textContent = path ? 'Change the image' : 'Choose an image';
+  if (name) name.textContent = path ? path.split('/').pop() : '';
+  if (oneshotActive()) {
+    const modeInp = document.getElementById('mode');
+    if (modeInp) modeInp.value = oneshotBackendMode();
+  }
+}
+async function oneshotAnchorPicked(input) {
+  const f = input && input.files && input.files[0];
+  if (!f) return;
+  if (typeof pickerUploadFile === 'function') await pickerUploadFile('image', f);
+  input.value = '';
+  oneshotSyncAnchor();
+}
+function oneshotClearAnchor() {
+  if (typeof pickerSetImage === 'function') pickerSetImage('image', '');
+  oneshotSyncAnchor();
+}
+function _setTakeToggle(hiddenId, groupId, attr, v) {
+  v = (String(v || 'on').toLowerCase() === 'off') ? 'off' : 'on';
+  const hid = document.getElementById(hiddenId);
+  if (hid) hid.value = v;
+  document.querySelectorAll(`#${groupId} .pill-btn`).forEach(b =>
+    b.classList.toggle('active', b.dataset[attr] === v));
+  return v;
+}
+function setTakeLightLock(v) { return _setTakeToggle('take_light_lock', 'takeLightLockGroup', 'takeLight', v); }
+function setTakeRetake(v) { return _setTakeToggle('take_retake', 'takeRetakeGroup', 'takeRetake', v); }
 
 function setTemporalMode(t) {
   const allowed = temporalModeAllowed();
@@ -2854,6 +3011,8 @@ function updatePromptPlaceholder() {
     prompt.placeholder = window._kfMode >= 3 ? keyframeMulti : keyframeTwo;
   } else if (currentMode === 'i2v') {
     prompt.placeholder = 'Describe how the reference image should move, plus sound cues. The image anchors frame 0; the prompt directs the full clip.';
+  } else if (currentMode === 'oneshot') {
+    prompt.placeholder = 'Describe the whole shot once — the subject, the world, the time of day and the sound. Then write one beat per five seconds below; the camera never cuts.';
   } else if (currentMode === 'ingredients') {
     prompt.placeholder = "Describe WHAT'S in the reference sheet — each character, prop, and the location. e.g. a friendly cartoon hedgehog with rounded chestnut fur; a green coiled garden hose; the bright interior of a 'Greenfield' garden store. (The Action field above describes the shot itself.)";
   } else if (currentMode === 'control') {
@@ -2939,7 +3098,10 @@ document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick =
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
-  setTakeSeconds, takePrefill, beatsInput, takeRefresh,
+  setTakeSeconds, takePrefill, takePrefillClick, beatsInput, takeRefresh,
+  takePartSeconds, takeLengthLabel, oneshotSummary,
+  oneshotEnter, oneshotLeave, oneshotBackendMode, oneshotRefreshLabels, oneshotSyncAnchor,
+  oneshotAnchorPicked, oneshotClearAnchor, setTakeLightLock, setTakeRetake,
   windowPromptsInput,
   audioStudioInit, audioStudioDurationChanged, audioStudioEnhancePrompt, audioStudioGenerate,
   trainRecommendedPreset, trainUpdatePresetButtons, trainUpdatePresetNote, downloadSampleCharacter,

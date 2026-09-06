@@ -471,7 +471,7 @@ function _autoMainOutputsFilterForMode(mode) {
   // Auto-set NEVER lands on 'all' — that's user-only, per spec.
   let target = null;
   if (mode === 'image') target = 'photos';
-  else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend' || mode === 'restore' || mode === 'ingredients' || mode === 'control') target = 'videos';
+  else if (mode === 't2v' || mode === 'i2v' || mode === 'oneshot' || mode === 'keyframe' || mode === 'extend' || mode === 'restore' || mode === 'ingredients' || mode === 'control') target = 'videos';
   if (!target) return;
   // Same-filter early-return is conditional now: if the filter is already
   // on `target` but the visible list is empty AND we haven't loaded the
@@ -643,6 +643,13 @@ function setMode(mode) {
     mode = 't2v';
   }
   currentMode = mode;
+  // ONE SHOT is a UI mode with its own panel (#takeAxes). Every OTHER mode
+  // closes it and zeroes take_seconds here, before any early return below,
+  // so a normal clip never carries a take — the field is hidden and FormData
+  // would post it regardless of which chip is lit.
+  if (mode !== 'oneshot' && typeof oneshotLeave === 'function') {
+    try { oneshotLeave(); } catch (e) {}
+  }
   // HDR vs Character mutual exclusion — reflect mode change in pill state.
   // Runs in a microtask so the rest of setMode finishes setting UI bits
   // first (character chip strip visibility, etc.).
@@ -774,7 +781,11 @@ function setMode(mode) {
   // picker keeps the previous mode's filter when flipping back from
   // Studio to a video mode.
   if (typeof renderLorasList === 'function') renderLorasList();
-  document.getElementById('mode').value = mode;
+  // One Shot ships a real backend mode: t2v, or i2v when its anchor image is
+  // set (the same hidden #image field Image mode fills). make_job reads
+  // take_seconds + beats off the same form and turns the clip into parts.
+  document.getElementById('mode').value =
+    (mode === 'oneshot' && typeof oneshotBackendMode === 'function') ? oneshotBackendMode() : mode;
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => {
     if (mode === 'keyframe') {
       b.classList.toggle('active', isKeyframeModeChipActive(b, window._kfMode));
@@ -815,6 +826,11 @@ function setMode(mode) {
   // same "Q8 not installed" hint as elsewhere.
   if (mode === 'keyframe') {
     setQuality('high');
+  }
+  // Open the One Shot panel: length chips (default 1 min), beats, anchor,
+  // continuity toggles; the engine's own Length strip folds while it is open.
+  if (mode === 'oneshot' && typeof oneshotEnter === 'function') {
+    try { oneshotEnter(); } catch (e) { console.warn('oneshotEnter failed', e); }
   }
   updateAccelAvailability();
   updateTemporalAvailability();

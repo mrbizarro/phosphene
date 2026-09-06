@@ -15737,10 +15737,17 @@ def _sb_h3_available() -> bool:
 # ONE TAKE — a clip longer than one pass, on either engine
 # ---------------------------------------------------------------------------
 # The user picks a LENGTH (30 s … 2 min) and writes BEATS, one line per five
-# seconds. Nothing else is new: on LTX the take is the existing windows chain
-# (one prompt per 121-frame window); on H3 it is 15-second parts, each three
-# 5-second windows with their own prompt, each part starting from the last
-# frame of the one before (H3's first-frame conditioning), joined at the end.
+# seconds. Nothing else is new: on BOTH engines the take is PARTS chained by
+# last-frame handoff — each part an ordinary render, starting from the last
+# frame of the one before (i2v, anchored), joined at the end. On H3 a part is
+# 15 s (three beats); on LTX a part is 10 s (two beats, 241 frames, the
+# longest single render every quality prices). LTX used to render a take as
+# the windows chain (one Extend context per 121-frame window, 2026-09-06);
+# measured on a 30 s take it turned to mush after the first window — faces
+# dissolved, the audio went near silent — because Extend carries a latent
+# context that degrades on every hop, while a fresh i2v from a clean frame
+# starts every part at full quality. The windows chain stays for users who
+# choose "Long clips → windows" explicitly; a take no longer uses it.
 # The words "windows", "chain" and "parts" never reach the user; they see a
 # length, beats, and an honest time.
 TAKE_SECONDS = (30, 45, 60, 90, 120)
@@ -15748,6 +15755,8 @@ TAKE_BEAT_SECONDS = 5
 TAKE_H3_PART_LENGTH = "15s"            # the longest single H3 render
 TAKE_H3_BEATS_PER_PART = 3
 TAKE_H3_PART_FRAMES = 362
+TAKE_LTX_BEATS_PER_PART = 2            # 10 s — the LTX_LENGTHS "10s" cell
+TAKE_LTX_PART_FRAMES = 241             # 10 s × 24 fps + 1 (the 8k+1 grid)
 
 
 def take_plan(seconds, engine: str) -> dict | None:
@@ -15760,15 +15769,26 @@ def take_plan(seconds, engine: str) -> dict | None:
         return None
     beats = seconds // TAKE_BEAT_SECONDS
     eng = "h3" if (engine or "ltx") == "h3" else "ltx"
+    per_part = TAKE_H3_BEATS_PER_PART if eng == "h3" else TAKE_LTX_BEATS_PER_PART
+    n_parts = -(-beats // per_part)
+    parts = [list(range(i * per_part, min(beats, (i + 1) * per_part))) for i in range(n_parts)]
     if eng == "h3":
-        n_parts = -(-beats // TAKE_H3_BEATS_PER_PART)
-        parts = [list(range(i * TAKE_H3_BEATS_PER_PART,
-                            min(beats, (i + 1) * TAKE_H3_BEATS_PER_PART))) for i in range(n_parts)]
         frames = TAKE_H3_PART_FRAMES * n_parts
+        part_frames = TAKE_H3_PART_FRAMES
     else:
-        parts = [list(range(beats))]
         frames = seconds * 24 + 1                     # 8k+1 for every TAKE_SECONDS value
-    return {"seconds": seconds, "beats": beats, "parts": parts, "frames": frames, "engine": eng}
+        part_frames = TAKE_LTX_PART_FRAMES
+    # `frames` is the WHOLE take (the sidecar, the gallery, the estimate);
+    # `part_frames` is what one full part asks the engine for. A trailing
+    # one-beat LTX part (45 s → 2,2,2,2,1) renders take_ltx_part_frames(1).
+    return {"seconds": seconds, "beats": beats, "parts": parts, "frames": frames,
+            "part_frames": part_frames, "beats_per_part": per_part, "engine": eng}
+
+
+def take_ltx_part_frames(n_beats: int) -> int:
+    """Frames for an LTX part of `n_beats` beats: 241 for a full two-beat
+    part, 121 for the one-beat tail a 45 s take ends on — always 8k+1."""
+    return max(1, int(n_beats)) * TAKE_BEAT_SECONDS * 24 + 1
 
 
 def take_beats(raw, n: int) -> list[str]:
@@ -15867,15 +15887,27 @@ def take_drift(path, duration: float | None = None) -> dict:
 
 def take_estimate_minutes(engine: str, quality: str, seconds) -> float | None:
     """Wall clock for the whole take, from the same cost model every other
-    estimate uses. None when this Mac has no number for it (LTX windows are
-    not priced yet — the chain's extends have no measured model)."""
+    estimate uses: parts × the single-clip price of one part. H3 prices the
+    measured 15 s cell; LTX prices the `<quality>_10s` cell of LTX_TIERS (241
+    frames — exactly what one part renders), the one-beat tail at its 5 s
+    cell. None when this Mac has no number for it."""
     plan = take_plan(seconds, engine)
     if not plan:
         return None
     if plan["engine"] == "h3":
         per = _sb_h3_cost(quality or "standard", TAKE_H3_PART_LENGTH)
         return None if per is None else round(per * len(plan["parts"]) / 60.0, 1)
-    return None
+    q = (quality or "").strip().lower()
+    if q not in LTX_QUALITIES:
+        q = LTX_QUALITY_DEFAULT
+    total = 0.0
+    for idxs in plan["parts"]:
+        cell = LTX_TIERS.get(f"{q}_10s" if len(idxs) >= TAKE_LTX_BEATS_PER_PART else f"{q}_5s") or {}
+        per = cell.get("eta_min")
+        if per is None:
+            return None
+        total += float(per)
+    return round(total, 1)
 
 
 def _sb_h3_cost(quality_key: str, length_key: str):
@@ -16591,7 +16623,7 @@ def _sb_take_concept(concept: str, seconds: int) -> str:
     one movement per five-second beat, and the camera never cuts."""
     c = str(concept or "").strip()
     beats = int(seconds) // TAKE_BEAT_SECONDS
-    return (f"{c}\n\nONE TAKE. The whole film is a single continuous shot of "
+    return (f"{c}\n\nONE SHOT. The whole film is a single continuous shot of "
             f"{int(seconds)} seconds that never cuts. Write it as {beats} beats of "
             f"five seconds each, in order; each beat is what happens NEXT in the "
             f"same unbroken shot — lead with the movement (of the subject, of the "
@@ -16675,7 +16707,7 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
         if _take_secs in TAKE_SECONDS:
             n_shots = _take_secs // TAKE_BEAT_SECONDS
             concept = _sb_take_concept(concept, _take_secs)
-            push(f"[storyboard] one take of {_take_secs}s — planning {n_shots} beats")
+            push(f"[storyboard] one shot of {_take_secs}s — planning {n_shots} beats")
         storyboard.save_storyboard(STATE_DIR, board)
         push(f"[storyboard] planning {n_shots} shots — "
              f"the renderer's memory is borrowed for about a minute")
@@ -20546,10 +20578,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         requested_upscale_method = "lanczos"
     if requested_upscale_method not in ("lanczos", "pipersr"):
         requested_upscale_method = "lanczos"
-    # ONE TAKE (see take_plan). Read before the fields it overrides: on LTX it
-    # is the windows chain with one prompt per window; on H3 it is 15 s parts
-    # that continue from each other, run by run_take_job_inner. The form's own
-    # length pill is overruled — a take IS the length.
+    # ONE TAKE (see take_plan). Read before the fields it overrides: on both
+    # engines it is parts that continue from each other's last frame, run by
+    # run_take_job_inner — 15 s parts on H3, 10 s parts on LTX. The form's own
+    # length pill is overruled — a take IS the length. `take_light_lock=off`
+    # leaves the beats as written (no continuity sentence); `take_retake=off`
+    # skips the one drift retake per part.
     _take: dict | None = None
     _take_secs_raw = f("take_seconds", "")
     if _take_secs_raw and _take_secs_raw not in ("0", "off"):
@@ -20558,10 +20592,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         if _take is None:
             push(f"take_seconds={_take_secs_raw!r} is not one of {TAKE_SECONDS} — rendering a normal clip")
         else:
-            _lock = take_light_lock(f("prompt", ""))
-            _take["beat_prompts"] = [(b + " " + _lock) if b else b
+            _lock_on = f("take_light_lock", "on").strip().lower() not in ("off", "0", "false", "no")
+            _lock = take_light_lock(f("prompt", "")) if _lock_on else ""
+            _take["beat_prompts"] = [(b + " " + _lock) if (b and _lock) else b
                                      for b in take_beats(f("beats", ""), _take["beats"])]
             _take["light_lock"] = _lock
+            _take["retake"] = f("take_retake", "on").strip().lower() not in ("off", "0", "false", "no")
             if _take["engine"] == "h3":
                 # A take is 15 s parts whatever the form said; without a quality
                 # the tier composer fell back to draft_3s and every part became
@@ -20570,11 +20606,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 if not h3_compose_tier(f("h3_quality", ""), TAKE_H3_PART_LENGTH):
                     form["h3_quality"] = ["draft"]
                 form["h3_chain_prompts"] = [json.dumps(
-                    [_take["beat_prompts"][i] or (TAKE_HOLD + " " + _lock) for i in _take["parts"][0]])]
+                    [_take["beat_prompts"][i] or (TAKE_HOLD + (" " + _lock if _lock else ""))
+                     for i in _take["parts"][0]])]
             else:
-                form["temporal_mode"] = ["windows"]
-                form["frames"] = [str(_take["frames"])]
-                form["window_prompts"] = [json.dumps(_take["beat_prompts"])]
+                # An LTX take is 10 s parts by last-frame handoff, NOT the
+                # windows chain: the parent job carries one part's frames
+                # (what the estimate and the memory plan are sized to) and
+                # the runner derives every part. A leftover
+                # temporal_mode=windows / window_prompts from the form (the
+                # Storyboard door used to send them for a long shot) is
+                # overruled here so the take cannot fall back into the chain.
+                form["frames"] = [str(TAKE_LTX_PART_FRAMES)]
+                form["temporal_mode"] = ["native"]
+                form["window_prompts"] = [""]
     temporal_mode = f("temporal_mode", "native").strip().lower()
     # SLIDING WINDOWS ride the same control as Long Clip Boost — one "Long
     # clips" row, three answers — and are stored as `long_mode` so the render
@@ -23814,14 +23858,20 @@ def _run_windows_chain(job: dict, p: dict, plan: dict, first: Path,
 
 
 def run_take_job_inner(job: dict) -> None:
-    """An H3 take: N parts of 15 s, each three beats, each continuing from the
-    last frame of the part before, joined into one clip. Every part is an
-    ORDINARY H3 render through run_h3_job_inner with a derived job, so LoRAs,
-    Turbo, the export size and the log all behave as they do for a single
-    clip. Stop between parts is honoured through the parent's
-    `cancel_requested` (a running part dies with the H3 process group)."""
+    """One take on either engine: N parts, each continuing from the last frame
+    of the part before, joined into one clip. H3 parts are 15 s (three beats)
+    and render through run_h3_job_inner with `h3_chain_prompts`; LTX parts are
+    10 s (two beats, 241 frames) and render through run_job_inner as ordinary
+    t2v / i2v jobs — the first from the user's own anchor image when the job
+    came in as i2v with one, every later part i2v from the previous part's
+    last frame, anchored. Every part is an ORDINARY render with a derived job,
+    so LoRAs, characters, the quality tier, the export size and the log all
+    behave as they do for a single clip. Stop between parts is honoured
+    through the parent's `cancel_requested` (a running part dies with its
+    engine process)."""
     p = job["params"]
     take = p["take"]
+    engine = "h3" if take.get("engine") == "h3" else "ltx"
     beats = list(take.get("beat_prompts") or [])
     parts = take["parts"]
     n_parts = len(parts)
@@ -23832,48 +23882,88 @@ def run_take_job_inner(job: dict) -> None:
     ff = str(FFMPEG)
     outs: list[str] = []
     last_png: str | None = None
-    push(f"[take] {take['seconds']} s · {take['beats']} beats · {n_parts} parts on H3")
-    for k, idxs in enumerate(parts):
-        if job.get("cancel_requested"):
-            raise RuntimeError("stopped between parts")
-        lock0 = take.get("light_lock") or take_light_lock(p.get("prompt") or "")
-        chain = [(beats[i] if i < len(beats) else "") or (TAKE_HOLD + " " + lock0) for i in idxs]
-        child_params = dict(p)
-        child_params.update({
+    # The continuity lock: "" when the user switched it off (then blank beats
+    # hold with TAKE_HOLD alone and a retake does not double anything).
+    lock = take.get("light_lock")
+    if lock is None:
+        lock = take_light_lock(p.get("prompt") or "")
+    hold = (TAKE_HOLD + " " + lock) if lock else TAKE_HOLD
+    retake_allowed = take.get("retake", True) is not False
+    # The first part may start from the user's anchor image: an i2v job with
+    # an image is a take that opens on that frame. H3's i2v is the same
+    # contract for the first part (its --first-frame conditioning).
+    first_image = (p.get("image") or "") if p.get("mode") in ("i2v", "i2v_clean_audio") else ""
+    if first_image and not Path(first_image).is_file():
+        first_image = ""
+    render_part = run_h3_job_inner if engine == "h3" else run_job_inner
+    push(f"[take] one shot · {take['seconds']} s · {take['beats']} beats · {n_parts} parts on "
+         f"{'H3' if engine == 'h3' else 'LTX'}"
+         + (" · opens on the reference image" if first_image else ""))
+
+    def _child_params(k: int, idxs: list[int], chain: list[str]) -> dict:
+        cp = dict(p)
+        cp.update({
             "take": None,
-            "h3_chain_prompts": chain,
-            "prompt": chain[0],
-            "label": f"{label or 'take'} · part {k + 1} of {n_parts}",
-            "mode": "i2v" if last_png else p.get("mode", "t2v"),
+            "label": f"{label or 'one shot'} · part {k + 1} of {n_parts}",
             "open_when_done": False,
         })
         if last_png:
-            child_params["image"] = last_png
+            cp["mode"] = "i2v"
+            cp["image"] = last_png
+        elif first_image:
+            cp["mode"] = "i2v"
+            cp["image"] = first_image
+        else:
+            cp["mode"] = "t2v"
+        if engine == "h3":
+            cp["h3_chain_prompts"] = chain
+            cp["prompt"] = chain[0]
+        else:
+            # One prompt per part: its beats in order. A part is a plain LTX
+            # render — never the windows chain, never a Long Clip Boost the
+            # profile did not ask for on its own.
+            cp["prompt"] = " ".join(c for c in chain if c)
+            cp["frames"] = take_ltx_part_frames(len(idxs))
+            cp["h3_chain_prompts"] = []
+            cp["temporal_mode"] = "native"
+            cp["long_mode"] = "native"
+            cp["window_prompts"] = []
+            if cp["mode"] == "i2v":
+                cp["i2v_reference_mode"] = "anchor"
+        return cp
+
+    for k, idxs in enumerate(parts):
+        if job.get("cancel_requested"):
+            raise RuntimeError("stopped between parts")
+        chain = [(beats[i] if i < len(beats) else "") or hold for i in idxs]
+        child_params = _child_params(k, idxs, chain)
         child = {"id": f"{job['id']}-p{k + 1}", "params": child_params,
-                 "status": "running", "created_at": job.get("created_at")}
+                 "status": "running", "created_at": job.get("created_at"),
+                 "started_ts": time.time()}
         push(f"[take] beats {idxs[0] + 1}–{idxs[-1] + 1} of {take['beats']} · part {k + 1} of {n_parts}"
              + (" · continues from the last frame" if last_png else ""))
-        run_h3_job_inner(child)
+        render_part(child)
         out = child.get("output_path")
         if not out or not Path(out).is_file():
             raise RuntimeError(f"part {k + 1} produced no clip")
         # CONTINUITY CHECK: did the light move across this part? One retake
         # with the lock said twice and a fresh seed; keep the steadier clip.
+        # Skipped when the user turned retakes off.
         drift = take_drift(out)
-        if drift.get("drifted") and not job.get("cancel_requested"):
+        if drift.get("drifted") and retake_allowed and not job.get("cancel_requested"):
             push(f"[take] part {k + 1}: the light drifted (luma {drift['luma_first']} → "
-                 f"{drift['luma_last']}) — retaking it once with the continuity lock doubled")
-            lock = take.get("light_lock") or take_light_lock(p.get("prompt") or "")
-            retry_params = dict(child_params)
-            retry_params["h3_chain_prompts"] = [(c + " " + lock) if c else c for c in chain]
-            retry_params["prompt"] = retry_params["h3_chain_prompts"][0]
+                 f"{drift['luma_last']}) — retaking it once"
+                 + (" with the continuity lock doubled" if lock else " with a fresh seed"))
+            chain2 = [(c + " " + lock) if (c and lock) else c for c in chain]
+            retry_params = _child_params(k, idxs, chain2)
             try:
                 retry_params["seed"] = str(int(retry_params.get("seed") or 0) + 101)
             except (TypeError, ValueError):
                 retry_params["seed"] = "-1"
             retry = {"id": f"{job['id']}-p{k + 1}r", "params": retry_params,
-                     "status": "running", "created_at": job.get("created_at")}
-            run_h3_job_inner(retry)
+                     "status": "running", "created_at": job.get("created_at"),
+                     "started_ts": time.time()}
+            render_part(retry)
             out2 = retry.get("output_path")
             d2 = take_drift(out2) if out2 and Path(out2).is_file() else {"delta": 9.0}
             if d2.get("delta", 9.0) < drift["delta"]:
@@ -23891,10 +23981,13 @@ def run_take_job_inner(job: dict) -> None:
                         set_hidden(str(out2), True)
                     except Exception:                              # noqa: BLE001
                         pass
+        elif drift.get("drifted"):
+            push(f"[take] part {k + 1}: the light drifted (luma {drift.get('luma_first')} → "
+                 f"{drift.get('luma_last')}) — retakes are off, keeping it")
         job.setdefault("take_drift", []).append(drift)
         outs.append(out)
-        # Parts are working files: kept, hidden from the gallery. The take is
-        # the output.
+        # Parts are working files: kept, hidden from the gallery. The one shot
+        # is the output.
         try:
             set_hidden(str(out), True)
         except Exception:                                          # noqa: BLE001
@@ -23919,15 +24012,27 @@ def run_take_job_inner(job: dict) -> None:
     except (OSError, ValueError):
         side = {}
     side.update({
-        "mode": p.get("mode", "t2v"), "engine": "h3", "prompt": p.get("prompt") or "",
+        "mode": p.get("mode", "t2v"), "engine": engine, "prompt": p.get("prompt") or "",
         "label": label, "elapsed_sec": round(time.time() - t0, 1),
         "frames": take["frames"], "seconds": take["seconds"],
-        "take": {"seconds": take["seconds"], "beats": beats, "parts": outs, "engine": "h3"},
-        "h3_chain_prompts": beats,
+        "take": {"seconds": take["seconds"], "beats": beats, "parts": outs, "engine": engine,
+                 "beats_per_part": take.get("beats_per_part")
+                 or (TAKE_H3_BEATS_PER_PART if engine == "h3" else TAKE_LTX_BEATS_PER_PART),
+                 "part_frames": take.get("part_frames"),
+                 "light_lock": lock, "retake": retake_allowed},
+        "temporal_mode": "native", "long_mode": "native", "window_prompts": [],
     })
+    if engine == "h3":
+        side["h3_chain_prompts"] = beats
+    # The last part's sidecar names ITS image — a handoff frame in the state
+    # dir. The one shot's own image is the user's anchor, or nothing.
+    if first_image:
+        side["image"] = first_image
+    else:
+        side.pop("image", None)
     write_sidecar(final.with_suffix(final.suffix + ".json"), side)
     job["output_path"] = str(final)
-    push(f"[take] done in {round(time.time() - t0)}s → {final.name}")
+    push(f"[take] one shot done in {round(time.time() - t0)}s → {final.name}")
 
 
 def run_job_inner(job: dict) -> None:
@@ -23948,6 +24053,11 @@ def run_job_inner(job: dict) -> None:
         if p.get("take"):
             return run_take_job_inner(job)
         return run_h3_job_inner(job)
+    # ONE TAKE on LTX: parts by last-frame handoff, each an ordinary render
+    # back through this function with `take` cleared. Before the stale-engine
+    # gate on purpose — the parts hit it one by one, with the same words.
+    if p.get("take"):
+        return run_take_job_inner(job)
     # STALE-ENGINE GATE (fleet: 'Model type gemma4_unified not supported.',
     # 19 events / 6 installs, every one a legacy install whose vendored engine
     # predates the Gemma 4 tower). The render would die at first text-encode
@@ -25657,11 +25767,15 @@ def run_job_inner(job: dict) -> None:
                  f"{width}x{height} {model_frames}f{temporal_suffix}")
 
     if windows_plan:
-        # The first window lands beside the final name; the chain writes
-        # `raw_out` itself once the last window is trimmed to length.
+        # The first window is a working file like every other piece of the
+        # chain, so it lives in the job's `.windows/` folder — a `_w0.mp4`
+        # beside the final name showed up in the gallery as its own clip
+        # while the take was still forming (the chain never removed it).
+        # The chain writes `raw_out` itself once the last window is trimmed.
         job_spec["params"]["frames"] = windows_plan["window"]
-        job_spec["params"]["output_path"] = str(
-            raw_out.with_name(raw_out.stem + "_w0" + raw_out.suffix))
+        _w0_dir = OUTPUT / ".windows" / str(job.get("id") or "take")
+        _w0_dir.mkdir(parents=True, exist_ok=True)
+        job_spec["params"]["output_path"] = str(_w0_dir / (raw_out.stem + "_w0" + raw_out.suffix))
     result = HELPER.run(job_spec)
     if "seed_used" in result:
         push(f"seed used: {result['seed_used']}")

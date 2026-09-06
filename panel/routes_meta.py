@@ -111,10 +111,16 @@ def get_take_estimate(h, parsed) -> None:
                     "choices": list(P.TAKE_SECONDS)}, 400)
         return
     minutes = P.take_estimate_minutes(engine, quality, seconds)
+    # `parts` on both engines: H3 15 s parts, LTX 10 s parts (last-frame
+    # handoff, see take_plan). An LTX take is ordinary distilled renders, so
+    # it needs no Q8 pack any more — only an HQ quality would, and that is
+    # the quality chip's own gate.
     h._json({"ok": True, "seconds": plan["seconds"], "beats": plan["beats"],
-                "parts": len(plan["parts"]), "engine": plan["engine"], "frames": plan["frames"],
+                "parts": len(plan["parts"]), "beats_per_part": plan["beats_per_part"],
+                "part_frames": plan["part_frames"], "engine": plan["engine"],
+                "frames": plan["frames"],
                 "minutes": minutes, "eta": (P._fmt_eta(minutes) if minutes else None),
-                "needs_q8": plan["engine"] == "ltx"})
+                "needs_q8": False})
 
 
 @get("/panel/bug-context")

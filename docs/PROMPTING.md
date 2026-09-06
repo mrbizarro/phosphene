@@ -2,7 +2,7 @@
 
 Copy this whole page into your own assistant (ChatGPT, Claude, Codex) and ask it to write your beats. The Storyboard planner already follows these rules on its own; this page is for when you write by hand.
 
-## One take (a clip longer than one pass)
+## One Shot (a clip longer than one pass)
 
 - **One beat = five seconds = one thing that happens.** Lead with the movement: what the subject does, what the camera does, what enters the frame.
 - **A scene change gets a beat of its own.** Going through a door, into a room, onto a bridge: give it its own five seconds, and put the *approach* in the beat before it. A scene change hidden at the end of a busy beat is the one the model skips.
@@ -20,7 +20,7 @@ Copy this whole page into your own assistant (ChatGPT, Claude, Codex) and ask it
 
 ## What not to write
 
-- No "fast forward", "time-lapse" or "montage" in a one-take: the model cuts.
+- No "fast forward", "time-lapse" or "montage" in a One Shot: the model cuts.
 - No two subjects at once unless one of them is the point of the beat.
 - No text on screen; no lettering on signs unless you accept invented words.
 

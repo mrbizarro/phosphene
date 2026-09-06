@@ -6390,5 +6390,504 @@ class TimelineMarkup(unittest.TestCase):
         self.assertIn("var(--border", css)
 
 
+# ---------------------------------------------------------------------------
+# ONE SHOT IS A MODE. The owner's ruling: a continuous shot of 30 s – 2 min is
+# a different way of making a video, not a length on the clip form — its own
+# chip in the mode bar, its own panel (length, beats, anchor image, the two
+# continuity toggles), and a normal clip must never carry take_seconds. These
+# run the REAL setMode / oneshotEnter / oneshotLeave / setTakeSeconds against
+# a DOM shim built from the REAL chips in the markup, so "leaving the mode
+# zeroes the take" is executed, not grepped for.
+# ---------------------------------------------------------------------------
+
+ONESHOT_FUNCTIONS = (
+    "setMode", "defaultRemixMode", "updatePromptPlaceholder",
+    "takePartSeconds", "setTakeSeconds", "takePrefill", "takePrefillClick",
+    "beatsInput", "oneshotActive", "oneshotBackendMode", "oneshotEnter",
+    "oneshotLeave", "oneshotRefreshLabels", "oneshotSyncAnchor",
+    "_setTakeToggle", "setTakeLightLock", "setTakeRetake",
+    "takeLengthLabel", "oneshotSummary", "restoreFoldedLtxLength", "framesToDuration",
+)
+
+ONESHOT_SHIM = r"""
+'use strict';
+// A classList that REMEMBERS, because the assertions read it back.
+function _cls() {
+  const set = new Set();
+  return {
+    add(...a) { a.forEach(x => set.add(x)); },
+    remove(...a) { a.forEach(x => set.delete(x)); },
+    toggle(x, f) { const on = (f === undefined) ? !set.has(x) : !!f; on ? set.add(x) : set.delete(x); return on; },
+    contains(x) { return set.has(x); },
+    get list() { return [...set]; },
+  };
+}
+const _els = {};
+function _mk(id, props) {
+  let _v = '';
+  const e = Object.assign({
+    id, textContent: '', placeholder: '', className: '', innerHTML: '',
+    dataset: {}, hidden: false, style: {}, classList: _cls(), files: [],
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    setAttribute(k, v) { this['_attr_' + k] = v; }, getAttribute(k) { return this['_attr_' + k] ?? null; },
+    removeAttribute(k) { delete this['_attr_' + k]; if (k === 'src') this.src = ''; },
+    appendChild() {}, remove() {}, addEventListener() {}, focus() {}, blur() {},
+    dispatchEvent() { return true; },
+  }, props || {});
+  Object.defineProperty(e, 'value', {
+    get() { return _v; },
+    set(x) { _v = (x === null || x === undefined) ? '' : String(x); },
+    enumerable: true, configurable: true,
+  });
+  if (props && Object.prototype.hasOwnProperty.call(props, 'value')) e.value = props.value;
+  _els[id] = e;
+  return e;
+}
+// The REAL chips: every data-mode in #modeGroup, every data-take in #takeGroup,
+// the two toggle pairs — read out of index.html by the test and handed in.
+const MODE_CHIPS = __MODE_CHIPS__.map((m, i) => _mk('_mode' + i, { dataset: { mode: m } }));
+const TAKE_CHIPS = __TAKE_CHIPS__.map((t, i) => {
+  const parts = _mk('_parts' + i);
+  return _mk('_take' + i, { dataset: { take: String(t) }, querySelector: (sel) => sel === '.take-parts' ? parts : null });
+});
+const LIGHT_CHIPS = ['on', 'off'].map((v, i) => _mk('_light' + i, { dataset: { takeLight: v } }));
+const RETAKE_CHIPS = ['on', 'off'].map((v, i) => _mk('_retake' + i, { dataset: { takeRetake: v } }));
+global.document = {
+  getElementById: (id) => _els[id] || _mk(id),
+  querySelector: () => null,
+  querySelectorAll: (sel) => ({
+    '#modeGroup .pill-btn': MODE_CHIPS,
+    '#takeGroup .pill-btn': TAKE_CHIPS,
+    '#takeLightLockGroup .pill-btn': LIGHT_CHIPS,
+    '#takeRetakeGroup .pill-btn': RETAKE_CHIPS,
+  })[sel] || [],
+  createElement: () => _mk('_tmp'),
+  addEventListener: () => {},
+  readyState: 'complete',
+  body: { dataset: { engine: 'ltx' }, classList: _cls() },
+};
+global.window = global;
+global.console = console;
+const FPS = 24;
+// The LTX length axis as BOOT ships it — key + frames is what the restore reads.
+const BOOT = { ltx: { default_length: '5s', lengths: [
+  { key: '3s', frames: 73 }, { key: '5s', frames: 121 }, { key: '10s', frames: 241 } ] } };
+// The page's initial state, as the markup ships it.
+_mk('mode', { value: 't2v' });
+_mk('ltx_length', { value: '10s' });
+_mk('frames', { value: '241' });
+_mk('duration', { value: '10.00' });
+_mk('take_seconds', { value: '0' });
+_mk('take_light_lock', { value: 'on' });
+_mk('take_retake', { value: 'on' });
+_mk('takeAxes', { hidden: __PANEL_HIDDEN__ });
+_mk('beatsRow', { hidden: true });
+_mk('prompt', { value: 'She pushes off down the avenue. A van sweeps past. She drops off the kerb.' });
+_mk('i2vMode', { value: 'i2v' });   // Image mode's audio-source select, as shipped
+let currentMode = 't2v';
+// setMode's collaborators. Stubs, not extractions: the property under test is
+// the One Shot contract, not the paint.
+const REMIX_MODES = ['ingredients', 'control', 'restore'];
+let LAST_STATUS = null;
+global.ingredientsServed = () => true;
+global._portalLoraPicker = () => {};
+global.renderLorasList = () => {};
+global.updateAccelAvailability = () => {};
+global.updateTemporalAvailability = () => {};
+global.updateDerived = () => {};
+global.updateCustomizeSummary = () => {};
+global.updateModelsCard = () => {};
+global._updateCharsPickerVisibility = () => {};
+global._autoMainOutputsFilterForMode = () => {};
+global._syncEngineForMode = () => {};
+global.isKeyframeModeChipActive = () => false;
+global.setQuality = () => {};
+const refreshed = [];
+global.takeRefresh = async () => { refreshed.push(document.getElementById('take_seconds').value); };
+global.fetch = async () => ({ json: async () => ({ ok: true }) });
+"""
+
+ONESHOT_BODY = r"""
+const $ = (id) => document.getElementById(id);
+const active = (list, key) => list.filter(b => b.classList.contains('active')).map(b => b.dataset[key]);
+const out = {};
+out.start = { mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
+
+setMode('oneshot');
+out.enter = {
+  currentMode, mode: $('mode').value, take: $('take_seconds').value,
+  panelHidden: $('takeAxes').hidden, beatsRowHidden: $('beatsRow').hidden,
+  bodyClass: document.body.classList.contains('oneshot-mode'),
+  chips: active(MODE_CHIPS, 'mode'), takeChips: active(TAKE_CHIPS, 'take'),
+  light: $('take_light_lock').value, retake: $('take_retake').value,
+  lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake'),
+  parts: TAKE_CHIPS.map(b => b.querySelector('.take-parts').textContent),
+  note: $('takeEngineNote').textContent,
+  beats: $('beats').value, beatsHint: $('beatsHint').textContent,
+  placeholder: $('prompt').placeholder,
+  refreshed: refreshed.slice(),
+};
+
+// The switcher moves to H3: the parts are 15 s now, and the note says so.
+document.body.dataset.engine = 'h3';
+oneshotRefreshLabels();
+out.h3 = { parts: TAKE_CHIPS.map(b => b.querySelector('.take-parts').textContent), note: $('takeEngineNote').textContent };
+document.body.dataset.engine = 'ltx';
+oneshotRefreshLabels();
+
+// An anchor image flips the backend mode to i2v; clearing it flips back.
+$('image').value = '/uploads/frame_one.png';
+oneshotSyncAnchor();
+out.anchored = { mode: $('mode').value, thumbHidden: $('oneshotAnchorThumb').hidden,
+                 thumbSrc: $('oneshotAnchorThumb').src, clearHidden: $('oneshotAnchorClear').hidden,
+                 name: $('oneshotAnchorName').textContent };
+$('image').value = '';
+oneshotSyncAnchor();
+out.unanchored = { mode: $('mode').value, thumbHidden: $('oneshotAnchorThumb').hidden, clearHidden: $('oneshotAnchorClear').hidden };
+
+// The toggles write the hidden fields make_job reads, as on/off.
+setTakeLightLock('off'); setTakeRetake('off');
+out.toggledOff = { light: $('take_light_lock').value, retake: $('take_retake').value,
+                   lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake') };
+setTakeLightLock('garbage'); setTakeRetake(undefined);
+out.toggledBack = { light: $('take_light_lock').value, retake: $('take_retake').value };
+
+// A longer shot, and the beats button over a box that already has lines.
+setTakeSeconds(120);
+$('beats_text').value = 'only one line';
+beatsInput();
+out.len120 = { take: $('take_seconds').value, takeChips: active(TAKE_CHIPS, 'take'), beats: $('beats').value };
+takePrefillClick();
+out.prefilled = { lines: $('beats_text').value.split('\n').length, beats: $('beats').value };
+
+// The footer strip's summary, per engine, from the same length.
+out.summary = {
+  ltx60: oneshotSummary(60, 'ltx'), h3_90: oneshotSummary(90, 'h3'),
+  ltx30: oneshotSummary(30, 'ltx'), ltx120: oneshotSummary(120, 'ltx'), off: oneshotSummary(0, 'ltx'),
+  labels: [30, 45, 60, 90, 120].map(takeLengthLabel),
+};
+// An engine round trip while the Length strip is folded: H3's tier wrote 73
+// into #frames; the restore puts the folded LTX length (10s → 241) back.
+$('frames').value = '73'; $('duration').value = '3.00';
+out.restored = { ok: restoreFoldedLtxLength(), frames: $('frames').value, duration: $('duration').value };
+// LEAVING the mode: any other setMode zeroes the take and folds the panel —
+// and puts the two continuity fields back to on, so a normal clip's sidecar
+// carries no One Shot noise. Both are left OFF here on purpose.
+setTakeLightLock('off'); setTakeRetake('off');
+setMode('t2v');
+out.leave = {
+  currentMode, mode: $('mode').value, take: $('take_seconds').value, beats: $('beats').value,
+  panelHidden: $('takeAxes').hidden, bodyClass: document.body.classList.contains('oneshot-mode'),
+  chips: active(MODE_CHIPS, 'mode'),
+  light: $('take_light_lock').value, retake: $('take_retake').value,
+  lightChips: active(LIGHT_CHIPS, 'takeLight'), retakeChips: active(RETAKE_CHIPS, 'takeRetake'),
+};
+// ...including the early-return modes (character returns before the generic
+// path), which is where a hook placed too low would miss.
+setMode('oneshot');
+out.reenter = { take: $('take_seconds').value, panelHidden: $('takeAxes').hidden, takeChips: active(TAKE_CHIPS, 'take') };
+setMode('character');
+out.leaveViaCharacter = { currentMode, mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
+// A One Shot with an anchor enters straight into i2v.
+$('image').value = '/uploads/frame_one.png';
+setMode('oneshot');
+out.enterAnchored = { mode: $('mode').value, take: $('take_seconds').value };
+setMode('i2v');
+out.leaveToImage = { mode: $('mode').value, take: $('take_seconds').value, panelHidden: $('takeAxes').hidden };
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _oneshot_markup(src: str) -> dict:
+    """The real chips out of the real markup, for the shim."""
+    html = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
+    bar = html[html.index('id="modeGroup"'):]
+    bar = bar[:bar.index("</div>")]
+    modes = re.findall(r'data-mode="([^"]+)"', bar)
+    group = html[html.index('id="takeGroup"'):]
+    group = group[:group.index("</div>")]
+    takes = [int(t) for t in re.findall(r'data-take="(\d+)"', group)]
+    panel = extract_element("takeAxes", src)
+    return {"modes": modes, "takes": takes, "panel_hidden": " hidden" in panel or panel.endswith("hidden>")}
+
+
+def run_oneshot_contract() -> dict:
+    if NODE is None:
+        raise unittest.SkipTest("node not on PATH")
+    source = panel_source()
+    m = _oneshot_markup(source)
+    shim = (ONESHOT_SHIM
+            .replace("__MODE_CHIPS__", json.dumps(m["modes"]))
+            .replace("__TAKE_CHIPS__", json.dumps(m["takes"]))
+            .replace("__PANEL_HIDDEN__", "true" if m["panel_hidden"] else "false"))
+    # The length table is a module const, not a function — read it as it is.
+    choices = re.search(r"^const TAKE_CHOICES = \[[^\]]*\];", source, re.M)
+    if not choices:
+        raise AssertionError("TAKE_CHOICES not found in the panel source")
+    # The remembered length is a module `let`, read as it is like the table.
+    last = re.search(r"^let _oneshotLastSeconds = \d+;", source, re.M)
+    if not last:
+        raise AssertionError("_oneshotLastSeconds not found in the panel source")
+    script = (shim + choices.group(0) + "\n" + last.group(0) + "\n"
+              + "\n".join(extract_function(n, source) for n in ONESHOT_FUNCTIONS)
+              + "\n" + ONESHOT_BODY)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(script)
+        path = Path(fh.name)
+    try:
+        result = subprocess.run([NODE, str(path)], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(result.stdout + "\n" + result.stderr)
+        return json.loads(result.stdout)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+class OneShotIsAMode(unittest.TestCase):
+    """The mode chip, the panel, and the one property that matters most: a
+    normal clip never carries take_seconds."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = panel_source()
+        cls.html = (ROOT / "webapp" / "index.html").read_text(encoding="utf-8")
+        cls.r = run_oneshot_contract()
+
+    # ---- the markup ---------------------------------------------------------
+    def test_the_chip_is_in_the_mode_bar_between_image_and_fflf(self):
+        bar = self.html[self.html.index('id="modeGroup"'):]
+        bar = bar[:bar.index("</div>")]
+        modes = re.findall(r'data-mode="([^"]+)"', bar)
+        self.assertIn("oneshot", modes)
+        self.assertEqual(modes.index("oneshot"), modes.index("i2v") + 1)
+        self.assertEqual(modes[modes.index("oneshot") + 1], "keyframe")
+        chip = re.search(r'<button[^>]*data-mode="oneshot"[^>]*>(.*?)</button>', bar, re.S).group(1)
+        self.assertTrue(chip.startswith("One Shot"))
+        self.assertIn("never cuts", chip)
+
+    def test_the_panel_ships_folded_and_keeps_its_ids(self):
+        el = extract_element("takeAxes", self.src)
+        self.assertIn("hidden", el)
+        self.assertIn("oneshot-panel", el)
+        panel = self.html[self.html.index('id="takeAxes"'):]
+        panel = panel[:panel.index('id="takeEngineNote"')]
+        for needed in ('id="takeGroup"', 'id="beatsRow"', 'id="beats_text"', 'id="beatsHint"',
+                       'id="takeEstimate"', 'id="beatsPrefillBtn"', 'id="oneshotAnchorFile"',
+                       'id="oneshotAnchorThumb"', 'id="oneshotAnchorClear"',
+                       'id="takeLightLockGroup"', 'id="takeRetakeGroup"',
+                       'href="/docs/prompting"'):
+            self.assertIn(needed, panel, needed)
+        # In its own mode there is no Off chip — leaving the mode is Off.
+        takes = re.findall(r'data-take="(\d+)"', panel)
+        self.assertEqual(takes, ["30", "45", "60", "90", "120"])
+
+    def test_the_two_continuity_fields_are_in_the_video_form_and_default_on(self):
+        form = self.html[self.html.index('id="genForm"'):]
+        form = form[:form.index("</form>")]
+        for name in ("take_light_lock", "take_retake"):
+            el = extract_element(name, form)
+            self.assertIn('type="hidden"', el)
+            self.assertIn(f'name="{name}"', el)
+            self.assertIn('value="on"', el)
+        # ...and the fields they sit beside, so FormData posts the whole shot.
+        for name in ("take_seconds", "beats", "image"):
+            self.assertIn(f'name="{name}"', form)
+
+    def test_the_old_name_is_gone_from_everything_a_user_reads(self):
+        stray = []
+        files = [ROOT / "webapp" / "index.html", ROOT / "docs" / "PROMPTING.md",
+                 *sorted((ROOT / "webapp" / "js").glob("*.js"))]
+        for f in files:
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r"\bone[ -]take\b", line, re.I):
+                    stray.append(f"{f.name}:{i}: {line.strip()[:80]}")
+        self.assertEqual(stray, [], "the feature is called One Shot")
+
+    # ---- the executed contract ----------------------------------------------
+    def test_a_fresh_page_carries_no_take(self):
+        self.assertEqual(self.r["start"], {"mode": "t2v", "take": "0", "panelHidden": True})
+
+    def test_entering_the_mode_opens_the_panel_on_t2v_with_a_length(self):
+        e = self.r["enter"]
+        self.assertEqual(e["currentMode"], "oneshot")
+        self.assertEqual(e["mode"], "t2v")
+        self.assertEqual(e["take"], "60")
+        self.assertFalse(e["panelHidden"])
+        self.assertFalse(e["beatsRowHidden"])
+        self.assertTrue(e["bodyClass"])
+        self.assertEqual(e["chips"], ["oneshot"])
+        self.assertEqual(e["takeChips"], ["60"])
+        self.assertIn("never cuts", e["placeholder"])
+        self.assertEqual(e["refreshed"], ["60"], "the estimate is asked for on entry")
+
+    def test_the_beats_prefill_from_the_prompt_on_entry(self):
+        e = self.r["enter"]
+        self.assertEqual(json.loads(e["beats"])[:3],
+                         ["She pushes off down the avenue.", "A van sweeps past.", "She drops off the kerb."])
+        self.assertIn("12 lines of 5 s", e["beatsHint"])
+        self.assertIn("3 written", e["beatsHint"])
+        self.assertIn("leave a line blank to hold on the scene", e["beatsHint"])
+        self.assertNotIn("beats of", e["beatsHint"])
+
+    def test_the_toggles_default_on_and_write_on_off(self):
+        e = self.r["enter"]
+        self.assertEqual((e["light"], e["retake"]), ("on", "on"))
+        self.assertEqual((e["lightChips"], e["retakeChips"]), (["on"], ["on"]))
+        t = self.r["toggledOff"]
+        self.assertEqual((t["light"], t["retake"]), ("off", "off"))
+        self.assertEqual((t["lightChips"], t["retakeChips"]), (["off"], ["off"]))
+        self.assertEqual(self.r["toggledBack"], {"light": "on", "retake": "on"})
+
+    def test_parts_are_10s_on_ltx_and_15s_on_h3(self):
+        # One line per chip — "3 × 10 s", not "3 PARTS OF 10 S" wrapping to a
+        # 95px chip — so the strip keeps the Quality strip's height.
+        self.assertEqual(self.r["enter"]["parts"],
+                         ["3 × 10 s", "5 × 10 s", "6 × 10 s", "9 × 10 s", "12 × 10 s"])
+        self.assertEqual(self.r["enter"]["note"], "LTX — 10-second parts that continue from the last frame.")
+        self.assertEqual(self.r["h3"]["parts"],
+                         ["2 × 15 s", "3 × 15 s", "4 × 15 s", "6 × 15 s", "8 × 15 s"])
+        self.assertEqual(self.r["h3"]["note"], "Hailuo H3 — 15-second parts that continue from each other.")
+        self.assertNotIn("proven", self.r["h3"]["note"])
+
+    def test_the_footer_strip_says_the_shot_not_a_five_second_clip(self):
+        s = self.r["summary"]
+        self.assertEqual(s["ltx60"], "1 min · 6 parts of 10 s")
+        self.assertEqual(s["h3_90"], "1½ min · 6 parts of 15 s")
+        self.assertEqual(s["ltx30"], "30 s · 3 parts of 10 s")
+        self.assertEqual(s["ltx120"], "2 min · 12 parts of 10 s")
+        self.assertEqual(s["off"], "", "no shot, no summary — the clip line stays")
+        self.assertEqual(s["labels"], ["30 s", "45 s", "1 min", "1½ min", "2 min"])
+        fn = extract_function("updateDerived", self.src)
+        self.assertIn("oneshotSummary", fn)
+        self.assertIn("take_seconds", fn)
+        self.assertLess(fn.index("derivedFooter"), fn.index("oneshotSummary"),
+                        "the summary is the FOOTER strip's line")
+
+    def test_an_engine_round_trip_leaves_the_folded_ltx_length_alone(self):
+        r = self.r["restored"]
+        self.assertTrue(r["ok"])
+        self.assertEqual((r["frames"], r["duration"]), ("241", "10.00"))
+        fn = extract_function("setEngine", self.src)
+        self.assertIn("restoreFoldedLtxLength", fn)
+        # The snap from H3's 17n+5 grid is what wrote "3s" onto the folded
+        # strip; in One Shot the restore runs INSTEAD of it, not after it.
+        i = fn.index("currentMode === 'oneshot'")
+        self.assertLess(i, fn.index("snapFramesTo8kPlus1();"))
+        self.assertIn("setTakeSeconds", fn, "the mode's own state is re-asserted after the swap")
+
+    def test_an_anchor_image_makes_it_i2v_and_clearing_it_makes_it_t2v(self):
+        a = self.r["anchored"]
+        self.assertEqual(a["mode"], "i2v")
+        self.assertFalse(a["thumbHidden"])
+        self.assertIn("frame_one.png", a["thumbSrc"])
+        self.assertFalse(a["clearHidden"])
+        self.assertEqual(a["name"], "frame_one.png")
+        self.assertEqual(self.r["unanchored"], {"mode": "t2v", "thumbHidden": True, "clearHidden": True})
+        self.assertEqual(self.r["enterAnchored"], {"mode": "i2v", "take": "120"},
+                         "the remembered length, not the default")
+
+    def test_a_length_chip_and_the_write_the_beats_button(self):
+        self.assertEqual(self.r["len120"]["take"], "120")
+        self.assertEqual(self.r["len120"]["takeChips"], ["120"])
+        self.assertEqual(json.loads(self.r["len120"]["beats"]), ["only one line"])
+        self.assertEqual(self.r["prefilled"]["lines"], 3)
+
+    def test_leaving_the_mode_zeroes_the_take_and_folds_the_panel(self):
+        for key in ("leave", "leaveViaCharacter", "leaveToImage"):
+            l = self.r[key]
+            self.assertEqual(l["take"], "0", key)
+            self.assertTrue(l["panelHidden"], key)
+        l = self.r["leave"]
+        self.assertEqual(l["currentMode"], "t2v")
+        self.assertEqual(l["mode"], "t2v")
+        self.assertEqual(l["beats"], "")
+        self.assertFalse(l["bodyClass"])
+        self.assertEqual(l["chips"], ["t2v"])
+        self.assertEqual(self.r["leaveViaCharacter"]["currentMode"], "character")
+        self.assertEqual(self.r["leaveToImage"]["mode"], "i2v")
+
+    def test_leaving_the_mode_puts_the_continuity_fields_back_to_on(self):
+        # Both were switched OFF before leaving. They are hidden inputs in the
+        # video form, so FormData posts them with every clip — a normal clip
+        # must not carry an "off" from a mode it is not in.
+        l = self.r["leave"]
+        self.assertEqual((l["light"], l["retake"]), ("on", "on"))
+        self.assertEqual((l["lightChips"], l["retakeChips"]), (["on"], ["on"]))
+
+    def test_the_length_is_remembered_across_leaving_and_re_entering(self):
+        # 120 was chosen, the mode was left (take → 0) and re-entered: the
+        # panel reopens on 2 min, not on the 1 min default.
+        self.assertEqual(self.r["reenter"], {"take": "120", "panelHidden": False, "takeChips": ["120"]})
+
+    # ---- the copy -----------------------------------------------------------
+    def _panel_text(self):
+        panel = self.html[self.html.index('id="takeAxes"'):]
+        panel = panel[:panel.index('id="takeEngineNote"')]
+        panel = re.sub(r"<!--.*?-->", " ", panel, flags=re.S)
+        return re.sub(r"<[^>]+>", " ", panel)
+
+    def test_the_word_take_is_not_in_anything_a_user_reads(self):
+        text = self._panel_text()
+        self.assertFalse(re.search(r"\b(re)?takes?\b", text, re.I), text)
+        for fn in ("beatsInput", "oneshotRefreshLabels", "takeRefresh", "oneshotSummary", "takeLengthLabel"):
+            body = extract_function(fn, self.src)
+            strings = re.findall(r"""(['"`])((?:(?!\1).)*)\1""", body)
+            for _, lit in strings:
+                if lit[:1] in "./#":      # a selector, an id or a URL — not copy
+                    continue
+                self.assertFalse(re.search(r"\b(re)?takes?\b", lit, re.I), f"{fn}: {lit}")
+
+    def test_the_panel_copy(self):
+        text = " ".join(self._panel_text().split())
+        for needed in ("Start frame", "optional · the shot starts from this picture",
+                       "Split my prompt into beats",
+                       "one line per 5 seconds — what happens in that moment",
+                       "Lock the light", "keeps the time of day and weather the same in every line",
+                       "Redo a part that drifts", "if a part changes the light, it is rendered once more"):
+            self.assertIn(needed, text, needed)
+        for gone in ("Anchor image", "Write the beats for me", "Retake", "holds the moment"):
+            self.assertNotIn(gone, text, gone)
+        # The split button lives in the Beats label row, not on a row of its own.
+        row = self.html[self.html.index('id="beatsRow"'):self.html.index('id="beats_text"')]
+        self.assertIn('id="beatsPrefillBtn"', row)
+        self.assertNotIn("beats-tools", self.html)
+        # The hint counter and the overflow line, executed.
+        self.assertIn("extra line", extract_function("beatsInput", self.src))
+        self.assertIn("will be dropped", extract_function("beatsInput", self.src))
+
+    def test_the_storyboard_names_it_one_shot(self):
+        chip = re.search(r'<button[^>]*data-sb-shots="take"[^>]*>(.*?)</button>', self.html, re.S).group(1)
+        self.assertIn(">One Shot<", chip)
+        row = self.html[self.html.index('id="sbTakeRow"'):self.html.index('id="sbTakeGroup"')]
+        self.assertIn("One Shot length", row)
+        self.assertNotIn("How long", row)
+        # ...and the row really folds: .cz-control sets a display of its own.
+        css = (ROOT / "webapp" / "style" / "panel.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.cz-control\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}")
+
+    def test_the_leave_hook_runs_before_every_early_return(self):
+        fn = extract_function("setMode", self.src)
+        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'train')"))
+        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'character')"))
+        self.assertLess(fn.index("oneshotLeave"), fn.index("if (mode === 'image')"))
+
+    def test_load_params_reopens_a_one_shot_from_its_sidecar(self):
+        fn = extract_function("loadParams", self.src)
+        self.assertIn("setMode('oneshot')", fn)
+        self.assertLess(fn.index("setMode('oneshot')"), fn.index("setMode('extend')"))
+        self.assertIn("setTakeLightLock", fn)
+        self.assertIn("setTakeRetake", fn)
+
+    def test_the_engine_switch_refreshes_the_part_labels(self):
+        fn = extract_function("setEngine", self.src)
+        self.assertIn("oneshotRefreshLabels", fn)
+        self.assertIn("takeRefresh", fn)
+
+    def test_both_engines_serve_the_mode(self):
+        fn = extract_function("engineServesMode", self.src)
+        self.assertIn("mode === 'oneshot'", fn)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

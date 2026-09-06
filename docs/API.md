@@ -142,22 +142,42 @@ Submit multiple prompts as one batch.
 A clip longer than a single pass, on either engine. `take_seconds` is one of
 30 / 45 / 60 / 90 / 120; `beats` is a JSON list (or newline text) with one
 prompt per five seconds — a blank beat holds the previous moment, extras are
-dropped. The take overrules the engine's own length field:
+dropped. The take overrules the engine's own length field. On BOTH engines it
+renders as PARTS chained by last-frame handoff — `run_take_job_inner` runs one
+ordinary render per part, each starting from the last frame of the one before
+(i2v, anchored), hides the parts from the gallery and joins them into
+`<name>_take<seconds>s.mp4`:
 
-| engine | what make_job does | worker |
-|---|---|---|
-| `ltx` | `long_mode=windows`, `frames = seconds·24+1`, `window_prompts = beats` | the windows chain (needs the Q8 pack) |
-| `h3` | `h3_length=15s`, parts of three beats | `run_take_job_inner`: one ordinary H3 render per part, each starting from the last frame of the one before (`--first-frame`), parts hidden from the gallery, joined into `<name>_take<seconds>s.mp4` with a sidecar carrying `take.{seconds,beats,parts}` |
+| engine | part | what make_job does | worker |
+|---|---|---|---|
+| `ltx` | 10 s = two beats = 241 frames (a 45 s take ends on a one-beat 121-frame part) | `frames = 241`, `temporal_mode = native` (a take is never the windows chain, whatever the form sent) | one ordinary LTX render per part through `run_job_inner`: part 1 is `t2v`, or `i2v` from the job's own `image` when it came in as `i2v`; every later part is `i2v` from the previous part's last frame with `i2v_reference_mode = anchor`. Any quality; the Q8 pack is only needed by an HQ quality, as for a single clip |
+| `h3` | 15 s = three beats | `h3_length=15s`, `h3_chain_prompts` = the first part's beats | one ordinary H3 render per part (`--first-frame` from the previous last frame) |
 
-`params.take` on the job: `{seconds, beats, parts, frames, engine, beat_prompts}`.
-Load Params restores a take as a take.
+Two optional fields, both default `on`:
+
+| field | `off` means |
+|---|---|
+| `take_light_lock` | the continuity sentence (`take_light_lock()` — "it is still night…") is NOT appended to the beats; `take.light_lock` is `""` and a blank beat holds with the hold sentence alone |
+| `take_retake` | a part whose light drifts past `TAKE_DRIFT_MAX` is kept as rendered instead of being retaken once with a fresh seed; `take.retake` is `false` |
+
+`params.take` on the job: `{seconds, beats, parts, frames, part_frames,
+beats_per_part, engine, beat_prompts, light_lock, retake}` — `frames` is the
+whole take (`seconds·24+1` on LTX), `part_frames` one full part. The output's
+sidecar carries `take.{seconds, beats, parts, engine, beats_per_part,
+part_frames, light_lock, retake}` with `parts` the hidden part files, and
+`image` only when the take opened on the user's own anchor. Load Params
+restores a take as a take.
 
 ### `GET /take/estimate`
 
 `?engine=h3|ltx&quality=<engine quality key>&seconds=<take_seconds>` →
-`{ ok, seconds, beats, parts, engine, frames, minutes, eta, needs_q8 }`. Minutes
-come from the same cost model as every other estimate (H3: the measured 15 s
-cell × parts); `null` where this Mac has no number (LTX windows are unpriced).
+`{ ok, seconds, beats, parts, beats_per_part, part_frames, engine, frames,
+minutes, eta, needs_q8 }`. `parts` is the part count on both engines. Minutes
+are parts × the single-clip price of one part from the same cost model as
+every other estimate (H3: the measured 15 s cell; LTX: the quality's `10s`
+cell of `LTX_TIERS`, the one-beat tail at its `5s` cell); `null` where this
+Mac has no number. `needs_q8` is always `false` now — an LTX take renders on
+whatever the chosen quality renders on.
 
 ### `GET /status`
 

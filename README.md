@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second one take made in Phosphene" width="100%">
+  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second One Shot made in Phosphene" width="100%">
   <br>
-  <sub><b>The Commuter</b> — a 75-second one take, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One take control, from a single designed still. <a href="https://github.com/mrbizarro/phosphene/releases/latest">Watch the full film in the release</a>.</sub>
+  <sub><b>The Commuter</b> — a 75-second One Shot, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One Shot mode, from a single designed still. <a href="https://github.com/mrbizarro/phosphene/releases/latest">Watch the full film in the release</a>.</sub>
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.8.** **LTX Upscale**: any finished clip, an H3 draft above all, re-rendered at twice its size by the LTX-2.5 Pixel Spatial Upscaler with real generated detail, keeping its sound — a button on every video card, a Remix mode, and an **LTX ×2** option in the H3 form that queues the upscale behind the draft in one click. Presets Faithful (face and lips stay), Quick and Re-imagine. Also in this line: Extend renders again (broken since 4.10.2), One take sits under Quality and Length, LoRAs stack on Hailuo H3, Browse CivitAI search works again. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.11.0.** **One Shot** is its own way of making video: a continuous shot of 30 s to 2 min that never cuts, next to Text, Character and Image — pick a length, write one line per 5 seconds, add a start frame if you like, keep the light locked, and see the real time for your Mac. LTX one shots hold together now (parts that continue from the last frame, like Hailuo H3's), and the Storyboard planner can place a One Shot inside a film. Also in this line: LTX Upscale, Extend fixed, LoRAs stack on Hailuo H3. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

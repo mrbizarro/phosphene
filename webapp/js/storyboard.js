@@ -377,8 +377,8 @@ function sbLocInput() {
 }
 
 let _sbShots = 12;
-// ONE TAKE is the fifth answer on the Shots row: a film that is one shot,
-// planned as beats. `_sbTake` is 0 (off) or the take's length in seconds.
+// ONE SHOT is the fifth answer on the Shots row: a film that is one shot,
+// planned as beats. `_sbTake` is 0 (off) or the shot's length in seconds.
 let _sbTake = 0;
 function sbSetShots(n, persist) {
   const take = (n === 'take');
@@ -1436,7 +1436,7 @@ function sbShotCard(s, r, errs) {
     <textarea class="sb-shot-prompt" rows="3" spellcheck="false" data-act="prompt"
       ${locked ? 'readonly' : ''} title="${escapeHtml(s.title || '')}">${escapeHtml(s.prompt || '')}</textarea>
     ${s.take_seconds ? `
-    <div class="sb-beats-label">One take · ${s.take_seconds} s · ${Math.round(s.take_seconds / 5)} beats <span class="sub">one line per 5 seconds · the first beat is the prompt above</span></div>
+    <div class="sb-beats-label">One Shot · ${s.take_seconds} s · ${Math.round(s.take_seconds / 5)} beats <span class="sub">one line per 5 seconds · the first beat is the prompt above</span></div>
     <textarea class="sb-shot-prompt sb-beats" rows="${Math.min(12, Math.round(s.take_seconds / 5))}" spellcheck="false" data-act="beats"
       ${locked ? 'readonly' : ''}>${escapeHtml((s.beats || []).join('\n'))}</textarea>` : ''}
     ${mine.length ? `<div class="sb-shot-err">${mine.map(sbErrRow).join('')}</div>` : ''}

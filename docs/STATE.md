@@ -1,5 +1,35 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-07 — v4.11.0 ships: One Shot.** The mode chip + panel, LTX
+> one shots by last-frame handoff (proven on a 40 s bar conversation:
+> four 10 s parts, same people, same room, camera moving), the planner's
+> One Shot rule, the UX-walk fixes, the stray `_w0` gallery clip. Carries
+> 4.10.5–4.10.8.
+
+> **🎬 2026-09-07 — One Shot: its own mode, LTX by last-frame handoff, the planner
+> may place one in a film (on dev).** Measured tonight: an LTX 45 s take through
+> the windows chain (Extend with 121 f tail context) turns to mush at the FIRST
+> extension — faces smear, audio of the new piece peaks at −38 dB — at 27 min a
+> window (`mlx_outputs/.experiments/night_ltx_take45/`). So an LTX one shot now
+> renders like H3's: parts by last-frame handoff (10 s / 2 beats on LTX, 15 s /
+> 3 beats on H3), part 1 t2v or from the user's anchor image, later parts i2v
+> anchored on the previous last frame; `take_plan` carries `part_frames` /
+> `beats_per_part`; `run_take_job_inner` is engine-aware and calls
+> `run_job_inner` for LTX parts; new fields `take_light_lock` / `take_retake`;
+> `/take/estimate` returns parts for both engines (`test_take.py`, 22). The
+> windows chain stays only behind Long clips → windows. **UI:** the owner named
+> the feature **One Shot** and wanted it "a different part of the tooling": a
+> `data-mode="oneshot"` chip after Image with its own panel (#takeAxes: length,
+> beats + "Write the beats for me", anchor image reusing the i2v `image` field,
+> Lock the light / Retake toggles, estimate, engine note); leaving the mode
+> resets `take_seconds`; Load Params reopens it from `take.seconds`; "One take"
+> renamed everywhere users read it (`test_storyboard_editor_ui.py`
+> OneShotIsAMode, 16). **Planner:** `_ONE_SHOT` rule block + example in
+> storyboard_planner.py — a shot may carry `take_seconds` + `beats`, chosen for
+> a walk-and-talk / chase or POV / monologue / reveal / arrival, at most one or
+> two per film; storyboard.py validates, prices per engine's parts and posts
+> ONE job (`test_storyboard_one_shot.py`, 14; docs/STORYBOARD.md).
+
 > **🚀 2026-09-06 — v4.10.8 ships (dev promoted whole; main = dev tree).**
 > Upscale ×2 / LTX Upscale goes public: the card button, Remix → Upscale ×2,
 > and LTX ×2 in the H3 form (chain), presets Faithful (3 refine steps from

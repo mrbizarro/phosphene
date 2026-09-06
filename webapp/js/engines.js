@@ -55,6 +55,11 @@ function engineStatus(e) {
 // is the copy that decides.
 function engineServesMode(e, mode) {
   if (!e) return false;
+  // 'oneshot' is a UI mode that submits t2v (or i2v with an anchor) plus
+  // take_seconds; both engines render it — H3 as 15 s parts, LTX as 10 s —
+  // so it is asked about as the mode it ships under. Without this the chip
+  // would be folded as eng-foreign on H3, the engine the feature was built on.
+  if (mode === 'oneshot') mode = 't2v';
   if ((e.excluded_modes || []).indexOf(mode) !== -1) return false;
   if (!e.modes) return true;
   return e.modes.indexOf(mode) !== -1;
