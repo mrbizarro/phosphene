@@ -312,7 +312,21 @@ function sbeFps() { return (typeof FPS === 'number' && FPS > 0) ? FPS : 24; }
 // save payload testable in node rather than by eye — see
 // test_storyboard_editor_ui.py, which runs these exact functions.
 // ---------------------------------------------------------------------------
-function sbeLen(c) { return Math.max(SBE_MIN_CLIP, sbeNum(c.end) - sbeNum(c.start)); }
+// SPEED, ON THE CLIP. The mirror of `clip_speed()`: video only, clamped to
+// the same range, 1x when absent. Every length on the film goes through
+// `sbeLen`, so the one division below is the whole of what retiming does to
+// the layout — a 2x clip owns half the slot its window used to.
+const SBE_SPEED_MIN = 0.25;
+const SBE_SPEED_MAX = 4.0;
+function sbeSpeed(c) {
+  if (!c || sbeKind(c) !== 'video') return 1;
+  const s = sbeNum(c.speed, 1);
+  if (!(s > 0)) return 1;
+  return sbeRound(Math.max(SBE_SPEED_MIN, Math.min(SBE_SPEED_MAX, s)));
+}
+function sbeLen(c) {
+  return Math.max(SBE_MIN_CLIP, (sbeNum(c.end) - sbeNum(c.start)) / sbeSpeed(c));
+}
 
 // Each clip owns the gap that PRECEDES it. That single choice is what makes
 // every operation below a one-liner: a move is "change which gap you own", a
@@ -556,9 +570,13 @@ function sbeClipAudio(c) {
   const vs = sbeNum((c || {}).start), ve = sbeNum((c || {}).end);
   const fs = sbeNum((c || {}).film_start);
   const a = (c || {}).audio;
+  // THE SOUND RUNS AT THE CLIP'S SPEED, linked or not — the mirror of
+  // `clip_audio()`. `len` is the strip's length ON THE FILM.
+  const sp = sbeSpeed(c);
   if (!a || typeof a !== 'object' || sbeKind(c) !== 'video') {
     return { start: vs, end: ve, film_start: fs, linked: true,
-             coupled: false, split: false, len: Math.max(0, ve - vs) };
+             coupled: false, split: false, speed: sp,
+             len: sbeRound(Math.max(0, ve - vs) / sp) };
   }
   // THE PRESENCE OF THE FIELD IS THE SWITCH, not the values in it. Unlinking
   // writes the window the clip already has, so an equality test read a
@@ -572,8 +590,8 @@ function sbeClipAudio(c) {
   const f2 = sbeNum(a.film_start, fs);
   const coupled = a.linked === true;
   return { start: sbeRound(s2), end: sbeRound(e2), film_start: sbeRound(f2),
-           linked: coupled, coupled: coupled, split: true,
-           len: Math.max(0, sbeRound(e2 - s2)) };
+           linked: coupled, coupled: coupled, split: true, speed: sp,
+           len: sbeRound(Math.max(0, e2 - s2) / sp) };
 }
 
 // Rebuild the stored object from a window, keeping the coupling flag out of
@@ -654,13 +672,15 @@ function sbeAudioEdit(clips, id, mode, want) {
     // case exactly: you pull his line back under the previous shot and the
     // tail silently loses the same seconds off the end of the line you were
     // keeping.
-    const room = Math.min(t0, sbeRound(film + (end - start) - SBE_MIN_CLIP));
+    // FILM seconds on the lane, SOURCE seconds in the window: a retimed
+    // strip moves `speed` seconds of take for every film second dragged.
+    const room = Math.min(t0, sbeRound(film + (end - start) / w.speed - SBE_MIN_CLIP));
     let delta = sbeRound(room - film);
-    if (start + delta < 0) delta = sbeRound(-start);
-    start = sbeRound(start + delta);
+    if (start + delta * w.speed < 0) delta = sbeRound(-start / w.speed);
+    start = sbeRound(start + delta * w.speed);
     film = sbeRound(film + delta);
   } else {
-    let e = sbeRound(start + Math.max(SBE_MIN_CLIP, t0 - film));
+    let e = sbeRound(start + Math.max(SBE_MIN_CLIP, t0 - film) * w.speed);
     if (src > 0) e = Math.min(e, sbeRound(src));
     end = Math.max(sbeRound(start + SBE_MIN_CLIP), e);
   }
@@ -679,8 +699,10 @@ function sbeAudioEdit(clips, id, mode, want) {
 function sbeAudioDrift(c) {
   const w = sbeClipAudio(c);
   if (!w.split) return 0;
-  return sbeRound((w.film_start - w.start)
-                  - (sbeNum((c || {}).film_start) - sbeNum((c || {}).start)));
+  // On the film's clock: a source second is `1/speed` film seconds on both
+  // halves, the same arithmetic `clip_audio_drift()` does.
+  return sbeRound((w.film_start - w.start / w.speed)
+                  - (sbeNum((c || {}).film_start) - sbeNum((c || {}).start) / w.speed));
 }
 
 function sbeAudioInSync(c) { return Math.abs(sbeAudioDrift(c)) <= SBE_SYNC_TOL; }
@@ -809,7 +831,7 @@ function sbeResyncAudio(clips, id) {
              why: 'this clip\'s sound is already under its own picture' };
   }
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
-  const want = sbeRound(sbeNum(c.film_start) + (w.start - sbeNum(c.start)));
+  const want = sbeRound(sbeNum(c.film_start) + (w.start - sbeNum(c.start)) / w.speed);
   if (want < 0) {
     return { clips: clips, ok: false,
              why: 'the sound would have to start before the __SEQ__ does — move the picture later first' };
@@ -854,7 +876,32 @@ function sbeResyncAudio(clips, id) {
 // label is not worth a data migration. See docs/EDITOR_EFFECTS_MODEL.md.
 function sbeClipLen(c) {
   const n = sbeNum((c || {}).film_end) - sbeNum((c || {}).film_start);
-  return Math.max(0, n > 0 ? n : (sbeNum((c || {}).end) - sbeNum((c || {}).start)));
+  return Math.max(0, n > 0 ? n
+    : (sbeNum((c || {}).end) - sbeNum((c || {}).start)) / sbeSpeed(c));
+}
+
+// Sets the clip's play rate and RIPPLES: the slot shrinks or grows in place
+// and everything after it slides, sound included. The window is untouched —
+// speed changes how fast the same seconds of the take play, never which.
+function sbeSetSpeed(clips, id, v) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  if (sbeKind(c) !== 'video') {
+    return { clips: clips, ok: false, why: 'only a video clip has a clock to run fast or slow' };
+  }
+  const want = sbeRound(Math.max(SBE_SPEED_MIN, Math.min(SBE_SPEED_MAX, sbeNum(v, 1) || 1)));
+  if (Math.abs(want - sbeSpeed(c)) < 1e-9) return { clips: clips, ok: false, why: 'no change' };
+  const mark = sbeSyncMark(clips);
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  // NEUTRAL IS ABSENT: 1x is no field, so an untouched clip is byte-identical
+  // to one from before speed existed.
+  if (Math.abs(want - 1) < 1e-9) delete t.speed; else t.speed = want;
+  t.source = 'human';
+  sbeLayout(out);
+  sbeSyncCarry(out, mark, [id]);
+  return { clips: out, ok: true };
 }
 
 function sbeFx(c) {
@@ -881,17 +928,24 @@ function sbeFx(c) {
 // THE OPACITY AT A FILM SECOND, and the preview's whole honesty about fades:
 // a value per frame rather than a CSS transition, so scrubbing shows what is
 // true at that second instead of an animation that started when you arrived.
-function sbeFadeOpacityAt(c, t) {
+// `edges` is a transition's share of this clip's two ends ({head, tail} in
+// seconds, from `sbeTxEdges`). ONE <video> cannot show two pictures, so on
+// the stage a dissolve is previewed as a ramp through the stage's black on
+// both sides of the cut — the exact picture for a fade through black, an
+// honest approximation for a dissolve, and the badge says which.
+function sbeFadeOpacityAt(c, t, edges) {
   const e = sbeFx(c);
-  if (e.fade_in <= 1e-9 && e.fade_out <= 1e-9) return 1;
+  const ed = edges || { head: 0, tail: 0 };
+  const fin = Math.max(e.fade_in, sbeNum(ed.head)), fout = Math.max(e.fade_out, sbeNum(ed.tail));
+  if (fin <= 1e-9 && fout <= 1e-9) return 1;
   const fs = sbeNum((c || {}).film_start), fe = sbeNum((c || {}).film_end);
   const now = sbeNum(t);
   let o = 1;
-  if (e.fade_in > 1e-9 && now < fs + e.fade_in) {
-    o = Math.min(o, Math.max(0, (now - fs) / e.fade_in));
+  if (fin > 1e-9 && now < fs + fin) {
+    o = Math.min(o, Math.max(0, (now - fs) / fin));
   }
-  if (e.fade_out > 1e-9 && now > fe - e.fade_out) {
-    o = Math.min(o, Math.max(0, (fe - now) / e.fade_out));
+  if (fout > 1e-9 && now > fe - fout) {
+    o = Math.min(o, Math.max(0, (fe - now) / fout));
   }
   return Math.max(0, Math.min(1, sbeRound(o)));
 }
@@ -1391,9 +1445,42 @@ function sbeSetAudioFade(clips, id, edge, seconds) {
 // own window — the picture underneath is not consulted and does not shift.
 function sbeOvKind(o) {
   const k = String((o || {}).kind || '').toLowerCase();
-  if (k === 'still' || k === 'video') return k;
+  if (k === 'still' || k === 'video' || k === 'text') return k;
   return /\.(png|webp|tiff?)$/i.test(String((o || {}).path || ''))
     ? 'still' : 'video';
+}
+
+// A TITLE IS AN OVERLAY WHOSE PIXELS ARE DRAWN. The mirror of
+// `overlay_text()`: the same defaults, the same clamps, so the card the stage
+// paints and the card the render rasterises are the same card. `font_size`
+// is px at a 1080-high frame; `x`/`y` are fractions of the frame.
+const SBE_TEXT_DEFAULTS = { font_size: 64, color: '#ffffff', align: 'center',
+                            x: 0.5, y: 0.5, box: false, box_color: '#000000',
+                            box_opacity: 0.5 };
+const SBE_TEXT_REF_H = 1080;
+const SBE_TEXT_MAX = 400;
+function sbeHexColour(v, d) {
+  let s = String(v || '').trim().toLowerCase();
+  if (/^#[0-9a-f]{3}$/.test(s)) s = '#' + s.slice(1).split('').map(ch => ch + ch).join('');
+  return /^#[0-9a-f]{6}$/.test(s) ? s : d;
+}
+function sbeOvText(o) {
+  const it = o || {};
+  const raw = (it.style && typeof it.style === 'object') ? it.style : {};
+  const d = SBE_TEXT_DEFAULTS;
+  const size = Math.max(8, Math.min(400, sbeNum(raw.font_size, d.font_size) || d.font_size));
+  let align = String(raw.align || d.align).toLowerCase();
+  if (align !== 'left' && align !== 'center' && align !== 'right') align = d.align;
+  const clamp01 = (v, dv) => Math.max(0, Math.min(1, sbeNum(v, dv)));
+  return {
+    text: String(it.text || '').replace(/\r\n?/g, '\n').slice(0, SBE_TEXT_MAX),
+    style: {
+      font_size: sbeRound(size), color: sbeHexColour(raw.color, d.color),
+      align: align, x: sbeRound(clamp01(raw.x, d.x)), y: sbeRound(clamp01(raw.y, d.y)),
+      box: raw.box === true, box_color: sbeHexColour(raw.box_color, d.box_color),
+      box_opacity: sbeRound(clamp01(raw.box_opacity, d.box_opacity)),
+    },
+  };
 }
 
 function sbeOvAt(overlays, t) {
@@ -1476,14 +1563,19 @@ function sbeOvAdd(overlays, item, filmStart) {
     }
     fs = push;
   }
+  const kind = (item.kind === 'text') ? 'text'
+    : (/\.(png|webp|tiff?)$/i.test(String(item.path || '')) ? 'still' : 'video');
   const o = {
-    id: sbeNewId(), kind: /\.(png|webp|tiff?)$/i.test(String(item.path || ''))
-      ? 'still' : 'video',
-    path: item.path, title: item.title || '',
+    id: sbeNewId(), kind: kind,
+    path: (kind === 'text') ? null : item.path, title: item.title || '',
     start: 0, end: sbeRound(dur),
     film_start: sbeRound(fs), film_end: sbeRound(fs + dur),
     source: 'human', locked: false,
   };
+  if (kind === 'text') {
+    o.text = String(item.text || 'Title');
+    if (item.style && typeof item.style === 'object') o.style = Object.assign({}, item.style);
+  }
   return { overlays: (overlays || []).concat([o]), ok: true, added: o };
 }
 
@@ -1494,6 +1586,159 @@ function sbeOvDelete(overlays, id) {
   // NOT A RIPPLE. Removing a card must not move the picture under it, nor the
   // next card: the lane is a set of placements, not a queue.
   return { overlays: (overlays || []).filter(x => x.id !== id), ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// TRANSITIONS — a typed object that OWNS A BOUNDARY, never an overlap
+// ---------------------------------------------------------------------------
+// The mirror of `resolve_transitions()`. A transition names the OUTGOING clip
+// and sits on the cut between it and its successor; the clips' own slots do
+// not move, and the render builds the overlap from SOURCE HANDLES — half the
+// duration of extra tail past the out-point, half of extra head before the
+// in-point. So the one thing the client has to know, and say, is whether
+// those handles exist. `sbeTxResolve` answers per boundary, with the same
+// sentence the server's validator would refuse the save with.
+const SBE_TX_KINDS = ['dissolve', 'fade_black'];
+const SBE_TX_MIN = 1 / 24;
+const SBE_TX_MAX = 2.0;
+const SBE_TX_LABELS = { dissolve: 'Dissolve', fade_black: 'Fade through black' };
+
+function sbeTxById(txs, id) {
+  for (const t of txs || []) if (t.id === id) return t;
+  return null;
+}
+function sbeTxAfter(txs, clipId) {
+  for (const t of txs || []) if (t.after_clip === clipId) return t;
+  return null;
+}
+function sbeTxDuration(row, outLen, inLen, fps) {
+  const d0 = sbeNum((row || {}).duration);
+  if (d0 <= 0) return 0;
+  const d = Math.max(0, Math.min(d0, SBE_TX_MAX, 0.5 * Math.max(0, Math.min(outLen, inLen))));
+  const f = Math.max(1, sbeNum(fps, 24) || 24);
+  // EVEN FRAMES — half a side each — the same rule `transition_duration`
+  // applies, so the number the inspector shows is the number the film gets.
+  const frames = 2 * Math.round(d * f / 2);
+  return sbeRound(frames / f);
+}
+function sbeTxSpare(c, side) {
+  if (sbeKind(c) !== 'video') return Infinity;
+  if (side === 'head') return Math.max(0, sbeNum(c.start));
+  const dur = sbeNum(c.duration, 0);
+  if (!(dur > 0)) return null;
+  return Math.max(0, dur - sbeNum(c.end));
+}
+function sbeTxResolve(clips, txs, fps) {
+  const order = (clips || []).slice().sort((a, b) =>
+    (sbeNum(a.film_start) - sbeNum(b.film_start)) || String(a.path).localeCompare(String(b.path)));
+  const pos = {};
+  order.forEach((c, k) => { pos[c.id] = k; });
+  const seen = {};
+  const out = [];
+  (txs || []).forEach((row, n) => {
+    const label = 'transition ' + (n + 1);
+    const res = { id: row.id, after_clip: String(row.after_clip || ''), before_clip: '',
+                  kind: String(row.kind || '').toLowerCase(), duration: 0, half: 0,
+                  at: 0, problem: null };
+    const fail = (code, message) => { res.problem = { code: code, message: message }; out.push(res); };
+    const k = pos[res.after_clip];
+    if (k === undefined) { fail('transition_unknown_clip', label + ': names no clip on this timeline'); return; }
+    const a = order[k];
+    if (k + 1 >= order.length) { fail('transition_last_clip', 'this is the last clip — there is nothing after it to dissolve into'); return; }
+    const b = order[k + 1];
+    res.before_clip = b.id;
+    res.at = sbeRound(sbeNum(a.film_end));
+    if (seen[res.after_clip]) { fail('transition_duplicate_boundary', 'this cut already has a transition — one per boundary'); return; }
+    seen[res.after_clip] = true;
+    if (SBE_TX_KINDS.indexOf(res.kind) < 0) { fail('transition_kind', label + ': unknown kind ' + res.kind); return; }
+    if (!(sbeNum(row.duration) > 0)) { fail('transition_duration', 'the duration must be above 0 s'); return; }
+    const d = sbeTxDuration(row, sbeLen(a), sbeLen(b), fps);
+    if (d < SBE_TX_MIN - 1e-9) { fail('transition_duration', 'these two clips are too short to carry a transition between them'); return; }
+    res.duration = d;
+    res.half = sbeRound(d / 2);
+    const word = res.kind.replace('_', ' ');
+    const needOut = res.half * sbeSpeed(a), needIn = res.half * sbeSpeed(b);
+    const short = [];
+    const tail = sbeTxSpare(a, 'tail');
+    if (tail === null) short.push('the source length of the outgoing clip is not known — run Prepare so the panel can measure it');
+    else if (tail + 1e-6 < needOut) short.push('the outgoing clip has only ' + tail.toFixed(2) + 's beyond its out-point and the ' + word + ' needs ' + needOut.toFixed(2) + 's there — trim its tail in or shorten the transition');
+    const head = sbeTxSpare(b, 'head');
+    if (head !== null && head + 1e-6 < needIn) short.push('the incoming clip has only ' + head.toFixed(2) + 's before its in-point and the ' + word + ' needs ' + needIn.toFixed(2) + 's there — trim its head in or shorten the transition');
+    if (short.length) { fail('transition_no_handles', short.join('; ')); return; }
+    out.push(res);
+  });
+  return out;
+}
+// The half-durations a clip's two ends give to transitions, for the preview.
+function sbeTxEdges(clips, txs, clipId, fps) {
+  const e = { head: 0, tail: 0 };
+  for (const r of sbeTxResolve(clips, txs, fps)) {
+    if (r.problem) continue;
+    if (r.after_clip === clipId) e.tail = r.half;
+    if (r.before_clip === clipId) e.head = r.half;
+  }
+  return e;
+}
+function sbeTxSet(txs, afterId, kind, duration) {
+  const out = (txs || []).map(t => Object.assign({}, t));
+  let t = sbeTxAfter(out, afterId);
+  if (!t) { t = { id: sbeNewId(), after_clip: afterId }; out.push(t); }
+  t.kind = (SBE_TX_KINDS.indexOf(kind) >= 0) ? kind : 'dissolve';
+  t.duration = sbeRound(Math.max(SBE_TX_MIN, Math.min(SBE_TX_MAX, sbeNum(duration, 0.5) || 0.5)));
+  return { transitions: out, ok: true, transition: t };
+}
+function sbeTxDelete(txs, afterId) {
+  const t = sbeTxAfter(txs, afterId);
+  if (!t) return { transitions: txs, ok: false, why: 'gone' };
+  return { transitions: (txs || []).filter(x => x.after_clip !== afterId), ok: true };
+}
+// Drops what no longer owns a boundary: a clip that left, or one that became
+// the last clip.
+function sbeTxPrune(txs, clips) {
+  const order = (clips || []).slice().sort((a, b) => sbeNum(a.film_start) - sbeNum(b.film_start));
+  const ok = {};
+  order.forEach((c, k) => { if (k + 1 < order.length) ok[c.id] = true; });
+  const seen = {};
+  return (txs || []).filter(t => {
+    if (!ok[t.after_clip] || seen[t.after_clip]) return false;
+    seen[t.after_clip] = true;
+    return true;
+  });
+}
+function sbeTxRepoint(txs, fromId, toId) {
+  return (txs || []).map(t => (t.after_clip === fromId)
+    ? Object.assign({}, t, { after_clip: toId }) : Object.assign({}, t));
+}
+// The lane's own door, the same shape as `sbeOvMutate`.
+function sbeTxMutate(fn) {
+  const before = sbeSnapshot();
+  const res = fn(SBE.transitions || []);
+  if (!res || res.ok === false) {
+    if (res && res.why) phosToast(res.why, {});
+    return false;
+  }
+  SBE.undo.push(before);
+  if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
+  SBE.redo.length = 0;
+  SBE.transitions = res.transitions;
+  SBE.dirty = true;
+  sbeSetState('unsaved changes', 'dirty');
+  sbePaint();
+  sbeQueueSave();
+  return res;
+}
+function sbeTxCommit(kind, duration) {
+  if (!SBE.txSel) return;
+  sbeBlurControl();
+  const after = SBE.txSel;
+  if (!kind || kind === 'none') { sbeTxRemoveSel(); return; }
+  sbeTxMutate(ts => sbeTxSet(ts, after, kind, duration));
+}
+function sbeTxRemoveSel() {
+  if (!SBE.txSel) return;
+  const after = SBE.txSel;
+  if (!sbeTxAfter(SBE.transitions, after)) { sbePaint(); return; }
+  sbeTxMutate(ts => sbeTxDelete(ts, after));
 }
 
 function sbeStripOwned(c) {
@@ -1521,7 +1766,7 @@ function sbeStripsAt(clips, t) {
     const from = w.film_start, to = sbeRound(w.film_start + w.len);
     if (now < from - 1e-6 || now >= to) continue;
     out.push({ id: c.id, path: c.path || '',
-               at: sbeRound(w.start + (now - from)),
+               at: sbeRound(w.start + (now - from) * w.speed),
                from: from, to: to });
   }
   out.sort((a, b) => (a.from - b.from) || String(a.id).localeCompare(String(b.id)));
@@ -1629,12 +1874,43 @@ function sbeById(clips, id) {
   return null;
 }
 
-function sbeMoveTo(clips, id, filmStart) {
+// HOW A DRAG BEHAVES — the NLE contract, 2026-09-05.
+// Premiere, Resolve and After Effects all agree on two defaults, and the owner
+// asked for exactly them: dragging a clip's BODY moves that clip and nothing
+// else (it slides in the room between its neighbours and stops at them), and
+// pulling an EDGE changes that clip's length and leaves everything after it
+// where it was — a hole opens or closes, the rest of the film does not move.
+// The old behaviour, where every gesture repacked the sequence and slid the
+// whole tail, is what those programs call a RIPPLE, and it is still here as a
+// modifier: hold ⌘ (or Ctrl) while dragging. Shift still reorders.
+function sbeMoveTo(clips, id, filmStart, opts) {
+  const ripple = !!(opts && opts.ripple);
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const len = sbeLen(c);
-  const want = Math.max(0, sbeNum(filmStart));
+  const want0 = Math.max(0, sbeNum(filmStart));
+  if (!ripple) {
+    // Between its neighbours, and the neighbours stay put: this clip's own
+    // gap sets where it lands, the next clip's gap is corrected by the same
+    // amount so its film position does not change.
+    const mark = sbeSyncMark(clips);
+    const i = clips.indexOf(c);
+    const prev = i > 0 ? clips[i - 1] : null;
+    const next = (i + 1 < clips.length) ? clips[i + 1] : null;
+    const floor = prev ? sbeNum(prev.film_end) : 0;
+    const ceil = next ? sbeNum(next.film_start) - len : Infinity;
+    if (ceil < floor - 1e-9) return { clips: clips, ok: false, why: 'tight' };
+    const want = Math.max(floor, Math.min(ceil, want0));
+    const nextStart = next ? sbeNum(next.film_start) : null;
+    c._gap = Math.max(0, sbeRound(want - floor));
+    if (next && !next.locked) next._gap = Math.max(0, sbeRound(nextStart - (want + len)));
+    sbeLayout(clips);
+    sbeSyncCarry(clips, mark, [id]);
+    c.source = 'human';
+    return { clips: clips, ok: true };
+  }
+  const want = want0;
   const centre = want + len / 2;
   const mark = sbeSyncMark(clips);
   const rest = clips.filter(x => x !== c);
@@ -1661,13 +1937,20 @@ function sbeMoveTo(clips, id, filmStart) {
 // the tail does not move and a hole opens behind it (holes are legal here —
 // they are what the generate control fills). The right one changes the length,
 // so everything after it ripples.
-function sbeTrim(clips, id, edge, filmTime) {
+function sbeTrim(clips, id, edge, filmTime, opts) {
+  // `opts.ripple` (⌘ / Ctrl held): the tail slides, as it did before
+  // 2026-09-05. Default: the other clips do not move — see sbeMoveTo.
+  const ripple = !!(opts && opts.ripple);
   const c = sbeById(clips, id);
   if (!c) return { clips: clips, ok: false, why: 'gone' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
   const mark = sbeSyncMark(clips);
+  // A DRAG IS FILM SECONDS; THE WINDOW IS SOURCE SECONDS. At 2x a handle
+  // pulled one second along the film moves the in- or out-point two seconds
+  // of the take, which is what keeps the slot following the pointer.
+  const sp = sbeSpeed(c);
   if (edge === 'l') {
-    const d = sbeNum(filmTime) - sbeNum(c.film_start);
+    const d = (sbeNum(filmTime) - sbeNum(c.film_start)) * sp;
     let s = sbeNum(c.start) + d;
     s = Math.max(0, Math.min(sbeNum(c.end) - SBE_MIN_CLIP, s));
     // A HEAD TRIM MOVES THE SLOT WITH THE IN-POINT OR IT IS NOT A TRIM. The
@@ -1679,20 +1962,32 @@ function sbeTrim(clips, id, edge, filmTime) {
     // no longer plays under it. Trimming may not change the film→source
     // mapping of the frames it keeps; that invariant is what makes "the sound
     // stays put" correct rather than lucky.
-    const room = Math.max(0, sbeNum(c._gap));
-    if (s < sbeNum(c.start) - room) s = sbeRound(sbeNum(c.start) - room);
+    const room = Math.max(0, sbeNum(c._gap)) * sp;
+    if (!ripple && s < sbeNum(c.start) - room) s = sbeRound(sbeNum(c.start) - room);
     const applied = s - sbeNum(c.start);
     if (Math.abs(applied) < 1e-9) return { clips: clips, ok: false, why: 'edge' };
     c.start = sbeRound(s);
-    c._gap = Math.max(0, sbeRound(sbeNum(c._gap) + applied));
+    // Ripple on the head: the head stays where the previous clip ends and
+    // everything after slides by the length change (the gap is left alone).
+    if (!ripple) c._gap = Math.max(0, sbeRound(sbeNum(c._gap) + applied / sp));
   } else {
-    const d = sbeNum(filmTime) - sbeNum(c.film_end);
+    const d = (sbeNum(filmTime) - sbeNum(c.film_end)) * sp;
     let e = sbeNum(c.end) + d;
     const srcDur = sbeNum(c.duration, 0);
     if (srcDur > 0) e = Math.min(srcDur, e);
     e = Math.max(sbeNum(c.start) + SBE_MIN_CLIP, e);
+    const i = clips.indexOf(c);
+    const next = (i + 1 < clips.length) ? clips[i + 1] : null;
+    if (!ripple && next) {
+      // The clip may grow into the hole after it, never into the next clip.
+      const room = Math.max(0, sbeNum(next._gap)) * sp;
+      e = Math.min(e, sbeNum(c.end) + room);
+    }
     if (Math.abs(e - sbeNum(c.end)) < 1e-9) return { clips: clips, ok: false, why: 'edge' };
+    const grew = (e - sbeNum(c.end)) / sp;          // film seconds
     c.end = sbeRound(e);
+    // Default: the next clip does not move — its gap takes the difference.
+    if (!ripple && next && !next.locked) next._gap = Math.max(0, sbeRound(sbeNum(next._gap) - grew));
   }
   c.source = 'human';
   sbeLayout(clips);
@@ -1701,6 +1996,32 @@ function sbeTrim(clips, id, edge, filmTime) {
   // touched. A tail trim ripples everything after it, and those take theirs.
   sbeSyncCarry(clips, mark, [id]);
   return { clips: clips, ok: true };
+}
+
+// DUPLICATE: the same shot again, right after itself, with everything it
+// carries — window, speed, fades, grade, mute — and its sound LINKED: a
+// copied J-cut strip would sit under the original's seconds, which is the
+// one overlap the sound lane refuses. The copy is its own clip from then on.
+function sbeDuplicate(clips, id) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  const mark = sbeSyncMark(clips);
+  const b = JSON.parse(JSON.stringify(c));
+  for (const k of Object.keys(b)) if (k.charAt(0) === '_') delete b[k];
+  b.id = sbeNewId();
+  delete b.audio;
+  b.locked = false;
+  b.source = 'human';
+  b._gap = 0;
+  // NAMED AS A COPY, or two identical blocks side by side cannot be told
+  // apart — the review pressed D twice and could not say which was which.
+  const base = String(c.title || String(c.path || '').split('/').pop() || 'clip').replace(/ \(copy( \d+)?\)$/, '');
+  b.title = base + ' (copy)';
+  const out = clips.slice();
+  out.splice(out.indexOf(c) + 1, 0, b);
+  sbeLayout(out);
+  sbeSyncCarry(out, mark, [b.id]);
+  return { clips: out, ok: true, added: b };
 }
 
 function sbeRippleDelete(clips, id) {
@@ -1737,11 +2058,13 @@ function sbeLiftDelete(clips, id) {
   return { clips: out, ok: true, removed: c };
 }
 
-function sbeSplitAt(clips, t, newId) {
+function sbeSplitAt(clips, t, newId, transitions) {
   const c = sbeClipAt(clips, t);
   if (!c) return { clips: clips, ok: false, why: 'nothing there' };
   if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  // `off` is FILM seconds into the slot; the cut in the take is `off * speed`.
   const off = sbeNum(t) - sbeNum(c.film_start);
+  const sp = sbeSpeed(c);
   if (off < SBE_MIN_CLIP || sbeLen(c) - off < SBE_MIN_CLIP) {
     return { clips: clips, ok: false, why: 'too close to an edge' };
   }
@@ -1754,8 +2077,8 @@ function sbeSplitAt(clips, t, newId) {
   const w = sbeClipAudio(c);
   let cutA = null, cutB = null;
   if (w.split) {
-    const sp = sbeRound(sbeNum(c.start) + off);
-    if (sp < w.start + SBE_MIN_CLIP || sp > w.end - SBE_MIN_CLIP) {
+    const sp2 = sbeRound(sbeNum(c.start) + off * sp);
+    if (sp2 < w.start + SBE_MIN_CLIP || sp2 > w.end - SBE_MIN_CLIP) {
       // The strip has been trimmed to a window this cut falls outside, so one
       // half would end up with no sound at all — a state the document cannot
       // express (an absent `audio` means LINKED, which would invent sound the
@@ -1764,16 +2087,16 @@ function sbeSplitAt(clips, t, newId) {
                why: 'the unlinked sound does not reach this cut — move the '
                     + 'strip back or re-link it first' };
     }
-    cutA = sbeAudioField({ start: w.start, end: sp,
+    cutA = sbeAudioField({ start: w.start, end: sp2,
                            film_start: w.film_start }, w.coupled);
-    cutB = sbeAudioField({ start: sp, end: w.end,
-                           film_start: w.film_start + (sp - w.start) },
+    cutB = sbeAudioField({ start: sp2, end: w.end,
+                           film_start: w.film_start + (sp2 - w.start) / sp },
                          w.coupled);
   }
   const mark = sbeSyncMark(clips);
   const b = JSON.parse(JSON.stringify(c));
   b.id = newId || sbeNewId();
-  b.start = sbeRound(sbeNum(c.start) + off);
+  b.start = sbeRound(sbeNum(c.start) + off * sp);
   b._gap = 0;
   b.source = 'human';
   c.end = b.start;
@@ -1785,7 +2108,12 @@ function sbeSplitAt(clips, t, newId) {
   // Both halves were just given the position they are meant to have; the
   // reflow only ever moves what is AFTER them.
   sbeSyncCarry(out, mark, [c.id, b.id]);
-  return { clips: out, ok: true, added: b };
+  const res = { clips: out, ok: true, added: b };
+  // A TRANSITION AFTER THE SPLIT CLIP NOW FOLLOWS ITS SECOND HALF — that is
+  // the half that owns the boundary the transition was on. Left on the first
+  // half it would move to the fresh cut in the middle of the shot.
+  if (transitions) res.transitions = sbeTxRepoint(transitions, c.id, b.id);
+  return res;
 }
 
 function sbeNewId() {
@@ -1867,6 +2195,38 @@ function sbeBright(c) {
 // drift, the badge says approximate, and the render is the exact one.
 function sbeBrightnessCss(b) {
   return Math.max(0, sbeRound(1 + 2 * sbeNum(b)));
+}
+
+// FRAMING — the mirror of `clip_frame()`: zoom 1–3 and the anchor as
+// fractions, clamped, neutral when absent. A slug has nothing to reframe.
+const SBE_FRAME_ZOOM_MAX = 3.0;
+function sbeFraming(c) {
+  const f = (c && c.frame && typeof c.frame === 'object') ? c.frame : {};
+  let z = sbeNum(f.zoom, 1);
+  if (!(z > 0)) z = 1;
+  z = Math.max(1, Math.min(SBE_FRAME_ZOOM_MAX, z));
+  const cl = (v) => Math.max(0, Math.min(1, sbeNum(v, 0.5)));
+  return { zoom: sbeRound(z), x: sbeRound(cl(f.x)), y: sbeRound(cl(f.y)) };
+}
+function sbeFramingIsNeutral(c) { return Math.abs(sbeFraming(c).zoom - 1) < 1e-9; }
+function sbeSetFraming(clips, id, field, v) {
+  const c = sbeById(clips, id);
+  if (!c) return { clips: clips, ok: false, why: 'gone' };
+  if (c.locked) return { clips: clips, ok: false, why: 'locked' };
+  if (sbeKind(c) === 'slug') return { clips: clips, ok: false, why: 'black has nothing to reframe' };
+  const cur = sbeFraming(c);
+  const next = Object.assign({}, cur);
+  next[field] = sbeNum(v, cur[field]);
+  const fr = sbeFraming({ frame: next });
+  if (Math.abs(fr.zoom - cur.zoom) < 1e-9 && Math.abs(fr.x - cur.x) < 1e-9 && Math.abs(fr.y - cur.y) < 1e-9) {
+    return { clips: clips, ok: false, why: '' };
+  }
+  const out = clips.map(x => Object.assign({}, x));
+  const t = sbeById(out, id);
+  // NEUTRAL IS ABSENT: zoom 1 is no field, whatever the anchor says.
+  if (Math.abs(fr.zoom - 1) < 1e-9) delete t.frame; else t.frame = fr;
+  t.source = 'human';
+  return { clips: out, ok: true };
 }
 
 function sbeSetBrightness(clips, id, v) {
@@ -1979,6 +2339,12 @@ function sbeCleanClip(c) {
   const b = sbeBright(out);
   if (Math.abs(b) < 1e-6) delete out.adjust;
   else out.adjust = { brightness: sbeRound(b) };
+  // 1x is the absence of the field, the same way the server writes it.
+  const sp = sbeSpeed(c);
+  if (kind !== 'video' || Math.abs(sp - 1) < 1e-9) delete out.speed;
+  else out.speed = sp;
+  if (kind === 'slug' || sbeFramingIsNeutral(c)) delete out.frame;
+  else out.frame = sbeFraming(c);
   return out;
 }
 
@@ -1992,6 +2358,8 @@ function sbeSaveBody(state) {
     for (const k of Object.keys(o)) if (k.charAt(0) !== '_') out[k] = o[k];
     return out;
   });
+  // THE BOUNDARIES TRAVEL TOO. An empty list is the server's absent key.
+  edit.transitions = (state.transitions || []).map(t => Object.assign({}, t));
   edit.board_id = state.id;
   const body = { id: state.id, edit: edit };
   if (state.expect !== null && state.expect !== undefined) body.expect_revision = state.expect;
@@ -2452,13 +2820,16 @@ function sbeAdopt(r, quiet) {
   SBE.unplaced = r.unplaced || [];
   SBE.pool = r.clips || [];
   SBE.relink = r.relink || [];
+  SBE.sections = r.sections || [];
   SBE.prepare = r.prepare || {};
   if (r.drafts) SBE.drafts = r.drafts;
   if (r.active_draft !== undefined) SBE.activeDraft = r.active_draft || '';
   SBE.backup = r.backup || null;
   SBE.backupHidden = false;          // a NEW offer is not the one dismissed
   SBE.overlays = (SBE.edit.overlays || []).map(o => Object.assign({}, o));
+  SBE.transitions = (SBE.edit.transitions || []).map(t => Object.assign({}, t));
   SBE.ovSel = '';
+  SBE.txSel = '';
   SBE.clips = sbeAdoptGaps((SBE.edit.clips || []).map(c => Object.assign({}, c)));
   sbeLayout(SBE.clips);
   SBE.dirty = false;
@@ -2483,6 +2854,7 @@ function sbeAdopt(r, quiet) {
   sbePaintDraft();
   sbePaintRecovery();
   sbePaintRelink();
+  sbeDeliverPaint();
   if (ED.src === 'film') edPoolRefresh();
   sbeFetchPeaks();
   sbePaint();
@@ -2617,6 +2989,7 @@ function sbeSnapshot(audio) {
     // this a card placed and then undone would stay on screen while the
     // pictures walked back without it.
     overlays: SBE.overlays || [],
+    transitions: SBE.transitions || [],
     audio: (audio === undefined)
       ? (SBE.audio || (SBE.edit && SBE.edit.audio) || null) : audio,
   });
@@ -2630,6 +3003,7 @@ function sbeRestore(json) {
   // `overlays`, and restoring `undefined` over a live lane would delete a
   // card nobody asked to remove — absent means "unchanged", not "empty".
   if (s.overlays !== undefined) SBE.overlays = s.overlays || [];
+  if (s.transitions !== undefined) SBE.transitions = s.transitions || [];
   SBE.edit = SBE.edit || {};
   // ...and a restore never COMMITS a discovered track into the document. The
   // arrangement owns a soundtrack only once somebody has placed it (see
@@ -2702,6 +3076,11 @@ function sbeMutate(fn) {
   if (SBE.undo.length > SBE_UNDO_MAX) SBE.undo.shift();
   SBE.redo.length = 0;
   SBE.clips = res.clips;
+  // A CLIP THAT LEFT TAKES ITS BOUNDARY WITH IT. Any mutation may remove or
+  // reorder clips; a transition naming a clip that is gone, or one that has
+  // become the last clip, is pruned here rather than refused at the save.
+  if (res.transitions) SBE.transitions = res.transitions;
+  SBE.transitions = sbeTxPrune(SBE.transitions || [], SBE.clips);
   SBE.dirty = true;
   sbeSetState('unsaved changes', 'dirty');
   sbePaint();
@@ -3598,6 +3977,11 @@ function sbePaint() {
   sbePaintWave(span, width);
   sbePaintMusic(width);
   sbePaintOverlays();
+  // THE STAGE'S CARD FOLLOWS THE LANE. A title removed from the lane (or
+  // undone back onto it) must leave or return on the monitor in the same
+  // paint, not on the next scrub — the review caught a deleted title still
+  // painting over the picture.
+  sbeOvPaint();
   sbePaintTrack();
   sbePaintAudioLane();
   sbePaintHead();
@@ -3823,8 +4207,35 @@ function sbePaintRuler(span, width) {
     html += '<i style="left:' + x.toFixed(1) + 'px"></i>' +
             '<b style="left:' + x.toFixed(1) + 'px">' + lab + '</b>';
   }
+  // THE SONG'S SECTIONS, as faint bands behind the ticks: the arc the
+  // Director cut to, on the film's clock. Track seconds become film seconds
+  // through the same music window the bed and the beat grid use, so a
+  // trimmed or slid soundtrack moves its sections with it.
+  html += sbeSectionBands(SBE.sections, SBE.audio, SBE.peaks ? SBE.peaks.duration : 0, span);
   r.innerHTML = html;
   r.style.width = width + 'px';
+  if (r.classList) r.classList.toggle('has-sections', !!(SBE.sections && SBE.sections.length));
+}
+
+function sbeSectionBands(sections, audio, trackDur, span) {
+  if (!sections || !sections.length) return '';
+  const w = sbeMusicWindow(audio || {}, trackDur || 0);
+  let out = '';
+  for (const s of sections) {
+    const a = w.film_start + (sbeNum(s.start) - w.head);
+    const b = w.film_start + (sbeNum(s.end) - w.head);
+    const x0 = Math.max(0, a), x1 = Math.min(span, b);
+    if (x1 - x0 <= 1e-6) continue;
+    const px = sbePx(x1 - x0);
+    const e = sbeNum(s.energy);
+    const heat = e >= 0.75 ? 'loud' : (e <= 0.35 ? 'quiet' : 'steady');
+    out += '<u class="sbe-sec is-' + escapeHtml(String(s.label || 'verse')) + '" ' +
+           'title="' + escapeHtml(String(s.label || '') + ' · ' + sbeFmtTime(x0) + '–' + sbeFmtTime(x1)
+             + ' · ' + heat + ' — the Director cuts ' + (String(s.label) === 'chorus' ? 'fastest' : (String(s.label) === 'intro' || String(s.label) === 'outro' ? 'slowest' : 'at the base pace') + ' here')) + '" ' +
+           'style="left:' + sbePx(x0).toFixed(1) + 'px;width:' + px.toFixed(1) + 'px">' +
+           (px > 40 ? escapeHtml(String(s.label || '')) : '') + '</u>';
+  }
+  return out;
 }
 
 function sbePaintWave(span, width) {
@@ -3938,7 +4349,7 @@ function sbePaintMusic(width) {
   sbeEl('sbeMusicName').textContent = (right - left > 120) ? label : '';
   el.title = name + '\nStarts at ' + sbeFmtTime(w.film_start) +
     ' of the __SEQ__, from ' + sbeFmtTime(w.head) + ' of the track.' +
-    '\nDrag to place it · pull either end to trim · hold Alt to ignore the cuts.' +
+    '\nDrag to move it (the others stay) · pull either end to trim · hold Alt to ignore the cuts · hold ⌘ to slide everything after it.' +
     '\nCorners fade it · double-click the level line to add a point.';
   sbePaintBedLevel(el, Math.max(3, right - left));
 }
@@ -4365,26 +4776,31 @@ function sbePaintTrack() {
     const kind = sbeKind(c);
     const bright = sbeBright(c);
     const bad = SBE.errors.byId && SBE.errors.byId[c.id];
+    const sp = sbeSpeed(c);
     const flag = c.locked ? 'lock'
+      : (Math.abs(sp - 1) >= 1e-6 ? sp.toFixed(2).replace(/\.?0+$/, '') + 'x'
       : (Math.abs(bright) >= 1e-6
           ? (bright > 0 ? '+' : '') + bright.toFixed(2)
           // "slow" is a VIDEO's problem. A still has no proxy because it needs
           // none and a slug has no file at all, so flagging either as
           // un-scrubbable would be advice to run a Prepare that would do
           // nothing.
-          : (kind === 'video' && !c.proxy ? 'slow' : ''));
+          : (kind === 'video' && !c.proxy ? 'slow' : '')));
     const cls = 'sbe-clip is-' + kind + (c.id === SBE.sel ? ' is-sel' : '')
               + (c.id === SBE.curId ? ' is-playing' : '')
               + (bad ? ' is-bad' : '') + (c.locked ? ' is-locked' : '')
               + (Math.abs(bright) >= 1e-6 ? ' is-graded' : '')
+              + (Math.abs(sp - 1) >= 1e-6 ? ' is-retimed' : '')
+              + (!sbeFramingIsNeutral(c) ? ' is-framed' : '')
               + (flag ? ' has-flag' : '');
     // A still and a slug have no source window to report — their only number
     // is the hold, and printing "0.00→3.00" of a clock they do not have reads
     // as a trim somebody made.
     const meta = (kind === 'video')
       ? (sbeNum(c.start).toFixed(2) + '→' + sbeNum(c.end).toFixed(2) +
-         ' · ' + sbeLen(c).toFixed(2) + 's')
-      : (sbeLen(c).toFixed(2) + 's hold');
+         ' · ' + sbeLen(c).toFixed(2) + 's' + (Math.abs(sp - 1) >= 1e-6 ? ' @' + sp + 'x' : '')
+         + (!sbeFramingIsNeutral(c) ? ' · \u2316' + sbeFraming(c).zoom.toFixed(1) + 'x' : ''))
+      : (sbeLen(c).toFixed(2) + 's hold' + (!sbeFramingIsNeutral(c) ? ' · \u2316' + sbeFraming(c).zoom.toFixed(1) + 'x' : ''));
     const label = (kind === 'slug')
       ? 'black'
       : (c.title || String(c.path || '').split('/').pop() || 'clip');
@@ -4419,6 +4835,37 @@ function sbePaintTrack() {
           + '</div>';
   }
   track.innerHTML = html;
+  // THE CUTS, each one a handle. A transition is not a lane and not a block:
+  // it is a property of the boundary between two clips, so that is where it
+  // is found — a small mark on every cut, a band the length of the
+  // transition once one exists, and the inspector to set it. Drawn AFTER the
+  // blocks so it sits on top of both grips.
+  const order = SBE.clips.slice().sort((a, b) => sbeNum(a.film_start) - sbeNum(b.film_start));
+  const resolved = sbeTxResolve(order, SBE.transitions || [], sbeFps());
+  for (let k = 0; k + 1 < order.length; k++) {
+    const a = order[k], b = order[k + 1];
+    const at = sbeNum(a.film_end);
+    if (sbeNum(b.film_start) - at > 0.5 / sbeFps()) continue;   // a hole, not a cut
+    const r = resolved.find(x => x.after_clip === a.id) || null;
+    const sel = SBE.txSel === a.id;
+    const bad = r && r.problem;
+    const x = sbePx(at);
+    if (r && !bad) {
+      const w = Math.max(6, sbePx(r.duration));
+      html = '<div class="sbe-cut is-tx is-' + r.kind + (sel ? ' is-sel' : '') + '" data-after="'
+           + escapeHtml(a.id) + '" title="' + escapeHtml(SBE_TX_LABELS[r.kind] + ' · '
+           + r.duration.toFixed(2) + 's, centred on the cut. Click to change it.')
+           + '" style="left:' + (x - w / 2).toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
+           + (w > 44 ? '<span>' + escapeHtml((r.kind === 'dissolve' ? '\u2715 ' : '\u25d1 ')
+              + r.duration.toFixed(2) + 's') + '</span>' : '') + '</div>';
+    } else {
+      html = '<div class="sbe-cut' + (sel ? ' is-sel' : '') + (bad ? ' is-bad' : '')
+           + '" data-after="' + escapeHtml(a.id) + '" title="'
+           + escapeHtml(bad ? r.problem.message : 'Cut. Click to put a transition here.')
+           + '" style="left:' + (x - 6).toFixed(1) + 'px"></div>';
+    }
+    track.insertAdjacentHTML('beforeend', html);
+  }
   track.style.width = sbeEl('sbeInner').style.width;
   if (SBE.dropAt !== null && SBE.dropAt !== undefined) {
     const line = document.createElement('div');
@@ -4604,16 +5051,22 @@ function sbePaintOverlays() {
     const x = sbePx(sbeNum(o.film_start));
     const w = Math.max(2, sbePx(sbeNum(o.film_end) - sbeNum(o.film_start)));
     const e = sbeFx(o);
-    const name = sbeNiceName(o.title || String(o.path || '').split('/').pop() || 'card');
-    html += '<div class="sbe-ov' + (o.id === SBE.ovSel ? ' is-sel' : '') + '" '
+    const okind = sbeOvKind(o);
+    const name = (okind === 'text')
+      ? (sbeOvText(o).text.split('\n')[0] || 'Title')
+      : sbeNiceName(o.title || String(o.path || '').split('/').pop() || 'card');
+    html += '<div class="sbe-ov is-' + okind + (o.id === SBE.ovSel ? ' is-sel' : '') + '" '
           + 'data-id="' + escapeHtml(o.id) + '" '
-          + 'title="' + escapeHtml('Overlay — composited over the picture. '
+          + 'title="' + escapeHtml((okind === 'text'
+              ? 'Title — drawn over the picture. '
+              : 'Overlay — composited over the picture. ')
               + 'Drag to move, pull either end to change how long.') + '" '
           + 'style="left:' + x.toFixed(1) + 'px;width:' + w.toFixed(1) + 'px">'
-          + (sbeOvKind(o) === 'still' && o.path
+          + (okind === 'still' && o.path
               ? '<img class="sbe-ov-thumb" alt="" src="/image?w=240&path='
                 + encodeURIComponent(o.path) + '">'
               : '')
+          + (okind === 'text' ? '<span class="sbe-ov-t">T</span>' : '')
           + (w > 60 ? escapeHtml(name) : '')
           + (e.fade_in > 1e-9 ? '<div class="sbe-cl-fade in" style="left:0;width:'
               + sbePx(e.fade_in).toFixed(1) + 'px"></div>' : '')
@@ -4626,8 +5079,8 @@ function sbePaintOverlays() {
   // the four pool sources already follow. Without it the overlay lane is a
   // strip of nothing that teaches nobody it exists.
   lane.innerHTML = html || '<div class="sbe-track-empty sbe-ovlane-empty">'
-    + 'Overlay lane — drop a still here, or press \u25a3 on an image in the '
-    + 'media pool to lay it over the picture at the playhead.</div>';
+    + 'Overlay lane — drop a still here, press \u25a3 on an image in the '
+    + 'media pool, or Add title for text over the picture at the playhead.</div>';
   lane.style.width = sbeEl('sbeInner').style.width;
 }
 
@@ -4636,13 +5089,128 @@ function sbePaintOverlays() {
 function sbeOvPaint(t) {
   const el = sbeEl('sbeOvLayer');
   if (!el || !el.classList) return;
+  const tx = sbeEl('sbeOvText');
   const now = (t === undefined) ? SBE.playhead : sbeNum(t);
   const o = sbeOvAt(SBE.overlays, now);
-  if (!o || !o.path) { el.classList.remove('is-on'); return; }
+  const txOff = () => { if (tx && tx.classList) tx.classList.remove('is-on'); };
+  if (!o) { el.classList.remove('is-on'); txOff(); return; }
+  if (sbeOvKind(o) === 'text') {
+    // A TITLE IS DRAWN IN THE DOM, not re-rendered: the same string, the same
+    // anchor and the same size rule (`font_size` at 1080 high, scaled to
+    // the stage) the rasteriser uses, so what is on the stage is what lands
+    // in the file. The stage's own height is the scale; the style values
+    // are written as custom properties and the stylesheet does the rest.
+    el.classList.remove('is-on');
+    if (!tx || !tx.classList) return;
+    const tt = sbeOvText(o);
+    const st = tt.style;
+    const stage = sbeEl('sbeStage');
+    const H = (stage && stage.clientHeight) ? stage.clientHeight : SBE_TEXT_REF_H;
+    if (tx.textContent !== tt.text) tx.textContent = tt.text;
+    tx.style.setProperty('--tx-size', (st.font_size * H / SBE_TEXT_REF_H).toFixed(2) + 'px');
+    tx.style.setProperty('--tx-color', st.color);
+    tx.style.setProperty('--tx-y', (st.y * 100).toFixed(3) + '%');
+    tx.style.setProperty('--tx-align', st.align);
+    tx.style.setProperty('--tx-box', st.box ? sbeRgba(st.box_color, st.box_opacity) : 'transparent');
+    tx.style.opacity = String(sbeFadeOpacityAt(o, now));
+    tx.classList.add('is-on');
+    sbeOvTextPlace(tx, st, stage);
+    return;
+  }
+  txOff();
+  if (!o.path) { el.classList.remove('is-on'); return; }
   const url = '/image?w=1280&path=' + encodeURIComponent(o.path);
   if (el.getAttribute('src') !== url) el.setAttribute('src', url);
   el.style.opacity = String(sbeFadeOpacityAt(o, now));
   el.classList.add('is-on');
+}
+
+// WHERE THE BOX SITS, IN PIXELS, KEPT INSIDE THE FRAME. The anchor is a
+// fraction and the align says which edge of the text sits on it; measured
+// against the stage so a wide title at x=0.2 is pushed back in rather than
+// cut at the frame's edge — the same clamp `render_title` applies.
+function sbeOvTextPlace(tx, st, stage) {
+  const W = (stage && stage.clientWidth) ? stage.clientWidth : 0;
+  const tw = (tx && tx.offsetWidth) ? tx.offsetWidth : 0;
+  const shift = st.align === 'left' ? 0 : (st.align === 'right' ? 1 : 0.5);
+  if (!W || !tw || !tx.style || !tx.style.setProperty) {
+    if (tx && tx.style && tx.style.setProperty) {
+      tx.style.setProperty('--tx-left', (st.x * 100).toFixed(3) + '%');
+      tx.style.setProperty('--tx-shift', (-shift * 100) + '%');
+    }
+    return;
+  }
+  let left = st.x * W - tw * shift;
+  left = Math.max(0, Math.min(W - tw, left));
+  tx.style.setProperty('--tx-left', left.toFixed(1) + 'px');
+  tx.style.setProperty('--tx-shift', '0%');
+}
+
+function sbeRgba(hex, alpha) {
+  const h = sbeHexColour(hex, '#000000').slice(1);
+  return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16)
+       + ',' + parseInt(h.slice(4, 6), 16) + ',' + Math.max(0, Math.min(1, sbeNum(alpha))).toFixed(3) + ')';
+}
+
+// THE TITLE'S ONE DOOR. Every field on a title — its text, its size, where
+// it sits — goes through here, as one undo step and one queued snapshot,
+// the way every other overlay edit does.
+function sbeOvTextCommit(field, value) {
+  if (!SBE.ovSel) return;
+  sbeBlurControl();
+  const id = SBE.ovSel;
+  sbeOvMutate(os => {
+    const o = sbeOvById(os, id);
+    if (!o || sbeOvKind(o) !== 'text') return { overlays: os, ok: false, why: 'gone' };
+    const out = os.map(x => Object.assign({}, x));
+    const t = sbeOvById(out, id);
+    if (field === 'text') {
+      const s = String(value || '').replace(/\r\n?/g, '\n').slice(0, SBE_TEXT_MAX);
+      if (!s.trim()) return { overlays: os, ok: false, why: 'a title needs some text' };
+      if (s === String(t.text || '')) return { overlays: os, ok: false, why: '' };
+      t.text = s;
+    } else {
+      const st = Object.assign({}, t.style || {});
+      if (field === 'box') st.box = !!value;
+      else if (field === 'align') st.align = String(value);
+      else if (field === 'color' || field === 'box_color') st[field] = sbeHexColour(value, SBE_TEXT_DEFAULTS[field]);
+      else st[field] = sbeNum(value, SBE_TEXT_DEFAULTS[field]);
+      // NEUTRAL IS ABSENT, the server's rule: a style back at the defaults
+      // is no style.
+      const clean = sbeOvText({ style: st }).style;
+      const keep = {};
+      for (const k of Object.keys(clean)) if (clean[k] !== SBE_TEXT_DEFAULTS[k]) keep[k] = clean[k];
+      if (Object.keys(keep).length) t.style = keep; else delete t.style;
+      if (JSON.stringify(t.style || null) === JSON.stringify(o.style || null)) {
+        return { overlays: os, ok: false, why: '' };
+      }
+    }
+    t.source = 'human';
+    return { overlays: out, ok: true };
+  });
+  sbeOvPaint();
+}
+
+// ADD TITLE: a text overlay at the playhead, selected, with the inspector's
+// text box focused so the next thing typed is the title. No modal, no
+// prompt — the inspector is where every other property of an overlay lives,
+// so it is where the text lives too.
+function edAddTitle() {
+  if (!SBE.open || !SBE.id) {
+    phosToast('Open a __SEQ__ first — a title belongs to a timeline.', {});
+    return;
+  }
+  const res = sbeOvMutate(os => sbeOvAdd(os, { kind: 'text', text: 'Title',
+                                               title: 'Title', duration_s: 3 },
+                                         SBE.playhead));
+  if (!res || !res.added) return;
+  SBE.ovSel = res.added.id;
+  SBE.sel = '';
+  SBE.txSel = '';
+  sbePaint();
+  sbeOvPaint();
+  const box = sbeEl('sbeOvTextBox');
+  if (box && box.focus) { try { box.focus(); box.select && box.select(); } catch (e) {} }
 }
 
 function sbeOnOvDown(ev) {
@@ -4651,6 +5219,7 @@ function sbeOnOvDown(ev) {
   const id = blk.dataset.id;
   SBE.ovSel = id;
   SBE.sel = '';
+  SBE.txSel = '';
   const o = sbeOvById(SBE.overlays, id);
   if (!o) return;
   const grip = ev.target.closest('.sbe-grip');
@@ -5377,12 +5946,62 @@ function sbePaintKeys() {
 
 function sbePaintInspector() {
   const box = sbeEl('sbeInspect');
+  // A SELECTED CUT OWNS THE INSPECTOR. The boundary between two clips is a
+  // subject in its own right — it is what a transition is a property of —
+  // so it gets the same box every other subject gets, and the same shape:
+  // what it is, then its controls.
+  if (SBE.txSel && !SBE.sel && !SBE.ovSel) {
+    const order = SBE.clips.slice().sort((p, q) => sbeNum(p.film_start) - sbeNum(q.film_start));
+    const k = order.findIndex(c => c.id === SBE.txSel);
+    const a = order[k], b = order[k + 1];
+    if (!a || !b) { SBE.txSel = ''; }
+    else {
+      const row = sbeTxAfter(SBE.transitions, a.id);
+      const r = sbeTxResolve(order, SBE.transitions || [], sbeFps()).find(x => x.after_clip === a.id) || null;
+      const name = (c) => (sbeKind(c) === 'slug') ? 'black'
+        : sbeNiceName(c.title || String(c.path || '').split('/').pop() || 'clip');
+      const kind = row ? String(row.kind) : 'none';
+      const dur = row ? sbeNum(row.duration, 0.5) : 0.5;
+      const opt = (v, label) => '<option value="' + v + '"' + (kind === v ? ' selected' : '') + '>' + label + '</option>';
+      const cap = Math.max(SBE_TX_MIN, Math.min(SBE_TX_MAX, 0.5 * Math.min(sbeLen(a), sbeLen(b))));
+      const why = !row
+        ? 'A transition here pulls ' + 'extra picture from beyond each clip\'s trim — '
+          + 'the cut itself does not move, and neither does the sound.'
+        : (r && r.problem ? r.problem.message
+           : (r ? SBE_TX_LABELS[r.kind] + ' over ' + r.duration.toFixed(2) + 's, centred on the cut: '
+                  + r.half.toFixed(2) + 's of handle each side. '
+                  + (r.kind === 'dissolve'
+                     ? 'The preview only approximates it (one picture at a time); the render is a true dissolve.'
+                     : 'The preview shows it; the render is exact.') : ''));
+      box.innerHTML =
+        '<b>Cut · ' + escapeHtml(name(a)) + ' \u2192 ' + escapeHtml(name(b)) + '</b>' +
+        '<span>at ' + sbeNum(a.film_end).toFixed(2) + 's on the __SEQ__</span>' +
+        '<div class="sbe-sect"><div class="sbe-sect-h">Transition</div>' +
+        '<div class="sbe-sect-b">' +
+        '<span class="sbe-fade-row"><label for="sbeTxKind">Kind</label>' +
+        '<select class="sb-input sbe-tx-kind" id="sbeTxKind" ' +
+          'onchange="sbeTxCommit(this.value, sbeEl(\'sbeTxDur\').value)">' +
+        opt('none', 'None — a hard cut') + opt('dissolve', 'Dissolve') +
+        opt('fade_black', 'Fade through black') + '</select></span>' +
+        '<span class="sbe-fade-row"><label for="sbeTxDur">Length</label>' +
+        '<input type="number" class="sb-input sbe-fade-num" id="sbeTxDur" min="' +
+          SBE_TX_MIN.toFixed(2) + '" max="' + cap.toFixed(2) + '" step="0.05" value="' + dur.toFixed(2) + '" ' +
+          'onchange="sbeTxCommit(sbeEl(\'sbeTxKind\').value, this.value)" ' +
+          'title="Seconds, centred on the cut. Snapped to an even number of frames.">' +
+        '<span class="sbe-adj-val">s</span></span>' +
+        (row ? '<button type="button" class="ghost-btn" onclick="sbeTxRemoveSel()">Remove</button>' : '') +
+        '</div></div>' +
+        '<span class="sbe-why' + (r && r.problem ? ' is-bad' : '') + '">' + escapeHtml(why) + '</span>';
+      return;
+    }
+  }
   // A SELECTED CARD OWNS THE INSPECTOR. It is a lane of its own, so it gets
   // the same two sections that mean anything for it — what it is, and its
   // effects — and none of the Sound section, which it has no half of.
   const ov = sbeOvById(SBE.overlays, SBE.ovSel);
   if (ov && !SBE.sel) {
     const oe = sbeFx(ov);
+    const okind = sbeOvKind(ov);
     const orow = (edge, val) =>
       '<span class="sbe-fade-row">' +
       '<label for="sbeOvFade' + edge + '">Fade ' + edge + '</label>' +
@@ -5390,20 +6009,67 @@ function sbePaintInspector() {
         'min="0" step="0.05" value="' + val.toFixed(2) + '" ' +
         'onchange="sbeOvFadeCommit(\'' + edge + '\', this.value)">' +
       '<span class="sbe-adj-val">s</span></span>';
+    // A TITLE'S OWN SECTION. The text and how it sits, beside the same
+    // Effects every overlay has — a title is a card the render draws, and
+    // the inspector says so by giving it the card's box plus one section.
+    let textSect = '';
+    if (okind === 'text') {
+      const tt = sbeOvText(ov);
+      const st = tt.style;
+      const alignOpt = (v, l) => '<option value="' + v + '"' + (st.align === v ? ' selected' : '') + '>' + l + '</option>';
+      textSect =
+        '<div class="sbe-sect"><div class="sbe-sect-h">Text</div>' +
+        '<div class="sbe-sect-b sbe-title-b">' +
+        '<textarea class="sb-input sbe-title-text" id="sbeOvTextBox" rows="2" maxlength="' + SBE_TEXT_MAX + '" ' +
+          'placeholder="What the title says" onchange="sbeOvTextCommit(\'text\', this.value)">' +
+          escapeHtml(tt.text) + '</textarea>' +
+        '<span class="sbe-fade-row"><label for="sbeOvTxSize">Size</label>' +
+        '<input type="number" class="sb-input sbe-fade-num" id="sbeOvTxSize" min="8" max="400" step="4" ' +
+          'value="' + st.font_size.toFixed(0) + '" onchange="sbeOvTextCommit(\'font_size\', this.value)" ' +
+          'title="Pixels on a 1080-high frame; scales with the film."></span>' +
+        '<span class="sbe-fade-row"><label for="sbeOvTxColor">Colour</label>' +
+        '<input type="color" class="sbe-swatch" id="sbeOvTxColor" value="' + st.color + '" ' +
+          'onchange="sbeOvTextCommit(\'color\', this.value)"></span>' +
+        '<span class="sbe-fade-row"><label for="sbeOvTxAlign">Align</label>' +
+        '<select class="sb-input sbe-tx-kind" id="sbeOvTxAlign" onchange="sbeOvTextCommit(\'align\', this.value)">' +
+        alignOpt('left', 'Left') + alignOpt('center', 'Centre') + alignOpt('right', 'Right') + '</select></span>' +
+        '<span class="sbe-fade-row sbe-title-pos"><label for="sbeOvTxX">Across</label>' +
+        '<input type="range" id="sbeOvTxX" min="0" max="1" step="0.01" value="' + st.x + '" ' +
+          'oninput="sbeOvTextPreview(\'x\', this.value)" onchange="sbeOvTextCommit(\'x\', this.value)"></span>' +
+        '<span class="sbe-fade-row sbe-title-pos"><label for="sbeOvTxY">Down</label>' +
+        '<input type="range" id="sbeOvTxY" min="0" max="1" step="0.01" value="' + st.y + '" ' +
+          'oninput="sbeOvTextPreview(\'y\', this.value)" onchange="sbeOvTextCommit(\'y\', this.value)"></span>' +
+        '<label class="check sbe-title-box"><input type="checkbox" id="sbeOvTxBox"' + (st.box ? ' checked' : '') +
+          ' onchange="sbeOvTextCommit(\'box\', this.checked)"> Box behind</label>' +
+        (st.box
+          ? '<span class="sbe-fade-row"><label for="sbeOvTxBoxColor">Box colour</label>' +
+            '<input type="color" class="sbe-swatch" id="sbeOvTxBoxColor" value="' + st.box_color + '" ' +
+              'onchange="sbeOvTextCommit(\'box_color\', this.value)">' +
+            '<input type="range" id="sbeOvTxBoxOp" min="0" max="1" step="0.05" value="' + st.box_opacity + '" ' +
+              'title="Box opacity" onchange="sbeOvTextCommit(\'box_opacity\', this.value)"></span>'
+          : '') +
+        '</div></div>';
+    }
     box.innerHTML =
-      '<b>' + escapeHtml(sbeNiceName(ov.title
-          || String(ov.path || '').split('/').pop() || 'overlay')) + '</b>' +
-      '<span>overlay · ' + escapeHtml(sbeOvKind(ov)) + '</span>' +
+      '<b>' + escapeHtml(okind === 'text'
+          ? (sbeOvText(ov).text.split('\n')[0] || 'Title')
+          : sbeNiceName(ov.title || String(ov.path || '').split('/').pop() || 'overlay')) + '</b>' +
+      '<span>overlay · ' + escapeHtml(okind === 'text' ? 'title' : okind) + '</span>' +
       '<span>' + sbeNum(ov.film_start).toFixed(2) + '–' +
       sbeNum(ov.film_end).toFixed(2) + 's on the __SEQ__</span>' +
-      '<span class="sbe-why">Composited over the picture. Its transparency is '
-      + 'kept in the preview, the render and the export.</span>' +
+      '<span class="sbe-why">' + (okind === 'text'
+        ? 'Drawn over the picture by the render, in the same font the stage shows. '
+          + 'Fades and position are kept in the preview and the film.'
+        : 'Composited over the picture. Its transparency is '
+          + 'kept in the preview, the render and the export.') + '</span>' +
+      textSect +
       '<div class="sbe-sect"><div class="sbe-sect-h">Effects</div>' +
       '<div class="sbe-sect-b">' + orow('in', oe.fade_in)
       + orow('out', oe.fade_out) + '</div></div>' +
       '<div class="sbe-sect"><div class="sbe-sect-h">Overlay</div>' +
       '<div class="sbe-sect-b">' +
-      '<button type="button" class="ghost-btn" onclick="sbeOvDeleteSel()">Remove overlay</button>' +
+      '<button type="button" class="ghost-btn" onclick="sbeOvDeleteSel()">' +
+      (okind === 'text' ? 'Remove title' : 'Remove overlay') + '</button>' +
       '</div></div>';
     return;
   }
@@ -5506,12 +6172,38 @@ function sbePaintInspector() {
       : '') +
     ((kind === 'video' && !c.proxy)
       ? '<span>no proxy — scrubbing this one decodes from the top of the clip</span>' : '') +
-    adjust +
+    ((kind === 'video' && !sbeShotForClip(c))
+      ? '<span>not a storyboard shot — it cannot be retaken from here, only re-cut</span>' : '') +
     '<span class="sbe-why">' + escapeHtml(why.join(' · ')) + '</span>' +
     (errs.length ? '<span style="color:var(--danger)">' + escapeHtml(errs[0].message) + '</span>' : '') +
     sect('Clip',
-      '<button type="button" class="ghost-btn" onclick="sbeToggleLock()">' +
+      // SPEED, AS A CONTROL AND NEVER A GUESS. A number with the four rates
+      // people actually reach for beside it; the slot follows and the rest
+      // of the film ripples. Only a video clip has a clock.
+      ((kind === 'video')
+        ? '<span class="sbe-fade-row sbe-speed-row"><label for="sbeSpeed">Speed</label>' +
+          '<input type="number" class="sb-input sbe-fade-num" id="sbeSpeed" min="' + SBE_SPEED_MIN +
+            '" max="' + SBE_SPEED_MAX + '" step="0.05" value="' + sbeSpeed(c).toFixed(2) + '" ' +
+            'onchange="sbeSpeedCommit(this.value)" ' +
+            'title="Plays the same seconds of the take faster or slower. The slot on the film changes; everything after it moves.">' +
+          '<span class="sbe-adj-val">x</span>' +
+          [0.5, 1, 2].map(v => '<button type="button" class="ghost-btn sbe-speed-pill' +
+            (Math.abs(sbeSpeed(c) - v) < 1e-6 ? ' is-on' : '') + '" onclick="sbeSpeedCommit(' + v + ')" ' +
+            'title="' + (v === 1 ? 'Normal speed' : (v < 1 ? 'Half speed — twice as long on the film' : 'Double speed — half as long on the film')) + '">' + v + 'x</button>').join('') +
+          '</span>'
+        : '') +
+      '<button type="button" class="ghost-btn" onclick="sbeToggleLock()" ' +
+      'title="' + (c.locked ? 'Let this shot move and trim again.' : 'Pin this shot to its place on the film; everything else flows around it.') + '">' +
       (c.locked ? 'Unlock' : 'Lock') + '</button>' +
+      '<button type="button" class="ghost-btn" onclick="sbeDuplicateSel()" ' +
+      'title="The same shot again, right after this one — window, speed, fades and grade included. Everything after it slides. (D)">Duplicate</button>' +
+      // RETAKE: send this clip back through the renderer and get a new take
+      // offered against it, in place. Only a clip that came from a shot has
+      // a prompt to start from — and the inspector says so when it cannot.
+      ((kind === 'video' && sbeShotForClip(c))
+        ? '<button type="button" class="ghost-btn" onclick="sbeRetakeSel()" ' +
+          'title="Render a new take of this shot — same character, a new seed, the prompt to edit. When it lands you choose whether it replaces this clip.">Retake</button>'
+        : '') +
       '<button type="button" class="ghost-btn" onclick="sbeLiftSelected()" ' +
       'title="Take this shot out and leave its hole. Nothing else moves. (Delete)">Lift</button>' +
       '<button type="button" class="ghost-btn" onclick="sbeRippleSelected()" ' +
@@ -5611,7 +6303,27 @@ function sbePaintInspector() {
     // `adjust.brightness` on disk, because a label is not worth a data
     // migration — and it is PRESENTED here, beside the fades, because this is
     // where a person looks for it.
-    sect('Effects', adjust + fadeRow('in', e.fade_in) + fadeRow('out', e.fade_out));
+    sect('Effects', adjust + fadeRow('in', e.fade_in) + fadeRow('out', e.fade_out)
+         + ((kind !== 'slug') ? (() => {
+             const fr = sbeFraming(c);
+             const on = !sbeFramingIsNeutral(c);
+             return '<span class="sbe-fade-row sbe-frame-row"><label for="sbeFrameZoom">Zoom</label>'
+               + '<input type="range" id="sbeFrameZoom" min="1" max="' + SBE_FRAME_ZOOM_MAX + '" step="0.05" '
+               + 'value="' + fr.zoom + '" oninput="sbeFramingPreview(\'zoom\', this.value)" '
+               + 'onchange="sbeFramingCommit(\'zoom\', this.value)" '
+               + 'title="Magnify the picture and reframe it. Approximate on the stage; the render crops the source exactly.">'
+               + '<span class="sbe-adj-val" id="sbeFrameZoomVal">' + fr.zoom.toFixed(2) + 'x</span>'
+               + (on ? '<button type="button" class="ghost-btn" onclick="sbeFramingReset()">Reset</button>' : '')
+               + '</span>'
+               + (on
+                  ? '<span class="sbe-fade-row sbe-frame-row"><label for="sbeFrameX">Across</label>'
+                    + '<input type="range" id="sbeFrameX" min="0" max="1" step="0.01" value="' + fr.x + '" '
+                    + 'oninput="sbeFramingPreview(\'x\', this.value)" onchange="sbeFramingCommit(\'x\', this.value)"></span>'
+                    + '<span class="sbe-fade-row sbe-frame-row"><label for="sbeFrameY">Down</label>'
+                    + '<input type="range" id="sbeFrameY" min="0" max="1" step="0.01" value="' + fr.y + '" '
+                    + 'oninput="sbeFramingPreview(\'y\', this.value)" onchange="sbeFramingCommit(\'y\', this.value)"></span>'
+                  : '');
+           })() : ''));
 }
 
 // The slider moves at pointer speed and the undo stack does not. `oninput`
@@ -5623,6 +6335,20 @@ function sbeBrightPreview(v) {
   const out = sbeEl('sbeBrightVal');
   if (out) out.textContent = (b > 0 ? '+' : '') + b.toFixed(2);
   sbeApplyPreviewFilter(b);
+}
+
+// The two position sliders move at pointer speed and the undo stack does
+// not — the same split the brightness slider makes. `oninput` paints, and
+// `onchange` (once, when the drag ends) is the edit.
+function sbeOvTextPreview(field, v) {
+  const o = sbeOvById(SBE.overlays, SBE.ovSel);
+  if (!o || sbeOvKind(o) !== 'text') return;
+  const tx = sbeEl('sbeOvText');
+  if (!tx || !tx.style || !tx.style.setProperty) return;
+  const val = Math.max(0, Math.min(1, sbeNum(v)));
+  if (field === 'y') { tx.style.setProperty('--tx-y', (val * 100).toFixed(3) + '%'); return; }
+  const st = Object.assign({}, sbeOvText(o).style, { x: val });
+  sbeOvTextPlace(tx, st, sbeEl('sbeStage'));
 }
 
 function sbeOvFadeCommit(edge, v) {
@@ -5657,6 +6383,24 @@ function sbeBrightCommit(v) {
   sbeQueueSave();
 }
 
+// A CONTROL THAT KEEPS FOCUS EATS THE SPACE BAR — the next press re-clicks
+// it instead of toggling play. Every inspector commit hands focus back.
+function sbeBlurControl() {
+  try {
+    const a = document.activeElement;
+    if (a && a.blur && a.tagName !== 'TEXTAREA') a.blur();
+  } catch (e) {}
+}
+
+function sbeSpeedCommit(v) {
+  if (!SBE.sel) return;
+  sbeBlurControl();
+  const ok = sbeMutate(cs => sbeSetSpeed(cs, SBE.sel, v));
+  if (!ok) { sbePaintInspector(); return; }
+  // The stage is showing a frame of a clip whose clock just changed.
+  if (!SBE.playing) sbeShowFrameAt(SBE.playhead);
+}
+
 // One place decides what the stage looks like, so the video layer and the
 // still layer can never disagree about the grade.
 // THE PREVIEW'S OPACITY, a value per frame rather than a CSS transition: a
@@ -5672,7 +6416,7 @@ function sbeFadePaint(t) {
   // during a SCRUB gave the stale clip, or none at all, and the ramp a person
   // is dragging is exactly the one they are scrubbing to look at.
   const c = sbeClipAt(SBE.clips, now) || sbeById(SBE.clips, SBE.curId);
-  const o = c ? sbeFadeOpacityAt(c, now) : 1;
+  const o = c ? sbeFadeOpacityAt(c, now, sbeTxEdges(SBE.clips, SBE.transitions, c.id, sbeFps())) : 1;
   // OPACITY IS ALSO THE LAYER SWITCH. `.sbe-still` is opacity:0 until it wins
   // `.is-on`, so writing the ramp onto BOTH layers turned the hidden one on --
   // and the still, being last in the stage and backed with #000, painted a
@@ -5686,12 +6430,60 @@ function sbeFadePaint(t) {
   paint(img);
 }
 
-function sbeApplyPreviewFilter(b) {
+function sbeApplyPreviewFilter(b, frame) {
   const css = (Math.abs(sbeNum(b)) < 1e-6) ? '' : 'brightness(' + sbeBrightnessCss(b) + ')';
   const v = sbeEl('sbeVideo');
   const i = sbeEl('sbeStill');
   if (v) v.style.filter = css;
   if (i) i.style.filter = css;
+  sbeApplyPreviewFraming(frame);
+}
+
+// THE REFRAME ON THE STAGE: the layer scaled about the anchor. Approximate
+// — the stage letterboxes with object-fit, so a picture that is not 16:9
+// scales about a point slightly off the source's own fraction — and the
+// inspector says so; the render's crop is exact.
+function sbeApplyPreviewFraming(frame) {
+  const f = sbeFraming({ frame: frame || {} });
+  const t = (Math.abs(f.zoom - 1) < 1e-9) ? '' : 'scale(' + f.zoom.toFixed(3) + ')';
+  const o = (f.x * 100).toFixed(2) + '% ' + (f.y * 100).toFixed(2) + '%';
+  for (const el of [sbeEl('sbeVideo'), sbeEl('sbeStill')]) {
+    if (!el || !el.style) continue;
+    el.style.transform = t;
+    el.style.transformOrigin = t ? o : '';
+  }
+}
+
+// The sliders move at pointer speed and the undo stack does not — `oninput`
+// paints, `onchange` is the edit, the brightness slider's own split.
+function sbeFramingPreview(field, v) {
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (!c) return;
+  const f = sbeFraming(c);
+  f[field] = sbeNum(v, f[field]);
+  sbeApplyPreviewFraming(f);
+  const out = sbeEl('sbeFrameZoomVal');
+  if (out && field === 'zoom') out.textContent = sbeFraming({ frame: f }).zoom.toFixed(2) + 'x';
+}
+function sbeFramingCommit(field, v) {
+  if (!SBE.sel) return;
+  sbeBlurControl();
+  const ok = sbeMutate(cs => sbeSetFraming(cs, SBE.sel, field, v));
+  if (!ok) { sbePaintInspector(); return; }
+  const c = sbeById(SBE.clips, SBE.sel);
+  if (c) sbeApplyPreviewFraming(sbeFraming(c));
+}
+function sbeFramingReset() {
+  if (!SBE.sel) return;
+  sbeMutate(cs => {
+    const c = sbeById(cs, SBE.sel);
+    if (!c || !c.frame) return { clips: cs, ok: false, why: '' };
+    const out = cs.map(x => Object.assign({}, x));
+    delete sbeById(out, SBE.sel).frame;
+    sbeById(out, SBE.sel).source = 'human';
+    return { clips: out, ok: true };
+  });
+  sbeApplyPreviewFraming(null);
 }
 
 function sbePaintChrome() {
@@ -5823,11 +6615,24 @@ function sbeOnTrackDown(ev) {
     sbeGenOpen(sbeNum(gap.dataset.gapStart), sbeNum(gap.dataset.gapDur));
     return;
   }
+  // A CUT IS A SUBJECT OF ITS OWN. Clicking the mark on a boundary selects
+  // the boundary, and the inspector becomes the place to put a transition on
+  // it — no lane, no panel, nothing that reads as bolted on.
+  const cut = ev.target.closest('.sbe-cut');
+  if (cut) {
+    ev.preventDefault();
+    SBE.txSel = cut.dataset.after;
+    SBE.sel = '';
+    SBE.ovSel = '';
+    sbePaint();
+    return;
+  }
   const blk = ev.target.closest('.sbe-clip');
-  if (!blk) { sbeSeek(sbeTimeFromEvent(ev, track)); return; }
+  if (!blk) { SBE.txSel = ''; sbeSeek(sbeTimeFromEvent(ev, track)); sbePaint(); return; }
   const id = blk.dataset.id;
   SBE.sel = id;
   SBE.ovSel = '';           // one inspector, one subject
+  SBE.txSel = '';
   SBE.audioDrag = null;     // same insurance the lane takes against the other
   const c = sbeById(SBE.clips, id);
   if (!c) return;
@@ -5864,7 +6669,16 @@ function sbeOnTrackDown(ev) {
     sbePaint();
     return;
   }
-  const grip = ev.target.closest('.sbe-grip');
+  // AN EDGE IS A TRIM WHEREVER YOU GRAB IT. The grips are drawn 9 px wide; a
+  // pointer within the edge zone of the block trims even when it lands a
+  // pixel outside the grip element — the reach every NLE gives an edge.
+  let grip = ev.target.closest('.sbe-grip');
+  if (!grip) {
+    const br = blk.getBoundingClientRect();
+    const EDGE = 10;
+    if (ev.clientX - br.left <= EDGE) grip = { classList: { contains: () => false } };
+    else if (br.right - ev.clientX <= EDGE) grip = { classList: { contains: (k) => k === 'r' } };
+  }
   // SHIFT IS REORDER. The hint strip already teaches "hold Alt to ignore the
   // beat", so a second modifier on the same gesture is the idiom this timeline
   // already has — and it is the only way to offer both verbs without a mode
@@ -5873,10 +6687,15 @@ function sbeOnTrackDown(ev) {
   // for the generate control to fill.
   const mode = grip ? (grip.classList.contains('r') ? 'trimR' : 'trimL')
                     : (ev.shiftKey ? 'reorder' : 'move');
+  // ⌘ / CTRL IS RIPPLE: the gesture also slides everything after the clip,
+  // the way it did before 2026-09-05. Read again on every move so it can be
+  // pressed or released mid-drag, as in Premiere.
   SBE.drag = { id: id, mode: mode, x0: ev.clientX, t0: sbeTimeFromEvent(ev, track),
                fs0: sbeNum(c.film_start), fe0: sbeNum(c.film_end), moved: false,
+               ripple: !!(ev.metaKey || ev.ctrlKey),
                before: JSON.stringify(SBE.clips) };
   if (mode === 'move') blk.classList.add('is-drag');
+  track.classList.toggle('is-ripple', SBE.drag.ripple);
   try { track.setPointerCapture(ev.pointerId); } catch (e) {}
   ev.preventDefault();
   sbePaint();
@@ -5908,16 +6727,26 @@ function sbeOnTrackMove(ev) {
     // pulling the drop index onto a beat would mean nothing.
     const r = sbeReorderTo(SBE.clips, d.id, Math.max(0, d.t0 + dt));
     if (r.ok) SBE.clips = r.clips;
-  } else if (d.mode === 'move') {
-    const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
-    const r = sbeMoveTo(SBE.clips, d.id, want);
-    if (r.ok) SBE.clips = r.clips;
-  } else if (d.mode === 'trimL') {
-    const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
-    sbeTrim(SBE.clips, d.id, 'l', want);
   } else {
-    const want = sbeSnapTime(Math.max(0, d.fe0 + dt), SBE.beats, tol, snapOn, off);
-    sbeTrim(SBE.clips, d.id, 'r', want);
+    // A move or a trim always works from the SNAPSHOT: the model clamps at
+    // neighbours, and re-applying deltas to an already-clamped state would
+    // let a pointer that kept going drag the clip through the wall.
+    const ripple = !!(ev.metaKey || ev.ctrlKey);
+    d.ripple = ripple;
+    track.classList.toggle('is-ripple', ripple);
+    SBE.clips = JSON.parse(d.before);
+    const o = { ripple: ripple };
+    if (d.mode === 'move') {
+      const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
+      const r = sbeMoveTo(SBE.clips, d.id, want, o);
+      if (r.ok) SBE.clips = r.clips;
+    } else if (d.mode === 'trimL') {
+      const want = sbeSnapTime(Math.max(0, d.fs0 + dt), SBE.beats, tol, snapOn, off);
+      sbeTrim(SBE.clips, d.id, 'l', want, o);
+    } else {
+      const want = sbeSnapTime(Math.max(0, d.fe0 + dt), SBE.beats, tol, snapOn, off);
+      sbeTrim(SBE.clips, d.id, 'r', want, o);
+    }
   }
   sbePaint();
 }
@@ -5945,6 +6774,7 @@ function sbeOnTrackUp(ev) {
   SBE.drag = null;
   if (!d) return;
   document.querySelectorAll('.sbe-clip.is-drag').forEach(el => el.classList.remove('is-drag'));
+  const trk = sbeEl('sbeTrack'); if (trk) trk.classList.remove('is-ripple');
   if (!d.moved) { sbePaint(); return; }
   // A DRAG THAT MOVED THE POINTER BUT NOT THE FILM IS NOT AN EDIT. Dragging a
   // clip left when it is already hard against its neighbour is the common case
@@ -6030,6 +6860,10 @@ function sbeLoadInto(v, c, at) {
     v.muted = !!SBE.muted || !sbePictureCarriesSound(c);
     v.volume = 1;
     v.playsInline = true;
+    // THE CLIP'S SPEED IS THE ELEMENT'S RATE. The browser plays the same
+    // seconds of the take at the rate the render's `setpts` will, so the
+    // preview and the file agree about how fast the shot goes by.
+    try { v.playbackRate = sbeSpeed(c); } catch (e) {}
     const url = sbeClipUrl(c);
     const seek = () => {
       const t = Math.max(0, Math.min(sbeNum(c.end) - 1e-3, sbeNum(at)));
@@ -6069,7 +6903,7 @@ async function sbeShowFrameAt(t) {
     return;
   }
   const kind = sbeKind(c);
-  sbeApplyPreviewFilter(sbeBright(c));
+  sbeApplyPreviewFilter(sbeBright(c), sbeFraming(c));
   if (kind === 'slug') {
     // NO FILE, SO NOTHING TO LOAD. Both layers off leaves the stage's own
     // black, which is the frame the render will write — the one case where the
@@ -6097,7 +6931,7 @@ async function sbeShowFrameAt(t) {
     return;
   }
   if (img) img.classList.remove('is-on');
-  await sbeLoadInto(v, c, sbeNum(c.start) + (t - sbeNum(c.film_start)));
+  await sbeLoadInto(v, c, sbeNum(c.start) + (t - sbeNum(c.film_start)) * sbeSpeed(c));
   v.classList.add('is-on');
   sbeEl('sbeBadge').textContent =
     (c.title || c.path.split('/').pop()) + ' · ' + sbeNum(c.start).toFixed(2) + '–' +
@@ -6796,12 +7630,64 @@ function edAddSlug() {
 function sbePaintRelink() {
   const bar = sbeEl('sbeRelink');
   if (!bar) return;
-  const rows = SBE.relink || [];
+  const all = SBE.relink || [];
+  const rows = all.filter(r => !r.retake);
+  const takes = all.filter(r => r.retake && !sbeRetakeDismissed(r));
   bar.hidden = !rows.length;
-  if (!rows.length) return;
-  sbeEl('sbeRelinkText').textContent = rows.length +
-    (rows.length === 1 ? ' shot was' : ' shots were') +
-    ' finished since this cut — use the finished versions.';
+  if (rows.length) {
+    sbeEl('sbeRelinkText').textContent = rows.length +
+      (rows.length === 1 ? ' shot was' : ' shots were') +
+      ' finished since this cut — use the finished versions.';
+  }
+  // A RETAKE IS ONE DECISION PER TAKE, so each gets its own line and its
+  // own two answers. The old take stays until the person says otherwise.
+  const tb = sbeEl('sbeRetakes');
+  if (!tb) return;
+  tb.hidden = !takes.length;
+  if (!takes.length) return;
+  tb.innerHTML = takes.map(r =>
+    '<span class="sbe-relink-row">' +
+    '<span>New take of <b>' + escapeHtml(sbeNiceName(r.title || ('shot ' + r.n))) + '</b> is ready.</span>' +
+    '<button type="button" class="ghost-btn" onclick="sbeRetakeUse(\'' + escapeHtml(r.id) + '\')" ' +
+      'title="Replace the clip with the new take. Same cut, same timings.">Use it</button>' +
+    '<button type="button" class="ghost-btn" onclick="sbeRetakeKeep(\'' + escapeHtml(r.id) + '\', \'' + escapeHtml(r.to) + '\')" ' +
+      'title="Keep the take that is on the timeline. The new one stays in the media pool.">Keep the old one</button>' +
+    '</span>').join('');
+}
+
+// "Keep the old one" is a decision about ONE file against ONE clip, kept in
+// this browser: the take stays in the pool, and this line does not come back
+// for it.
+function sbeRetakeDismissed(r) {
+  try {
+    const seen = JSON.parse(localStorage.getItem('phos_retake_keep') || '[]');
+    return seen.indexOf(String(r.id) + '|' + String(r.to)) >= 0;
+  } catch (e) { return false; }
+}
+function sbeRetakeKeep(id, to) {
+  try {
+    const seen = JSON.parse(localStorage.getItem('phos_retake_keep') || '[]');
+    seen.push(String(id) + '|' + String(to));
+    localStorage.setItem('phos_retake_keep', JSON.stringify(seen.slice(-200)));
+  } catch (e) {}
+  sbePaintRelink();
+}
+async function sbeRetakeUse(id) {
+  if (SBE.dirty && !SBE.conflict && !(await sbeSave(true))) {
+    phosToast('Your arrangement could not be saved, and the swap works on the saved file — fix the save first.',
+              { kind: 'danger', duration: 8000 });
+    return;
+  }
+  const fd = new URLSearchParams();
+  fd.set('id', SBE.id);
+  fd.set('only', id);
+  let r;
+  try { r = await (await fetch('/storyboard/edit/relink', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r || !r.ok) { phosToast((r && r.error) || 'The take could not be swapped in.', { kind: 'danger' }); return; }
+  SBE.undo.length = 0; SBE.redo.length = 0;
+  sbeAdopt(r, true);
+  phosToast('The new take is on the timeline. Same cut, same timings.', { kind: 'success', duration: 5000 });
 }
 
 async function sbeRelink() {
@@ -6913,12 +7799,13 @@ function sbeUnmuteFromRefusal() {
 async function sbeEnter(c, at) {
   const v = sbeEl('sbeVideo');
   const img = sbeEl('sbeStill');
-  sbeApplyPreviewFilter(sbeBright(c));
+  sbeApplyPreviewFilter(sbeBright(c), sbeFraming(c));
   const kind = sbeKind(c);
   if (kind === 'video') {
     if (img) img.classList.remove('is-on');
     await sbeLoadInto(v, c, (at === undefined || at === null) ? sbeNum(c.start) : sbeNum(at));
     v.classList.add('is-on');
+    try { v.playbackRate = sbeSpeed(c); } catch (e) {}
     try { await v.play(); } catch (e) {}
     return;
   }
@@ -6947,8 +7834,12 @@ async function sbePlay() {
   const v = sbeEl('sbeVideo');
   SBE.curId = c.id;
   if (sbeKind(c) === 'video') {
-    await sbeLoadInto(v, c, sbeNum(c.start) + (SBE.playhead - sbeNum(c.film_start)));
+    // ENTERING MID-CLIP: film seconds into the slot are `speed` source
+    // seconds into the take — the review caught a 2x clip re-seeking on
+    // every frame because this seek landed at the 1x position.
+    await sbeLoadInto(v, c, sbeNum(c.start) + (SBE.playhead - sbeNum(c.film_start)) * sbeSpeed(c));
     v.classList.add('is-on');
+    try { v.playbackRate = sbeSpeed(c); } catch (e) {}
     try {
       await v.play();
     } catch (e) {
@@ -6965,7 +7856,7 @@ async function sbePlay() {
         try { await v.play(); } catch (e2) {}
       }
     }
-    sbeApplyPreviewFilter(sbeBright(c));
+    sbeApplyPreviewFilter(sbeBright(c), sbeFraming(c));
   } else {
     await sbeEnter(c);
   }
@@ -7015,7 +7906,7 @@ async function sbeFrame() {
       sbePaintTrack();
     }
   } else if (c) {
-    SBE.playhead = sbeNum(c.film_start) + Math.max(0, v.currentTime - sbeNum(c.start));
+    SBE.playhead = sbeNum(c.film_start) + Math.max(0, v.currentTime - sbeNum(c.start)) / sbeSpeed(c);
     if (v.currentTime >= sbeNum(c.end) - 1e-3 || v.ended) {
       const next = SBE.clips[SBE.clips.indexOf(c) + 1];
       if (!next) { sbeStop(); sbePaintHead(); return; }
@@ -7189,7 +8080,10 @@ function sbeStripSync(force) {
     // the envelope's own clock.
     const c2 = sbeById(SBE.clips, w.id);
     const win = c2 ? sbeClipAudio(c2) : null;
-    a.volume = win ? sbeGainAt(c2, win.len, w.at - win.start) : 1;
+    // The envelope's clock is the strip AS PLAYED — film seconds into it —
+    // which is `(source second - in-point) / speed`.
+    a.volume = win ? sbeGainAt(c2, win.len, (w.at - win.start) / win.speed) : 1;
+    try { a.playbackRate = win ? win.speed : 1; } catch (e) {}
     try {
       if (fresh || force || Math.abs(a.currentTime - w.at) > SBE_STRIP_SLIP) {
         a.currentTime = w.at;
@@ -7302,8 +8196,19 @@ function sbeLiftSelected() {
   sbePaint();
 }
 
+function sbeDuplicateSel() {
+  if (!SBE.sel) return;
+  let added = null;
+  const ok = sbeMutate(cs => { const r = sbeDuplicate(cs, SBE.sel); if (r.ok) added = r.added; return r; });
+  if (!ok) return;
+  // THE COPY IS THE SELECTION NOW — it is the thing just made, and the one
+  // the next key press should act on.
+  if (added) { SBE.sel = added.id; sbePaint(); }
+  sbeBlurControl();
+}
+
 function sbeSplitHere() {
-  sbeMutate(cs => sbeSplitAt(cs, SBE.playhead));
+  sbeMutate(cs => sbeSplitAt(cs, SBE.playhead, undefined, SBE.transitions || []));
 }
 
 function sbeToggleLock() {
@@ -7378,12 +8283,47 @@ async function sbeAuto() {
 }
 
 let _sbeGenAt = 0;
-function sbeGenOpen(filmStart, duration) {
+// THE SHOT A CLIP CAME FROM, from the pool the payload already carries.
+// By path — a clip on the timeline is a file, and the pool row for that
+// file knows its shot number, its prompt and its character.
+function sbeShotForClip(c) {
+  if (!c || !c.path) return null;
+  for (const r of (SBE.pool || [])) if (r.path === c.path) return r;
+  return null;
+}
+
+// RETAKE: the same modal a hole uses, seeded from the clip — its prompt to
+// edit, its length as the length, its slot as the slot — and `retake_of` so
+// the new take comes back offered against THIS clip rather than as a loose
+// shot under the timeline.
+let _sbeRetakeOf = '';
+function sbeRetakeSel() {
+  const c = sbeById(SBE.clips, SBE.sel);
+  const shot = c ? sbeShotForClip(c) : null;
+  if (!c || !shot) { phosToast('Only a clip that came from a shot can be retaken.', {}); return; }
+  const len = Math.max(0.5, sbeNum(shot.duration_s, 0) || (sbeLen(c) * sbeSpeed(c) + 1));
+  sbeGenOpen(sbeNum(c.film_start), len, { retakeOf: c.id, prompt: shot.prompt || '',
+                                          name: shot.title || String(c.path).split('/').pop() });
+}
+
+function sbeGenOpen(filmStart, duration, opts) {
   _sbeGenAt = sbeNum(filmStart);
-  sbeEl('sbeGenWhere').textContent =
-    'Nothing plays between ' + sbeFmtTime(filmStart) + ' and ' +
-    sbeFmtTime(sbeNum(filmStart) + sbeNum(duration)) + '. This shot is written to the ' +
-    'storyboard and rendered like any other.';
+  _sbeRetakeOf = (opts && opts.retakeOf) || '';
+  sbeEl('sbeGenWhere').textContent = _sbeRetakeOf
+    ? ('A new take of ' + (opts.name || 'this clip') + ': the same shot and character, a new ' +
+       'seed, the prompt below to edit. When it lands, a line above the timeline offers it ' +
+       'against this clip — Use it, or keep the old one.')
+    : ('Nothing plays between ' + sbeFmtTime(filmStart) + ' and ' +
+       sbeFmtTime(sbeNum(filmStart) + sbeNum(duration)) + '. This shot is written to the ' +
+       'storyboard and rendered like any other.');
+  const ttl = sbeEl('sbeGenTitle');
+  if (ttl) ttl.textContent = _sbeRetakeOf ? 'Retake this shot' : 'Fill this hole';
+  const after = sbeEl('sbeGenAfter');
+  if (after) after.hidden = !!_sbeRetakeOf;
+  const box = sbeEl('sbeGenPrompt');
+  if (box) box.value = (opts && opts.prompt) ? opts.prompt : '';
+  const go = sbeEl('sbeGenGo');
+  if (go) go.textContent = _sbeRetakeOf ? 'Queue the retake' : 'Queue the shot';
   // FLOOR, not round: a shot longer than the hole it was ordered for pushes
   // everything after it off the beat the moment it is placed.
   sbeEl('sbeGenDuration').value =
@@ -7406,6 +8346,7 @@ async function sbeGenSubmit() {
   fd.set('prompt', prompt);
   fd.set('duration', String(sbeNum(sbeEl('sbeGenDuration').value, 5)));
   fd.set('film_start', String(_sbeGenAt));
+  if (_sbeRetakeOf) fd.set('retake_of', _sbeRetakeOf);
   const on = document.querySelector('#sbeGenPass .pill-btn.active');
   fd.set('pass', (on && on.dataset.pass) || 'draft');
   let r;
@@ -7426,6 +8367,45 @@ async function sbeGenSubmit() {
   SBE.awaitingClip = Date.now();
   phosToast('Shot ' + r.n + ' is in the queue. It appears under the timeline when it lands.',
             { kind: 'success', duration: 6000 });
+}
+
+// DELIVER AS — remembered in this browser, posted with every render, and
+// painted onto the pills when the menu is built.
+const SBE_DELIVER_FORMATS = ['h264', 'hevc', 'prores'];
+const SBE_DELIVER_SIZES = ['native', '1080p', '2160p'];
+const SBE_DELIVER_FINISH = ['none', 'grain', 'heavy_grain'];
+function sbeDeliverGet() {
+  let d = {};
+  try { d = JSON.parse(localStorage.getItem('phos_deliver') || '{}') || {}; } catch (e) { d = {}; }
+  return { format: SBE_DELIVER_FORMATS.indexOf(d.format) >= 0 ? d.format : 'h264',
+           size: SBE_DELIVER_SIZES.indexOf(d.size) >= 0 ? d.size : 'native',
+           finish: SBE_DELIVER_FINISH.indexOf(d.finish) >= 0 ? d.finish : 'none' };
+}
+function sbeDeliverPick(key, value) {
+  const d = sbeDeliverGet();
+  d[key] = value;
+  try { localStorage.setItem('phos_deliver', JSON.stringify(d)); } catch (e) {}
+  sbeDeliverPaint();
+}
+function sbeDeliverPaint() {
+  const d = sbeDeliverGet();
+  document.querySelectorAll('#sbeDeliverFormat .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.format === d.format));
+  document.querySelectorAll('#sbeDeliverSize .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.size === d.size));
+  document.querySelectorAll('#sbeDeliverFinish .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.finish === d.finish));
+  const btn = sbeEl('sbeRenderBtn');
+  if (btn && !SBE.rendering) {
+    const short = ({ h264: '', hevc: 'HEVC', prores: 'ProRes' })[d.format];
+    const size = d.size === 'native' ? '' : (d.size === '2160p' ? '4K' : '1080p');
+    const fin = d.finish === 'none' ? '' : (d.finish === 'heavy_grain' ? 'heavy grain' : 'grain');
+    const tag = [short, size, fin].filter(Boolean).join(' ');
+    btn.textContent = tag ? ('Render · ' + tag) : 'Render';
+    btn.title = 'Assemble the film as ' + ({ h264: 'H.264', hevc: 'HEVC', prores: 'ProRes 422 HQ' })[d.format]
+      + (d.size === 'native' ? ', as cut' : (d.size === '2160p' ? ' at 4K' : ' at 1080p'))
+      + '. Change it under the arrow.';
+  }
 }
 
 async function sbeRenderFilm() {
@@ -7456,6 +8436,10 @@ async function sbeRenderFilm() {
   fd.set('id', SBE.id);
   const music = (sbeEl('sbeMusic').value || '').trim();
   if (music) { fd.set('music', music); fd.set('music_mode', sbeMusicMode()); }
+  const dl = sbeDeliverGet();
+  fd.set('format', dl.format);
+  fd.set('size', dl.size);
+  fd.set('finish', dl.finish);
   let r;
   try { r = await (await fetch('/storyboard/edit/render', { method: 'POST', body: fd })).json(); }
   catch (e) { r = { ok: false, error: String(e) }; }
@@ -7470,8 +8454,11 @@ async function sbeRenderFilm() {
   sbeEl('sbeRenderNote').textContent = (r.gaps_note || '') +
     ' Wrote ' + Math.round(sbeNum(r.duration)) + 's to ' + (r.path || '').split('/').pop();
   phosToast('Rendered ' + r.clips + ' clips · ' + Math.round(sbeNum(r.duration)) + 's' +
+            (r.deliver && r.deliver.label ? ' · ' + r.deliver.label : '') +
+            (r.deliver && r.deliver.format === 'prores'
+              ? ' — a ProRes .mov: it opens in an NLE or QuickTime, not in this preview' : '') +
             (r.gaps_note ? ' — ' + r.gaps_note : ''),
-            { kind: 'success', duration: r.gaps_note ? 11000 : 6000 });
+            { kind: 'success', duration: (r.gaps_note || (r.deliver && r.deliver.format === 'prores')) ? 11000 : 6000 });
   // The render ENDS ON THE FILM. Before this the timeline wrote an mp4 into
   // mlx_outputs/storyboards/, printed one line of grey text under the button,
   // and left the user looking at the timeline wondering where the film went.
@@ -7605,9 +8592,12 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === ' ') { ev.preventDefault(); sbeTogglePlay(); return; }
   if (ev.key === 'ArrowLeft') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead - (ev.shiftKey ? step * 10 : step)); return; }
   if (ev.key === 'ArrowRight') { ev.preventDefault(); sbeStop(); sbeSeek(SBE.playhead + (ev.shiftKey ? step * 10 : step)); return; }
+  if ((ev.key === 'Delete' || ev.key === 'Backspace') && SBE.txSel) { ev.preventDefault(); sbeTxRemoveSel(); return; }
+  if ((ev.key === 'Delete' || ev.key === 'Backspace') && SBE.ovSel && !SBE.sel) { ev.preventDefault(); sbeOvDeleteSel(); return; }
   if ((ev.key === 'Delete' || ev.key === 'Backspace') && ev.shiftKey) { ev.preventDefault(); sbeRippleSelected(); return; }
   if (ev.key === 'Delete' || ev.key === 'Backspace') { ev.preventDefault(); sbeLiftSelected(); return; }
   if (ev.key === 's' || ev.key === 'S') { ev.preventDefault(); sbeSplitHere(); return; }
+  if ((ev.key === 'd' || ev.key === 'D') && !ev.metaKey && !ev.ctrlKey && SBE.sel) { ev.preventDefault(); sbeDuplicateSel(); return; }
   if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'z' || ev.key === 'Z')) {
     ev.preventDefault();
     ev.shiftKey ? sbeRedo() : sbeUndo();
@@ -7896,6 +8886,19 @@ Object.assign(globalThis, {
   sbeDeleteKeyframe, sbeDeleteStrip, sbeSetAudioFade, sbeOvKind,
   sbeOvAt, sbeOvById, sbeOvFits, sbeOvMove,
   sbeOvTrim, sbeOvAdd, sbeOvDelete, sbeStripOwned,
+  // Editor v2: speed on the clip, titles on the overlay lane, transitions on
+  // the cut.
+  sbeSpeed, sbeSetSpeed, sbeSpeedCommit,
+  sbeOvText, sbeHexColour, sbeRgba, sbeOvTextCommit, sbeOvTextPreview, edAddTitle,
+  sbeSectionBands, sbeShotForClip, sbeRetakeSel, sbeRetakeDismissed,
+  sbeDeliverGet, sbeDeliverPick, sbeDeliverPaint, sbeDuplicate, sbeDuplicateSel,
+  sbeFraming, sbeFramingIsNeutral, sbeSetFraming, sbeApplyPreviewFraming, sbeFramingPreview,
+  sbeFramingCommit, sbeFramingReset,
+  sbeRetakeKeep, sbeRetakeUse,
+  sbeOvTextPlace, sbeBlurControl,
+  sbeTxById, sbeTxAfter, sbeTxDuration, sbeTxSpare, sbeTxResolve, sbeTxEdges,
+  sbeTxSet, sbeTxDelete, sbeTxPrune, sbeTxRepoint, sbeTxMutate, sbeTxCommit,
+  sbeTxRemoveSel,
   sbePictureCarriesSound, sbeStripsAt, sbeClipAt, sbeHoles,
   sbeBeatGrid, sbeGridIsAGuess, sbeSnapTime, sbeById,
   sbeMoveTo, sbeTrim, sbeRippleDelete, sbeLiftDelete, sbeSplitAt,

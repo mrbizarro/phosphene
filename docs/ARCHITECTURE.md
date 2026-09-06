@@ -38,6 +38,12 @@ webapp/                 ← the frontend, as plain files served from disk
     └── panel.css       ← ALL panel CSS (slice 1, landed)
 mlx_warm_helper.py      ← the render subprocess (JSON over stdin/stdout);
                           not part of the web frontend at all
+ltx_windows.py          ← PURE: the sliding-window schedule and per-window
+                          prompt contract for long LTX clips; the panel turns
+                          it into one generate + N extend calls
+storyboard_editor.py    ← the Editor's document model: clips, overlays
+                          (cards and titles), transitions, the mix — every
+                          accessor the preview, render and export share
 panel_assets/
 └── stats.html          ← the /stats dashboard (predates webapp/; same
                           served-from-disk idea)

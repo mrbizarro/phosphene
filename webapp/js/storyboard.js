@@ -377,13 +377,27 @@ function sbLocInput() {
 }
 
 let _sbShots = 12;
+// ONE TAKE is the fifth answer on the Shots row: a film that is one shot,
+// planned as beats. `_sbTake` is 0 (off) or the take's length in seconds.
+let _sbTake = 0;
 function sbSetShots(n, persist) {
-  _sbShots = Number(n) || 12;
+  const take = (n === 'take');
+  if (take) { if (!_sbTake) _sbTake = 60; }
+  else { _sbTake = 0; _sbShots = Number(n) || 12; }
   document.querySelectorAll('#sbLengthGroup .q-chip').forEach(b =>
-    b.classList.toggle('active', Number(b.dataset.sbShots) === _sbShots));
-  if (persist !== false) sbSaveSetting('storyboard_shots', _sbShots);
+    b.classList.toggle('active', take ? b.dataset.sbShots === 'take' : Number(b.dataset.sbShots) === _sbShots));
+  const row = sbEl('sbTakeRow');
+  if (row) row.hidden = !take;
+  if (take) sbSetTake(_sbTake);
+  if (persist !== false && !take) sbSaveSetting('storyboard_shots', _sbShots);
+}
+function sbSetTake(secs) {
+  _sbTake = Number(secs) || 60;
+  document.querySelectorAll('#sbTakeGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', Number(b.dataset.sbTake) === _sbTake));
 }
 function sbShotsValue() {
+  if (_sbTake) return Math.round(_sbTake / 5);
   const on = document.querySelector('#sbLengthGroup .q-chip.active');
   return on ? Number(on.dataset.sbShots) : _sbShots;
 }
@@ -392,6 +406,40 @@ async function sbSaveSetting(key, value) {
     const fd = new URLSearchParams(); fd.set(key, String(value));
     await fetch('/settings', { method: 'POST', body: fd });
   } catch (e) {}
+}
+
+function sbToggleSwitchHelp() {
+  const btn = sbEl('sbSwitchHelpBtn'), note = sbEl('sbSwitchHelpNote');
+  if (!btn || !note) return;
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  note.hidden = open;
+}
+// The long-shot switch needs the Q8 pack (the chain runs on the dev
+// transformer). Say so on the switch, from the status the panel already has,
+// rather than at render time per shot.
+function sbSyncBriefGates() {
+  const el = sbEl('sbLongWindows');
+  if (!el) return;
+  const s = globalThis.LAST_STATUS;
+  if (!s) return;
+  const ok = !!s.q8_available;
+  el.disabled = !ok;
+  if (!ok && el.checked) el.checked = false;
+  const lab = el.closest('label');
+  if (lab) lab.title = ok
+    ? 'A shot longer than 5 seconds renders as a chain of 5-second passes, each continuing from the last, instead of being shortened to fit one. Slower. LTX shots only.'
+    : 'Needs the Q8 pack — download it from the launcher menu first.';
+}
+async function sbRestill(n) {
+  const fd = new FormData();
+  fd.set('id', SB.id); fd.set('n', String(n));
+  let r;
+  try { r = await (await fetch('/storyboard/restill', { method: 'POST', body: fd })).json(); }
+  catch (e) { r = { ok: false, error: String(e) }; }
+  if (!r.ok) { phosToast(r.error || 'Could not start a new still.', { kind: 'danger', duration: 6000 }); return; }
+  phosToast(`A new still for shot ${n} is being made; the shot renders from it when it lands.`, { duration: 6000 });
+  sbLoad(SB.id, true);
 }
 
 function sbToggleRamHelp() {
@@ -589,12 +637,23 @@ async function sbPlan() {
   const fd = new URLSearchParams();
   fd.set('concept', concept);
   fd.set('shots', String(sbShotsValue()));
+  fd.set('take_seconds', String(_sbTake || 0));
   fd.set('style', (sbEl('sbStyle') || {}).value || '');
   fd.set('must', (sbEl('sbMust') || {}).value || '');
   fd.set('locations', (sbEl('sbLocations') || {}).value || '');
   fd.set('wardrobe', (sbEl('sbWardrobe') || {}).value || '');
   fd.set('engine', _sbEngineMode);
   if (_sbCastId) fd.set('character_id', _sbCastId);
+  // The director's two fields travel whenever the row exists, so clearing
+  // the path is a real "no soundtrack" and not an absent field the server
+  // would read as "keep what the board had".
+  if (sbEl('sbTrack')) {
+    fd.set('soundtrack', (sbEl('sbTrack').value || '').trim());
+    fd.set('bars_per_shot', (sbEl('sbTrackBars') || {}).value || '2');
+  }
+  if (sbEl('sbAuto')) fd.set('auto', sbEl('sbAuto').checked ? '1' : '0');
+  if (sbEl('sbAnchorStills')) fd.set('anchor_stills', sbEl('sbAnchorStills').checked ? '1' : '0');
+  if (sbEl('sbLongWindows')) fd.set('long_windows', sbEl('sbLongWindows').checked ? '1' : '0');
   let r;
   try {
     r = await (await fetch('/storyboard/plan', { method: 'POST', body: fd })).json();
@@ -606,10 +665,30 @@ async function sbPlan() {
   }
   SB.id = r.id;
   try { localStorage.setItem('phos_sb_open', SB.id); } catch (e) {}
+  if (sbEl('sbAuto') && sbEl('sbAuto').checked) {
+    phosToast('Auto is on: after the plan, every shot renders, the cut is made and the film is assembled on their own. The Film screen shows it when it lands.',
+              { duration: 9000 });
+  }
   sbShow('planning');
   sbSetPlanningStage('load');
   sbLoad(SB.id);
 }
+// THE SHOTS CHIPS STAND DOWN WHEN A TRACK IS ON THE BRIEF — the grid decides
+// the count — and the line under the field says what will happen instead.
+function sbTrackInput() {
+  const path = ((sbEl('sbTrack') || {}).value || '').trim();
+  const bars = (sbEl('sbTrackBars') || {}).value || '2';
+  const meta = sbEl('sbTrackMeta');
+  const row = sbEl('sbLengthRow');
+  if (meta) {
+    meta.textContent = path
+      ? 'music video — one shot per ' + bars + ' bar' + (bars === '1' ? '' : 's')
+        + ' on the downbeat; the track replaces the clips\' own sound and sets the shot count'
+      : 'optional — a track makes it a music video cut to the beat';
+  }
+  if (row) row.classList.toggle('is-standing-down', !!path);
+}
+
 function sbPlanBtnReset() {
   const btn = sbEl('sbPlanBtn');
   if (!btn) return;
@@ -629,12 +708,13 @@ async function sbCancelPlan() {
 function sbSetPlanningStage(stage) {
   const map = {
     load:   ['Loading the planner', 'About a minute. Nothing renders yet.'],
+    grid:   ['Reading the beat', 'Finding the downbeats the shots will cut on.'],
     write:  ['Writing the plan', 'About a minute. Nothing renders yet.'],
     check:  ['Checking the plan', 'About a minute. Nothing renders yet.'],
     repair: ['Fixing the plan', 'It came back slightly malformed. One retry.'],
     unload: ['Giving the memory back', 'The renderer gets it now.'],
   };
-  const order = ['load', 'write', 'check', 'repair', 'unload'];
+  const order = ['load', 'grid', 'write', 'check', 'repair', 'unload'];
   const at = order.indexOf(stage);
   const t = map[stage] || map.load;
   const ttl = sbEl('sbPlanningTitle'), sub = sbEl('sbPlanningSub');
@@ -1005,6 +1085,17 @@ function sbRenderPlan(r) {
   const shots = b.shots || [];
   const title = sbEl('sbTitle');
   if (title && document.activeElement !== title) title.value = b.title || '';
+  // The three brief switches read back from the board, so reopening a film
+  // shows how it is being made — not whatever the last brief had ticked.
+  for (const [id, key] of [['sbAuto', 'auto'], ['sbAnchorStills', 'anchor_stills'], ['sbLongWindows', 'long_windows']]) {
+    const el = sbEl(id);
+    if (el && key in b) el.checked = !!b[key];
+  }
+  if ('take_seconds' in b) {
+    if (b.take_seconds) { sbSetShots('take', false); sbSetTake(b.take_seconds); }
+    else sbSetShots(b.shots_target || _sbShots, false);
+  }
+  sbSyncBriefGates();
 
   // --- summary ---
   // Per PASS, not per `status`: during delivery, `status === 'done'` still
@@ -1265,6 +1356,19 @@ function sbShotCard(s, r, errs) {
   const passLabel = r.pass === 'final' ? 'Delivery' : 'Draft';
   const seedSet = (s.seed != null && s.seed !== -1);
 
+  // ANCHOR STILL. The image the shot starts from, when the board anchors
+  // shots; a failed still says so and the shot renders unanchored.
+  const stillPending = !s.still && !s.still_error && s.still_job_id && s.still_job_id !== 'skipped';
+  const stillBlock = s.still ? `
+    <div class="sb-still" title="The still this shot starts from">
+      <a href="/image?path=${encodeURIComponent(s.still)}" target="_blank" rel="noopener" title="Open the still">
+        <img src="/image?w=480&path=${encodeURIComponent(s.still)}" alt="Anchor still for shot ${n}" loading="lazy"></a>
+      <span class="sb-still-tag">starts from this still</span>
+      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill" title="Make a new still and render this shot from it">New still</button>
+    </div>` : stillPending ? `
+    <div class="sb-still is-pending"><span class="sb-still-spin" aria-hidden="true"></span><span class="sb-still-tag">making the still…</span></div>`
+    : (s.still_error ? `<div class="sb-still sb-still-failed" title="${escapeHtml(s.still_error)}"><span class="sb-still-tag">no still — rendered unanchored</span>
+      <button type="button" class="sb-err-fix sb-still-redo" data-act="restill" title="Try the still again">Try again</button></div>` : '');
   const outBlock = stale ? `
     <div class="sb-shot-out car-card is-stale">
       <div class="car-thumb-wrap" onclick="selectOutput('${escapeHtml(stale)}')">
@@ -1331,9 +1435,13 @@ function sbShotCard(s, r, errs) {
     </div>
     <textarea class="sb-shot-prompt" rows="3" spellcheck="false" data-act="prompt"
       ${locked ? 'readonly' : ''} title="${escapeHtml(s.title || '')}">${escapeHtml(s.prompt || '')}</textarea>
+    ${s.take_seconds ? `
+    <div class="sb-beats-label">One take · ${s.take_seconds} s · ${Math.round(s.take_seconds / 5)} beats <span class="sub">one line per 5 seconds · the first beat is the prompt above</span></div>
+    <textarea class="sb-shot-prompt sb-beats" rows="${Math.min(12, Math.round(s.take_seconds / 5))}" spellcheck="false" data-act="beats"
+      ${locked ? 'readonly' : ''}>${escapeHtml((s.beats || []).join('\n'))}</textarea>` : ''}
     ${mine.length ? `<div class="sb-shot-err">${mine.map(sbErrRow).join('')}</div>` : ''}
     ${failBlock}
-    ${outBlock}
+    ${stillBlock}${outBlock}
   </li>`;
 }
 
@@ -1396,14 +1504,24 @@ function sbRenderRunBar(r) {
   const paused = LAST_STATUS && LAST_STATUS.paused;
   sbEl('sbRunTitle').textContent = paused
     ? `Paused · ${done} of ${shots.length} done`
-    : (active ? `Shot ${active.n} of ${shots.length}` : `${done} of ${shots.length} done`);
+    : (active ? (tag.still ? `Still for shot ${active.n} of ${shots.length}` : `Shot ${active.n} of ${shots.length}`)
+              : `${done} of ${shots.length} done`);
   let sub = '';
-  if (active) sub = `S${String(active.n).padStart(2, '0')} · ${snippet(active.prompt, 40)}`;
+  if (active) sub = (tag.still ? 'making the still · ' : '') + `S${String(active.n).padStart(2, '0')} · ${snippet(active.prompt, 40)}`;
   // The remaining time is a SERVER number. /status.eta_sec is the sum of
   // per-job ETAs and is trustworthy when every queued job is this film's.
   const q = (LAST_STATUS && LAST_STATUS.queue) || [];
   const allMine = q.length && q.every(j => { const t = _sbTagOf(j); return t && t.id === SB.id; });
   if (allMine && LAST_STATUS.eta_sec) sub += ` · ${sbFmtWall(LAST_STATUS.eta_sec)} left`;
+  else {
+    // THE FILM'S OWN NUMBER when the queue's is not ours to read: the sum
+    // of the per-shot estimates for what this pass has not landed yet,
+    // from the same cost model the summary cell prices the film with.
+    const per = r.per_shot_est || {};
+    const left = shots.filter(s => !s[outKey] && s.status !== 'skipped')
+      .reduce((a, s) => a + (Number(per[String(s.n)]) || 0), 0);
+    if (left > 0) sub += ` · ${sbFmtWall(left)} left`;
+  }
   sbEl('sbRunSub').textContent = sub;
   sbEl('sbPauseBtn').textContent = paused ? 'Resume' : 'Pause';
   sbEl('sbRunDots').innerHTML = shots.map(s => {
@@ -1424,8 +1542,10 @@ function sbRenderRunBar(r) {
 }
 
 function _sbTagOf(job) {
-  const m = /^sb:([^#]+)#(\d+)$/.exec(((job || {}).params || {}).session_tag || '');
-  return m ? { id: m[1], n: Number(m[2]) } : null;
+  // `sb:<board>#<n>` is a shot's clip; `sb:<board>#<n>:still` is the anchor
+  // still made before it. Both belong to the film.
+  const m = /^sb:([^#]+)#(\d+)(:still)?$/.exec(((job || {}).params || {}).session_tag || '');
+  return m ? { id: m[1], n: Number(m[2]), still: !!m[3] } : null;
 }
 function sbScrollToShot(n) {
   const el = document.querySelector(`.sb-shot[data-n="${n}"]`);
@@ -1578,6 +1698,7 @@ function sbShotAction(n, act, el, ev) {
     }
     case 'note': s.note = el.value; sbGrade(n, s.grade, el.value); return;
     case 'retry': sbRenderPass(SB.payload.pass || 'draft', [n]); return;
+    case 'restill': sbRestill(n); return;
     case 'cut': sbGrade(n, 'cut', s.note || ''); return;
     default: return;
   }
@@ -2034,7 +2155,9 @@ function sbPollHook(s) {
 // ---- wiring ----------------------------------------------------------------
 document.addEventListener('click', (ev) => {
   const chip = ev.target.closest && ev.target.closest('#sbLengthGroup .q-chip');
-  if (chip) { sbSetShots(Number(chip.dataset.sbShots)); return; }
+  if (chip) { sbSetShots(chip.dataset.sbShots === 'take' ? 'take' : Number(chip.dataset.sbShots)); return; }
+  const tk = ev.target.closest && ev.target.closest('#sbTakeGroup [data-sb-take]');
+  if (tk) { sbSetTake(tk.dataset.sbTake); return; }
   const eng = ev.target.closest && ev.target.closest('#sbEngineGroup [data-sb-engine]');
   if (eng) { sbSetEngineMode(eng.dataset.sbEngine); return; }
   const reng = ev.target.closest && ev.target.closest('#sbReplanEngineGroup [data-sb-engine]');
@@ -2107,12 +2230,29 @@ document.addEventListener('focusout', (ev) => {
 
 let _sbPromptTimer = null;
 document.addEventListener('input', (ev) => {
+  const bel = ev.target.closest && ev.target.closest('#sbShots textarea[data-act="beats"]');
+  if (bel) {
+    // The beats of a take: one line per 5 s, kept as a list the length of
+    // the take; beat 1 is also the shot's prompt.
+    const li = bel.closest('.sb-shot');
+    const s = sbShotById(Number(li.dataset.n));
+    if (!s) return;
+    const n = Math.max(1, Math.round((s.take_seconds || 0) / 5));
+    const lines = String(bel.value || '').split('\n').map(x => x.trim()).slice(0, n);
+    while (lines.length < n) lines.push('');
+    s.beats = lines;
+    if (lines[0]) { s.prompt = lines[0]; const pe = li.querySelector('textarea[data-act="prompt"]'); if (pe && pe.value !== lines[0]) pe.value = lines[0]; }
+    if (_sbPromptTimer) clearTimeout(_sbPromptTimer);
+    _sbPromptTimer = setTimeout(() => sbQueueSave(true), 800);
+    return;
+  }
   const el = ev.target.closest && ev.target.closest('#sbShots textarea[data-act="prompt"]');
   if (!el) return;
   const li = el.closest('.sb-shot');
   const s = sbShotById(Number(li.dataset.n));
   if (!s) return;
   s.prompt = el.value;
+  if (s.take_seconds && Array.isArray(s.beats)) s.beats[0] = el.value;
   sbAutoGrowPrompts(el);
   if (_sbPromptTimer) clearTimeout(_sbPromptTimer);
   _sbPromptTimer = setTimeout(() => sbQueueSave(true), 800);
@@ -2178,6 +2318,9 @@ document.addEventListener('dragend', () => {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  sbSetTake,
+  sbToggleSwitchHelp, sbSyncBriefGates, sbRestill,
+  sbTrackInput,
   sbEl, sbFmtClock, sbFmtBytes, sbFmtAgo,
   sbFilmKind, sbFilmPick, sbRenderFinalQualities, sbInit,
   sbTeardown, sbConceptInput, sbMustInput, sbLocInput,

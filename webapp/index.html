@@ -917,6 +917,11 @@
              make_job allowlist — a field that isn't listed there silently
              no-ops on /queue/add (the known trap). setH3Tier keeps the three
              in sync, so there is exactly one state, spelled three ways. -->
+        <!-- ONE TAKE: a length past a single pass, and one beat per five
+             seconds. make_job turns it into the windows chain (LTX) or
+             15 s parts that continue from each other (H3). -->
+        <input type="hidden" name="take_seconds" id="take_seconds" value="0">
+        <input type="hidden" name="beats" id="beats" value="">
         <input type="hidden" name="h3_tier" id="h3_tier" value="draft_3s">
         <input type="hidden" name="h3_quality" id="h3_quality" value="draft">
         <input type="hidden" name="h3_length" id="h3_length" value="3s">
@@ -1300,6 +1305,8 @@
                       onclick="event.stopPropagation(); event.preventDefault(); document.getElementById('h3LoraImportFile').click()"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-folder-simple"/></svg>Import H3 LoRA</button>
               <button type="button" class="loras-browse-btn"
                       onclick="event.stopPropagation(); event.preventDefault(); openCivitaiModal()"><svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-magnifying-glass"/></svg>Browse CivitAI</button>
+              <button type="button" class="loras-browse-btn is-ghost" id="loraUpdatesBtn" title="Ask CivitAI whether any installed LoRA has a newer version"
+                      onclick="event.stopPropagation(); event.preventDefault(); checkLoraUpdates()">Check for updates</button>
             </span>
           </summary>
           <div class="loras-body" id="lorasBody">
@@ -1579,13 +1586,56 @@
                  frames at 12fps, then exports a normal 24fps file with
                  motion interpolation. This is explicit because dialogue,
                  lip-sync, and fast motion need user judgment. -->
+            <!-- ONE TAKE. The length control for anything longer than one
+                 pass, on either engine. Picks a length, writes beats, shows
+                 the real time; the engine's own length pills lock while it is
+                 on, because a take IS the length. -->
+            <div class="cz-control" id="takeRow">
+              <div class="cz-label">One take
+                <span class="cz-label-hint" id="takeHint">longer than a single clip · the world changes, the shot never cuts · <a href="/docs/prompting" target="_blank" rel="noopener">how to write the beats</a></span>
+              </div>
+              <div class="pill-group cols-3" id="takeGroup">
+                <button type="button" class="pill-btn active" data-take="0" onclick="setTakeSeconds(0)"><span>Off</span><span class="sub">one clip</span></button>
+                <button type="button" class="pill-btn" data-take="30" onclick="setTakeSeconds(30)"><span>30 s</span><span class="sub">6 beats</span></button>
+                <button type="button" class="pill-btn" data-take="45" onclick="setTakeSeconds(45)"><span>45 s</span><span class="sub">9 beats</span></button>
+                <button type="button" class="pill-btn" data-take="60" onclick="setTakeSeconds(60)"><span>1 min</span><span class="sub">12 beats</span></button>
+                <button type="button" class="pill-btn" data-take="90" onclick="setTakeSeconds(90)"><span>1½ min</span><span class="sub">18 beats</span></button>
+                <button type="button" class="pill-btn" data-take="120" onclick="setTakeSeconds(120)"><span>2 min</span><span class="sub">24 beats</span></button>
+              </div>
+              <div class="cz-control" id="beatsRow" hidden>
+                <div class="cz-label">Beats
+                  <span class="cz-label-hint" id="beatsHint">one line per 5 seconds · a blank line holds the moment</span></div>
+                <textarea id="beats_text" class="sb-textarea" rows="6" spellcheck="false"
+                  oninput="beatsInput()"
+                  placeholder="she pushes off down the sunlit avenue&#10;a van sweeps past, pigeons burst up ahead&#10;she drops off the kerb into the road&#10;…"></textarea>
+                <div class="take-estimate" id="takeEstimate" aria-live="polite"></div>
+              </div>
+            </div>
+
             <div class="cz-control" id="temporalRow" data-ltx-only>
               <div class="cz-label">Long clips
-                <span class="cz-label-hint">experimental temporal interpolation</span>
+                <span class="cz-label-hint">past 10 s: interpolate frames, or chain windows</span>
               </div>
-              <div class="pill-group cols-2" id="temporalGroup">
+              <div class="pill-group cols-3" id="temporalGroup">
                 <button type="button" class="pill-btn active" data-temporal="native"><span>Native</span><span class="sub">24fps from LTX</span></button>
                 <button type="button" class="pill-btn" data-temporal="fps12_interp24"><span>12 → 24fps</span><span class="sub">half frames · interpolated</span></button>
+                <button type="button" class="pill-btn" data-temporal="windows"><span>Windows</span><span class="sub">experimental · picture drifts across passes · needs Q8</span></button>
+              </div>
+              <!-- SLIDING WINDOWS: one prompt per window, the H3 chain's
+                   contract brought to LTX. The first line is the shot; every
+                   later line is the next beat, led by the movement; a blank
+                   line holds the previous moment. The invariants are what
+                   must not change between passes and are re-injected into
+                   every window. -->
+              <div class="cz-control" id="windowsRow" hidden>
+                <div class="cz-label">Per-window prompts
+                  <span class="cz-label-hint" id="windowsHint">one line per window · blank holds</span></div>
+                <textarea id="window_prompts_text" class="sb-textarea" rows="3" spellcheck="false"
+                  oninput="windowPromptsInput()"
+                  placeholder="(first window uses the prompt above)&#10;he turns to the window and the light catches his face&#10;"></textarea>
+                <input type="hidden" name="window_prompts" id="window_prompts" value="">
+                <input type="text" name="window_invariants" id="window_invariants" class="sb-input"
+                       placeholder="what must not change between windows — one man, a grey room, soft window light">
               </div>
             </div>
 
@@ -2671,7 +2721,7 @@
 
       <div class="cz-control" id="sbLengthRow">
         <div class="cz-label">Shots <span class="cz-label-hint">how many, roughly</span></div>
-        <div class="quality-strip pill-group cols-4" id="sbLengthGroup">
+        <div class="quality-strip pill-group cols-5" id="sbLengthGroup">
           <button type="button" class="q-chip pill-btn" data-sb-shots="6">
             <span class="ql-name">6</span><span class="q-spec ql-spec sub">a scene</span></button>
           <button type="button" class="q-chip pill-btn active" data-sb-shots="12">
@@ -2680,6 +2730,21 @@
             <span class="ql-name">24</span><span class="q-spec ql-spec sub">a film</span></button>
           <button type="button" class="q-chip pill-btn" data-sb-shots="36">
             <span class="ql-name">36</span><span class="q-spec ql-spec sub">long</span></button>
+          <!-- ONE TAKE: a film that is one shot. The planner writes beats
+               (one per 5 s) instead of shots; the render is the Video tab's
+               take. -->
+          <button type="button" class="q-chip pill-btn" data-sb-shots="take" title="One continuous shot that never cuts — the planner writes one beat per five seconds and the world changes around the subject">
+            <span class="ql-name">1</span><span class="q-spec ql-spec sub">one take</span></button>
+        </div>
+        <div class="cz-control" id="sbTakeRow" hidden>
+          <div class="cz-label">How long <span class="cz-label-hint">one beat per 5 seconds · the camera never cuts</span></div>
+          <div class="pill-group cols-5" id="sbTakeGroup">
+            <button type="button" class="pill-btn" data-sb-take="30"><span>30 s</span><span class="sub">6 beats</span></button>
+            <button type="button" class="pill-btn" data-sb-take="45"><span>45 s</span><span class="sub">9 beats</span></button>
+            <button type="button" class="pill-btn active" data-sb-take="60"><span>1 min</span><span class="sub">12 beats</span></button>
+            <button type="button" class="pill-btn" data-sb-take="90"><span>1½ min</span><span class="sub">18 beats</span></button>
+            <button type="button" class="pill-btn" data-sb-take="120"><span>2 min</span><span class="sub">24 beats</span></button>
+          </div>
         </div>
       </div>
 
@@ -2691,6 +2756,28 @@
         <div class="cz-label">Engine <span class="cz-label-hint">who renders the shots</span></div>
         <div class="pill-group cols-3" id="sbEngineGroup"></div>
         <div class="sb-enginepick-note" id="sbEnginePickNote"></div>
+      </div>
+
+      <!-- THE DIRECTOR. A soundtrack on the brief makes this a music video:
+           the beat grid decides how many shots there are and how long each
+           is (the Shots chips stand down), the planner writes one movement
+           per slot, and the Editor opens the film already cut on the
+           downbeats under this track. The same path the Editor's soundtrack
+           takes — a file on this Mac. -->
+      <div class="cz-control" id="sbTrackRow">
+        <div class="cz-label">Soundtrack
+          <span class="cz-label-hint" id="sbTrackMeta">optional — a track makes it a music video cut to the beat</span></div>
+        <div class="sb-track-row">
+          <input type="text" id="sbTrack" class="sb-input" spellcheck="false"
+                 oninput="sbTrackInput()"
+                 placeholder="/path/to/the/track.wav">
+          <select class="sb-input sb-track-bars" id="sbTrackBars" title="How many bars each shot holds"
+                  onchange="sbTrackInput()">
+            <option value="1">1 bar</option>
+            <option value="2" selected>2 bars</option>
+            <option value="4">4 bars</option>
+          </select>
+        </div>
       </div>
 
       <div class="cz-control" id="sbStyleRow">
@@ -2745,6 +2832,34 @@
         </div>
       </details>
 
+      <!-- AUTO. One press: plan, render every shot, cut to the beat, make
+           the film. Each step is the panel's existing one; only the
+           hand-over is new. -->
+      <label class="check sb-auto" title="After the plan lands, every shot renders on its own, the cut is made (on the beat when there is a track) and the film is assembled — no more buttons. You can still stop the render or re-cut afterwards.">
+        <input type="checkbox" id="sbAuto"> Auto — plan, render every shot, cut and make the film
+      </label>
+      <!-- ANCHOR STILLS. A still of each shot's first frame (from the
+           character's sheet when it has one) is made first, in seconds; the
+           clip then starts from it. -->
+      <label class="check sb-auto" title="Before each shot renders, an image of its first frame is made (from the character's sheet when the shot has one) and the clip starts from that still. LTX shots only; the still shows on the shot card with a New still button.">
+        <input type="checkbox" id="sbAnchorStills"> Start each shot from a still
+      </label>
+      <!-- LONG WINDOWS. A shot longer than one LTX window renders as a chain
+           of windows instead of being cut to fit. -->
+      <label class="check sb-auto" title="A shot longer than 5 seconds renders as a chain of 5-second passes, each continuing from the last, instead of being shortened to fit one. Slower. LTX shots only.">
+        <input type="checkbox" id="sbLongWindows"> Long shots (over 5 s): chain 5-second passes · needs the Q8 pack
+      </label>
+      <div class="sb-ramline">
+        <span>These three decide how the film gets made.</span>
+        <button type="button" class="help-dot" id="sbSwitchHelpBtn" aria-expanded="false"
+                aria-controls="sbSwitchHelpNote" title="What do they do?" onclick="sbToggleSwitchHelp()">?</button>
+      </div>
+      <div class="h3-winhelp" id="sbSwitchHelpNote" hidden>
+        <b>Auto</b> — once the plan lands, every shot renders on its own, the cut is made (on the beat when there is a track) and the film is assembled. You can still stop it or re-cut afterwards.<br>
+        <b>Start each shot from a still</b> — an image of the first frame is made first (seconds), from the character's sheet when the shot has one, and the clip starts from it. The composition is decided on the image, not discovered after minutes of video. A still that fails is written on the card and the shot renders without one. LTX shots only.<br>
+        <b>Long shots</b> — a shot over 5 seconds is normally shortened to fit one pass. With this on, it renders as a chain of 5-second passes, each continuing the last. Slower, and it needs the Q8 pack. LTX shots only.<br>
+        The planner writes the beats by the rules in <a href="/docs/prompting" target="_blank" rel="noopener">Writing for Phosphene</a>; the same page can be copied into your own assistant if you write by hand.
+      </div>
       <div class="form-action-footer">
         <div class="sb-ramline" id="sbRamLine">
           <span>Planning borrows the memory for about a minute, then gives it back.</span>
@@ -2957,6 +3072,12 @@
         <button type="button" class="ghost-btn" id="edAddSlugBtn"
                 onclick="edAddSlug()"
                 title="Black, for as long as you say. No file, no proxy — it is drawn by the render.">Add black</button>
+        <!-- A TITLE IS MADE THE SAME WAY BLACK IS: it has no file, so it has
+             no row. It lands on the overlay lane at the playhead, selected,
+             with its text ready to type in the inspector. -->
+        <button type="button" class="ghost-btn" id="edAddTitleBtn"
+                onclick="edAddTitle()"
+                title="Text over the picture, on the overlay lane at the playhead. Type it in the inspector; it is drawn by the render.">Add title</button>
       </div>
       <select class="sb-input ed-pool-film" id="edPoolFilm" hidden
               onchange="edPoolPickFilm(this.value)"
@@ -3474,6 +3595,40 @@
            They are `position: fixed` and hidden, so an open menu cannot push
            the workspace around — the same rule the notice surface follows. -->
       <div class="sbe-pop" id="sbeRenderMenu" hidden>
+        <!-- DELIVER AS. Two rows, remembered: what the film is encoded as
+             and how big. H.264 is the panel's preset and plays everywhere;
+             HEVC is the Mac's hardware encoder at half the size; ProRes is a
+             .mov for the grade that nothing here previews. Size is up
+             only, never a crop. -->
+        <span class="sbe-pop-note">Deliver as</span>
+        <span class="pill-group cols-3 sbe-deliver" id="sbeDeliverFormat">
+          <button type="button" class="pill-btn active" data-format="h264" onclick="sbeDeliverPick('format', 'h264')"
+                  title="The panel's own preset. Plays everywhere.">H.264</button>
+          <button type="button" class="pill-btn" data-format="hevc" onclick="sbeDeliverPick('format', 'hevc')"
+                  title="Apple's hardware encoder — about half the size at the same look. Plays in Safari and Chrome on a Mac.">HEVC</button>
+          <button type="button" class="pill-btn" data-format="prores" onclick="sbeDeliverPick('format', 'prores')"
+                  title="ProRes 422 HQ in a .mov, 10-bit 4:2:2 — for colour grading in an NLE. Not previewable here.">ProRes</button>
+        </span>
+        <span class="sbe-deliver-cap">H.264 plays everywhere · HEVC half the size · ProRes for the grade (.mov)</span>
+        <span class="pill-group cols-3 sbe-deliver" id="sbeDeliverSize">
+          <button type="button" class="pill-btn active" data-size="native" onclick="sbeDeliverPick('size', 'native')"
+                  title="The largest picture in the cut, as it is.">As cut</button>
+          <button type="button" class="pill-btn" data-size="1080p" onclick="sbeDeliverPick('size', '1080p')"
+                  title="Scaled to 1080 high, aspect kept, never cropped.">1080p</button>
+          <button type="button" class="pill-btn" data-size="2160p" onclick="sbeDeliverPick('size', '2160p')"
+                  title="Scaled to 2160 high (4K), aspect kept. An upscale — it adds pixels, not detail.">4K</button>
+        </span>
+        <span class="sbe-deliver-cap">Size is up only, never a crop · 4K adds pixels, not detail</span>
+        <span class="pill-group cols-3 sbe-deliver" id="sbeDeliverFinish">
+          <button type="button" class="pill-btn active" data-finish="none" onclick="sbeDeliverPick('finish', 'none')"
+                  title="The picture as rendered.">Clean</button>
+          <button type="button" class="pill-btn" data-finish="grain" onclick="sbeDeliverPick('finish', 'grain')"
+                  title="Fine moving film grain over the delivered picture — takes the digital edge off.">Grain</button>
+          <button type="button" class="pill-btn" data-finish="heavy_grain" onclick="sbeDeliverPick('finish', 'heavy_grain')"
+                  title="Coarse grain, 16 mm territory. Added after the size, so a 4K delivery gets 4K grain.">Heavy grain</button>
+        </span>
+        <span class="sbe-deliver-cap">Finish is on the delivery only — the preview and the export stay clean</span>
+        <span class="sbe-pop-sep"></span>
         <button type="button" class="ghost-btn" id="sbeNleBtn" onclick="sbeExportNle()"
                 title="A folder with an FCP7 XML (Premiere + Resolve), an After Effects script, and hardlinked media. Audio comes out as stems, not the ducked mix.">Export for Premiere / Resolve / AE</button>
         <span class="sbe-pop-note" id="sbeRenderNote"></span>
@@ -3710,6 +3865,11 @@
              both, carrying its own opacity so a card's fade is independent of
              whatever is beneath it — which is what a second track means. -->
         <img id="sbeOvLayer" class="sbe-ov-layer" alt="">
+        <!-- A TITLE ON THE STAGE. Drawn in the DOM at the same anchor and
+             the same 1080-relative size the render rasterises it at, so the
+             stage shows the card the file will carry. Same opacity rule as
+             the card layer: its fade is its own. -->
+        <div id="sbeOvText" class="sbe-ov-text"></div>
         <div class="sbe-stage-badge" id="sbeBadge">idle</div>
         <div class="sbe-stage-empty" id="sbeStageEmpty" hidden></div>
       </div>
@@ -3927,6 +4087,13 @@
           <button type="button" id="mainOutputsFilterPhotos"
                   onclick="setMainOutputsFilter('photos')">Photos</button>
         </div>
+        <!-- SEARCH, over everything the sidecar knows: prompt words, mode,
+             quality, engine, size, seed, LoRA and character names. A
+             substring test on one lower-cased string per output, so it is
+             free per keystroke; the title says how many match. -->
+        <input type="search" class="sb-input outputs-search" id="outputsSearch"
+               placeholder="Search prompts, models, LoRAs, sizes…" aria-label="Search outputs"
+               spellcheck="false" oninput="setOutputsQuery(this.value)" onsearch="setOutputsQuery(this.value)">
         <span class="ch-spacer"></span>
         <!-- "Show all (N)" — surfaces older renders that /status's polling
              fast path (newest 60) doesn't include. The button is hidden
@@ -4229,6 +4396,41 @@
         </button>
       </div>
       <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
+    </div>
+
+    <!-- Appearance. Three answers — dark, light, follow the system — kept
+         in this browser and applied before the first paint from main.js.
+         Same row shape as the switches below. -->
+    <div class="settings-section">
+      <h3>Appearance</h3>
+      <div class="hint" style="margin-bottom:10px">The panel's palette. "System" follows the Mac's own light or dark setting and switches live. Saved in this browser only.</div>
+      <div class="pill-group cols-3" id="appearanceGroup">
+        <button type="button" class="pill-btn active" data-appearance="dark" onclick="setAppearance('dark')">Dark</button>
+        <button type="button" class="pill-btn" data-appearance="light" onclick="setAppearance('light')">Light</button>
+        <button type="button" class="pill-btn" data-appearance="system" onclick="setAppearance('system')">System</button>
+      </div>
+    </div>
+
+    <!-- Completion alerts. A chime in the tab when a render finishes or
+         fails, and a browser notification when the tab is in the
+         background — once the person has allowed them. Same row shape as
+         the analytics switch below. -->
+    <div class="settings-section">
+      <h3>Completion alerts</h3>
+      <div class="hint" style="margin-bottom:10px" id="notifyHint"></div>
+      <div class="spicy-row">
+        <span class="spicy-state on" id="notifyStateBadge">ON</span>
+        <button type="button" class="ghost-btn" id="notifyAllowBtn" hidden
+                onclick="askNotifyPermission()">Allow browser alerts</button>
+        <button type="button" class="ghost-btn" id="notifyPushBtn" hidden
+                onclick="pushToggle()">Alert me here even when the tab is closed</button>
+        <button type="button" class="ghost-btn" id="notifyPushTestBtn" hidden
+                onclick="pushTest()">Send a test</button>
+        <button type="button" class="ghost-btn" id="notifyToggleBtn"
+                onclick="toggleNotify()" style="margin-left:auto">
+          Turn off
+        </button>
+      </div>
     </div>
 
     <!-- Anonymous usage analytics. Default ON, one click to turn off, and
@@ -4607,7 +4809,7 @@ Third prompt."></textarea>
      is intent; the timeline only learns about it when the clip exists. -->
 <div class="modal-bg" id="sbeGenModal" onclick="if(event.target===this)sbeGenClose()">
   <div class="modal">
-    <h3>Fill this hole</h3>
+    <h3 id="sbeGenTitle">Fill this hole</h3>
     <div class="hint" id="sbeGenWhere"></div>
     <textarea class="batch" id="sbeGenPrompt" rows="4"
       placeholder="A slow push in on the empty gym, dust in the light."></textarea>
@@ -4627,7 +4829,7 @@ Third prompt."></textarea>
          back off the queued job and hands them here: this is what will
          actually render, not what we asked for. -->
     <div class="sbe-params" id="sbeGenParams" hidden></div>
-    <div class="hint" style="margin-top:6px">The clip renders into the queue like any other shot. When it lands it appears under the timeline, and you place it — nothing moves your cuts on its own.</div>
+    <div class="hint" style="margin-top:6px" id="sbeGenAfter">The clip renders into the queue like any other shot. When it lands it appears under the timeline, and you place it — nothing moves your cuts on its own.</div>
     <div class="modal-actions">
       <button class="small" onclick="sbeGenClose()">Cancel</button>
       <button class="small primary" style="padding:6px 14px" id="sbeGenGo" onclick="sbeGenSubmit()">Queue the shot</button>

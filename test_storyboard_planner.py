@@ -1357,9 +1357,9 @@ class TestScreenplayPass(unittest.TestCase):
     Owner, on the films this planner produced before it existed: "the prompt
     writing should be like a movie director... The action is well planned. You
     understand what I mean? It is not working properly. It's just a succession
-    of shots." Maestro does screenplay -> shot breakdown -> per-model polish;
-    this had no screenplay step at all, so structure and coverage were being
-    invented in the same breath.
+    of shots." A film is written screenplay -> shot breakdown -> per-shot
+    polish; this had no screenplay step at all, so structure and coverage were
+    being invented in the same breath.
     """
     SCENE = "\n".join([
         "BEAT - He throws both arms wide in front of the soapy car.",

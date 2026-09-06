@@ -238,6 +238,83 @@ the bed and its duck stay consistent with each other and with the preview,
 and both are displaced together by exactly the amount `gaps_note` already
 discloses. Fixing that means fixing the concatenation, not the mix.
 
+## Editor v2 — speed, titles, transitions (2026-09-05)
+
+Three more citizens of the same model, each expressed in all three outputs
+or honestly declared where one cannot carry it.
+
+### Speed — on the clip
+
+`clip.speed`, 0.25–4.0, video only, **absent is 1x, never automatic** (the
+owner's verdict on a slowed shot that read as an accident was "too slow-mo").
+`clip_speed()` is the accessor; `sbeLen` / `clip_length` divide by it, so the
+slot is `(end - start) / speed` and everything downstream that measures the
+film reads the played length. **Preview**: `<video>.playbackRate`, and the strip
+player's too. **Render**: `setpts=(PTS-STARTPTS)/speed` on the picture, `atempo`
+chained past ffmpeg's 0.5–2.0 window on the sound, the same `apad,atrim` tail
+to the played length. **Export**: carried as `speed` on the row; the FCP7 XML's
+in/out and start/end already disagree by that ratio, which is how an importer
+infers a speed change — no explicit Time Remap effect is written.
+
+**The envelope's clock does not move.** `afx` fades and points are seconds of
+the strip AS PLAYED; `audio_gain_points()` documents why (the `volume` term
+runs after `atempo`, and a fade of "1 s" was typed in film seconds). A keyframe
+at 2 s is at 2 s of the strip after a retime; the strip is what changed length.
+
+### Titles — on the overlay lane
+
+An overlay with `kind: "text"` — a card the render DRAWS. `overlay_text()`
+returns `{text, style}` clamped, `style` is written only where it differs from
+`TEXT_STYLE_DEFAULTS`. **Preview**: a DOM element on the stage at the same
+anchor (`x`/`y` fractions of the frame) and the same size rule (`font_size` at
+1080 high, scaled to the stage). **Render**: a frame-sized RGBA PNG rasterised
+with Pillow from an explicitly resolved font FILE, verified BEFORE ffmpeg is
+built, fed through the very overlay chain an uploaded card takes — so fades,
+z-order and the one-lane rule come free. Not `drawtext`: that filter is a
+build option and the Homebrew ffmpeg this panel resolves on the author's own
+machine does not carry it. **Export**: not carried (a title has no path); the
+lane skips it and says nothing false.
+
+### Transitions — on the cut
+
+The hard one, and the one the picture-lane rule forbade as an overlap. A
+transition is a **typed object that owns a boundary** (`transitions[]`,
+`after_clip`), never a second picture in the same second: the clips' slots do
+not move, the film is exactly as long as the timeline, and the render gets its
+overlap from SOURCE HANDLES — half the duration of extra tail past the outgoing
+out-point, half of extra head before the incoming in-point, centred on the cut,
+the way an NLE builds one. No handles, no transition: `transition_no_handles`
+names the side and the shortfall, in the validator and again at `render`. Every
+transition code is an error; `WARNING_CODES` is untouched.
+
+**Preview**: the stage has ONE `<video>`, so a dissolve is previewed as a ramp
+through black on both sides of the cut (exact for `fade_black`, an honest
+approximation for `dissolve`, and the inspector says so). **Render**: the
+picture concat is split at the boundary into runs and re-joined with `xfade`
+(`fade` / `fadeblack`); the sound takes the lane path it already had for J-cuts
+and is byte-for-byte unchanged. **Export**: not carried yet — the cut is
+exported as a butt join.
+
+**Where it lives on screen**: the boundary. A small mark on every cut, a band
+the length of the transition once one exists, the inspector to set kind and
+length. No lane, no panel.
+
+### Framing — a zoom and a reframe, per clip
+
+`clip.frame = {zoom, x, y}`, zoom 1–3, the window centred at the fraction
+(x, y) of the source; `clip_frame()` is the accessor, neutral is absent, a
+slug has nothing to reframe. **Preview**: the stage layer scaled about the
+same anchor (CSS, approximate — the render is exact). **Render**: `crop` of
+the source's own pixels, before `fps`/`scale`, expressed with `iw`/`ih` so
+the same string serves a 640-wide draft and a 1280-wide delivery, even-sized
+for 4:2:0. **Export**: FCP7 Basic Motion (scale %, centre = `zoom·(0.5−x)`
+frame widths) and AE scale + position — the decision, not baked pixels.
+
+### Markers — deliberately not built
+
+They are for hour-long timelines; ours are ~90 s and cut to a beat grid the
+panel computes. Adding them would be copying without a reason.
+
 ## What is deliberately not built yet
 
 * **Overlay lane** (his headline want: an endcard PNG over the sky). It is the

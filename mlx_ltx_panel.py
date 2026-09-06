@@ -857,6 +857,11 @@ def _settings_defaults() -> dict:
         # to flip OFF→ON so kids / casual visitors can't enable it by a
         # stray click.
         "spicy_mode": False,
+        # Completion alerts: a short chime in the tab, and a browser
+        # notification when the tab is in the background and the person has
+        # allowed them. On by default because a render is minutes long and
+        # nobody watches a progress bar for eleven of them; one click off.
+        "notify_done": True,
         # Memory/speed policy. Defaults to Auto so 5 s clips keep the fast
         # full-decode path while long/high-pressure renders stay protected.
         # Live preview. On by default: it costs ~0.2 % of the render,
@@ -1122,6 +1127,13 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
         else:
             out["spicy_mode"] = str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    if "notify_done" in patch:
+        v = patch["notify_done"]
+        if isinstance(v, bool):
+            out["notify_done"] = v
+        else:
+            out["notify_done"] = str(v).strip().lower() in ("1", "true", "yes", "on")
+
 
     if "live_preview" in patch:
         # Two states, and anything unrecognised is refused rather than
@@ -1271,6 +1283,10 @@ def get_settings_public() -> dict:
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "spicy_mode": bool(s.get("spicy_mode", False)),
         "live_preview": str(s.get("live_preview", "on")),
+        "notify_done": bool(s.get("notify_done", True)),
+        # Push: can the panel send at all, and how many browsers listen.
+        "push_available": push_available(),
+        "push_subscriptions": len(_push_subs()),
         # Write-only until now: `update_settings` validated and stored it, but
         # the GET never returned it, so any control would open showing "auto"
         # no matter what the user had chosen.
@@ -2859,23 +2875,34 @@ def _set_h3_turbo_dl(**kw) -> None:
         _h3_turbo_dl_state.update(kw)
 
 
-def _h3_turbo_download_bg(target_dir, push_log) -> None:
+def _h3_turbo_asset(key: str | None = None) -> dict:
+    """The managed adapter to fetch: v4-600 EMA from its author's repo by
+    default; the LightX2V release asset when asked for by key."""
+    key = key or H3_TURBO_DEFAULT_ASSET
+    if key in H3_TURBO_ASSETS:
+        return dict(H3_TURBO_ASSETS[key], key=key)
+    return {"key": "v1.0", "file": H3_TURBO_LORA_FILE, "url": H3_TURBO_ASSET_URL,
+            "sha256": H3_TURBO_ASSET_SHA256, "bytes": H3_TURBO_ASSET_BYTES}
+
+
+def _h3_turbo_download_bg(target_dir, push_log, asset: dict | None = None) -> None:
     """Stream the digest-pinned v1.0 repack release asset into the H3 pack."""
     import urllib.request
     import hashlib
-    total_mb = H3_TURBO_ASSET_BYTES // (1 << 20)
+    asset = asset or _h3_turbo_asset()
+    total_mb = asset['bytes'] // (1 << 20)
     tmp = None
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / H3_TURBO_LORA_FILE
+        target = target_dir / asset['file']
         if target.is_file():
             _set_h3_turbo_dl(status="done", mb=total_mb, total_mb=total_mb,
                              error=None)
             return
         tmp = target.with_suffix(target.suffix + ".partial")
-        push_log(f"[h3:turbo] downloading {H3_TURBO_LORA_FILE} "
+        push_log(f"[h3:turbo] downloading {asset['file']} "
                  f"(~{total_mb} MB)…")
-        req = urllib.request.Request(H3_TURBO_ASSET_URL,
+        req = urllib.request.Request(asset['url'],
                                      headers={"User-Agent": "Phosphene"})
         h = hashlib.sha256()
         written = 0
@@ -2897,11 +2924,11 @@ def _h3_turbo_download_bg(target_dir, push_log) -> None:
                     push_log(f"[h3:turbo] {written // (1 << 20)} / "
                              f"{total_mb} MB")
                     last_log = now
-        if written != H3_TURBO_ASSET_BYTES:
+        if written != asset['bytes']:
             raise RuntimeError(
                 f"size mismatch: got {written}, expected "
-                f"{H3_TURBO_ASSET_BYTES} — please retry")
-        if h.hexdigest() != H3_TURBO_ASSET_SHA256:
+                f"{asset['bytes']} — please retry")
+        if h.hexdigest() != asset['sha256']:
             raise RuntimeError("checksum mismatch (download corrupt) — "
                                "please retry")
         tmp.replace(target)
@@ -2941,7 +2968,7 @@ def _h3_install_turbo(push_log, download_fn=None) -> dict:
                          "from the Phosphene sidebar in Pinokio to update the "
                          "clone — it keeps every weight already on disk."}
     target = _h3_turbo_dir()
-    if (target / H3_TURBO_LORA_FILE).is_file():
+    if any((target / f).is_file() for f, _v, _fb in H3_TURBO_LORA_CANDIDATES):
         return {"ok": True, "started": False, "already_installed": True,
                 "dir": str(target)}
     with _h3_turbo_dl_lock:
@@ -2950,14 +2977,14 @@ def _h3_install_turbo(push_log, download_fn=None) -> dict:
                     "error": "a Turbo adapter download is already active"}
         _h3_turbo_dl_state.clear()
         _h3_turbo_dl_state.update(status="downloading", mb=0,
-                                  total_mb=H3_TURBO_ASSET_BYTES // (1 << 20),
+                                  total_mb=_h3_turbo_asset()['bytes'] // (1 << 20),
                                   error=None)
     fn = download_fn or _h3_turbo_download_bg
     threading.Thread(target=fn, args=(target, push_log), daemon=True,
                      name="h3-turbo-download").start()
     return {"ok": True, "started": True, "dir": str(target),
-            "asset": H3_TURBO_ASSET_URL, "sha256": H3_TURBO_ASSET_SHA256,
-            "bytes": H3_TURBO_ASSET_BYTES}
+            "asset": _h3_turbo_asset()['url'], "sha256": _h3_turbo_asset()['sha256'],
+            "bytes": _h3_turbo_asset()['bytes']}
 
 
 # Compatibility taxonomy for LoRAs across the panel's two render lanes
@@ -3098,6 +3125,11 @@ def _read_lora_sidecar(safetensors_path: Path) -> dict:
         # fall back to these defaults, so no existing sidecar needs a rewrite.
         "lora_layout": None,
         "lora_converted_prefix": None,
+        # `guide`: the planner-written paragraph (POST /loras/guide) — what
+        # the LoRA does, how to prompt it, a strength to start from. The
+        # reader is a whitelist, so a key it does not name never reaches the
+        # picker: this row is what makes the guide survive the read.
+        "guide": "",
     }
     if sidecar.exists():
         try:
@@ -3237,6 +3269,10 @@ def list_user_loras() -> list[dict]:
             "civitai_id": meta.get("civitai_id"),
             "civitai_version_id": meta.get("civitai_version_id"),
             "civitai_url": civitai_url,
+            # A written guide (Settings-free): what the LoRA does, how to prompt
+            # it, a strength to start from. Written on request by the planner
+            # model from the sidecar; kept in the sidecar under `guide`.
+            "guide": str(meta.get("guide") or ""),
             "downloaded_at": meta.get("downloaded_at"),
             "is_curated": False,
             **ltx_compat,
@@ -7317,7 +7353,23 @@ H3_TURBO_RAW_V01_FILE = "minimax_h3_fl2v_turbo_4step_v0.1.safetensors"
 # It stays behind both LightX2V layouts so a completed v1.0 download always
 # wins, and it carries the fallback flag so the UI labels it honestly.
 H3_TURBO_CKPT500_FILE = "minimax_h3_turbo_4step_ema_ckpt500.safetensors"
+# THE COMMUNITY'S CURRENT ADAPTER (2026-09-05): larryvrh's v4 step-600 EMA.
+# Its author: "the strongest checkpoint released — much better static and
+# small-motion shots, markedly better micro-detail (faces, fingers, fine
+# texture); the over-sharpening of the v1 line is resolved; 6–8 steps is where
+# it performs best (4 can smear fast motion)". Bare runner layout, no repack
+# needed, 780 MB. Strength 1.0 per its card. It resolves FIRST when present;
+# the LightX2V repack and the two older files stay as fallbacks so no install
+# loses Turbo.
+H3_TURBO_V4_FILE = "minimax_h3_turbo_v4_step600_ema.safetensors"
+H3_TURBO_V4_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
+H3_TURBO_V4_URL = ("https://huggingface.co/" + H3_TURBO_V4_REPO
+                   + "/resolve/main/" + H3_TURBO_V4_FILE)
+H3_TURBO_V4_SHA256 = "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3"
+H3_TURBO_V4_BYTES = 779849816
+H3_TURBO_V4_STEPS = 7                    # sigma points → 6 forwards, the card's sweet spot
 H3_TURBO_LORA_CANDIDATES = (
+    (H3_TURBO_V4_FILE, "v4-600-EMA", False),
     (H3_TURBO_LORA_FILE, "v1.0", False),
     (H3_TURBO_FALLBACK_LORA_FILE, "v0.1", True),
     (H3_TURBO_CKPT500_FILE, "ckpt500-EMA", True),
@@ -7343,8 +7395,18 @@ H3_TURBO_ASSET_BYTES = 1956165254
 H3_TURBO_DIRNAME = "turbo-lora"
 # Sigma POINTS, matching --steps. 4 points = 3 forwards = what the adapter was
 # distilled for; it is visibly softer at fewer and gains nothing at more.
-H3_TURBO_STEPS = 4
-H3_TURBO_DOWNLOAD_GB = 2.0  # the published asset is 1,956,165,254 bytes
+H3_TURBO_STEPS = 4                       # the 4-step adapters (v1.0 / v0.1 / ckpt500)
+# Sigma points per adapter version; anything unlisted is a 4-step adapter.
+H3_TURBO_VERSION_STEPS = {"v4-600-EMA": H3_TURBO_V4_STEPS}
+# What the managed download fetches. The v4 adapter comes straight from its
+# author's repo (bare layout, digest-pinned); the LightX2V release asset stays
+# reachable by key for installs that cannot reach Hugging Face.
+H3_TURBO_ASSETS = {
+    "v4-600-EMA": {"file": H3_TURBO_V4_FILE, "url": H3_TURBO_V4_URL,
+                   "sha256": H3_TURBO_V4_SHA256, "bytes": H3_TURBO_V4_BYTES},
+}
+H3_TURBO_DEFAULT_ASSET = "v4-600-EMA"
+H3_TURBO_DOWNLOAD_GB = 0.8  # the v4 adapter is 779,849,816 bytes
 # Size floors for the "is it really there" probe. An interrupted fetch leaves a
 # short file that loads far enough to fail 30 s into a render, which is exactly
 # the failure mode the H3-vanish lesson says to catch at status time instead.
@@ -7364,6 +7426,19 @@ H3_TURBO_FORWARDS = H3_TURBO_STEPS - 1
 # One line, no marketing. It is a step-distillation adapter; say so.
 H3_TURBO_NOTE = ("Turbo uses the LightX2V v1.0 768p 4-step adapter — fewer "
                  "denoise passes over the same H3 model.")
+H3_TURBO_NOTE_V4 = ("Turbo uses the community's v4-600 EMA adapter — six denoise "
+                    "passes over the same H3 model; sharper faces and fine detail "
+                    "than the 4-step adapters.")
+
+
+def h3_turbo_note(paths: dict | None = None) -> str:
+    """The one sentence that says which adapter Turbo is, for the adapter
+    that actually resolves — not the one this file was written against."""
+    try:
+        resolved = paths or h3_turbo_paths()
+    except Exception:                                              # noqa: BLE001
+        return H3_TURBO_NOTE
+    return H3_TURBO_NOTE_V4 if (resolved or {}).get("version") == "v4-600-EMA" else H3_TURBO_NOTE
 
 # ============================================================================
 # H3 RENDER SHAPE — two independent axes, priced by one measured cost model
@@ -9664,7 +9739,8 @@ def h3_turbo_paths() -> dict:
             break
     missing = [] if lora is not None else [
         "adapter ("
-        + H3_TURBO_LORA_FILE
+        + H3_TURBO_V4_FILE
+        + "; or " + H3_TURBO_LORA_FILE
         + "; safe fallback "
         + H3_TURBO_FALLBACK_LORA_FILE
         + ")"
@@ -9677,6 +9753,38 @@ def h3_turbo_paths() -> dict:
         "missing": missing,
         "files_ok": lora is not None,
     }
+
+
+def h3_turbo_steps(paths: dict | None = None) -> int:
+    """Sigma points for the Turbo adapter that will actually run: 7 (six
+    forwards) for v4-600 EMA, 4 for the 4-step adapters. Anything that says
+    "Turbo pins N steps" must read this, never H3_TURBO_STEPS directly."""
+    resolved = paths or h3_turbo_paths()
+    return int(H3_TURBO_VERSION_STEPS.get(resolved.get("version") or "", H3_TURBO_STEPS))
+
+
+def _h3_retune_turbo_estimates() -> None:
+    """The tier table priced Turbo at import with the 4-step forwards, before
+    the adapter directory could be resolved. Re-price every cell for the
+    adapter that is actually installed — six forwards for v4 — so the chips,
+    the Speed pills and the Storyboard estimate say what will happen."""
+    try:
+        fwd = max(1, h3_turbo_steps() - 1)
+    except Exception:                                              # noqa: BLE001
+        return
+    if fwd == H3_TURBO_FORWARDS:
+        return
+    for cell in H3_TIERS.values():
+        try:
+            windows = int(cell.get("chain_windows") or 1)
+            tm = h3_estimate_minutes(int(cell["width"]), int(cell["height"]),
+                                     int(cell["window_frames"]), windows, fwd)
+            tm = min(float(cell.get("eta_min") or tm), tm)
+            cell["turbo_min"] = round(tm, 2)
+            cell["turbo_eta"] = _fmt_eta(tm)
+            cell["turbo_forwards"] = windows * fwd
+        except Exception:                                          # noqa: BLE001
+            continue
 
 
 def h3_turbo_lora_spec(paths: dict | None = None) -> str:
@@ -9714,9 +9822,9 @@ def h3_turbo_status() -> dict:
         "supported": supported,
         "downloaded": downloaded,
         "reason": reason,
-        "steps": H3_TURBO_STEPS,
+        "steps": h3_turbo_steps(paths),
         "download_gb": H3_TURBO_DOWNLOAD_GB,
-        "repo": H3_TURBO_REPO,
+        "repo": H3_TURBO_V4_REPO,
         "adapter": str(paths["lora"]) if paths["lora"] else None,
         "adapter_version": paths["version"],
         "fallback": paths["fallback"],
@@ -9731,7 +9839,7 @@ def h3_turbo_status() -> dict:
                          f"{H3_TURBO_RAW_V01_FILE} is not compatible."),
         "dir": str(paths["dir"]),
         "missing": paths["missing"],
-        "note": H3_TURBO_NOTE,
+        "note": h3_turbo_note(paths),
         "label": "Turbo",
     }
 
@@ -9825,6 +9933,9 @@ _H3_LORA_B_SUFFIX = ".lora_B.weight"
 # adapter). Anything claiming more than this is not a header we should read
 # into memory on a /status tick.
 _H3_LORA_MAX_HEADER_BYTES = 64 * 1024 * 1024
+
+
+_h3_retune_turbo_estimates()
 
 
 def _h3_loras_dir() -> Path:
@@ -13363,6 +13474,40 @@ def list_uploads(limit: int = 40) -> list[dict]:
     return out
 
 
+def _output_search_text(meta: dict, params: dict) -> str:
+    """The searchable words of one output, lower-cased, space-joined."""
+    bits: list[str] = []
+    try:
+        for k in ("prompt", "label", "preset_label", "mode", "quality", "engine",
+                  "character_id", "trigger", "seed", "seed_used", "h3_tier"):
+            v = params.get(k)
+            if v not in (None, "", [], {}):
+                bits.append(str(v)[:400])
+        w, h = params.get("width"), params.get("height")
+        if w and h:
+            bits.append(f"{int(w)}x{int(h)}")
+        fr = params.get("frames")
+        if fr:
+            bits.append(f"{int(fr)}f")
+        for lo in (params.get("loras") or []):
+            if isinstance(lo, dict) and lo.get("path"):
+                bits.append(Path(str(lo["path"])).stem)
+            elif isinstance(lo, str):
+                bits.append(Path(lo).stem)
+        for k in ("engine", "model"):
+            v = meta.get(k)
+            if isinstance(v, str) and v:
+                bits.append(Path(v).name if "/" in v else v)
+        tp = meta.get("temporal") or {}
+        if isinstance(tp, dict) and tp.get("mode"):
+            bits.append(str(tp["mode"]))
+        if meta.get("windows"):
+            bits.append("windows")
+    except Exception:                                                # noqa: BLE001
+        pass
+    return " ".join(bits).lower()
+
+
 def list_outputs(
     include_hidden: bool = False,
     limit: int = 60,
@@ -13568,6 +13713,7 @@ def list_outputs(
         # nothing, and it is what puts an S03 badge on a gallery card. None for
         # every clip that isn't part of a storyboard, which is most of them.
         sb_tag = None
+        search = ""
         sidecar = p.with_suffix(p.suffix + ".json")
         has_sidecar = sidecar.exists()
         if has_sidecar:
@@ -13581,6 +13727,12 @@ def list_outputs(
                     _sc_params = {}
                 # Top-level `engine` is what the H3 path stamps; the image
                 # path only has params.engine ("mflux/ideogram" etc.).
+                # WHAT THE GALLERY CAN BE SEARCHED BY, from the sidecar this
+                # loop already reads: the prompt, the mode, the quality, the
+                # engine, the size, the seed, the LoRAs and the character.
+                # One lower-cased string per row, so the browser's filter is
+                # a substring test and costs nothing per keystroke.
+                search = _output_search_text(meta, _sc_params)
                 _eng = meta.get("engine") or _sc_params.get("engine")
                 if isinstance(_eng, str) and _eng:
                     engine = _eng
@@ -13661,6 +13813,7 @@ def list_outputs(
             # without re-parsing the filename. Mirrors isPhotoOutput() on
             # the agent-stage pane (commit af5c184).
             "kind": "image" if is_image else "video",
+            "q": search,
         })
     total = len(out)
     # Apply offset + limit. limit<=0 means "no cap"; otherwise slice. This
@@ -14704,6 +14857,11 @@ def compute_upscale_plan(w: int, h: int, mode: str | None,
         # the plan so the sidecar records that nothing was added. Everything
         # that does NOT match (768×448 = 12:7, 640×384 = 5:3, LTX's 1280×704)
         # keeps the fit-and-pad path exactly as it was.
+        # A FIT NEVER SHRINKS. "Fit 720p" means "bring a smaller render up to
+        # 720p", not "throw away the native 1344x768 H3 render" — which is what
+        # the default did to every native take until 2026-09-06.
+        if eff_w >= target_w and eff_h >= target_h:
+            return None
         exact_aspect = (eff_w * target_h == eff_h * target_w)
         if exact_aspect:
             fit_w, fit_h = target_w, target_h
@@ -14964,6 +15122,75 @@ def _sb_h3_available() -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# ONE TAKE — a clip longer than one pass, on either engine
+# ---------------------------------------------------------------------------
+# The user picks a LENGTH (30 s … 2 min) and writes BEATS, one line per five
+# seconds. Nothing else is new: on LTX the take is the existing windows chain
+# (one prompt per 121-frame window); on H3 it is 15-second parts, each three
+# 5-second windows with their own prompt, each part starting from the last
+# frame of the one before (H3's first-frame conditioning), joined at the end.
+# The words "windows", "chain" and "parts" never reach the user; they see a
+# length, beats, and an honest time.
+TAKE_SECONDS = (30, 45, 60, 90, 120)
+TAKE_BEAT_SECONDS = 5
+TAKE_H3_PART_LENGTH = "15s"            # the longest single H3 render
+TAKE_H3_BEATS_PER_PART = 3
+TAKE_H3_PART_FRAMES = 362
+
+
+def take_plan(seconds, engine: str) -> dict | None:
+    """Beats and parts for a take of `seconds` on `engine`; None when off."""
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if seconds not in TAKE_SECONDS:
+        return None
+    beats = seconds // TAKE_BEAT_SECONDS
+    eng = "h3" if (engine or "ltx") == "h3" else "ltx"
+    if eng == "h3":
+        n_parts = -(-beats // TAKE_H3_BEATS_PER_PART)
+        parts = [list(range(i * TAKE_H3_BEATS_PER_PART,
+                            min(beats, (i + 1) * TAKE_H3_BEATS_PER_PART))) for i in range(n_parts)]
+        frames = TAKE_H3_PART_FRAMES * n_parts
+    else:
+        parts = [list(range(beats))]
+        frames = seconds * 24 + 1                     # 8k+1 for every TAKE_SECONDS value
+    return {"seconds": seconds, "beats": beats, "parts": parts, "frames": frames, "engine": eng}
+
+
+def take_beats(raw, n: int) -> list[str]:
+    """Exactly `n` beat prompts from what the form sent (a JSON list or a
+    newline-separated string). A blank beat holds the previous moment; extras
+    are dropped, missing ones are blank."""
+    items: list[str] = []
+    if isinstance(raw, list):
+        items = [str(x or "").strip() for x in raw]
+    elif raw:
+        s = str(raw).strip()
+        try:
+            v = json.loads(s)
+            items = [str(x or "").strip() for x in v] if isinstance(v, list) else [s]
+        except (TypeError, ValueError):
+            items = [ln.strip() for ln in s.split("\n")]
+    items = items[:n]
+    return items + [""] * (n - len(items))
+
+
+def take_estimate_minutes(engine: str, quality: str, seconds) -> float | None:
+    """Wall clock for the whole take, from the same cost model every other
+    estimate uses. None when this Mac has no number for it (LTX windows are
+    not priced yet — the chain's extends have no measured model)."""
+    plan = take_plan(seconds, engine)
+    if not plan:
+        return None
+    if plan["engine"] == "h3":
+        per = _sb_h3_cost(quality or "standard", TAKE_H3_PART_LENGTH)
+        return None if per is None else round(per * len(plan["parts"]) / 60.0, 1)
+    return None
+
+
 def _sb_h3_cost(quality_key: str, length_key: str):
     """The MEASURED wall clock for one H3 cell, in seconds — the hook
     storyboard.estimate() takes so the cost model lives in exactly one place.
@@ -15102,6 +15329,21 @@ def _sb_reconcile(board: dict) -> bool:
         # it has been through — the OUTPUTS are that record, and they are what
         # the scheduler reads. But the UI reads `status`, so a shot waiting on
         # its delivery render must not keep showing "done" from its draft.
+        # The anchor still: an image job whose output becomes the shot's
+        # first frame. Folded back the same way; a failed still is reported on
+        # the shot but does not fail it — the shot renders unanchored.
+        sj = s.get("still_job_id")
+        if sj and not s.get("still"):
+            job = idx.get(sj)
+            st = ((job or {}).get("status") or "").lower()
+            if st == "done" and (job or {}).get("output_path"):
+                s["still"] = job["output_path"]
+                s["still_error"] = None
+                changed = True
+            elif st in ("failed", "error", "cancelled"):
+                if s.get("still_error") != ((job or {}).get("error") or "the still could not be made"):
+                    s["still_error"] = (job or {}).get("error") or "the still could not be made"
+                    changed = True
         fj = s.get("final_job_id")
         if fj and not s.get("final_output"):
             fst = ((idx.get(fj) or {}).get("status") or "").lower()
@@ -15539,6 +15781,145 @@ def _sb_set_planner(board: dict, **kw) -> None:
     board["planner"] = p
 
 
+# The bars a director's slot spans, and the floor under a slot: shorter than
+# this is a flash, and the planner cannot write a movement into it.
+DIRECTOR_MIN_SLOT_SEC = 1.0
+
+
+def _sb_director_grid(soundtrack: dict, *, max_shots: int = 48) -> dict:
+    """The beat grid, as SLOTS: `{path, bpm, bars_per_shot, total_sec, count,
+    slot_sec, slots: [{start, end}], must: [...]}` or `{error}`.
+
+    `beat_map()` is the same fit the Editor's Prepare runs, so the slots the
+    planner writes to are the downbeats the first cut lands on. When the
+    track has more bars than `max_shots` slots can hold, the film covers the
+    FIRST `max_shots` slots and says so — a 48-shot board is the panel's
+    ceiling and a plan that silently squashed the song would be the other
+    kind of wrong.
+    """
+    import storyboard_edit as _se                                    # noqa: PLC0415
+    path = str((soundtrack or {}).get("path") or "")
+    if not path or not Path(path).is_file():
+        return {"error": f"no audio file at {path or '(none)'}"}
+    bars = max(1, min(8, int((soundtrack or {}).get("bars_per_shot") or 2)))
+    try:
+        beats = _se.beat_map(path)
+    except Exception as exc:                                          # noqa: BLE001
+        return {"error": f"could not read the beat of {Path(path).name}: {exc}"}
+    downs = [float(t) for t in (beats.get("downbeats") or [])]
+    total = float(beats.get("duration") or 0.0)
+    if total <= 0:
+        total = float((_se.probe_media(path) or {}).get("duration") or 0.0)
+    if len(downs) < 2 or total <= 0:
+        return {"error": f"{Path(path).name} has no beat the panel can find"}
+    # THE SONG MAP DECIDES HOW OFTEN. Sections on the same bar grid, each with
+    # an energy, and `director_pacing` turns the user's bars-per-shot into a
+    # per-section stride: the chorus cuts twice as often, the intro and the
+    # outro half as often. Best-effort: a track the map cannot read is cut at
+    # the base stride throughout, and the plan says so.
+    smap = None
+    try:
+        smap = _se.song_map(path, beats)
+    except Exception as exc:                                          # noqa: BLE001
+        push(f"[storyboard] director: no song map for {Path(path).name} ({exc}); "
+             f"cutting every {bars} bar(s) throughout")
+    sections = list((smap or {}).get("sections") or [])
+    mean_e = float((smap or {}).get("mean_energy") or 0.0)
+    grid = [t for t in downs if t < total - DIRECTOR_MIN_SLOT_SEC]
+    slots: list[dict] = []
+    if sections:
+        for sec in sections:
+            i, j = sec["bars"]
+            stride = _se.director_pacing(sec["label"], float(sec["energy"]), mean_e, bars)
+            edges = grid[i:j:stride] + [min(total, float(sec["end"]))]
+            for a, b in zip(edges, edges[1:]):
+                if b - a >= DIRECTOR_MIN_SLOT_SEC:
+                    slots.append({"start": a, "end": b, "section": sec["label"],
+                                  "energy": float(sec["energy"]), "bars": stride})
+    else:
+        cuts = grid[::bars] + [total]
+        slots = [{"start": cuts[i], "end": cuts[i + 1], "section": "",
+                  "energy": 0.0, "bars": bars}
+                 for i in range(len(cuts) - 1)
+                 if cuts[i + 1] - cuts[i] >= DIRECTOR_MIN_SLOT_SEC]
+    note = ""
+    if len(slots) > max_shots:
+        slots = slots[:max_shots]
+        note = (f"the track has more bars than {max_shots} shots can hold; "
+                f"the film covers its first {slots[-1]['end']:.0f}s")
+    if not slots:
+        return {"error": f"{Path(path).name} is too short to cut to"}
+    slot_sec = sum(s["end"] - s["start"] for s in slots) / len(slots)
+    must = [f"this is a MUSIC VIDEO cut to a {float(beats.get('bpm') or 0):.0f} bpm "
+            f"track: every shot is ONE movement that reads in about "
+            f"{slot_sec:.1f} seconds — begin each description with the movement "
+            f"(what moves, how the camera moves), never with the subject",
+            "no shot depends on hearing words: nobody speaks to camera and "
+            "no shot contains dialogue, because the track replaces every "
+            "clip's own sound"]
+    # THE ARC, SHOT BY SHOT. The planner cannot hear the track, so it is told
+    # which shots fall in which section and how hot that section is — the
+    # chorus wants the boldest images, the intro the stillest.
+    if sections:
+        k = 1
+        for sec in sections:
+            n = sum(1 for sl in slots if sl.get("section") == sec["label"]
+                    and sec["start"] <= sl["start"] < sec["end"])
+            if not n:
+                continue
+            heat = ("peak energy" if sec["energy"] > mean_e * 1.2
+                    else "low energy" if sec["energy"] < mean_e * 0.6 else "steady energy")
+            must.append(f"shots {k}–{k + n - 1} are the {sec['label']} "
+                        f"({sec['start']:.0f}–{sec['end']:.0f}s, {heat}"
+                        f"{', the boldest images and the fastest cuts' if sec['label'] == 'chorus' else ''}"
+                        f"{', the stillest' if sec['label'] in ('intro', 'outro') else ''})")
+            k += n
+    if note:
+        must.append(note)
+    return {"path": path, "bpm": float(beats.get("bpm") or 0.0),
+            "bars_per_shot": bars, "total_sec": round(slots[-1]["end"], 3),
+            "count": len(slots), "slot_sec": round(slot_sec, 3),
+            "slots": [{"start": round(s["start"], 3), "end": round(s["end"], 3),
+                       "section": s.get("section") or "", "bars": s.get("bars") or bars,
+                       "energy": round(float(s.get("energy") or 0.0), 4)}
+                      for s in slots],
+            "sections": [{k2: v for k2, v in sec.items() if k2 != "bars"} for sec in sections],
+            "must": must, "note": note}
+
+
+def _sb_director_concept(concept: str, director: dict) -> str:
+    """The brief the planner reads: the idea, then what the track demands."""
+    c = str(concept or "").strip()
+    return (f"{c}\n\nMUSIC VIDEO. The track is {director['bpm']:.0f} bpm and "
+            f"runs {director['total_sec']:.0f}s; the film is {director['count']} "
+            f"shots of about {director['slot_sec']:.1f}s each, one per "
+            f"{director['bars_per_shot']} bar(s), cut on the downbeat. Plan an "
+            f"ARC across the shots (where it starts, where it turns, where it "
+            f"lands) rather than a pool of similar images, and give the film one "
+            f"recurring anchor image it returns to.")
+
+
+def _sb_take_concept(concept: str, seconds: int) -> str:
+    """The brief for a film that is ONE continuous shot: the planner writes
+    one movement per five-second beat, and the camera never cuts."""
+    c = str(concept or "").strip()
+    beats = int(seconds) // TAKE_BEAT_SECONDS
+    return (f"{c}\n\nONE TAKE. The whole film is a single continuous shot of "
+            f"{int(seconds)} seconds that never cuts. Write it as {beats} beats of "
+            f"five seconds each, in order; each beat is what happens NEXT in the "
+            f"same unbroken shot — lead with the movement (of the subject, of the "
+            f"camera, of the world), name what enters or changes, and keep the "
+            f"subject, the camera position and the light continuous from one "
+            f"beat into the next. No new angles, no reverse shots, no jumps in "
+            f"time: every beat starts exactly where the previous one ends. "
+            f"A change of place (through a door, into a room, onto a bridge) gets "
+            f"a beat OF ITS OWN, with the approach in the beat before it; a reveal "
+            f"(the face, the person waiting) is the whole of its beat, nothing else "
+            f"in it; the beat before a change or a reveal slows down; every other "
+            f"beat has something new enter the frame within its first second. "
+            f"Name the sound in every beat.")
+
+
 def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
     """Plan a film, then GIVE THE MEMORY BACK — in that order, always.
 
@@ -15566,17 +15947,55 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
             entry["session"] = session
             _SB_PLANNERS[board_id] = entry
 
+        # THE DIRECTOR'S GRID, before the planner runs. The shot count and
+        # every duration come from the track, not from the chips: a slot per
+        # `bars_per_shot` bars of downbeats, and the planner is told, in the
+        # brief, that it is writing a music video cut to that grid — one
+        # movement per slot, led by the movement. The measured trap: a
+        # per-shot "the music drives this" string fed to LTX VERBATIM renders
+        # a closed mouth; what the LLM does with the grid is the mechanism,
+        # so the grid goes into the PLANNER's input and nothing else.
+        director = None
+        concept = brief.get("concept") or ""
+        must = list(brief.get("must") or [])
+        n_shots = int(brief.get("n_shots") or 12)
+        if brief.get("soundtrack"):
+            board["planner"]["stage"] = "grid"
+            storyboard.save_storyboard(STATE_DIR, board)
+            director = _sb_director_grid(brief["soundtrack"],
+                                         max_shots=STORYBOARD_MAX_SHOTS)
+            if director.get("error"):
+                _sb_set_planner(board, state="failed", stage=None,
+                                error=director["error"], error_kind="grid")
+                storyboard.save_storyboard(STATE_DIR, board)
+                push(f"[storyboard] director: {director['error']}")
+                return
+            n_shots = director["count"]
+            concept = _sb_director_concept(concept, director)
+            must = must + list(director["must"])
+            push(f"[storyboard] director: {director['bpm']:.0f} bpm, "
+                 f"{director['count']} slots of ~{director['slot_sec']:.1f}s "
+                 f"({director['bars_per_shot']} bar(s) each) over "
+                 f"{director['total_sec']:.0f}s of {Path(director['path']).name}")
         board["planner"]["stage"] = "write"
+        # ONE TAKE: the plan is N beats, not N shots; collapsed after the
+        # planner returns (collapse_take). Wins over the shot count and over a
+        # soundtrack's slot count — the take's length is the film's length.
+        _take_secs = int(brief.get("take_seconds") or 0)
+        if _take_secs in TAKE_SECONDS:
+            n_shots = _take_secs // TAKE_BEAT_SECONDS
+            concept = _sb_take_concept(concept, _take_secs)
+            push(f"[storyboard] one take of {_take_secs}s — planning {n_shots} beats")
         storyboard.save_storyboard(STATE_DIR, board)
-        push(f"[storyboard] planning {brief.get('n_shots')} shots — "
+        push(f"[storyboard] planning {n_shots} shots — "
              f"the renderer's memory is borrowed for about a minute")
 
         result = storyboard_planner.plan_film(
-            brief.get("concept") or "",
-            n_shots=int(brief.get("n_shots") or 12),
+            concept,
+            n_shots=n_shots,
             style=brief.get("style") or "",
             characters=brief.get("characters") or None,
-            must_include=brief.get("must") or None,
+            must_include=must or None,
             feedback=brief.get("feedback") or None,
             previous=previous,
             # The film's own choice, and it is a PLANNING input: the planner
@@ -15622,6 +16041,30 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
         board["planner"]["stage"] = "repair" if int(meta.get("attempts") or 1) > 1 else "check"
 
         board["title"] = result.get("title") or board.get("title") or "Untitled film"
+        # THE SLOT IS THE SHOT'S LENGTH, PLUS A HANDLE. Shot k plays slot k on
+        # the grid; it is rendered a second longer so the auto-editor has a
+        # window to choose and a dissolve has material either side. Written
+        # onto the board so the Editor's first cut and the chips agree.
+        if director:
+            slots = director["slots"]
+            for k, _s in enumerate(result.get("shots") or []):
+                if not isinstance(_s, dict) or k >= len(slots):
+                    continue
+                _len = float(slots[k]["end"]) - float(slots[k]["start"])
+                _s["duration_s"] = round(min(60.0, _len + 1.0), 2)
+                _s["frames"] = storyboard.ltx_frames_for(_s["duration_s"])
+                _s["slot"] = {"start": round(float(slots[k]["start"]), 3),
+                              "end": round(float(slots[k]["end"]), 3)}
+                if slots[k].get("section"):
+                    _s["section"] = slots[k]["section"]
+            board["soundtrack"] = {**(board.get("soundtrack") or {}),
+                                   "path": director["path"],
+                                   "bpm": director["bpm"],
+                                   "bars_per_shot": director["bars_per_shot"],
+                                   "total_sec": director["total_sec"],
+                                   "slots": slots,
+                                   "sections": director.get("sections") or [],
+                                   "count": director["count"]}
         # What each shot had BEFORE the plan replaced it. A re-rolled shot is a
         # brand-new dict, so its previous take has to be read from here — off
         # the new dict it is always None.
@@ -15631,6 +16074,8 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
                 _prev_out[_s["n"]] = (_s.get("draft_output") or _s.get("final_output")
                                       or _s.get("stale_output"))
         board["shots"] = result.get("shots") or []
+        if int(brief.get("take_seconds") or 0) in TAKE_SECONDS:
+            board["shots"] = storyboard.collapse_take(board["shots"], int(brief["take_seconds"]))
         # DIALOGUE MUST FIT THE SHOT. The validator rejects a line the clock
         # cannot carry (`dialogue_does_not_fit`), because it renders as a
         # sentence cut off mid-word. For planner output the fix is mechanical
@@ -15694,6 +16139,8 @@ def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
         storyboard.save_storyboard(STATE_DIR, board)
         push(f"[storyboard] plan ready — {len(board['shots'])} shots, "
              f"{round(float(meta.get('elapsed_s') or 0))}s, memory given back")
+        if board.get("auto"):
+            _sb_auto_after_plan(board_id)
     except Exception as exc:                                     # noqa: BLE001
         try:
             if board is None:
@@ -15733,6 +16180,67 @@ def _sb_enqueue(job_form: dict) -> str:
     return job["id"]
 
 
+def _sb_still_job_form(shot: dict, board: dict, policy: dict) -> dict:
+    """The ORDINARY image-job form for a shot's anchor still.
+
+    Composition and light come from the shot's own prompt (the still IS the
+    first frame); a shot with a character whose sheet exists is drawn with the
+    sheet as the reference through the Reference Edit engine, so the face on
+    the still is the face on the sheet. Anything else takes the default image
+    engine. One image, the shot's seed when it has one."""
+    prompt = storyboard.compose_shot_prompt(shot, storyboard.board_locations(board),
+                                            storyboard.board_wardrobe(board))
+    still_prompt = storyboard.still_prompt(prompt)
+    w = int(policy.get("width") or 0) or 1280
+    hh = int(policy.get("height") or 0) or 704
+    # The still takes the image engine's aspect NEAREST the shot canvas, so
+    # i2v crops as little of it as possible (a 640x448 draft is 4:3, not
+    # 16:9). The engine's own table is the source of truth; the small "s"
+    # variants are the same shapes and are left to the engine.
+    ratio = w / float(hh)
+    table = {k: v for k, v in agent_image_engine.ASPECT_DIMS.items() if not k.endswith("s")}
+    aspect = min(table, key=lambda k: abs((table[k][0] / float(table[k][1])) - ratio))
+    refs: list[str] = []
+    engine = "auto"
+    cid = shot.get("character_id")
+    if cid:
+        sheet = _character_sheet_png(str(cid))
+        if sheet:
+            refs = [str(sheet)]
+            engine = "qwen_edit_inline"
+    n = shot.get("n")
+    title = (board.get("title") or "").strip()
+    form = {
+        "mode": "image", "prompt": still_prompt, "engine_override": engine,
+        "aspect": aspect, "n": "1",
+        "seed": str(shot["seed"]) if isinstance(shot.get("seed"), int) and shot["seed"] != -1 else "-1",
+        "refs": json.dumps(refs),
+        "preset_label": (f"S{n:02d} still · {title}" if title else f"S{n:02d} still"),
+        "session_tag": f"sb:{board.get('id')}#{n}:still",
+        "enhance": "off", "open_when_done": "off",
+    }
+    return form
+
+
+def _sb_clear_still(board: dict, n: int, pass_name: str = "draft") -> dict | None:
+    """Forget shot `n`'s anchor still AND the clip that was rendered from it,
+    so the next render of that shot makes a new still first and starts the
+    clip from it. Returns the shot, or None when there is no shot `n`."""
+    shot = next((x for x in (board.get("shots") or [])
+                 if isinstance(x, dict) and x.get("n") == n), None)
+    if shot is None:
+        return None
+    for k in ("still", "still_job_id", "still_error"):
+        shot.pop(k, None)
+    key = "draft_job_id" if pass_name == "draft" else "final_job_id"
+    out_key = "draft_output" if pass_name == "draft" else "final_output"
+    shot.pop(key, None)
+    shot.pop(out_key, None)
+    shot["status"] = "pending"
+    shot["error"] = None
+    return shot
+
+
 def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
     """Submit the film ONE BUCKET AT A TIME, then wait for it.
 
@@ -15770,9 +16278,52 @@ def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
             if not pending:
                 break
 
+            policy = (board.get("policy") or {}).get(pass_name) or {}
+            h3_ok = _sb_h3_available()
+            # ANCHOR STILLS. Shots that want a still and do not have one yet
+            # get an image job each, queued the ordinary way, and this thread
+            # waits for the batch before the video jobs are built — the still
+            # is what the video job starts from. A still that fails leaves
+            # the shot to render unanchored, once, with the error on the card.
+            if board.get("anchor_stills"):
+                # LTX shots only: an H3 shot cannot start from the still, so
+                # making one would be an image nobody uses.
+                _emode = board.get("engine_mode") or "auto"
+                need = [s for s in pending
+                        if storyboard.shot_wants_still(s) and not s.get("still")
+                        and not s.get("still_job_id")
+                        and storyboard.resolve_engine(s, engine_mode=_emode, h3_available=h3_ok) != "h3"]
+                if need:
+                    sids = []
+                    for shot in need:
+                        try:
+                            form = _sb_still_job_form(shot, board, policy)
+                            jid = _sb_enqueue({k: ("" if v is None else str(v)) for k, v in form.items()})
+                        except Exception as exc:                  # noqa: BLE001
+                            push(f"[storyboard] shot {shot.get('n')} still could not be queued: {exc}")
+                            shot["still_error"] = str(exc)
+                            shot["still_job_id"] = "skipped"
+                            continue
+                        shot["still_job_id"] = jid
+                        sids.append(jid)
+                    storyboard.save_storyboard(STATE_DIR, board)
+                    if sids:
+                        push(f"[storyboard] {len(sids)} anchor still(s) queued — {board.get('title')}")
+                        while True:
+                            with _SB_LOCK:
+                                entry = _SB_RENDERS.get(board_id)
+                                if not entry or entry.get("stop"):
+                                    return
+                            idx = _sb_job_index()
+                            if not [j for j in sids if (idx.get(j) or {}).get("status") in ("queued", "running")]:
+                                break
+                            time.sleep(3.0)
+                        board = storyboard.load_storyboard(STATE_DIR, board_id)
+                        _sb_reconcile(board)
+                        storyboard.save_storyboard(STATE_DIR, board)
+                        continue
             bucket = storyboard.bucket_key(pending[0])
             batch = [s for s in pending if storyboard.bucket_key(s) == bucket]
-            policy = (board.get("policy") or {}).get(pass_name) or {}
             h3_ok = _sb_h3_available()
             # Does THIS install's runner take `--chain-prompts`? A pack cloned
             # before that flag landed renders 10 s fine and cannot be told what
@@ -15790,7 +16341,9 @@ def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
                     engine_mode=board.get("engine_mode") or "auto",
                     h3_chain_prompts=chain_ok,
                     locations=storyboard.board_locations(board),
-                    wardrobe=storyboard.board_wardrobe(board))
+                    wardrobe=storyboard.board_wardrobe(board),
+                    long_windows=bool(board.get("long_windows")),
+                    style=str(board.get("style") or ""))
                 # make_job reads a form: every value is a string (or a list of
                 # them). Normalise here so a bool/int never reaches f().
                 job_form = {k: ("" if v is None else str(v)) for k, v in form.items()}
@@ -15837,15 +16390,79 @@ def _sb_render_thread(board_id: str, pass_name: str, only: list | None) -> None:
         push(f"[storyboard] render dispatch stopped: {exc}")
     finally:
         with _SB_LOCK:
-            _SB_RENDERS.pop(board_id, None)
+            _entry = _SB_RENDERS.pop(board_id, None)
+        stopped = bool((_entry or {}).get("stop"))
         try:
             board = storyboard.load_storyboard(STATE_DIR, board_id)
             if _sb_reconcile(board):
                 storyboard.save_storyboard(STATE_DIR, board)
             # Delivered shots don't need their draft's Stage-A cache any more.
             _sb_sweep_stage_a(board)
+            if board.get("auto") and pass_name == "draft" and not stopped:
+                _sb_auto_film(board)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# AUTO — the Director's whole pipeline with one press
+# ---------------------------------------------------------------------------
+# Plan → render every shot → cut to the beat → make the film. Each step is
+# the panel's existing one (the same threads the buttons start, the same
+# auto-edit the Editor's first GET runs, the same assembler Render uses);
+# what is new is only the hand-over between them, so nothing here can make a
+# different film from the one the buttons would.
+def _sb_auto_after_plan(board_id: str) -> None:
+    """Start the draft render once the planner has given the memory back."""
+    def run() -> None:
+        for _ in range(240):                          # the planner's unload
+            with _SB_LOCK:
+                if board_id not in _SB_PLANNERS:
+                    break
+            time.sleep(0.5)
+        with _SB_LOCK:
+            if _SB_RENDERS.get(board_id):
+                return
+            _SB_RENDERS[board_id] = {"stop": False, "pass": "draft", "queued": 0,
+                                     "auto": True}
+        push(f"[storyboard] auto: rendering every shot of the plan")
+        th = threading.Thread(target=_sb_render_thread, daemon=True,
+                              name=f"phos-sb-render-{board_id}",
+                              args=(board_id, "draft", None))
+        with _SB_LOCK:
+            _SB_RENDERS[board_id]["thread"] = th
+        th.start()
+    threading.Thread(target=run, daemon=True, name=f"phos-sb-auto-{board_id}").start()
+
+
+def _sb_auto_film(board: dict) -> dict | None:
+    """Cut and assemble once every shot has rendered. None when it cannot."""
+    shots = [s for s in (board.get("shots") or []) if isinstance(s, dict)
+             and s.get("status") != "skipped"]
+    if not shots or any(not (s.get("draft_output") or s.get("final_output")) for s in shots):
+        missing = sum(1 for s in shots if not (s.get("draft_output") or s.get("final_output")))
+        push(f"[storyboard] auto: {missing} shot(s) did not render — the film waits "
+             f"for you to re-render or skip them")
+        return None
+    sedit = _sbe_import()
+    bdir = _sbe_board_dir(board["id"])
+    edit = _sbe_auto_edit(board)
+    try:
+        sedit.save_edit(bdir, edit)
+        edit = sedit.load_edit(bdir) or edit
+    except sedit.EditError as exc:
+        push(f"[storyboard] auto: the cut could not be saved: {exc}")
+        return None
+    push(f"[storyboard] auto: cut {len(edit.get('clips') or [])} shots"
+         + (" on the beat" if edit.get("beats") else "") + " — assembling the film")
+    film = _sbe_render_edit(board, edit)
+    if film.get("ok"):
+        board["auto_film"] = film.get("path")
+        storyboard.save_storyboard(STATE_DIR, board)
+        push(f"[storyboard] auto: film ready — {Path(str(film['path'])).name}")
+    else:
+        push(f"[storyboard] auto: the film could not be assembled: {film.get('error')}")
+    return film
 
 
 def _sb_cancel_running_shot(job_ids) -> str | None:
@@ -16398,6 +17015,18 @@ def _sb_cut_index(plan) -> dict:
             win["mute"] = True
         if isinstance(entry.get("fx"), dict) and entry["fx"]:
             win["fx"] = dict(entry["fx"])
+        try:
+            sp = float(entry.get("speed") or 1.0)
+        except (TypeError, ValueError):
+            sp = 1.0
+        if abs(sp - 1.0) > 1e-9:
+            win["speed"] = sp
+        if isinstance(entry.get("transition"), dict):
+            win["transition"] = dict(entry["transition"])
+        if entry.get("tx_in"):
+            win["tx_in"] = float(entry["tx_in"])
+        if isinstance(entry.get("frame"), dict) and entry["frame"]:
+            win["frame"] = dict(entry["frame"])
         out.setdefault(str(Path(str(entry["path"]))), []).append(win)
     return out
 
@@ -16485,6 +17114,38 @@ def _sb_fade_term(fx, seconds: float, *, alpha: bool = False) -> str:
     return out
 
 
+def _sb_frame_term(frame) -> str:
+    """`crop=…,` for a reframed segment, or "" for every other one.
+
+    THE EMPTY STRING IS THE POINT, as with brightness: a clip nobody
+    reframed adds no filter. The crop is the source's own pixels — the window
+    is `iw/zoom` by `ih/zoom` with its centre at the fraction (`x`, `y`) of
+    the picture — and the scale-to-fit that follows in every segment chain
+    magnifies it to the frame. Expressed with ffmpeg's `iw`/`ih` so one
+    string is right for a 640-wide draft and a 1280-wide delivery alike.
+    Runs BEFORE `fps=`/`scale=` and after `trim`, so it composes with the
+    window and with speed without either knowing.
+    """
+    if not isinstance(frame, dict):
+        return ""
+    try:
+        z = float(frame.get("zoom") or 1.0)
+        x = float(frame.get("x", 0.5))
+        y = float(frame.get("y", 0.5))
+    except (TypeError, ValueError):
+        return ""
+    if z != z or z <= 1.0 + 1e-9:
+        return ""
+    z = min(3.0, z)
+    x = max(0.0, min(1.0, x))
+    y = max(0.0, min(1.0, y))
+    # Even sizes: a 4:2:0 encode has no odd-dimension form, and a crop that
+    # lands on an odd width fails the whole graph.
+    return (f"crop=w=2*floor(iw/{z:.6f}/2):h=2*floor(ih/{z:.6f}/2):"
+            f"x=(iw-2*floor(iw/{z:.6f}/2))*{x:.6f}:"
+            f"y=(ih-2*floor(ih/{z:.6f}/2))*{y:.6f},")
+
+
 def _sb_brightness_term(adjust) -> str:
     """`eq=brightness=X,` for a graded segment, or "" for every other one.
 
@@ -16540,10 +17201,96 @@ def _sb_seg_seconds(sg: dict) -> float:
         return max(0.0, float(sg.get("duration") or 0.0))
     info = sg.get("info") or {}
     cut = sg.get("window")
+    # AT THE CLIP'S SPEED: the window is source seconds, the answer is film
+    # seconds. A transition's extra head and tail are NOT in this number — the
+    # film is exactly as long as the timeline says, which is the whole point
+    # of building the overlap from source handles.
+    speed = _sb_seg_speed(sg)
     if cut:
         return min(max(0.0, float(cut["end"]) - float(cut["start"])),
-                   float(info["duration"]))
-    return float(info["duration"])
+                   float(info["duration"])) / speed
+    return float(info["duration"]) / speed
+
+
+def _sb_seg_speed(sg: dict) -> float:
+    try:
+        sp = float((sg or {}).get("speed") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return sp if sp > 0 else 1.0
+
+
+def _sb_atempo_term(speed: float) -> str:
+    """`atempo=…,` chained so every stage stays inside ffmpeg's 0.5–2.0
+    window, or "" at 1x. 0.25x is `atempo=0.5,atempo=0.5,`; 4x is
+    `atempo=2.0,atempo=2.0,`. The empty string at 1x is the point: a clip
+    nobody retimed builds the identical audio chain it always did."""
+    sp = float(speed or 1.0)
+    if abs(sp - 1.0) < 1e-9 or sp <= 0:
+        return ""
+    parts = []
+    while sp > 2.0 + 1e-9:
+        parts.append(2.0)
+        sp /= 2.0
+    while sp < 0.5 - 1e-9:
+        parts.append(0.5)
+        sp /= 0.5
+    parts.append(sp)
+    return "".join(f"atempo={p:.6f}," for p in parts)
+
+
+def _sb_seg_extension(sg: dict) -> tuple[float, float]:
+    """(extra head, extra tail) in FILM seconds a transition asks of this
+    segment's picture. Zero for every segment that joins nothing."""
+    tx_in = max(0.0, float((sg or {}).get("tx_in") or 0.0))
+    t = (sg or {}).get("transition")
+    tx_out = max(0.0, float(t.get("duration") or 0.0)) / 2.0 if isinstance(t, dict) else 0.0
+    return tx_in, tx_out
+
+
+def _sb_picture_chains(vlabels: list[str], segs: list[dict],
+                       pic_lens: list[float]) -> list[str]:
+    """The picture lane's concat, ending in `[vcat]` — split at every
+    transition and re-joined with `xfade`.
+
+    WITH NO TRANSITION this is the single `concat=n=N:v=1:a=0[vcat]` it has
+    always been, character for character. With one, the segments either side
+    of the boundary are concatenated as before into two runs, and the runs
+    are crossfaded: the outgoing run carries half the transition of EXTRA
+    tail (source beyond the out-point) and the incoming run half of extra
+    head, so `offset = len(run) - duration` puts the dissolve CENTRED on the
+    cut and the output is exactly `sum(film seconds)` long — the timeline's
+    own length, which is why the sound never has to know.
+    """
+    groups: list[list[int]] = []
+    cur: list[int] = []
+    for i, sg in enumerate(segs):
+        cur.append(i)
+        if isinstance(sg.get("transition"), dict) and i + 1 < len(segs):
+            groups.append(cur)
+            cur = []
+    if cur:
+        groups.append(cur)
+    if len(groups) <= 1:
+        return [f"{''.join(vlabels)}concat=n={len(segs)}:v=1:a=0[vcat]"]
+    chains: list[str] = []
+    lens: list[float] = []
+    for g, idxs in enumerate(groups):
+        chains.append(f"{''.join(vlabels[i] for i in idxs)}"
+                      f"concat=n={len(idxs)}:v=1:a=0[pg{g}]")
+        lens.append(sum(pic_lens[i] for i in idxs))
+    base, cur_len = "[pg0]", lens[0]
+    for g in range(1, len(groups)):
+        t = segs[groups[g - 1][-1]]["transition"]
+        d = float(t.get("duration") or 0.0)
+        kind = "fadeblack" if str(t.get("kind")) == "fade_black" else "fade"
+        offset = max(0.0, cur_len - d)
+        lab = "[vcat]" if g == len(groups) - 1 else f"[px{g}]"
+        chains.append(f"{base}[pg{g}]xfade=transition={kind}:"
+                      f"duration={d:.6f}:offset={offset:.6f}{lab}")
+        cur_len = cur_len + lens[g] - d
+        base = lab
+    return chains
 
 
 def _sb_split_audio_plan(segs: list[dict]) -> dict:
@@ -16564,7 +17311,15 @@ def _sb_split_audio_plan(segs: list[dict]) -> dict:
     for i, sg in enumerate(segs):
         n = _sb_seg_seconds(sg)
         kind = str(sg.get("kind") or "video")
+        speed = _sb_seg_speed(sg)
         has_audio = bool((sg.get("info") or {}).get("has_audio")) and kind == "video"
+        # A TRANSITION SPLITS THE PICTURE CONCAT, so the sound can no longer
+        # ride the same `concat … a=1` — it takes the lane path, which lays
+        # it out from these same film seconds and is untouched by the
+        # picture's extra handles. Nothing about the sound changes; only
+        # which graph carries it.
+        if isinstance(sg.get("transition"), dict) or sg.get("tx_in"):
+            split = True
         # MUTE IS THE ABSENCE OF A LANE. This graph lays sound and silence end
         # to end with `concat`, so "do not play this clip" is expressed by
         # contributing no row and letting the hush fill the slot — no volume
@@ -16580,45 +17335,52 @@ def _sb_split_audio_plan(segs: list[dict]) -> dict:
             if aud:
                 split = True
                 rows.append({"idx": i, "start": float(aud["start"]),
-                             "end": float(aud["end"]),
+                             "end": float(aud["end"]), "speed": speed,
                              "at": cum + float(aud.get("delta") or 0.0)})
             else:
                 cut = sg.get("window")
                 st = float(cut["start"]) if cut else 0.0
-                rows.append({"idx": i, "start": st, "end": st + n, "at": cum})
+                # SOURCE seconds on both ends: `n` is film seconds, so the
+                # window a retimed clip plays is `n * speed` of the take.
+                rows.append({"idx": i, "start": st, "end": st + n * speed,
+                             "speed": speed, "at": cum})
         cum += n
     total = round(cum, 6)
     rows.sort(key=lambda r: r["at"])
     lanes = []
     for r in rows:
-        at, st, en = r["at"], r["start"], r["end"]
+        at, st, en, sp = r["at"], r["start"], r["end"], r["speed"]
         if at < 0:
             # A J-cut on the FIRST clip has nothing to lead from, so the head
             # is CUT rather than shifted — shifting would slide the whole
             # performance late against a picture that did not move.
-            st += -at
+            st += -at * sp
             at = 0.0
-        if en - st <= 1e-6 or at >= total - 1e-6:
+        if (en - st) / sp <= 1e-6 or at >= total - 1e-6:
             continue
-        if at + (en - st) > total:      # an L-cut past the last frame is cut
-            en = st + (total - at)
-        lanes.append({"idx": r["idx"], "start": st, "end": en, "at": at})
+        if at + (en - st) / sp > total:  # an L-cut past the last frame is cut
+            en = st + (total - at) * sp
+        lanes.append({"idx": r["idx"], "start": st, "end": en, "at": at,
+                      "speed": sp})
     # THE INCOMING SOUND WINS ITS OWN START, and that IS the J-cut: the
     # OUTGOING clip's tail is what gives way. Trimming the incoming head
     # instead would put its first syllable back where the picture cuts, which
     # is the edit the user was trying to get away from.
     for a, b in zip(lanes, lanes[1:]):
         room = b["at"] - a["at"]
-        if a["end"] - a["start"] > room + 1e-9:
-            a["end"] = a["start"] + max(0.0, room)
+        if (a["end"] - a["start"]) / a["speed"] > room + 1e-9:
+            a["end"] = a["start"] + max(0.0, room) * a["speed"]
     out = []
     for L in lanes:
-        n = L["end"] - L["start"]
+        n = (L["end"] - L["start"]) / L["speed"]
         if n <= 1e-6:
             continue                    # entirely covered by its neighbour
-        out.append({"idx": L["idx"], "start": round(L["start"], 6),
-                    "end": round(L["end"], 6), "at": round(L["at"], 6),
-                    "len": round(n, 6)})
+        lane = {"idx": L["idx"], "start": round(L["start"], 6),
+                "end": round(L["end"], 6), "at": round(L["at"], 6),
+                "len": round(n, 6)}
+        if abs(L["speed"] - 1.0) > 1e-9:
+            lane["speed"] = L["speed"]
+        out.append(lane)
     return {"split": split, "total": total, "lanes": out}
 
 
@@ -16693,7 +17455,8 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
                          music: dict | None = None,
                          overlays: list | None = None,
                          overlay_base: int = 0,
-                         segments: list[dict] | None = None) -> tuple[str, str]:
+                         segments: list[dict] | None = None,
+                         scale_to: int = 0, grain: int = 0) -> tuple[str, str]:
     """The concat FILTER graph for a mixed-geometry cut → (graph, video_label).
 
     A bare concat DEMUXER cannot do this job. The shots in one film are not
@@ -16769,56 +17532,79 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
     # the thing the bed is ducking against.
     silent_segments = bool(music) and music_mode == "replace"
     total = 0.0
+    pic_lens: list[float] = []
     for idx, sg in enumerate(segs):
         kind = str(sg.get("kind") or "video")
         info = sg.get("info") or {}
         inp = sg.get("input")
         cut = sg.get("window")
         bright = _sb_brightness_term(sg.get("adjust"))
+        reframe = _sb_frame_term(sg.get("frame"))
         fx = sg.get("fx")
         has_audio = bool(info.get("has_audio")) and kind == "video"
+        # A TRANSITION'S HANDLES. Extra picture at the head and/or the tail,
+        # in film seconds, taken from source the trims left behind. Zero for
+        # every segment that joins nothing, so the strings below are the ones
+        # they always were.
+        tx_in, tx_out = _sb_seg_extension(sg)
+        speed = _sb_seg_speed(sg)
+        tempo = _sb_atempo_term(speed)
         if kind == "slug":
             # NO FILE, NO INPUT, NO PROBE. `color` is a source filter, so the
             # cheapest of the three kinds is also the one that needed the
             # refactor: it is a chain in the graph and nothing else.
             seg = max(0.0, float(sg.get("duration") or 0.0))
+            pic = seg + tx_in + tx_out
             dur = f"{seg:.6f}"
             total += seg
             chains.append(
-                f"color=c=black:s={target_w}x{target_h}:r={FPS}:d={dur},"
-                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+                f"color=c=black:s={target_w}x{target_h}:r={FPS}:d={pic:.6f},"
+                f"setsar=1,{bright}{_sb_fade_term(fx, pic)}format={pix_fmt}[v{idx}]")
         elif kind == "still":
             # The picture arrives already looped to length by `-loop 1 -t D`
             # on the input; the trim here pins it to the exact slot so the
             # video and the synthesised silence below cannot disagree by a
             # frame, which is all concat needs to go wrong.
             seg = max(0.0, float(sg.get("duration") or 0.0))
+            pic = seg + tx_in + tx_out
             dur = f"{seg:.6f}"
             total += seg
             chains.append(
-                f"[{inp}:v]trim=0:{dur},setpts=PTS-STARTPTS,fps={FPS},"
+                f"[{inp}:v]trim=0:{pic:.6f},setpts=PTS-STARTPTS,{reframe}fps={FPS},"
                 f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
                 f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+                f"setsar=1,{bright}{_sb_fade_term(fx, pic)}format={pix_fmt}[v{idx}]")
         else:
             if cut:
                 seg = max(0.0, float(cut["end"]) - float(cut["start"]))
-                seg = min(seg, float(info["duration"]))
-                head = (f"[{inp}:v]trim=start={float(cut['start']):.6f}:"
-                        f"end={float(cut['end']):.6f},setpts=PTS-STARTPTS,")
+                seg = min(seg, float(info["duration"])) / speed
+                pic = seg + tx_in + tx_out
+                # The handles are SOURCE seconds here — a retimed clip pulls
+                # `speed` times as much take for the same film second.
+                v0 = max(0.0, float(cut["start"]) - tx_in * speed)
+                v1 = float(cut["end"]) + tx_out * speed
+                # SPEED IS ONE TERM ON THE PICTURE'S CLOCK: `(PTS-STARTPTS)/s`
+                # runs the window fast or slow and `fps=` after it lays the
+                # result back on the film's frame grid. At 1x this is the
+                # `setpts=PTS-STARTPTS` it has always been.
+                rt = "" if abs(speed - 1.0) < 1e-9 else f"/{speed:.6f}"
+                head = (f"[{inp}:v]trim=start={v0:.6f}:end={v1:.6f},"
+                        f"setpts={'(PTS-STARTPTS)' + rt if rt else 'PTS-STARTPTS'},")
                 ahead = (f"[{inp}:a]atrim=start={float(cut['start']):.6f}:"
-                         f"end={float(cut['end']):.6f},asetpts=PTS-STARTPTS,")
+                         f"end={float(cut['end']):.6f},asetpts=PTS-STARTPTS,{tempo}")
             else:
                 seg = float(info["duration"])
+                pic = seg
                 head = f"[{inp}:v]"
                 ahead = f"[{inp}:a]"
             total += seg
             dur = f"{seg:.6f}"
             chains.append(
-                f"{head}fps={FPS},"
+                f"{head}{reframe}fps={FPS},"
                 f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
                 f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-                f"setsar=1,{bright}{_sb_fade_term(fx, seg)}format={pix_fmt}[v{idx}]")
+                f"setsar=1,{bright}{_sb_fade_term(fx, pic)}format={pix_fmt}[v{idx}]")
+        pic_lens.append(pic)
         if silent_segments:
             pads.append(f"[v{idx}]")
             continue
@@ -16836,7 +17622,7 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
                 vtail = ("," + vol.rstrip(",")) if vol else ""
                 chains.append(
                     f"[{inp}:a]atrim=start={L['start']:.6f}:end={L['end']:.6f},"
-                    f"asetpts=PTS-STARTPTS,aresample={rate},"
+                    f"asetpts=PTS-STARTPTS,{tempo}aresample={rate},"
                     f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
                     f"apad,atrim=0:{L['len']:.6f},asetpts=PTS-STARTPTS"
                     f"{vtail}[a{idx}]")
@@ -16872,7 +17658,7 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
     bed_env = _sb_volume_term((music or {}).get("gain"))
     bed_tail = ("," + bed_env.rstrip(",")) if bed_env else ""
     if silent_segments:
-        chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+        chains.extend(_sb_picture_chains(pads, segs, pic_lens))
         # `apad` before the trim so a soundtrack shorter than the film ends in
         # silence rather than ending the film.
         chains.append(
@@ -16884,7 +17670,7 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
         if split:
             # The picture concatenates on its own; the sound was already laid
             # out end to end by the plan, gaps and all.
-            chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+            chains.extend(_sb_picture_chains(pads, segs, pic_lens))
             chains.extend(_sb_split_audio_chains(aplan["lanes"], total, rate,
                                                  "[acat]"))
         else:
@@ -16937,7 +17723,7 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
             f"normalize=0,asoftclip=type=tanh:threshold={_sb_mix_ceiling():g}"
             "[aout]")
     elif split:
-        chains.append(f"{''.join(pads)}concat=n={len(segs)}:v=1:a=0[vcat]")
+        chains.extend(_sb_picture_chains(pads, segs, pic_lens))
         chains.extend(_sb_split_audio_chains(aplan["lanes"], total, rate,
                                              "[aout]"))
     else:
@@ -16994,6 +17780,17 @@ def _sb_film_filtergraph(probes: list[tuple], target_w: int, target_h: int,
         # length and the audio simply ends where the last clip's sound ended,
         # which is what silence after the final shot means anyway. A pad chain
         # here would have been a label nothing maps.
+    # THE DELIVERY SIZE, last of all: the finished picture (overlays and
+    # all) scaled to the asked height with the aspect kept. Zero means the
+    # graph is character-for-character what it was.
+    if scale_to:
+        chains.append(f"{base}scale=-2:{int(scale_to)}:flags=lanczos[vdl]")
+        base = "[vdl]"
+    # THE FINISH, after the size: grain is added at the delivered
+    # resolution, or a 1080p upscale would magnify the grains into blotches.
+    if grain:
+        chains.append(f"{base}noise=alls={int(grain)}:allf=t+u[vgr]")
+        base = "[vgr]"
     tail = bt709_vf("")
     if tail:
         chains.append(f"{base}{tail}[vout]")
@@ -17032,35 +17829,71 @@ def _sb_timeline_segments(timeline: list) -> tuple[list[dict], list[str], list]:
         if length <= 0:
             continue
         adjust = entry.get("adjust") if isinstance(entry.get("adjust"), dict) else None
+        frame = entry.get("frame") if isinstance(entry.get("frame"), dict) else None
         if kind == "slug":
-            segs.append({"kind": "slug", "input": None, "info": None,
-                         "window": None, "adjust": adjust,
-                         "duration": length})
+            seg = {"kind": "slug", "input": None, "info": None,
+                   "window": None, "adjust": adjust, "duration": length}
+            if isinstance(entry.get("transition"), dict):
+                seg["transition"] = dict(entry["transition"])
+            if entry.get("tx_in"):
+                seg["tx_in"] = max(0.0, float(entry["tx_in"]))
+            segs.append(seg)
             continue
         path = str(entry.get("path") or "")
+        # THE TRANSITION FIELDS RIDE THROUGH VERBATIM; whether they still
+        # make sense is decided once the whole list exists (below), because a
+        # dropped unreadable neighbour is exactly what would strand one.
+        tx = entry.get("transition") if isinstance(entry.get("transition"), dict) else None
+        try:
+            tx_in = max(0.0, float(entry.get("tx_in") or 0.0))
+        except (TypeError, ValueError):
+            tx_in = 0.0
+        tx_out = (max(0.0, float(tx.get("duration") or 0.0)) / 2.0) if tx else 0.0
         if kind == "still":
             info = _sb_probe_still(path)
             if info is None:
                 unreadable.append(Path(path).name)
                 continue
-            segs.append({"kind": "still", "input": len(inputs), "info": info,
-                         "window": None, "adjust": adjust,
-                         "duration": length, "path": path})
+            seg = {"kind": "still", "input": len(inputs), "info": info,
+                   "window": None, "adjust": adjust,
+                   "duration": length, "path": path}
+            if frame:
+                seg["frame"] = dict(frame)
+            if tx:
+                seg["transition"] = dict(tx)
+            if tx_in:
+                seg["tx_in"] = tx_in
+            segs.append(seg)
             # `-loop 1` with an explicit `-t` is what turns one image into a
             # stream of the right length. Without `-t` the loop is infinite and
-            # ffmpeg runs until the disk is full.
+            # ffmpeg runs until the disk is full. A transition's handles are
+            # extra picture, so the loop runs that much longer.
             inputs.append(["-loop", "1", "-framerate", str(FPS),
-                           "-t", f"{length:.6f}", "-i", path])
+                           "-t", f"{length + tx_in + tx_out:.6f}", "-i", path])
             continue
         info = _sb_probe_clip(path)
         if info is None:
             unreadable.append(Path(path).name)
             continue
+        try:
+            speed = float(entry.get("speed") or 1.0)
+        except (TypeError, ValueError):
+            speed = 1.0
+        if speed <= 0:
+            speed = 1.0
         seg = {"kind": "video", "input": len(inputs), "info": info,
                "window": {"start": start, "end": end},
                "adjust": adjust,
-               "duration": min(length, float(info["duration"])),
+               "duration": min(length, float(info["duration"])) / speed,
                "path": path}
+        if abs(speed - 1.0) > 1e-9:
+            seg["speed"] = speed
+        if frame:
+            seg["frame"] = dict(frame)
+        if tx:
+            seg["transition"] = dict(tx)
+        if tx_in:
+            seg["tx_in"] = tx_in
         if entry.get("mute") is True:
             seg["mute"] = True
         if isinstance(entry.get("fx"), dict) and entry["fx"]:
@@ -17085,7 +17918,87 @@ def _sb_timeline_segments(timeline: list) -> tuple[list[dict], list[str], list]:
                 pass
         segs.append(seg)
         inputs.append(["-i", path])
+    # A TRANSITION NEEDS BOTH OF ITS CLIPS. If the incoming one was dropped as
+    # unreadable, the outgoing one is left describing a dissolve into nothing
+    # — so the pair is reconciled here, on the list the graph will actually
+    # see: a `transition` with no `tx_in` on the next segment is removed, and
+    # a `tx_in` with no `transition` before it is removed. The film gets a
+    # hard cut there and `unreadable` already says why.
+    for i, sg in enumerate(segs):
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        if sg.get("transition") and not (nxt and nxt.get("tx_in")):
+            sg.pop("transition", None)
+        prv = segs[i - 1] if i > 0 else None
+        if sg.get("tx_in") and not (prv and prv.get("transition")):
+            sg.pop("tx_in", None)
+    for i, sg in enumerate(segs):
+        # The still's `-t` was written before the reconciliation; rewrite it
+        # from the fields that survived so the input and the graph agree.
+        if sg.get("kind") == "still" and sg.get("input") is not None:
+            tx_in, tx_out = _sb_seg_extension(sg)
+            inputs[sg["input"]][5] = f"{float(sg['duration']) + tx_in + tx_out:.6f}"
     return segs, unreadable, inputs
+
+
+# DELIVERY. What the film is encoded AS, and how big. H.264 is the panel's
+# own preset and plays everywhere; HEVC is the Mac's hardware encoder, about
+# half the bytes at the same look, and plays in Safari and Chrome on a Mac
+# (`hvc1` tag or Safari refuses it); ProRes 422 HQ is for the grade — a .mov
+# nothing here can preview but every NLE opens. Size is UP only: "as cut"
+# is the largest picture in the cut, 1080p and 4K are Lanczos to that
+# height, never a crop.
+DELIVER_FORMATS = {
+    "h264": {"label": "H.264", "ext": ".mp4"},
+    "hevc": {"label": "HEVC", "ext": ".mp4"},
+    "prores": {"label": "ProRes 422 HQ", "ext": ".mov"},
+}
+DELIVER_SIZES = {"native": 0, "1080p": 1080, "2160p": 2160}
+# FINISH: film grain on the delivered picture. A delivery-time treatment,
+# not a timeline effect — it belongs beside the format, never in the
+# document, and the preview never shows a delivery encode anyway. ffmpeg's
+# `noise` with temporal + uniform flags is real, moving grain; the two
+# strengths are the ones that read as "film" and "16 mm" on a 1080p master
+# without turning into snow.
+DELIVER_FINISH = {"none": 0, "grain": 9, "heavy_grain": 18}
+
+
+def _sb_deliver(fmt, size, finish=None) -> dict:
+    """The delivery choice, resolved: `{format, size, height, ext, label,
+    finish, grain}`."""
+    f = str(fmt or "h264").strip().lower()
+    if f not in DELIVER_FORMATS:
+        f = "h264"
+    s = str(size or "native").strip().lower()
+    if s not in DELIVER_SIZES:
+        s = "native"
+    fin = str(finish or "none").strip().lower()
+    if fin not in DELIVER_FINISH:
+        fin = "none"
+    label = DELIVER_FORMATS[f]["label"] + ("" if s == "native" else f" · {s}")
+    if fin != "none":
+        label += " · " + fin.replace("_", " ")
+    return {"format": f, "size": s, "height": DELIVER_SIZES[s],
+            "ext": DELIVER_FORMATS[f]["ext"], "finish": fin,
+            "grain": DELIVER_FINISH[fin], "label": label}
+
+
+def _sb_encode_args(deliver: dict, codec: dict) -> list[str]:
+    """The encoder half of the assembler's argv, per format."""
+    f = (deliver or {}).get("format", "h264")
+    if f == "hevc":
+        # `-q:v` is VideoToolbox's quality dial (1–100); 65 sits where x264's
+        # crf 18 does to the eye. `hvc1` is the tag QuickTime and Safari
+        # require; ffmpeg's default `hev1` plays nowhere on a Mac.
+        return ["-c:v", "hevc_videotoolbox", "-q:v", "65", "-tag:v", "hvc1",
+                "-pix_fmt", "yuv420p", *BT709_FLAGS,
+                "-movflags", "+faststart", "-c:a", "aac", "-b:a", "192k"]
+    if f == "prores":
+        return ["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0",
+                "-pix_fmt", "yuv422p10le", *BT709_FLAGS,
+                "-c:a", "pcm_s16le"]
+    return ["-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
+            "-preset", "medium", *BT709_FLAGS, "-movflags", "+faststart",
+            "-c:a", "aac", "-b:a", "192k"]
 
 
 def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
@@ -17095,7 +18008,8 @@ def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
                       music_end: float | None = None,
                       music_delay: float = 0.0,
                       music_mode: str = "replace",
-                      music_gain: list | None = None) -> dict:
+                      music_gain: list | None = None,
+                      deliver: dict | None = None) -> dict:
     """Concatenate the exported shots into ONE playable film.
 
     `clips` is the export directory's own copies, in `n` order, already
@@ -17204,6 +18118,28 @@ def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
         fe = max(fs, float(o.get("film_end") or 0.0))
         if fe - fs <= 1e-6:
             continue
+        if str(o.get("kind") or "") == "text":
+            # A TITLE BECOMES A CARD ON THE WAY IN. Drawn at the film's own
+            # geometry as a frame-sized RGBA PNG beside the film, then handed
+            # to the overlay chain exactly as an uploaded card would be — so
+            # it inherits the alpha handling, the fades and the z-order with
+            # no second code path. Refused, with a sentence, when there is no
+            # font to draw it with; a film with a hole where the title was is
+            # the failure this check exists to prevent.
+            sedit = _sbe_import()
+            problem = sedit.title_font_problem()
+            if problem:
+                return {"ok": False, "error": problem, "status": 400}
+            tdir = out_path.parent / ".titles"
+            png = tdir / f"title_{sedit.title_fingerprint(o, target_w, target_h)}.png"
+            try:
+                if not png.is_file():
+                    sedit.render_title(o, target_w, target_h, png)
+            except Exception as exc:                               # noqa: BLE001
+                return {"ok": False, "status": 400,
+                        "error": f"could not draw the title "
+                                 f"{str(o.get('text') or '')[:40]!r}: {exc}"}
+            o = dict(o, path=str(png), kind="still")
         src = str(o.get("path") or "")
         if not src or not Path(src).is_file():
             unreadable.append(Path(src).name if src else "overlay")
@@ -17219,11 +18155,20 @@ def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
     overlay_base = (len(seg_inputs) if segments is not None else len(probes)) \
         + (1 if music else 0)
     codec = output_codec_settings()
+    dl = _sb_deliver((deliver or {}).get("format"), (deliver or {}).get("size"),
+                     (deliver or {}).get("finish"))
+    # ProRes is 4:2:2 10-bit; the graph's segments are normalised to the
+    # requested pix_fmt, so ask for the one the encoder will write.
+    graph_pix = "yuv422p10le" if dl["format"] == "prores" else codec["pix_fmt"]
+    # UP ONLY, and only when it changes something: a 1080p delivery of a
+    # 1080-high cut is the cut.
+    scale_to = dl["height"] if dl["height"] and dl["height"] != target_h else 0
     graph, vlabel = _sb_film_filtergraph(probes, target_w, target_h, rate,
-                                         codec["pix_fmt"], cuts=cuts,
+                                         graph_pix, cuts=cuts,
                                          music=music_arg, segments=segments,
                                          overlays=ov_rows,
-                                         overlay_base=overlay_base)
+                                         overlay_base=overlay_base,
+                                         scale_to=scale_to, grain=dl["grain"])
 
     cmd = [str(FFMPEG), "-y"]
     if segments is not None:
@@ -17242,11 +18187,8 @@ def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
     cmd += [
         "-filter_complex", graph,
         "-map", vlabel, "-map", "[aout]",
-        "-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
-        "-preset", "medium",
-        *BT709_FLAGS,
-        "-movflags", "+faststart",
-        "-c:a", "aac", "-b:a", "192k", "-ar", str(rate),
+        *_sb_encode_args(dl, codec),
+        "-ar", str(rate),
         str(out_path),
     ]
     try:
@@ -17273,8 +18215,14 @@ def _sb_assemble_film(clips: list, out_path, *, plan: list | None = None,
             else i["duration"]
             for (_c, i), w in zip(probes, _sb_segment_windows(probes, cuts)))
         n_clips = len(probes)
+    if scale_to:
+        target_w = max(2, int(round(target_w * scale_to / float(target_h))))
+        target_w += target_w % 2
+        target_h = scale_to
     facts = {"ok": True, "path": str(out_path), "clips": n_clips,
              "width": target_w, "height": target_h,
+             "deliver": {"format": dl["format"], "size": dl["size"],
+                         "finish": dl["finish"], "label": dl["label"]},
              "sample_rate": rate,
              "duration": round(played, 3),
              "trimmed": bool(cuts) or segments is not None,
@@ -17358,21 +18306,34 @@ def _sb_plan_auto_edit(clips: list, *, music=None,
                   f"on the grid")
 
 
-def _sb_film_name(board: dict) -> str:
-    """ONE film per board, one name.
+def _sb_film_name(board: dict, deliver: dict | None = None) -> str:
+    """ONE film per board, one name — per DELIVERY.
 
     Export wrote `<slug>_film.mp4` and the timeline's render wrote
     `<slug>_timeline.mp4`, into the same folder, from the same assembler — so
     one board produced two films of the same movie and the Film screen could
     only tell them apart by a chip that said which button you had pressed.
     That is the whole of the 2026-08-17 "two films in one folder" finding.
+
+    A different delivery IS a different file — `_film_hevc.mp4`,
+    `_film_1080p.mp4`, `_film_prores.mov` — because a 4K ProRes master and
+    the H.264 the panel previews are both wanted, side by side.
     """
-    return f"{_sb_slug(board.get('title') or 'storyboard', 6)}_film.mp4"
+    base = f"{_sb_slug(board.get('title') or 'storyboard', 6)}_film"
+    dl = deliver or {}
+    if dl.get("format") and dl["format"] != "h264":
+        base += "_" + dl["format"]
+    if dl.get("size") and dl["size"] != "native":
+        base += "_" + dl["size"]
+    if dl.get("finish") and dl["finish"] != "none":
+        base += "_" + dl["finish"]
+    return base + (dl.get("ext") or ".mp4")
 
 
 def _sbe_render_edit(board: dict, edit: dict, *, music=None,
                      music_mode: str | None = None,
-                     out_name: str | None = None) -> dict:
+                     out_name: str | None = None,
+                     deliver: dict | None = None) -> dict:
     """Assemble the film the TIMELINE describes. The one assembler.
 
     Both doors come here now: the Editor's Render, and Export whenever the
@@ -17391,13 +18352,26 @@ def _sbe_render_edit(board: dict, edit: dict, *, music=None,
     if music and not Path(str(music)).is_file():
         return {"ok": False, "error": f"no soundtrack at {music}",
                 "status": 400}
+    # A TRANSITION WITHOUT ITS HANDLES IS REFUSED HERE, with the validator's
+    # own sentence — the document may still carry it (a trim after the save
+    # can take a handle away), and a hard cut where a dissolve was promised is
+    # not a film anybody asked for.
+    probs = sedit.transition_problems(edit)
+    if probs:
+        return {"ok": False, "error": probs[0]["message"], "status": 400}
+    if any(sedit.overlay_kind(o) == "text" for o in sedit.overlay_items(edit)):
+        problem = sedit.title_font_problem()
+        if problem:
+            return {"ok": False, "error": problem, "status": 400}
     # The soundtrack's three numbers, from the one function that owns them —
     # so the render, the NLE export and the waveform on screen cannot disagree
     # about where the music starts.
     win = sedit.music_window(audio)
     dest = _sb_film_dir(board)
     dest.mkdir(parents=True, exist_ok=True)
-    name = out_name or _sb_film_name(board)
+    dl = _sb_deliver((deliver or {}).get("format"), (deliver or {}).get("size"),
+                     (deliver or {}).get("finish"))
+    name = out_name or _sb_film_name(board, deliver=dl)
     gaps = sedit.edit_gaps(edit)
     kinds = {}
     for c in cuts:
@@ -17424,7 +18398,8 @@ def _sbe_render_edit(board: dict, edit: dict, *, music=None,
         timeline=cuts, music=music, music_start=win["start"],
         music_end=win["end"], music_delay=win["delay"], music_mode=mmode,
         music_gain=sedit.bed_render_gain(edit),
-        overlays=sedit.overlay_items(edit))
+        overlays=sedit.overlay_items(edit),
+        deliver=dl)
     film["gaps"] = gaps
     if gaps:
         # An honest limitation, disclosed rather than discovered: this
@@ -17722,7 +18697,7 @@ def _sb_films(board: dict, *, probe: bool = True) -> list[dict]:
     except OSError:
         return out
     for p in entries:
-        if p.suffix.lower() != ".mp4" or _SB_SHOT_COPY_RE.match(p.name):
+        if p.suffix.lower() not in (".mp4", ".mov") or _SB_SHOT_COPY_RE.match(p.name):
             continue
         try:
             st = p.stat()
@@ -17845,6 +18820,10 @@ def _sbe_board_clips(board: dict) -> list[dict]:
             # `edit/generate`; the client uses it to drop a freshly rendered
             # clip into the hole it was generated for instead of at the end.
             "slot": s.get("edit_slot"),
+            # The whole prompt, for a retake to start from; the title above
+            # is what the row shows.
+            "prompt": s.get("prompt") or "",
+            "character_id": s.get("character_id") or "",
         })
     return out
 
@@ -18186,7 +19165,11 @@ def _sbe_auto_edit(board: dict, *, music: str | None = None,
     bdir = _sbe_board_dir(board["id"])
     clips = _sbe_board_clips(board)
     cache = _sbe_prepare_cache(bdir)
-    music = music or cache.get("music")
+    # THE DIRECTOR'S TRACK IS THE DEFAULT SOUNDTRACK. A board planned to a
+    # beat grid opens in the Editor already cut to it; Prepare (a cached
+    # track) and an explicit `music` still win.
+    music = (music or cache.get("music")
+             or ((board.get("soundtrack") or {}).get("path") or None))
     beats = cache.get("beats") if (music and cache.get("music") == music) else None
     if not clips:
         return sedit.edit_from_plan([], board_id=board["id"])
@@ -18255,6 +19238,27 @@ def _sbe_relinks(board: dict, edit: dict) -> list[dict]:
         if hit:
             out.append({"id": c.get("id"), "path": str(c.get("path")),
                         **hit})
+    # RETAKES. A shot ordered from the Editor as a new take of ONE clip
+    # (`edit_slot.retake_of`) that has since rendered is offered against that
+    # clip — flagged, because a retake is a choice per take (the old one may
+    # be better), never the batch "use the finished versions" rewrite.
+    by_id = {str(c.get("id")): c for c in (edit.get("clips") or [])
+             if isinstance(c, dict) and c.get("id")}
+    for s in (board.get("shots") or []):
+        if not isinstance(s, dict):
+            continue
+        slot = s.get("edit_slot") if isinstance(s.get("edit_slot"), dict) else {}
+        target = str(slot.get("retake_of") or "")
+        new = s.get("final_output") or s.get("draft_output")
+        if not target or not new or not Path(str(new)).is_file():
+            continue
+        c = by_id.get(target)
+        if not c or str(c.get("path") or "") == str(new):
+            continue
+        out.append({"id": target, "path": str(c.get("path") or ""),
+                    "to": str(new), "n": s.get("n"),
+                    "title": (s.get("title") or s.get("prompt") or "")[:80],
+                    "retake": True})
     return out
 
 
@@ -18302,6 +19306,10 @@ def _sbe_payload(board: dict, edit: dict) -> dict:
         # back to. Never an error — a J-cut is a deliberate drift — but the
         # panel cannot flag what the server does not say.
         "sync": sedit.edit_sync_flags(edit),
+        # THE SONG MAP, for the ruler. Sections in TRACK seconds from the
+        # Director's analysis (empty for a film with no planned soundtrack);
+        # the client puts them on the film's clock through the music window.
+        "sections": list(((board.get("soundtrack") or {}).get("sections")) or []),
         # Board clips that are NOT on the timeline — a shot rendered after the
         # edit was saved, or one generated into a gap that has just landed.
         # Never auto-inserted: the arrangement is the human's, and a server
@@ -18848,9 +19856,45 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         requested_upscale_method = "lanczos"
     if requested_upscale_method not in ("lanczos", "pipersr"):
         requested_upscale_method = "lanczos"
+    # ONE TAKE (see take_plan). Read before the fields it overrides: on LTX it
+    # is the windows chain with one prompt per window; on H3 it is 15 s parts
+    # that continue from each other, run by run_take_job_inner. The form's own
+    # length pill is overruled — a take IS the length.
+    _take: dict | None = None
+    _take_secs_raw = f("take_seconds", "")
+    if _take_secs_raw and _take_secs_raw not in ("0", "off"):
+        _take_engine = (f("engine", ENGINE_DEFAULT) or ENGINE_DEFAULT).strip().lower()
+        _take = take_plan(_take_secs_raw, _take_engine)
+        if _take is None:
+            push(f"take_seconds={_take_secs_raw!r} is not one of {TAKE_SECONDS} — rendering a normal clip")
+        else:
+            _take["beat_prompts"] = take_beats(f("beats", ""), _take["beats"])
+            if _take["engine"] == "h3":
+                form["h3_length"] = [TAKE_H3_PART_LENGTH]
+                form["h3_chain_prompts"] = [json.dumps(
+                    [_take["beat_prompts"][i] for i in _take["parts"][0]])]
+            else:
+                form["temporal_mode"] = ["windows"]
+                form["frames"] = [str(_take["frames"])]
+                form["window_prompts"] = [json.dumps(_take["beat_prompts"])]
     temporal_mode = f("temporal_mode", "native").strip().lower()
+    # SLIDING WINDOWS ride the same control as Long Clip Boost — one "Long
+    # clips" row, three answers — and are stored as `long_mode` so the render
+    # path reads one flag per lane. `window_prompts` is one line per window
+    # (blank = hold the previous moment), the H3 chain's wire shape.
+    long_mode = "windows" if temporal_mode == "windows" else "native"
     if temporal_mode not in ("native", "fps12_interp24"):
         temporal_mode = "native"
+    _wp_raw = f("window_prompts", "")
+    window_prompts: list[str] = []
+    if _wp_raw:
+        try:
+            _wp = json.loads(_wp_raw)
+            if isinstance(_wp, list):
+                window_prompts = [str(x or "").strip() for x in _wp]
+        except (TypeError, ValueError):
+            window_prompts = [x.strip() for x in str(_wp_raw).split("\n")]
+    window_invariants = f("window_invariants", "").strip()
 
     # Optional Characters-tab origin fields. The /characters/<id>/generate
     # endpoint stamps these onto the form so the sidecar records enough state
@@ -19092,7 +20136,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # The adapter is distilled FOR 4 sigma points. Honouring a Steps pill on
         # top of it would quietly render a configuration nobody validated, so
         # Turbo wins and says so rather than losing to a leftover pill.
-        push(f"Turbo pins the sampler at {H3_TURBO_STEPS} steps — ignoring the "
+        push(f"Turbo pins the sampler at {h3_turbo_steps()} steps — ignoring the "
              f"{_h3_steps}-step override.")
         _h3_steps = 0
 
@@ -19154,6 +20198,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # trap as every key in this dict: leave it out and the whole
             # control looks wired and silently no-ops on /queue/add.
             "h3_chain_prompts": _h3_chain_prompts,
+            "take": _take,
             # LTX-2.5 distilled schedule preset — "" (tuned default) or
             # "fast"/"vendor", already gated above to the lane that defines
             # it. SAME allowlist trap as every key in this dict: leave it out
@@ -19226,6 +20271,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "quality": quality,                    # quick / balanced / standard / high
             "accel": f("accel", "off"),            # off / boost / turbo
             "temporal_mode": temporal_mode,         # native / fps12_interp24
+            # Sliding windows (ltx_windows.py). Same allowlist trap as every
+            # key here: leave one out and the control silently no-ops.
+            "long_mode": long_mode,                 # native / windows
+            "window_prompts": window_prompts,
+            "window_invariants": window_invariants,
             "upscale": upscale,                     # off / fit_720p / x2
             "upscale_method": requested_upscale_method,   # lanczos / pipersr
             # LoRAs the user has enabled for this job. The UI submits a
@@ -19343,7 +20393,7 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # both ride the SAME path the tier default does (nothing downstream
         # branches on WHY the count is what it is).
         job["params"]["steps"] = int(
-            H3_TURBO_STEPS if _h3_turbo else (_h3_steps or _tier_cfg["steps"]))
+            h3_turbo_steps() if _h3_turbo else (_h3_steps or _tier_cfg["steps"]))
         job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
         job["params"]["h3_window_frames"] = int(
             _tier_cfg.get("window_frames") or _tier_cfg["frames"])
@@ -19927,7 +20977,9 @@ def run_image_job_inner(job: dict) -> None:
             raise RuntimeError("each ref must be a non-empty path string")
         rp = Path(r)
         rp = (rp if rp.is_absolute() else (UPLOADS / r)).resolve()
-        allowed = [UPLOADS.resolve(), OUTPUT.resolve()]
+        # The character sheets are a legitimate reference too: the Storyboard's
+        # anchor stills are drawn from a character's own sheet.
+        allowed = [UPLOADS.resolve(), OUTPUT.resolve(), _CHARACTERS_CACHE_PATH.resolve()]
         if not any(rp.is_relative_to(root) for root in allowed):
             raise RuntimeError(f"ref path not under uploads/outputs: {r}")
         if not rp.is_file():
@@ -21259,9 +22311,9 @@ def run_h3_job_inner(job: dict) -> None:
                 "Turbo's adapter isn't on disk: "
                 + "; ".join(turbo_paths["missing"])
                 + f". Expected under {turbo_paths['dir']} — turn Turbo off, or "
-                  f"install {H3_TURBO_LORA_FILE} (or the safe folded v0.1 "
-                  f"fallback) under {turbo_paths['dir']}.")
-        steps = H3_TURBO_STEPS
+                  f"install {H3_TURBO_V4_FILE} (or {H3_TURBO_LORA_FILE}, or the safe "
+                  f"folded v0.1 fallback) under {turbo_paths['dir']}.")
+        steps = h3_turbo_steps(turbo_paths)
 
     # First-frame conditioning (Image mode). The flag landed on the runner
     # after the first public branch, so probe the INSTALLED script rather than
@@ -21476,7 +22528,7 @@ def run_h3_job_inner(job: dict) -> None:
          + (" · per-window prompts" if chain_prompts else "")
          + (f" · first frame {first_frame.name}" if first_frame else ""))
     if turbo:
-        push(f"[h3] {H3_TURBO_NOTE}")
+        push(f"[h3] {h3_turbo_note(turbo_paths)}")
     # The shot list, in the log, in render order — so a clip whose second beat
     # didn't land can be diagnosed from the log alone.
     for _i, _wp in enumerate(chain_prompts, 1):
@@ -21891,6 +22943,198 @@ def run_h3_job_inner(job: dict) -> None:
         subprocess.run(["open", str(final_target)], check=False)
 
 
+def _run_windows_chain(job: dict, p: dict, plan: dict, first: Path,
+                       raw_out: Path, total_frames: int) -> dict:
+    """Windows 2..N as `extend` passes, each on ONLY the last window of the
+    previous output, then the new frames of every window joined and trimmed
+    to length into `raw_out`. Returns the plan with what happened.
+
+    CONSTANT TIME PER WINDOW (2026-09-05). The first version handed each
+    extend the whole clip so far, and Extend encodes and conditions on every
+    frame it is given: window 2 took 10 min, window 3 17, window 4 26 — a
+    30 s take was heading for three hours. The model only needs the tail for
+    continuity, so each pass now sees the last `window` frames (after the
+    plan's `discard` is dropped), renders `new_frames` after them, and only
+    those new frames go into the join. Every intermediate file is kept beside
+    the final one and hidden from the gallery — a chain that dies at window 4
+    leaves windows 1–3 on disk, which is the difference between a resumable
+    clip and a lost hour.
+    """
+    import ltx_windows as _lw                                        # noqa: PLC0415
+    prompts = _lw.window_prompts(p.get("prompt") or "", p.get("window_prompts") or [],
+                                 invariants=p.get("window_invariants") or "",
+                                 count=plan["count"])
+    plan = dict(plan, prompts=prompts, files=[str(first)])
+    codec = output_codec_settings()
+    fps = float(FPS)
+    # WORKING FILES LIVE OUTSIDE THE GALLERY. Tails, window outputs and pieces
+    # used to be written beside the final clip and hidden per panel — and the
+    # hidden list is per panel, so a second panel sharing the outputs folder
+    # (the owner's, next to a test instance) showed every one of them as a
+    # finished video. A dot-folder is invisible to every gallery listing.
+    work = OUTPUT / ".windows" / str(job.get("id") or "take")
+    work.mkdir(parents=True, exist_ok=True)
+    ctx = int(plan.get("window") or _lw.DEFAULT_WINDOW)
+    discard = int(plan.get("discard") or 0)
+    enc = ["-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
+           "-preset", "fast", *BT709_FLAGS, "-c:a", "aac", "-b:a", "192k"]
+    pieces = [str(first)]
+    cur = first
+    cur_frames = ctx                       # the first pass is one window
+    for w in plan["windows"][1:]:
+        k = w["index"]
+        # 1. THE CONTEXT: the last `ctx` frames of the previous output, its
+        #    `discard` tail dropped first. Frame-exact through `select`.
+        end = cur_frames - discard - 1
+        start = max(0, end - ctx + 1)
+        tail = work / f"{raw_out.stem}_w{k - 1}t{raw_out.suffix}"
+        run_ffmpeg_tracked([
+            str(FFMPEG), "-y", "-i", str(cur),
+            "-vf", f"select='between(n\\,{start}\\,{end})',setpts=N/FRAME_RATE/TB",
+            "-af", f"atrim=start={start / fps:.6f}:end={(end + 1) / fps:.6f},asetpts=PTS-STARTPTS",
+            *enc, "-movflags", "+faststart", str(tail)], f"Windows: tail {k - 1}")
+        ctx_frames = end - start + 1
+        out = work / f"{raw_out.stem}_w{k}{raw_out.suffix}"
+        seed = p.get("seed_used") if p.get("seed_used") is not None else p.get("seed")
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            seed = -1
+        spec = {
+            "action": "extend",
+            "id": job["id"],
+            "params": {
+                "model_dir": str(pack_path("q8")),
+                "dev_transformer": hq_weights()["dev_transformer"],
+                "prompt": prompts[k],
+                "negative_prompt": p.get("negative_prompt", ""),
+                "video_path": str(tail),
+                "extend_frames": _lw.extend_latents(w["new_frames"]),
+                "direction": "after",
+                "output_path": str(out),
+                "seed": (seed + k) if seed >= 0 else -1,
+                "steps": int(p.get("extend_steps") or 8),
+                "cfg_scale": 1.0,
+                "loras": p.get("loras") or [],
+            },
+        }
+        push(f"[windows] window {k + 1}/{plan['count']}: +{w['new_frames']}f "
+             f"after {ctx_frames}f of context · \"{prompts[k][:60]}\"")
+        res = HELPER.run(spec)
+        if not out.is_file():
+            raise RuntimeError(f"window {k + 1} produced no file ({res.get('error') or 'no output'})")
+        plan["files"].append(str(out))
+        # 2. THE PIECE: only the frames this window added.
+        piece = work / f"{raw_out.stem}_w{k}p{raw_out.suffix}"
+        run_ffmpeg_tracked([
+            str(FFMPEG), "-y", "-i", str(out),
+            "-vf", f"select='gte(n\\,{ctx_frames})',setpts=N/FRAME_RATE/TB",
+            "-af", f"atrim=start={ctx_frames / fps:.6f},asetpts=PTS-STARTPTS",
+            *enc, "-movflags", "+faststart", str(piece)], f"Windows: piece {k}")
+        pieces.append(str(piece))
+        for f in (str(cur), str(tail), str(out), str(piece)):
+            set_hidden(f, True)
+        cur = out
+        cur_frames = ctx_frames + int(w["new_frames"])
+    # 3. THE JOIN, trimmed to the asked length.
+    keep = min(int(total_frames), int(plan["delivered_frames"]))
+    lst = work / f"{raw_out.stem}_windows.txt"
+    lst.write_text("".join(f"file '{x}'\n" for x in pieces))
+    run_ffmpeg_tracked([
+        str(FFMPEG), "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-t", f"{keep / fps:.6f}",
+        "-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
+        "-preset", "medium", *BT709_FLAGS, "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", str(raw_out)], "Windows: final join")
+    set_hidden(str(cur), True)
+    plan["output_frames"] = keep
+    plan["pieces"] = pieces
+    push(f"[windows] {plan['count']} windows → {raw_out.name} ({keep}f)")
+    return plan
+
+
+def run_take_job_inner(job: dict) -> None:
+    """An H3 take: N parts of 15 s, each three beats, each continuing from the
+    last frame of the part before, joined into one clip. Every part is an
+    ORDINARY H3 render through run_h3_job_inner with a derived job, so LoRAs,
+    Turbo, the export size and the log all behave as they do for a single
+    clip. Stop between parts is honoured through the parent's
+    `cancel_requested` (a running part dies with the H3 process group)."""
+    p = job["params"]
+    take = p["take"]
+    beats = list(take.get("beat_prompts") or [])
+    parts = take["parts"]
+    n_parts = len(parts)
+    label = p.get("label") or ""
+    t0 = time.time()
+    take_dir = STATE_DIR / "take" / job["id"]
+    take_dir.mkdir(parents=True, exist_ok=True)
+    ff = str(FFMPEG)
+    outs: list[str] = []
+    last_png: str | None = None
+    push(f"[take] {take['seconds']} s · {take['beats']} beats · {n_parts} parts on H3")
+    for k, idxs in enumerate(parts):
+        if job.get("cancel_requested"):
+            raise RuntimeError("stopped between parts")
+        chain = [beats[i] if i < len(beats) else "" for i in idxs]
+        if not chain[0]:
+            chain[0] = p.get("prompt") or ""
+        child_params = dict(p)
+        child_params.update({
+            "take": None,
+            "h3_chain_prompts": chain,
+            "prompt": chain[0],
+            "label": f"{label or 'take'} · part {k + 1} of {n_parts}",
+            "mode": "i2v" if last_png else p.get("mode", "t2v"),
+            "open_when_done": False,
+        })
+        if last_png:
+            child_params["image"] = last_png
+        child = {"id": f"{job['id']}-p{k + 1}", "params": child_params,
+                 "status": "running", "created_at": job.get("created_at")}
+        push(f"[take] beats {idxs[0] + 1}–{idxs[-1] + 1} of {take['beats']} · part {k + 1} of {n_parts}"
+             + (" · continues from the last frame" if last_png else ""))
+        run_h3_job_inner(child)
+        out = child.get("output_path")
+        if not out or not Path(out).is_file():
+            raise RuntimeError(f"part {k + 1} produced no clip")
+        outs.append(out)
+        # Parts are working files: kept, hidden from the gallery. The take is
+        # the output.
+        try:
+            set_hidden(str(out), True)
+        except Exception:                                          # noqa: BLE001
+            pass
+        last_png = str(take_dir / f"part{k + 1}_last.png")
+        subprocess.run([ff, "-loglevel", "error", "-y", "-sseof", "-0.05", "-i", out,
+                        "-frames:v", "1", "-update", "1", last_png], check=True)
+        job["take_progress"] = {"part": k + 1, "parts": n_parts}
+    if job.get("cancel_requested"):
+        raise RuntimeError("stopped before the join")
+    lst = take_dir / "concat.txt"
+    lst.write_text("".join(f"file '{o}'\n" for o in outs))
+    final = _unique_output_path(
+        OUTPUT, _descriptive_filename(label, p.get("prompt") or "", fallback="take") + f"_take{take['seconds']}s")
+    push(f"[take] joining {n_parts} parts → {final.name}")
+    subprocess.run([ff, "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(final)], check=True)
+    side: dict = {}
+    try:
+        side = json.loads(Path(outs[-1] + ".json").read_text())
+    except (OSError, ValueError):
+        side = {}
+    side.update({
+        "mode": p.get("mode", "t2v"), "engine": "h3", "prompt": p.get("prompt") or "",
+        "label": label, "elapsed_sec": round(time.time() - t0, 1),
+        "frames": take["frames"], "seconds": take["seconds"],
+        "take": {"seconds": take["seconds"], "beats": beats, "parts": outs, "engine": "h3"},
+        "h3_chain_prompts": beats,
+    })
+    write_sidecar(final.with_suffix(final.suffix + ".json"), side)
+    job["output_path"] = str(final)
+    push(f"[take] done in {round(time.time() - t0)}s → {final.name}")
+
+
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
@@ -21906,6 +23150,8 @@ def run_job_inner(job: dict) -> None:
     # dispatches BEFORE every LTX-only clamp/validation below — none of which
     # applies to it.
     if (p.get("engine") or "ltx").strip().lower() == "h3":
+        if p.get("take"):
+            return run_take_job_inner(job)
         return run_h3_job_inner(job)
     # STALE-ENGINE GATE (fleet: 'Model type gemma4_unified not supported.',
     # 19 events / 6 installs, every one a legacy install whose vendored engine
@@ -23051,6 +24297,53 @@ def run_job_inner(job: dict) -> None:
             "requested_duration_sec": round(requested_duration, 3),
             "method": "ffmpeg_minterpolate_mci",
         }
+    # SLIDING WINDOWS. Past one window the clip is rendered as a SEQUENCE:
+    # one `generate` for the first window, then one `extend` per later window
+    # with that window's own prompt (ltx_windows.window_prompts), each on the
+    # kept tail of the last. The extend lane is the Q8 dev transformer, so
+    # this needs the High add-on and a tier that allows Extend — refused
+    # with the same sentences Extend itself uses rather than silently
+    # rendering one window. The memory plan is sized to ONE window, which is
+    # the whole point.
+    windows_plan = None
+    if (str(p.get("long_mode") or "native") == "windows"
+            and mode in ("t2v", "i2v") and not ltx_quality_uses_hq(quality)):
+        import ltx_windows as _lw                                    # noqa: PLC0415
+        try:
+            windows_plan = _lw.plan_windows(frames)
+        except ValueError as exc:
+            raise RenderRefused("windows", f"Sliding windows: {exc}")
+        if windows_plan["count"] <= 1:
+            windows_plan = None
+            push(f"[windows] {frames}f fits one window — rendering natively.")
+        else:
+            if not SYSTEM_CAPS["allows_extend"]:
+                raise RenderRefused(
+                    "hardware_tier",
+                    f"Sliding windows chain Extend passes, and Extend isn't "
+                    f"supported on the {SYSTEM_CAPS['label']} hardware tier — "
+                    f"it works from {min_ram_gb_for('allows_extend') or 48} GB. "
+                    f"Use Long Clip Boost or a single window instead.")
+            _ext_missing = hq_surface_missing()
+            if _ext_missing:
+                raise RenderRefused(
+                    "pack_missing",
+                    f"Sliding windows chain Extend passes, which need the "
+                    f"LTX-2.5 High add-on (the Q8 model). Missing "
+                    f"{len(_ext_missing)} file(s): {', '.join(_ext_missing[:3])}"
+                    f"{' …' if len(_ext_missing) > 3 else ''}. Open Settings → "
+                    f"Models and download it, then render again.")
+            if temporal_mode != "native":
+                push("[windows] Long Clip Boost and sliding windows are two "
+                     "answers to one question; windows win, rendering native fps.")
+                temporal_mode = "native"
+                p["temporal_mode"] = "native"
+                temporal_plan = None
+                model_fps = delivery_fps
+            model_frames = windows_plan["window"]
+            push(f"[windows] {_lw.describe(windows_plan)}")
+            for note in windows_plan["notes"]:
+                push(f"[windows] {note}")
     memory_plan = plan_memory_policy(model_frames, mode=mode, quality=quality)
 
     # T2V/I2V resolution clamp — only applies on the base tier (< 48 GB).
@@ -23413,12 +24706,22 @@ def run_job_inner(job: dict) -> None:
             push(f"Run via helper: id={job['id']} mode={mode} quality={quality} accel={p.get('accel', 'off')} "
                  f"{width}x{height} {model_frames}f{temporal_suffix}")
 
+    if windows_plan:
+        # The first window lands beside the final name; the chain writes
+        # `raw_out` itself once the last window is trimmed to length.
+        job_spec["params"]["frames"] = windows_plan["window"]
+        job_spec["params"]["output_path"] = str(
+            raw_out.with_name(raw_out.stem + "_w0" + raw_out.suffix))
     result = HELPER.run(job_spec)
     if "seed_used" in result:
         push(f"seed used: {result['seed_used']}")
         p["seed_used"] = result["seed_used"]
     if result.get("memory_policy"):
         memory_plan = {**memory_plan, "helper": result.get("memory_policy")}
+    if windows_plan:
+        windows_plan = _run_windows_chain(job, p, windows_plan,
+                                          Path(job_spec["params"]["output_path"]),
+                                          raw_out, frames)
 
     final_target = raw_out
     if mode == "i2v_clean_audio":
@@ -23563,6 +24866,8 @@ def run_job_inner(job: dict) -> None:
         sidecar["accel_metrics"] = result["accel_metrics"]
     if temporal_plan:
         sidecar["temporal"] = temporal_plan
+    if windows_plan:
+        sidecar["windows"] = windows_plan
     if upscale_plan:
         sidecar["upscale"] = {
             k: v for k, v in upscale_plan.items()
@@ -23591,6 +24896,123 @@ def run_job_inner(job: dict) -> None:
 # ---- worker thread -----------------------------------------------------------
 
 _CONSEC_FAIL: dict = {"sig": "", "n": 0}   # worker_loop's same-failure streak
+
+
+# ---------------------------------------------------------------------------
+# PUSH — the completion alert that reaches a closed tab
+# ---------------------------------------------------------------------------
+# The in-tab chime needs the page open. Web Push does not: the browser keeps
+# a subscription for this origin, the panel signs each message with a VAPID
+# key pair it generates once, and the browser's own push service wakes the
+# service worker (`/sw.js`) to show the notification — Mac closed-tab, or a
+# phone that has the panel installed over an HTTPS address. No cloud relay:
+# the panel posts straight to the browser vendor's endpoint. Everything is
+# best-effort: a push that cannot be sent is a log line, never a failed job.
+def _push_dir() -> Path:
+    return STATE_DIR
+
+
+def _vapid_keys() -> dict | None:
+    """`{private, public}` (base64url), generated on first use. None when
+    pywebpush is not installed — the feature simply is not offered."""
+    try:
+        from py_vapid import Vapid, b64urlencode                  # noqa: PLC0415
+        from cryptography.hazmat.primitives import serialization   # noqa: PLC0415
+    except Exception:                                              # noqa: BLE001
+        return None
+    p = _push_dir() / "vapid.json"
+    if p.is_file():
+        try:
+            d = json.loads(p.read_text())
+            if d.get("private") and d.get("public"):
+                return d
+        except (OSError, ValueError):
+            pass
+    v = Vapid()
+    v.generate_keys()
+    raw_pub = v.public_key.public_bytes(serialization.Encoding.X962,
+                                        serialization.PublicFormat.UncompressedPoint)
+    raw_priv = v.private_key.private_numbers().private_value.to_bytes(32, "big")
+    d = {"private": b64urlencode(raw_priv), "public": b64urlencode(raw_pub)}
+    _push_dir().mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(d))
+    return d
+
+
+def _push_subs_path() -> Path:
+    return _push_dir() / "push_subscriptions.json"
+
+
+def _push_subs() -> list[dict]:
+    try:
+        d = json.loads(_push_subs_path().read_text())
+        return [s for s in d if isinstance(s, dict) and s.get("endpoint")] if isinstance(d, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _push_save_subs(subs: list[dict]) -> None:
+    _push_dir().mkdir(parents=True, exist_ok=True)
+    _push_subs_path().write_text(json.dumps(subs))
+
+
+def push_available() -> bool:
+    try:
+        import pywebpush  # noqa: F401,PLC0415
+        return True
+    except Exception:                                              # noqa: BLE001
+        return False
+
+
+def push_notify(title: str, body: str, tag: str = "phos") -> int:
+    """Send one notification to every subscribed browser. Returns how many
+    were delivered; a subscription the vendor says is gone is dropped."""
+    subs = _push_subs()
+    keys = _vapid_keys() if subs else None
+    if not subs or not keys:
+        return 0
+    try:
+        from pywebpush import webpush, WebPushException              # noqa: PLC0415
+    except Exception:                                              # noqa: BLE001
+        return 0
+    sent, keep = 0, []
+    payload = json.dumps({"title": title, "body": body, "tag": tag})
+    for s in subs:
+        try:
+            webpush(subscription_info=s, data=payload,
+                    vapid_private_key=keys["private"],
+                    vapid_claims={"sub": "mailto:phosphene@localhost"},
+                    ttl=3600, timeout=10)
+            sent += 1
+            keep.append(s)
+        except WebPushException as exc:                            # noqa: PERF203
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code in (404, 410):
+                push(f"[push] a browser's subscription is gone ({code}) — dropped")
+                continue
+            push(f"[push] could not deliver: {exc}")
+            keep.append(s)
+        except Exception as exc:                                   # noqa: BLE001
+            push(f"[push] could not deliver: {exc}")
+            keep.append(s)
+    if len(keep) != len(subs):
+        _push_save_subs(keep)
+    return sent
+
+
+def _push_job_done(job: dict) -> None:
+    """The completion alert, pushed. Never raises."""
+    try:
+        if not get_settings().get("notify_done", True):
+            return
+        p = job.get("params") or {}
+        what = (p.get("label") or p.get("preset_label")
+                or (str(p.get("prompt") or "")[:60]) or p.get("mode") or "a render")
+        failed = job.get("status") == "failed"
+        push_notify("Phosphene — a render failed" if failed else "Phosphene — render done",
+                    str(what), tag="phos-" + str(job.get("id") or ""))
+    except Exception as exc:                                       # noqa: BLE001
+        push(f"[push] skipped: {exc}")
 
 
 def worker_loop() -> None:
@@ -23669,6 +25091,11 @@ def worker_loop() -> None:
                          f"waiting. Fix the cause above (Settings → Models for a "
                          f"missing or incomplete model), then press Resume.")
         finally:
+            if job.get("status") in ("done", "failed"):
+                # The closed-tab alert. Off the GPU lock, best-effort, and only
+                # when the person has a browser subscribed.
+                threading.Thread(target=_push_job_done, args=(job,), daemon=True,
+                                 name="phos-push").start()
             job["finished_at"] = iso_now()
             if job.get("started_ts"):
                 job["elapsed_sec"] = round(time.time() - job["started_ts"], 2)
@@ -25166,6 +26593,43 @@ class Handler(BaseHTTPRequestHandler):
                 board["concept"] = concept
                 board["style"] = f("style", "")
                 board["must"] = must
+                # THE DIRECTOR. A soundtrack on the brief makes this a music
+                # video: the beat grid decides how many shots there are and
+                # how long each one is, the planner writes one shot per slot,
+                # and the Editor's first cut lands every shot on its downbeat
+                # under this track. Resolved HERE — a bad path is a 400 now,
+                # not a planner that ran for a minute and cut nothing.
+                _track = (f("soundtrack", "") or "").strip()
+                if "soundtrack" in form:
+                    if _track and not Path(_track).is_file():
+                        _sb_release_planner(bid, "-pending-")
+                        self._json({"ok": False,
+                                    "error": f"no audio file at {_track}"}, 400)
+                        return
+                    try:
+                        _bars = int(f("bars_per_shot", "2") or 2)
+                    except (TypeError, ValueError):
+                        _bars = 2
+                    board["soundtrack"] = ({"path": _track,
+                                            "bars_per_shot": max(1, min(8, _bars))}
+                                           if _track else None)
+                # AUTO: plan, then render every shot, then cut and make the
+                # film, with nobody pressing the next button. Stored on the
+                # board because the two later steps run in threads that only
+                # have the board to read.
+                if "auto" in form:
+                    board["auto"] = str(f("auto", "")).strip().lower() in ("1", "on", "true", "yes")
+                # ANCHOR STILLS: before a shot renders, an image of its first
+                # frame is generated (from the character's sheet when the shot
+                # has one) and the video starts FROM it — composition decided
+                # on a still that takes seconds, not a clip that takes minutes.
+                if "anchor_stills" in form:
+                    board["anchor_stills"] = str(f("anchor_stills", "")).strip().lower() in ("1", "on", "true", "yes")
+                # LONG WINDOWS: a shot longer than one LTX window renders as a
+                # chain of windows on the Q8 dev transformer instead of being
+                # cut to fit (see ltx_windows.py).
+                if "long_windows" in form:
+                    board["long_windows"] = str(f("long_windows", "")).strip().lower() in ("1", "on", "true", "yes")
                 # PATCH, never overwrite. Re-plan and Try again rebuild this
                 # form by hand and send neither `locations` nor `wardrobe`, so
                 # unconditional assignment ERASED both on the first re-plan —
@@ -25195,6 +26659,27 @@ class Handler(BaseHTTPRequestHandler):
                 # The slot was claimed under a placeholder before the id existed
                 # (a brand-new board mints its id above); move it onto the real
                 # one now that nothing else can fail.
+                # ONE TAKE on the brief: patched only when sent ("0" turns it
+                # off). The plan thread turns it into beats.
+                if "take_seconds" in form:
+                    _ts_raw = f("take_seconds", "0") or "0"
+                    try:
+                        _ts = int(_ts_raw)
+                    except ValueError:
+                        _ts = 0
+                    if _ts and _ts not in TAKE_SECONDS:
+                        _sb_release_planner(bid, "-pending-")
+                        self._json({"ok": False,
+                                    "error": f"a take must be one of {list(TAKE_SECONDS)} seconds "
+                                             f"(got {_ts_raw!r})."}, 400)
+                        return
+                    if _ts:
+                        board["take_seconds"] = _ts
+                    else:
+                        board.pop("take_seconds", None)
+                    storyboard.save_storyboard(STATE_DIR, board)
+                if board.get("take_seconds") in TAKE_SECONDS:
+                    shots_n = int(board["take_seconds"]) // TAKE_BEAT_SECONDS
                 with _SB_LOCK:
                     _SB_PLANNERS.pop("-pending-", None)
                     _SB_PLANNERS.setdefault(bid, {"cancelled": False})
@@ -25204,10 +26689,12 @@ class Handler(BaseHTTPRequestHandler):
                 th = threading.Thread(
                     target=_sb_plan_thread, daemon=True, name=f"phos-sb-plan-{bid}",
                     args=(bid, {"concept": concept, "n_shots": shots_n,
+                                "take_seconds": board.get("take_seconds") or 0,
                                 "style": board["style"], "characters": chars,
                                 "must": must, "feedback": notes or None,
                                 "locations": board.get("locations") or [],
-                                "engine_mode": emode},
+                                "engine_mode": emode,
+                                "soundtrack": board.get("soundtrack") or None},
                           previous if notes else None))
                 with _SB_LOCK:
                     _SB_PLANNERS[bid]["thread"] = th
@@ -25276,7 +26763,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": f"shots {bad} are not objects"}, 400)
                         return
                     keep = {"draft_job_id", "final_job_id", "draft_output",
-                            "final_output", "error"}
+                            "final_output", "error",
+                            # the anchor still is server-owned too
+                            "still", "still_job_id", "still_error"}
                     by_n = {s.get("n"): s for s in (board.get("shots") or [])
                             if isinstance(s, dict)}
                     merged = []
@@ -25343,6 +26832,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # ---- render --------------------------------------------------
+            if action == "restill":
+                # NEW STILL for one shot: forget its still and the clip made
+                # from it, then take the ordinary render path for that shot
+                # alone — the render thread makes the still first and the
+                # clip from it, exactly as a first render would.
+                bid = f("id", "")
+                board = load(bid)
+                pass_name = "final" if f("pass", "draft") == "final" else "draft"
+                try:
+                    n = int(f("n", "0") or 0)
+                except ValueError:
+                    n = 0
+                if _sb_clear_still(board, n, pass_name) is None:
+                    self._json({"ok": False, "error": f"there is no shot {n}"}, 404)
+                    return
+                if not board.get("anchor_stills"):
+                    board["anchor_stills"] = True
+                storyboard.save_storyboard(STATE_DIR, board)
+                form["only"] = [str(n)]
+                form["pass"] = [pass_name]
+                action = "render"
+
             if action == "render":
                 bid = f("id", "")
                 board = load(bid)
@@ -25895,17 +27406,32 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False,
                                     "error": "no timeline to relink"}, 404)
                         return
-                    swaps = {r["path"]: r["to"] for r in _sbe_relinks(board, edit)}
+                    only = f("only", "")
+                    rows = _sbe_relinks(board, edit)
+                    # WITHOUT `only`, the batch rewrite is drafts → finals and
+                    # nothing else: a retake is adopted one clip at a time,
+                    # by id, because it replaces a take the user may prefer.
+                    if only:
+                        rows = [r for r in rows if str(r.get("id")) == only]
+                    else:
+                        rows = [r for r in rows if not r.get("retake")]
+                    swaps = {}
+                    for r in rows:
+                        if r.get("retake"):
+                            swaps[("id", str(r["id"]))] = r["to"]
+                        else:
+                            swaps[("path", r["path"])] = r["to"]
                     if not swaps:
                         self._json(_sbe_payload(board, edit))
                         return
                     for c in (edit.get("clips") or []):
                         if not isinstance(c, dict):
                             continue
-                        to = swaps.get(str(c.get("path") or ""))
+                        to = (swaps.get(("id", str(c.get("id") or "")))
+                              or swaps.get(("path", str(c.get("path") or ""))))
                         if to:
                             c["path"] = to
-                            # The proxy belonged to the DRAFT. Dropping it here
+                            # The proxy belonged to the old take. Dropping it
                             # stops the player showing yesterday's file under
                             # today's path until the rebuild lands.
                             c["proxy"] = None
@@ -26275,10 +27801,14 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": "no edit to render — "
                                              "GET /storyboard/edit first"}, 404)
                         return
-                    name = f("out", "") or _sb_film_name(board)
-                    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.mp4", name):
+                    deliver = {"format": f("format", ""), "size": f("size", ""),
+                               "finish": f("finish", "")}
+                    name = f("out", "") or _sb_film_name(
+                        board, deliver=_sb_deliver(deliver["format"], deliver["size"],
+                                                   deliver["finish"]))
+                    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.(mp4|mov)", name):
                         self._json({"ok": False,
-                                    "error": "out must be a plain .mp4 "
+                                    "error": "out must be a plain .mp4 or .mov "
                                              "filename"}, 400)
                         return
                     # The SAME assembler the export uses, given one plan entry
@@ -26287,7 +27817,7 @@ class Handler(BaseHTTPRequestHandler):
                     film = _sbe_render_edit(
                         board, edit, music=f("music", "") or None,
                         music_mode=f("music_mode", "") or None,
-                        out_name=name)
+                        out_name=name, deliver=deliver)
                     self._json(film if film.get("ok") else (film | {"ok": False}),
                                200 if film.get("ok")
                                else int(film.get("status") or 500))
@@ -26408,26 +27938,67 @@ class Handler(BaseHTTPRequestHandler):
                     shots = [s for s in (board.get("shots") or [])
                              if isinstance(s, dict)]
                     n = max([int(s.get("n") or 0) for s in shots] or [0]) + 1
-                    shot = {
-                        "n": n,
-                        "title": (f("title", "") or prompt)[:60],
-                        "mode": "character" if cid else "text",
-                        "engine": (f("engine", "")
-                                   or board.get("engine_mode") or "ltx"),
-                        "prompt": prompt,
-                        "duration_s": dur,
-                        "seed": seed,
-                        "refs": [],
-                        "status": "pending",
-                        # The hole this shot was ordered for. Carried on the
-                        # BOARD (it is intent) and echoed to the client on the
-                        # edit payload's `unplaced` list when the clip lands.
-                        "edit_slot": {"film_start": round(film_start, 6),
-                                      "duration": round(dur, 6)},
-                    }
-                    if cid:
-                        shot["character_id"] = cid
-                        shot["trigger"] = f("trigger", "") or cid
+                    # A RETAKE CLONES THE CLIP'S OWN SHOT — its character,
+                    # its refs, its location, its engine — and changes only
+                    # what the form says (the prompt, the length, the seed).
+                    # A new take that silently lost its character would be a
+                    # different shot wearing the old one's number.
+                    retake_of = f("retake_of", "")
+                    source = None
+                    if retake_of:
+                        try:
+                            _edit = sedit.load_edit(_sbe_board_dir(bid)) or {}
+                        except sedit.EditError:
+                            _edit = {}
+                        _clip = next((c for c in (_edit.get("clips") or [])
+                                      if isinstance(c, dict)
+                                      and str(c.get("id")) == retake_of), None)
+                        if not _clip:
+                            self._json({"ok": False,
+                                        "error": "that clip is not on this "
+                                                 "timeline any more"}, 400)
+                            return
+                        _p = str(_clip.get("path") or "")
+                        source = next((s for s in shots
+                                       if _p and _p in (str(s.get("draft_output") or ""),
+                                                        str(s.get("final_output") or ""))),
+                                      None)
+                    if source:
+                        shot = {k: v for k, v in source.items()
+                                if k not in ("n", "status", "draft_output",
+                                             "final_output", "stale_output",
+                                             "grade", "draft_job", "final_job",
+                                             "edit_slot")
+                                and not str(k).endswith("_job")}
+                        shot.update({"n": n, "prompt": prompt,
+                                     "duration_s": dur, "seed": seed,
+                                     "status": "pending",
+                                     "title": (f("title", "") or source.get("title")
+                                               or prompt)[:60]})
+                        if cid:
+                            shot["character_id"] = cid
+                            shot["trigger"] = f("trigger", "") or cid
+                            shot["mode"] = "character"
+                    else:
+                        shot = {
+                            "n": n,
+                            "title": (f("title", "") or prompt)[:60],
+                            "mode": "character" if cid else "text",
+                            "engine": (f("engine", "")
+                                       or board.get("engine_mode") or "ltx"),
+                            "prompt": prompt,
+                            "duration_s": dur,
+                            "seed": seed,
+                            "refs": [],
+                            "status": "pending",
+                        }
+                        if cid:
+                            shot["character_id"] = cid
+                            shot["trigger"] = f("trigger", "") or cid
+                    shot["edit_slot"] = {"film_start": round(film_start, 6),
+                                         "duration": round(dur, 6)}
+                    if retake_of:
+                        shot["edit_slot"]["retake_of"] = retake_of
                     board.setdefault("shots", []).append(shot)
                     _sb_normalize(board)
                     # `_sb_normalize` may renumber; find the shot again by the
@@ -27205,7 +28776,10 @@ def _resolve_cap_tier(version_id: str | None = None) -> str:
     return quant
 
 
-def page() -> str:
+def page(theme: str = "") -> str:
+    """The served page. `theme` is the palette cookie the browser sent
+    ("light" / "dark" / ""); "light" is stamped on <html> so the first paint
+    is light — the module that applies Appearance runs after parse."""
     cap_tier = _resolve_cap_tier()
     bootstrap = json.dumps({
         "presets": PRESETS, "aspects": ASPECTS,
@@ -27297,6 +28871,8 @@ def page() -> str:
                      else "<title>Phosphene</title>")
             .replace("__BOOTSTRAP__", bootstrap)
             .replace("__PROFILE_BADGE__", profile_badge)
+            .replace('<html lang="en">',
+                     '<html lang="en" data-theme="light">' if theme == "light" else '<html lang="en">')
             .replace("__Q8_CHARACTER_INSTALL_COPY__",
                      q8_character_install_copy())
             .replace("__BUILD_STAMP__", html.escape(build_stamp_text()))

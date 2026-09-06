@@ -1,5 +1,17 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-06 — v4.10.0 ships.** Everything on this branch since v4.9.5
+> goes public as one release: Editor v2 (transitions, speed, titles, the
+> Director + song map, retake, completion alerts, deliver-as, duplicate,
+> search, framing), the timeline's NLE gestures, anchor stills, long shots,
+> LoRA guides + update checks, closed-tab alerts, light theme, **One take**
+> on both engines, Turbo v4-600 EMA, the constant-time windows chain, and the
+> three 4.9.x hotfixes. The release media is *The Commuter*, a 75 s H3 one
+> take at native. Also in: `docs/PROMPTING.md` served at `/docs/prompting`
+> with a copy button; the planner's take brief carries the night's rules
+> (a scene change or a reveal is a beat of its own, a settle before it); H3
+> native exports are no longer shrunk to 720p by default.
+
 > **🎬 2026-09-05 — Editor v2 on dev/beta, UNRELEASED: speed, titles, transitions, the Director, sliding windows.**
 > From the long-form editing brief (the measured gaps only, built our way).
 > **Transitions** are a typed object on a BOUNDARY (`transitions[]`,
@@ -116,6 +128,52 @@
 > anchor (41 s), frame 0 = the still; `/loras/updates` found one real
 > update (EditAnything → LTX 2.5 v2.0); `/loras/guide` wrote a real guide
 > (6.5 s).
+> **Same day, ONE TAKE.** A 60 s H3 ride (a hen on a skateboard through
+> twelve city environments, camera behind her) was first made by a script
+> driving four 15 s jobs, each from the last frame of the one before. That
+> script is now the panel: the Video tab's "One take" row (30 s … 2 min) with
+> one beat per 5 s, prefilled from the prompt; `take_plan` / `take_beats` /
+> `take_estimate_minutes` in the panel; on LTX it is the windows chain, on H3
+> `run_take_job_inner` runs ordinary H3 renders per part and joins them; the
+> engine's own length pills lock while a take is on; `/take/estimate` prices
+> it (a minute at H3 high ≈ 3 h 50 on this Mac). No user copy says "windows",
+> "chain" or "passes". `test_take` pins the arithmetic, the make_job mapping
+> and the runner with a stubbed engine. The Storyboard has the same door:
+> a fifth chip on the Shots row, **1 · one take**, with a length; the planner
+> writes beats instead of shots, the board keeps one shot with the beats
+> (editable on the card), and it renders as the same take.
+> **Same day, the timeline learns the NLE contract.** Dragging a clip's body
+> moves that clip alone, between its neighbours, and stops at them; pulling an
+> edge changes that clip's length and leaves everything after it where it was
+> (a hole opens or closes). The old behaviour — every gesture repacked the
+> sequence and slid the whole tail — is a RIPPLE now: hold ⌘ (or Ctrl) while
+> dragging (a badge on the track says so); Shift still reorders. An edge is a
+> trim anywhere within 10 px of it. Drags re-apply from the pointerdown
+> snapshot so a clamped clip cannot creep through a neighbour. Seven timeline
+> scenarios that meant "slide the rest" now pass the ripple flag; two new ones
+> pin the defaults.
+> **Same evening, the windows chain runs in constant time.** Measured on a
+> 30 s LTX take at 640×448: window 2 took 10 min, window 3 17, window 4 26 —
+> each extend was handed the WHOLE clip so far and Extend encodes and
+> conditions on every frame it is given. `_run_windows_chain` now cuts the
+> last window (121 f, after the plan's discard) as the context for each
+> extend, keeps only the new frames of each pass as a piece, and joins the
+> pieces at the end (frame-exact `select` filters; the exact strings are
+> proven on a real clip in the test and by hand). A one-minute ride on H3
+> (four 15 s parts from each other's last frame) took 3 h 53 at 1024×576.
+> **Same evening, Turbo moves to the community's adapter.** larryvrh's
+> **v4 step-600 EMA** (780 MB, bare runner layout, sha `5f3a626c…a416d3`)
+> resolves FIRST in `H3_TURBO_LORA_CANDIDATES`; the LightX2V v1.0 repack,
+> the folded v0.1 and ckpt500 stay as fallbacks so no install loses Turbo.
+> Steps follow the adapter (`h3_turbo_steps`: 7 sigma points = 6 forwards for
+> v4, the card's sweet spot — 4 smears fast motion; 4 points for the 4-step
+> adapters), and `_h3_retune_turbo_estimates` re-prices every tier cell for
+> the installed adapter after the resolver exists (high_15s Turbo ~25 → ~44
+> min, native_15s ~57 min → ~1 h 44; honest, not optimistic). The managed
+> download fetches v4 from its author's repo, digest-pinned
+> (`H3_TURBO_ASSETS` / `_h3_turbo_asset`); the release asset stays reachable
+> by key. `test_h3_turbo_adapter` 13. A/B against exact and the old adapter
+> pending on the test panel.
 
 > **🚨 2026-09-06 — v4.9.8: H3 install/update broken for everyone by a deleted HF repo — fixed.**
 > `madebyollin/taeh3` on Hugging Face is gone (401/404); install_h3.js fetched

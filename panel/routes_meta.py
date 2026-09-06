@@ -14,6 +14,109 @@ from panel.routes import get, get_when, post, post_when
 P = None  # the running mlx_ltx_panel module; assigned at wiring time
 
 
+@get("/sw.js")
+def get_service_worker(h, parsed) -> None:
+    """The push service worker, served from the ROOT so its scope covers the
+    whole panel — a worker under /webapp/ could only wake for /webapp/."""
+    p = (P.ROOT / "webapp" / "sw.js")
+    if not p.is_file():
+        h.send_error(404); return
+    body = p.read_bytes()
+    h.send_response(200)
+    h.send_header("Content-Type", "text/javascript; charset=utf-8")
+    h.send_header("Cache-Control", "no-cache")
+    h.send_header("Service-Worker-Allowed", "/")
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+@get("/push/key")
+def get_push_key(h, parsed) -> None:
+    keys = P._vapid_keys() if P.push_available() else None
+    if not keys:
+        h._json({"ok": False, "available": False,
+                    "error": "push is not available on this install"}, 503)
+        return
+    h._json({"ok": True, "available": True, "public_key": keys["public"],
+                "subscriptions": len(P._push_subs())})
+
+
+@post("/push/subscribe")
+def post_push_subscribe(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    raw = form.get("subscription", [""])[0] if isinstance(form.get("subscription"), list) else (form.get("subscription") or "")
+    try:
+        sub = P.json.loads(raw)
+    except (TypeError, ValueError):
+        sub = None
+    if not isinstance(sub, dict) or not sub.get("endpoint") or not isinstance(sub.get("keys"), dict):
+        h._json({"ok": False, "error": "a PushSubscription JSON is required"}, 400)
+        return
+    subs = [s for s in P._push_subs() if s.get("endpoint") != sub["endpoint"]]
+    subs.append({"endpoint": sub["endpoint"], "keys": sub["keys"],
+                 "expirationTime": sub.get("expirationTime")})
+    P._push_save_subs(subs)
+    P.push(f"[push] a browser subscribed ({len(subs)} listening)")
+    h._json({"ok": True, "subscriptions": len(subs)})
+
+
+@post("/push/unsubscribe")
+def post_push_unsubscribe(h, path, qs, ctype) -> None:
+    _rb = h._read_form_body()
+    if _rb is None:
+        return
+    body, form = _rb
+    ep = form.get("endpoint", [""])[0] if isinstance(form.get("endpoint"), list) else (form.get("endpoint") or "")
+    subs = [s for s in P._push_subs() if s.get("endpoint") != ep]
+    P._push_save_subs(subs)
+    h._json({"ok": True, "subscriptions": len(subs)})
+
+
+@post("/push/test")
+def post_push_test(h, path, qs, ctype) -> None:
+    n = P.push_notify("Phosphene", "This is what a finished render will say.", tag="phos-test")
+    h._json({"ok": n > 0, "sent": n,
+                "error": None if n else "no browser is subscribed, or the push could not be delivered"})
+
+
+@get("/docs/prompting")
+def get_docs_prompting(h, parsed) -> None:
+    """docs/PROMPTING.md on a page (webapp/prompting.html) with one button:
+    copy the whole guide to paste into your own assistant. The page's markup
+    lives in the template; this only fills the seam."""
+    import html as _html
+    md = P.ROOT / "docs" / "PROMPTING.md"
+    tpl = P.ROOT / "webapp" / "prompting.html"
+    if not md.is_file() or not tpl.is_file():
+        h.send_error(404); return
+    page = tpl.read_text().replace("__GUIDE_MD__", _html.escape(md.read_text()))
+    h._ok(page.encode())
+
+
+@get("/take/estimate")
+def get_take_estimate(h, parsed) -> None:
+    """What a take of this length costs on this Mac: beats, parts, minutes.
+    `?engine=h3|ltx&quality=<engine quality key>&seconds=<TAKE_SECONDS>`."""
+    qs = parse_qs(parsed.query)
+    engine = (qs.get("engine", ["ltx"])[0] or "ltx").strip().lower()
+    quality = (qs.get("quality", [""])[0] or "").strip().lower()
+    seconds = (qs.get("seconds", ["0"])[0] or "0").strip()
+    plan = P.take_plan(seconds, engine)
+    if not plan:
+        h._json({"ok": False, "error": f"seconds must be one of {list(P.TAKE_SECONDS)}",
+                    "choices": list(P.TAKE_SECONDS)}, 400)
+        return
+    minutes = P.take_estimate_minutes(engine, quality, seconds)
+    h._json({"ok": True, "seconds": plan["seconds"], "beats": plan["beats"],
+                "parts": len(plan["parts"]), "engine": plan["engine"], "frames": plan["frames"],
+                "minutes": minutes, "eta": (P._fmt_eta(minutes) if minutes else None),
+                "needs_q8": plan["engine"] == "ltx"})
+
+
 @get("/panel/bug-context")
 def get_panel_bug_context(h, parsed) -> None:
     # Sysinfo + log tail bundle for the bug-report modal. The browser
@@ -631,4 +734,13 @@ def post_agent_gone(h, path, qs, ctype) -> None:
 
 @get("/")
 def get_root(h, parsed) -> None:
-    h._ok(P.page().encode())
+    # The palette the browser chose last time rides a cookie so the first
+    # paint is already light or dark — the modules that apply it run after.
+    _theme = ""
+    try:
+        from http.cookies import SimpleCookie  # noqa: PLC0415
+        _ck = SimpleCookie(h.headers.get("Cookie") or "")
+        _theme = _ck["phos_theme"].value if "phos_theme" in _ck else ""
+    except Exception:                                              # noqa: BLE001
+        _theme = ""
+    h._ok(P.page(theme=_theme).encode())

@@ -131,6 +131,13 @@ FUNCTIONS = (
     "sbeBedDeleteKeyframe",
     "sbeOvKind", "sbeOvAt", "sbeOvById", "sbeOvFits", "sbeOvMove", "sbeOvTrim",
     "sbeOvAdd", "sbeOvDelete", "sbeOvSetPath",
+    # Editor v2 — speed on the clip, titles on the lane, transitions on the
+    # cut. Every one is a mirror of a Python function of the same name-shape
+    # and `test_editor_v2.py` runs the two side by side.
+    "sbeSpeed", "sbeSetSpeed", "sbeOvText", "sbeHexColour", "sbeRgba",
+    "sbeOvTextPlace", "sbeDuplicate", "sbeFraming", "sbeFramingIsNeutral", "sbeSetFraming",
+    "sbeTxById", "sbeTxAfter", "sbeTxDuration", "sbeTxSpare", "sbeTxResolve",
+    "sbeTxEdges", "sbeTxSet", "sbeTxDelete", "sbeTxPrune", "sbeTxRepoint",
     "sbeAudioDrift", "sbeAudioInSync", "sbeAudioIsThePicture",
     "sbeDriftLabel", "sbeSyncBadge",
     "sbeSyncMark", "sbeSyncCarry", "sbeResyncAudio",
@@ -181,6 +188,19 @@ const SBE_SNAP_PX = 9;
 const SBE_GUESS_CONFIDENCE = 0.4;
 const SBE_BRIGHT_MAX = 0.5;
 const SBE_STILL_SECONDS = 3.0;
+// Editor v2. Keep equal to the panel's — test_editor_v2 reads both.
+const SBE_SPEED_MIN = 0.25;
+const SBE_SPEED_MAX = 4.0;
+const SBE_TX_KINDS = ['dissolve', 'fade_black'];
+const SBE_TX_MIN = 1 / 24;
+const SBE_TX_MAX = 2.0;
+const SBE_TX_LABELS = { dissolve: 'Dissolve', fade_black: 'Fade through black' };
+const SBE_TEXT_DEFAULTS = { font_size: 64, color: '#ffffff', align: 'center',
+                            x: 0.5, y: 0.5, box: false, box_color: '#000000',
+                            box_opacity: 0.5 };
+const SBE_TEXT_REF_H = 1080;
+const SBE_TEXT_MAX = 400;
+const SBE_FRAME_ZOOM_MAX = 3.0;
 // Wave 3. Keep these equal to the panel's — a drifted constant here is a gate
 // that passes while the browser does something else.
 const SBE_TL_PAD = 24;
@@ -388,11 +408,19 @@ out.clipInHole = sbeClipAt(holed, 3);
 
 // ---- move ----------------------------------------------------------------
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 }), clip({ id: 'c', end: 1.5 })]);
-let r = sbeMoveTo(cs, 'c', 0);
+let r = sbeMoveTo(cs, 'c', 0, { ripple: true });   // ⌘: the old free repack
 out.moveToHead = shape(r.clips);
 out.moveMarksHuman = sbeById(r.clips, 'c').source;
 out.moveLengths = lengthsAgree(r.clips);
 out.moveNoOverlap = !overlaps(r.clips);
+// DEFAULT (no modifier): a clip moves only between its neighbours and they
+// stay where they are — the Premiere / After Effects contract.
+cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 }), clip({ id: 'c', end: 1.5 })]);
+r = sbeMoveTo(cs, 'c', 0);
+out.moveClamped = shape(r.clips);                  // cannot pass b: stays at 5
+cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3, film_start: 4, film_end: 7 }), clip({ id: 'c', end: 1 })]);
+r = sbeMoveTo(cs, 'b', 3);                         // slides back into its own hole
+out.moveKeepsNeighbours = shape(r.clips);
 
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 })]);
 r = sbeMoveTo(cs, 'b', 6);       // dropped into open air: the hole is kept
@@ -410,9 +438,17 @@ out.anchoredNoOverlap = !overlaps(cs);
 
 // ---- trim ----------------------------------------------------------------
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 })]);
-sbeTrim(cs, 'a', 'r', 1.25);      // right handle: length changes, tail ripples
+sbeTrim(cs, 'a', 'r', 1.25, { ripple: true });   // ⌘: length changes, tail ripples
 out.trimRight = shape(cs);
 out.trimRightLengths = lengthsAgree(cs);
+// DEFAULT: the right handle opens a hole; the next clip does not move.
+cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 })]);
+sbeTrim(cs, 'a', 'r', 1.25);
+out.trimRightHole = shape(cs);
+out.trimRightHoleLengths = lengthsAgree(cs);
+// ...and it may grow back into that hole but never into the neighbour.
+sbeTrim(cs, 'a', 'r', 5);
+out.trimRightStopsAtNext = shape(cs);
 
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 3 })]);
 sbeTrim(cs, 'b', 'l', 2.5);       // left handle: in-point moves, tail stays put
@@ -633,7 +669,7 @@ out.insertStill = { kind: r.added.kind, path: r.added.path, dur: r.added.duratio
 // A still is resized by the SAME trim machinery every other block uses, and
 // nothing clamps it, because it has no source clock to run out of.
 cs = lay([r.added, clip({ id: 'a', end: 2 })]);
-sbeTrim(cs, r.added.id, 'r', 9);
+sbeTrim(cs, r.added.id, 'r', 9, { ripple: true });   // ⌘: grow past the neighbour, which slides
 out.stillStretched = sbeRound(sbeLen(sbeById(cs, r.added.id)));
 
 // ---- reorder: closes the hole it leaves, opens none where it lands -------
@@ -653,7 +689,7 @@ out.reorderGone = sbeReorderTo(cs, 'nope', 0).why;
 // this is the difference between them.
 cs = lay([clip({ id: 'a', end: 2 }), clip({ id: 'b', end: 2 }),
           clip({ id: 'c', end: 2 })]);
-out.moveLeavesAHole = sbeMoveTo(cs, 'a', 9).clips.map(c => [c.id, c.film_start]);
+out.moveLeavesAHole = sbeMoveTo(cs, 'a', 9, { ripple: true }).clips.map(c => [c.id, c.film_start]);
 
 // ---- WAVE 3: the two sliders ---------------------------------------------
 // The owner's film, measured: 71.583338s in a 1108px-wide scroller.
@@ -1223,7 +1259,7 @@ out.dragCannotOpenASubFrameHole = (() => {
 // ...but a hole somebody can SEE survives a drag untouched.
 out.dragKeepsAGapYouCanSee = (() => {
   const cs = lay(HOLED());
-  const r = sbeMoveTo(cs, 'b', 6.5);
+  const r = sbeMoveTo(cs, 'b', 6.5, { ripple: true });   // ⌘: c and d slide, the hole stays
   return [sbeById(r.clips, 'b').film_start, sbeHoles(r.clips).length];
 })();
 // THE HEAL CARRIES THE SOUND. Closing a hole is not the user sliding a
@@ -1598,21 +1634,21 @@ out.pairTrimHead = (() => {
 //    silently coming apart, three shots away from the handle being dragged.
 out.pairTrimTailRipples = (() => {
   const cs = unlink(PAIR(), ['c']);
-  sbeTrim(cs, 'a', 'r', 3);
+  sbeTrim(cs, 'a', 'r', 3, { ripple: true });   // ⌘: the tail slides
   return [aState(cs, 'a'), aState(cs, 'c')];
 })();
 
 // 4. MOVING THE PICTURE BY HAND. The one gesture whose whole point is to leave
 //    the sound behind — and the clip NEXT to it still rides along.
 out.pairMove = (() => {
-  const cs = sbeMoveTo(unlink(PAIR(), ['b', 'c']), 'b', 6).clips;
+  const cs = sbeMoveTo(unlink(PAIR(), ['b', 'c']), 'b', 6, { ripple: true }).clips;
   return [aState(cs, 'b'), aState(cs, 'c')];
 })();
 
 // 5. THE REMATCH. One call puts the strip back under the frame it came from,
 //    and leaves it unlinked so it can be moved again.
 out.pairResync = (() => {
-  const cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  const cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   const r = sbeResyncAudio(cs, 'b');
   return [r.ok, aState(r.clips, 'b')];
 })();
@@ -1621,7 +1657,7 @@ out.pairResync = (() => {
 out.pairResyncKeepsTheTrim = (() => {
   let cs = unlink(PAIR(), ['a']);
   cs = sbeAudioEdit(cs, 'a', 'trimL', 1).clips;      // in-point 1 s into the take
-  cs = sbeMoveTo(cs, 'a', 5).clips;
+  cs = sbeMoveTo(cs, 'a', 5, { ripple: true }).clips;
   const r = sbeResyncAudio(cs, 'a');
   return [r.ok, aState(r.clips, 'a')];
 })();
@@ -1644,7 +1680,7 @@ out.pairSplit = (() => {
 // A split of a DRIFTED pair keeps the drift on both halves — the cut is
 // expressed in the source clock the two halves share.
 out.pairSplitKeepsTheDrift = (() => {
-  const cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  const cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   const r = sbeSplitAt(cs, 8, 'b2');
   return [r.ok, aState(r.clips, 'b').drift, aState(r.clips, 'b2').drift,
           aState(r.clips, 'b').snd, aState(r.clips, 'b2').snd];
@@ -1670,7 +1706,7 @@ out.pairRippleDelete = (() => {
 //    said "link" destroyed the J-cut the moment it was made — which is why the
 //    owner reached for LOCK, and why the clip then refused every drag.
 out.pairRelinkFreezesTheOffset = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   cs = sbeSetAudioLink(cs, 'b', true).clips;
   return [aState(cs, 'b'), sbeById(cs, 'b').audio.linked === true];
 })();
@@ -1684,9 +1720,9 @@ out.pairRelinkInSyncRemovesTheField = (() => {
 // A COUPLED pair travels together: the gesture that moves the picture moves
 // the sound, offset intact. This is the "lock it and move it" he described.
 out.pairCoupledTravels = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;   // -2 s J-cut
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;   // -2 s J-cut
   cs = sbeSetAudioLink(cs, 'b', true).clips;                 // freeze it
-  cs = sbeMoveTo(cs, 'b', 10).clips;                         // now move the pair
+  cs = sbeMoveTo(cs, 'b', 10, { ripple: true }).clips;       // now move the pair (⌘: past c)
   const s = aState(cs, 'b');
   const t = sbeTrim(cs, 'b', 'r', sbeById(cs, 'b').film_end - 1);
   return [s, aState(cs, 'b').drift, t.ok];
@@ -1694,7 +1730,7 @@ out.pairCoupledTravels = (() => {
 // ...and it cannot be dragged on its own any more, which is what "linked"
 // has always meant.
 out.pairCoupledStripRefusesTheDrag = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   cs = sbeSetAudioLink(cs, 'b', true).clips;
   const q = sbeAudioEdit(cs, 'b', 'move', 2);
   return [q.ok, q.why];
@@ -1711,7 +1747,7 @@ out.pairToggleRoundTrip = (() => {
   seen.push(aState(cs, 'b').drift);
   cs = sbeSetAudioLink(cs, 'b', true).clips;             // "lock" it
   seen.push([aState(cs, 'b').drift, aState(cs, 'b').coupled]);
-  cs = sbeMoveTo(cs, 'b', 9).clips;                      // move the pair
+  cs = sbeMoveTo(cs, 'b', 9, { ripple: true }).clips;    // move the pair (⌘: past c)
   seen.push([aState(cs, 'b').drift, aState(cs, 'b').snd]);
   const t2 = sbeTrim(cs, 'b', 'l', 9.5);                 // head, coupled
   seen.push([t2.ok, aState(cs, 'b').drift]);
@@ -1734,7 +1770,7 @@ out.pairHisScenario = (() => {
   const afterTrim = aState(cs, 'b');              // picture 5-8, sound 4-8
   cs = sbeSetAudioLink(cs, 'b', true).clips;      // "lock" the two together
   const frozen = aState(cs, 'b');
-  cs = sbeMoveTo(cs, 'b', 4).clips;               // move all together, gap closed
+  cs = sbeMoveTo(cs, 'b', 4, { ripple: true }).clips; // move all together, gap closed (⌘)
   const moved = aState(cs, 'b');
   return {
     trimOpensTheGap: [afterTrim.vid, afterTrim.snd, afterTrim.drift],
@@ -1749,7 +1785,7 @@ out.pairHisScenario = (() => {
 // A COUPLED pair is not a drift and is never flagged — its offset is the
 // relationship the user froze.
 out.pairCoupledIsNotFlagged = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   const free = sbeSyncBadge(sbeById(cs, 'b')).length > 0;
   cs = sbeSetAudioLink(cs, 'b', true).clips;
   return [free, sbeSyncBadge(sbeById(cs, 'b')).length > 0,
@@ -1758,14 +1794,14 @@ out.pairCoupledIsNotFlagged = (() => {
 // ...but Resync still reaches it, and a rematched couple has nothing left to
 // say, so the field goes.
 out.pairResyncACouple = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   cs = sbeSetAudioLink(cs, 'b', true).clips;
   const r = sbeResyncAudio(cs, 'b');
   return [r.ok, sbeById(r.clips, 'b').audio === undefined, aState(r.clips, 'b')];
 })();
 // A COUPLED pair splits into two coupled pairs.
 out.pairSplitACouple = (() => {
-  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;
+  let cs = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;
   cs = sbeSetAudioLink(cs, 'b', true).clips;
   const r = sbeSplitAt(cs, 8, 'b2');
   return [r.ok, aState(r.clips, 'b'), aState(r.clips, 'b2')];
@@ -1800,7 +1836,7 @@ out.pairHeadTrimAgainstANeighbour = (() => {
 // 10. THE FLAG'S ARITHMETIC. Positive is LATE, the tolerance is half a frame,
 //     and the label is what both halves print.
 out.pairDriftSigns = (() => {
-  const early = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6).clips;   // sound early
+  const early = sbeMoveTo(unlink(PAIR(), ['b']), 'b', 6, { ripple: true }).clips;   // sound early
   const late = sbeAudioEdit(unlink(PAIR(), ['b']), 'b', 'move', 6).clips;
   return [sbeAudioDrift(sbeById(early, 'b')), sbeAudioDrift(sbeById(late, 'b')),
           sbeDriftLabel(sbeAudioDrift(sbeById(early, 'b'))),
@@ -1818,7 +1854,7 @@ out.pairInSyncTolerance = (() => {
 // and writing one would unlink it behind the user's back.
 out.pairCarryLeavesLinkedAlone = (() => {
   const cs = PAIR();
-  sbeTrim(cs, 'a', 'r', 3);
+  sbeTrim(cs, 'a', 'r', 3, { ripple: true });   // ⌘: the tail slides
   return [sbeById(cs, 'c').audio === undefined, aState(cs, 'c').drift];
 })();
 
@@ -2229,12 +2265,20 @@ class TimelineClient(unittest.TestCase):
         self.assertIsNone(self.r["clipInHole"])
 
     # ---- move ------------------------------------------------------------
-    def test_a_move_reorders_and_everything_after_it_slides(self):
+    def test_a_ripple_move_reorders_and_everything_after_it_slides(self):
         self.assertEqual(self.r["moveToHead"],
                          [["c", 0, 1.5, 0, 1.5], ["a", 0, 2, 1.5, 3.5],
                           ["b", 0, 3, 3.5, 6.5]])
         self.assertTrue(self.r["moveLengths"])
         self.assertTrue(self.r["moveNoOverlap"])
+
+    def test_a_plain_move_stays_between_its_neighbours_and_moves_nothing_else(self):
+        # c dragged to 0 cannot pass b: it stays where it was.
+        self.assertEqual(self.r["moveClamped"],
+                         [["a", 0, 2, 0, 2], ["b", 0, 3, 2, 5], ["c", 0, 1.5, 5, 6.5]])
+        # b slides inside its own hole; a and c do not move.
+        self.assertEqual(self.r["moveKeepsNeighbours"],
+                         [["a", 0, 2, 0, 2], ["b", 0, 3, 3, 6], ["c", 0, 1, 7, 8]])
 
     def test_a_moved_clip_is_stamped_human(self):
         # The server keeps the other end of this promise: a re-plan can leave a
@@ -2256,10 +2300,18 @@ class TimelineClient(unittest.TestCase):
         self.assertTrue(self.r["anchoredNoOverlap"])
 
     # ---- trim ------------------------------------------------------------
-    def test_the_right_handle_changes_the_length_and_ripples_the_tail(self):
+    def test_the_right_handle_with_ripple_changes_the_length_and_slides_the_tail(self):
         self.assertEqual(self.r["trimRight"],
                          [["a", 0, 1.25, 0, 1.25], ["b", 0, 3, 1.25, 4.25]])
         self.assertTrue(self.r["trimRightLengths"])
+
+    def test_the_right_handle_by_default_opens_a_hole_and_moves_nothing_else(self):
+        self.assertEqual(self.r["trimRightHole"],
+                         [["a", 0, 1.25, 0, 1.25], ["b", 0, 3, 2, 5]])
+        self.assertTrue(self.r["trimRightHoleLengths"])
+        # growing back stops at the neighbour, never pushes it
+        self.assertEqual(self.r["trimRightStopsAtNext"],
+                         [["a", 0, 2, 0, 2], ["b", 0, 3, 2, 5]])
 
     def test_the_left_handle_moves_the_in_point_and_leaves_the_tail_alone(self):
         self.assertEqual(self.r["trimLeft"],
@@ -3256,9 +3308,10 @@ class TheSoundsEnvelopeOnTheClient(unittest.TestCase):
 
     def test_the_strip_player_moves_the_gain(self):
         fn = extract_function("sbeStripSync", self.src)
-        self.assertIn("sbeGainAt(c2, win.len, w.at - win.start)", fn)
-        # STRIP-relative, which is the envelope's own clock: a J-cut that
-        # slides its sound must not drag the ramp with it.
+        # STRIP-relative AND on the played clock: a J-cut that slides its
+        # sound must not drag the ramp with it, and a retimed strip's second
+        # is `(source second - in-point) / speed` (see audio_gain_points).
+        self.assertIn("sbeGainAt(c2, win.len, (w.at - win.start) / win.speed)", fn)
         self.assertIn("w.at - win.start", fn)
 
     def test_the_bed_plays_the_WHOLE_mix_and_not_just_its_envelope(self):

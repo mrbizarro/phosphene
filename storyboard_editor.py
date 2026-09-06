@@ -245,6 +245,36 @@ def clip_carries_media(clip) -> bool:
     return clip_kind(clip) in ("video", "still")
 
 
+# FRAMING — a zoom and a reframe, per clip. `frame: {zoom, x, y}`: the
+# picture is magnified `zoom` times (1 is the whole frame, 3 is a third of
+# it) and the window is centred at the fraction (`x`, `y`) of the source.
+# A push-in on a face, a wider frame's crop to a tighter one, a still that
+# needs to lose its margins — the reframe every NLE has and the render did
+# not. Not an "effect" (`fx` is fades): it is a transform, and it keeps its
+# own home the way brightness kept `adjust`. Neutral is absent.
+FRAME_ZOOM_MIN = 1.0
+FRAME_ZOOM_MAX = 3.0
+
+
+def clip_frame(clip) -> dict:
+    """`{zoom, x, y}`, clamped; `{1.0, 0.5, 0.5}` for a clip that has none."""
+    c = clip if isinstance(clip, dict) else {}
+    f = c.get("frame")
+    f = f if isinstance(f, dict) else {}
+    z = _f(f.get("zoom"), 1.0)
+    if z != z or z <= 0:
+        z = 1.0
+    z = max(FRAME_ZOOM_MIN, min(FRAME_ZOOM_MAX, z))
+    return {"zoom": round(z, 6),
+            "x": round(max(0.0, min(1.0, _f(f.get("x"), 0.5))), 6),
+            "y": round(max(0.0, min(1.0, _f(f.get("y"), 0.5))), 6)}
+
+
+def clip_frame_is_neutral(clip) -> bool:
+    f = clip_frame(clip)
+    return abs(f["zoom"] - 1.0) < 1e-9
+
+
 def clip_brightness(clip) -> float:
     """`adjust.brightness`, clamped, or 0.0 — the neutral that renders nothing.
 
@@ -284,14 +314,22 @@ def clip_audio(clip) -> dict:
     """
     if not isinstance(clip, dict):
         return {"start": 0.0, "end": 0.0, "film_start": 0.0,
-                "linked": True, "coupled": False, "split": False}
+                "linked": True, "coupled": False, "split": False,
+                "speed": 1.0, "len": 0.0}
     vs, ve = _f(clip.get("start")), _f(clip.get("end"))
     fs = _f(clip.get("film_start"))
+    # THE SOUND RUNS AT THE CLIP'S SPEED, linked or not: it came off the same
+    # take, and retiming the take retimes both halves. `len` is the strip's
+    # length ON THE FILM — the only clock the lane, the plan and the envelope
+    # use — so no caller has to remember to divide.
+    speed = clip_speed(clip)
     a = clip.get("audio")
     if not isinstance(a, dict) or clip_kind(clip) != "video":
         return {"start": round(vs, 6), "end": round(ve, 6),
                 "film_start": round(fs, 6),
-                "linked": True, "coupled": False, "split": False}
+                "linked": True, "coupled": False, "split": False,
+                "speed": speed,
+                "len": round(max(0.0, ve - vs) / speed, 6)}
     # THE PRESENCE OF THE FIELD IS THE SWITCH, not the values in it. Deriving
     # "linked" from equality looked tidier and was wrong in the one case that
     # matters: unlinking writes the window the clip already has, so a clip the
@@ -315,7 +353,8 @@ def clip_audio(clip) -> dict:
             "film_start": round(f, 6),
             # `linked` has always meant "this strip cannot be dragged on its
             # own", and that is true of a coupled pair too.
-            "linked": coupled, "coupled": coupled, "split": True}
+            "linked": coupled, "coupled": coupled, "split": True,
+            "speed": speed, "len": round(max(0.0, e - s) / speed, 6)}
 
 
 def clip_muted(clip) -> bool:
@@ -344,13 +383,38 @@ def clip_muted(clip) -> bool:
     return clip.get("mute") is True and clip_kind(clip) == "video"
 
 
+# SPEED, ON THE CLIP. `speed: 2.0` plays the source window twice as fast, so
+# the slot on the film is `(end - start) / speed`. The bounds are ffmpeg's own
+# honest range for `atempo` chained twice each way; below 0.25x a clip is a
+# still with ambitions and above 4x it is a strobe. An ABSENT speed is 1.0,
+# which is every clip ever written, so EDIT_VERSION does not move.
+#
+# NEVER AUTOMATIC. The owner's verdict on a slowed shot that read as an
+# accident was "too slow-mo"; this is a control a person sets on a clip, not a
+# thing the editor decides.
+SPEED_MIN = 0.25
+SPEED_MAX = 4.0
+
+
+def clip_speed(clip) -> float:
+    """The clip's play rate, clamped. 1.0 when absent, and always 1.0 for a
+    still or a slug — they have no source clock to run fast or slow."""
+    if not isinstance(clip, dict) or clip_kind(clip) != "video":
+        return 1.0
+    s = _f(clip.get("speed"), 1.0)
+    if s <= 0:
+        return 1.0
+    return round(max(SPEED_MIN, min(SPEED_MAX, s)), 6)
+
+
 def clip_length(clip) -> float:
-    """How long this clip plays. The film slot and the source window agree."""
+    """How long this clip plays. The film slot and the source window agree —
+    at the clip's speed."""
     if not isinstance(clip, dict):
         return 0.0
     n = _f(clip.get("film_end")) - _f(clip.get("film_start"))
     if n <= 0:
-        n = _f(clip.get("end")) - _f(clip.get("start"))
+        n = (_f(clip.get("end")) - _f(clip.get("start"))) / clip_speed(clip)
     return max(0.0, round(n, 6))
 
 
@@ -409,15 +473,214 @@ def clip_effects(clip) -> dict:
 OVERLAY_SUFFIXES = (".png", ".webp", ".tif", ".tiff")
 
 
+# WHAT AN OVERLAY CAN BE. A card is a still; a matte or a loop is a video; a
+# TITLE is `text` — pixels the render DRAWS rather than a file somebody
+# uploaded. It is a citizen of this lane and not a system of its own because
+# everything a title needs already exists here: alpha, fades, a slot on the
+# film, z-order over the picture, and the one-lane rule. What a title adds is
+# the string and how to set it.
+OVERLAY_KINDS = ("still", "video", "text")
+
+
 def overlay_kind(item) -> str:
-    """`still` or `video`. A card is a still; a matte or a loop is a video."""
+    """`still`, `video` or `text`. An EXPLICIT kind wins; the suffix decides the rest.
+
+    The explicit field has to win because a title has no path to probe, and
+    the suffix fallback has to stay because every overlay written before titles
+    existed carries only a path — so every existing document reads exactly as
+    it did.
+    """
     if not isinstance(item, dict):
         return "still"
     k = str(item.get("kind") or "").strip().lower()
-    if k in ("still", "video"):
+    if k in OVERLAY_KINDS:
         return k
     return "still" if str(item.get("path") or "").lower().endswith(
         OVERLAY_SUFFIXES) else "video"
+
+
+# ---------------------------------------------------------------------------
+# TITLES — text on the overlay lane
+# ---------------------------------------------------------------------------
+# THE STYLE IS A SMALL, CLOSED SET, and every value is clamped by the one
+# accessor so the preview, the render and any export are handed numbers that
+# are already legal. `font_size` is in pixels AT A 1080-HIGH FRAME and scales
+# with the frame the film is actually rendered at, so a title designed on the
+# stage looks the same on a 576p draft and a 720p delivery. `x`/`y` are the
+# anchor as a FRACTION of the frame — the same reason — and `align` says which
+# edge of the text sits on `x`.
+TEXT_STYLE_DEFAULTS = {
+    "font_size": 64,
+    "color": "#ffffff",
+    "align": "center",
+    "x": 0.5,
+    "y": 0.5,
+    "box": False,
+    "box_color": "#000000",
+    "box_opacity": 0.5,
+}
+TEXT_REFERENCE_HEIGHT = 1080
+TEXT_FONT_SIZE_MIN = 8
+TEXT_FONT_SIZE_MAX = 400
+TEXT_MAX_CHARS = 400
+TEXT_ALIGNS = ("left", "center", "right")
+_HEX_RE = re.compile(r"^#[0-9a-f]{6}$")
+
+# THE FONT IS RESOLVED EXPLICITLY, to a FILE, and verified before anything is
+# drawn. Letting a text renderer "discover" a font goes wrong quietly on a
+# machine with no fontconfig — the failure other editors have documented — so
+# the panel names the file it will use, in this order, and refuses with a
+# sentence when none of them exists. `LTX_TITLE_FONT` overrides the list.
+# The stylesheet's stack for the on-stage preview is the same family order.
+TITLE_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/HelveticaNeue.ttc",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
+
+
+def _hex_colour(v, default: str) -> str:
+    s = str(v or "").strip().lower()
+    if re.fullmatch(r"#[0-9a-f]{3}", s):
+        s = "#" + "".join(ch * 2 for ch in s[1:])
+    return s if _HEX_RE.match(s) else default
+
+
+def overlay_text(item) -> dict:
+    """`{text, style}` for a title, clamped. THE ONE ACCESSOR.
+
+    Absent style keys read the defaults, so a title written as `{"kind":
+    "text", "text": "FIN"}` is complete. Every consumer reads this and nothing
+    else, which is what keeps the stage and the render drawing the same card.
+    """
+    it = item if isinstance(item, dict) else {}
+    text = str(it.get("text") or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")[:TEXT_MAX_CHARS]
+    raw = it.get("style")
+    raw = raw if isinstance(raw, dict) else {}
+    d = TEXT_STYLE_DEFAULTS
+    size = _f(raw.get("font_size"), d["font_size"])
+    size = max(TEXT_FONT_SIZE_MIN, min(TEXT_FONT_SIZE_MAX, size))
+    align = str(raw.get("align") or d["align"]).strip().lower()
+    if align not in TEXT_ALIGNS:
+        align = d["align"]
+    style = {
+        "font_size": round(size, 3),
+        "color": _hex_colour(raw.get("color"), d["color"]),
+        "align": align,
+        "x": round(max(0.0, min(1.0, _f(raw.get("x"), d["x"]))), 6),
+        "y": round(max(0.0, min(1.0, _f(raw.get("y"), d["y"]))), 6),
+        "box": raw.get("box") is True,
+        "box_color": _hex_colour(raw.get("box_color"), d["box_color"]),
+        "box_opacity": round(max(0.0, min(1.0, _f(raw.get("box_opacity"),
+                                                 d["box_opacity"]))), 6),
+    }
+    return {"text": text, "style": style}
+
+
+def title_font_path() -> Path | None:
+    """The font FILE a title is drawn with, or None when there is none."""
+    env = os.environ.get("LTX_TITLE_FONT")
+    if env:
+        p = Path(env)
+        return p if p.is_file() else None
+    for c in TITLE_FONT_CANDIDATES:
+        p = Path(c)
+        if p.is_file():
+            return p
+    return None
+
+
+def title_font_problem() -> str | None:
+    """A sentence when no title can be drawn on this machine, else None.
+
+    Asked at COMPILE time — before the ffmpeg command is built — so a missing
+    font is a refusal with a reason, never a film with a hole where the title
+    was.
+    """
+    env = os.environ.get("LTX_TITLE_FONT")
+    if env and not Path(env).is_file():
+        return (f"LTX_TITLE_FONT points at {env}, and there is no font file "
+                f"there — fix the path or unset it to use the system font")
+    if title_font_path() is None:
+        return ("no font for titles: none of the system fonts the panel knows "
+                "is installed — set LTX_TITLE_FONT to a .ttf file")
+    return None
+
+
+def _rgba(hex_colour: str, alpha: float) -> tuple:
+    h = hex_colour.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16),
+            int(round(255 * max(0.0, min(1.0, alpha)))))
+
+
+def title_fingerprint(item, width: int, height: int) -> str:
+    """What a title's pixels depend on, hashed — the raster's cache key."""
+    t = overlay_text(item)
+    font = title_font_path()
+    raw = json.dumps([t, int(width), int(height), str(font) if font else "",
+                      int(font.stat().st_mtime_ns) if font else 0],
+                     sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def render_title(item, width: int, height: int, dest) -> Path:
+    """Draw a title as an RGBA PNG the size of the frame. Returns the path.
+
+    WHY A PICTURE AND NOT A FILTER. The render composites the overlay lane
+    with one chain — `format=rgba`, scale, alpha fade, `overlay=` under an
+    `enable=` window — and a title that arrives as a frame-sized RGBA image
+    inherits every part of it: the fades, the z-order, the one-lane rule, the
+    tpad past the last shot. A separate text filter would be a second path
+    through that chain, and it would also depend on the ffmpeg BUILD: the
+    text filter is optional at compile time and the Homebrew ffmpeg this very
+    panel resolves on its author's machine does not carry it. A PNG needs
+    nothing of ffmpeg but what every other card already needs.
+
+    The font is `title_font_path()`, verified by `title_font_problem()` before
+    this is ever called; a caller that skips the check gets an EditError here.
+    """
+    from PIL import Image, ImageDraw, ImageFont            # noqa: PLC0415
+    problem = title_font_problem()
+    if problem:
+        raise EditError(problem)
+    W, H = max(2, int(width)), max(2, int(height))
+    t = overlay_text(item)
+    st = t["style"]
+    text = t["text"] or " "
+    px = max(1, int(round(st["font_size"] * H / float(TEXT_REFERENCE_HEIGHT))))
+    font = ImageFont.truetype(str(title_font_path()), px)
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    spacing = max(0, int(round(px * 0.25)))
+    bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=spacing,
+                                   align=st["align"])
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    ax, ay = st["x"] * W, st["y"] * H
+    left = ax - tw * {"left": 0.0, "center": 0.5, "right": 1.0}[st["align"]]
+    # KEPT INSIDE THE FRAME, the same clamp the stage applies: a wide title
+    # anchored near an edge is pushed back in rather than cut off.
+    left = max(0.0, min(float(W - tw), left))
+    top = ay - th / 2.0
+    if st["box"]:
+        pad = px * 0.4
+        draw.rectangle([left - pad, top - pad, left + tw + pad, top + th + pad],
+                       fill=_rgba(st["box_color"], st["box_opacity"]))
+    draw.multiline_text((left - bbox[0], top - bbox[1]), text, font=font,
+                        fill=_rgba(st["color"], 1.0), spacing=spacing,
+                        align=st["align"])
+    dest = Path(str(dest))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    img.save(tmp, "PNG")
+    os.replace(tmp, dest)
+    return dest
 
 
 def overlay_items(edit) -> list[dict]:
@@ -500,6 +763,17 @@ def audio_gain_points(item, length: float) -> list[list[float]]:
     envelope's own points and the fade corners, each multiplied by the fade
     factor there — which is what makes a fade and a keyframed dip compose
     instead of one overriding the other.
+
+    THE CLOCK IS THE STRIP AS IT PLAYS ON THE FILM, and speed does not move
+    it. `length` is `clip_audio(c)["len"]` — the played length, already
+    divided by the clip's speed — and `t` in every point and every fade is a
+    second of THAT strip. Decided here, once, because the alternative (points
+    on the source clock, scaled at read time) would put a fade of "1 s" in
+    source seconds while the person typed it in film seconds, and the ffmpeg
+    `volume` term runs AFTER `atempo`, on the played clock, so this is the only
+    unit the render could apply without a conversion nothing else performs.
+    A keyframe at 2 s stays at 2 s of the strip when the clip is retimed; the
+    strip is what gets shorter or longer.
     """
     n = max(0.0, _f(length))
     if n <= 0:
@@ -689,7 +963,7 @@ def audible_strips(edit) -> list[list[float]]:
             continue
         w = clip_audio(c)
         s = _f(w["film_start"])
-        e = s + max(0.0, _f(w["end"]) - _f(w["start"]))
+        e = s + w["len"]
         if e - s > 1e-9:
             wins.append([round(s, 6), round(e, 6)])
     wins.sort()
@@ -848,8 +1122,11 @@ def clip_audio_drift(clip) -> float:
     if not w["split"]:
         return 0.0
     c = clip if isinstance(clip, dict) else {}
-    return round((w["film_start"] - w["start"])
-                 - (_f(c.get("film_start")) - _f(c.get("start"))), 6)
+    # AT THE CLIP'S SPEED: a source second is `1/speed` film seconds on both
+    # halves, so the two constants are compared on the film's clock.
+    sp = w["speed"]
+    return round((w["film_start"] - w["start"] / sp)
+                 - (_f(c.get("film_start")) - _f(c.get("start")) / sp), 6)
 
 
 def clip_audio_resync(clip) -> float:
@@ -861,7 +1138,8 @@ def clip_audio_resync(clip) -> float:
     """
     w = clip_audio(clip)
     c = clip if isinstance(clip, dict) else {}
-    return round(_f(c.get("film_start")) + (w["start"] - _f(c.get("start"))), 6)
+    return round(_f(c.get("film_start"))
+                 + (w["start"] - _f(c.get("start"))) / w["speed"], 6)
 
 
 # ===========================================================================
@@ -1332,6 +1610,187 @@ def _slim_beats(beats: dict | None) -> dict | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# TRANSITIONS — a typed object that OWNS A BOUNDARY, never an overlap
+# ---------------------------------------------------------------------------
+# WHY THIS IS NOT "LET THE PICTURES OVERLAP". A cross-dissolve IS two clips in
+# the same second, and the validator's one-picture-at-a-time rule
+# (`clips_overlap`) is load-bearing: the autosave, the crash backup, the
+# assembler and every gap/overlap check downstream rest on it, and
+# `WARNING_CODES` deliberately holds ONLY `clips_audio_overlap` because the
+# last time an ordinary edit was made unsaveable it cost an afternoon. So the
+# picture lane stays single-track and a transition is a SEPARATE list, the
+# same shape discipline as `overlays`:
+#
+#     "transitions": [{"id": "t1", "after_clip": "<clip id>",
+#                      "kind": "dissolve" | "fade_black", "duration": 0.5}]
+#
+# `after_clip` names the OUTGOING clip; the transition sits on the boundary
+# between it and its successor in film order. One per boundary. The clips'
+# own film_start/film_end DO NOT MOVE — the render gets its overlap from
+# SOURCE HANDLES: half the duration of extra tail from beyond the outgoing
+# clip's out-point and half of extra head from before the incoming clip's
+# in-point, material that already exists past the trims. That is how every
+# NLE builds a centred dissolve, it keeps the film exactly as long as the
+# timeline says, and it means the sound needs nothing new at all — the audio
+# plan never sees the extension.
+#
+# A side with no spare material is REFUSED with a sentence naming the side and
+# how much it is short. A still and a slug have no source clock, so they have
+# all the handles anybody could ask for.
+TRANSITION_KINDS = ("dissolve", "fade_black")
+TRANSITION_MIN = 1.0 / 24.0      # under one frame there is nothing to draw
+TRANSITION_MAX = 2.0             # longer than this eats the shot
+
+
+def transition_items(edit) -> list[dict]:
+    """The raw rows, dicts only, in document order. Absent is an empty list."""
+    rows = (edit or {}).get("transitions") if isinstance(edit, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [t for t in rows if isinstance(t, dict)]
+
+
+def transition_duration(row, out_len: float, in_len: float,
+                        fps: float = 24.0) -> float:
+    """The duration a boundary can actually carry: min(asked, half the
+    shorter neighbour, TRANSITION_MAX), on an EVEN number of frames. The
+    document keeps the number the user typed; every reader clamps through
+    here.
+
+    EVEN FRAMES, because the transition is split in half across the cut and
+    each half is extra picture on one side: 0.8 s at 24 fps is 19.2 frames,
+    which `xfade` rounds up on both runs and the film comes out one frame
+    longer than its sound. 20 frames — ten a side — is exact.
+    """
+    d = _f((row or {}).get("duration"))
+    if d <= 0:
+        return 0.0
+    d = max(0.0, min(d, TRANSITION_MAX, 0.5 * max(0.0, min(out_len, in_len))))
+    f = max(1.0, _f(fps, 24.0))
+    frames = 2 * int(round(d * f / 2.0))
+    return round(frames / f, 6)
+
+
+def _spare_source(clip, side: str) -> float | None:
+    """Seconds of untrimmed source beyond the out-point (`tail`) or before
+    the in-point (`head`). None when the source length is not known."""
+    if clip_kind(clip) != "video":
+        return float("inf")
+    if side == "head":
+        return max(0.0, _f(clip.get("start")))
+    dur = clip.get("duration")
+    if not isinstance(dur, (int, float)) or isinstance(dur, bool) or dur <= 0:
+        return None
+    return max(0.0, float(dur) - _f(clip.get("end")))
+
+
+def resolve_transitions(edit) -> list[dict]:
+    """Every transition row, resolved against the timeline it sits on.
+
+    Each entry: `{id, after_clip, before_clip, kind, duration, half,
+    out_index, in_index, at, problem}` where `problem` is None or a
+    `{code, message}` a validator can report verbatim. `duration` is the
+    CLAMPED one — the number the render will use — and `at` is the film
+    second of the boundary. Indices are into the document's `clips` list.
+    """
+    clips = [c for c in ((edit or {}).get("clips") or []) if isinstance(c, dict)]
+    order = sorted(range(len(clips)),
+                   key=lambda i: (_f(clips[i].get("film_start")),
+                                  str(clips[i].get("path"))))
+    pos = {i: k for k, i in enumerate(order)}
+    by_id = {}
+    for i, c in enumerate(clips):
+        cid = str(c.get("id") or "")
+        if cid and cid not in by_id:
+            by_id[cid] = i
+    seen: set = set()
+    out: list[dict] = []
+    for n, row in enumerate(transition_items(edit)):
+        label = f"transition {n + 1}"
+        res = {"id": str(row.get("id") or ""), "after_clip": str(row.get("after_clip") or ""),
+               "before_clip": "", "kind": str(row.get("kind") or "").strip().lower(),
+               "duration": 0.0, "half": 0.0, "out_index": None, "in_index": None,
+               "at": 0.0, "problem": None}
+
+        def fail(code, message):
+            res["problem"] = {"code": code, "message": message}
+            out.append(res)
+
+        aid = res["after_clip"]
+        if not aid or aid not in by_id:
+            fail("transition_unknown_clip",
+                 f"{label}: after_clip {aid!r} names no clip on this timeline")
+            continue
+        oi = by_id[aid]
+        res["out_index"] = oi
+        k = pos[oi]
+        if k + 1 >= len(order):
+            fail("transition_last_clip",
+                 f"{label}: clip {oi + 1} is the last clip — there is nothing "
+                 f"after it to dissolve into")
+            continue
+        ii = order[k + 1]
+        res["in_index"] = ii
+        res["before_clip"] = str(clips[ii].get("id") or "")
+        res["at"] = round(_f(clips[oi].get("film_end")), 6)
+        if aid in seen:
+            fail("transition_duplicate_boundary",
+                 f"{label}: the cut after clip {oi + 1} already has a "
+                 f"transition — one per boundary")
+            continue
+        seen.add(aid)
+        if res["kind"] not in TRANSITION_KINDS:
+            fail("transition_kind",
+                 f"{label}: kind must be one of {', '.join(TRANSITION_KINDS)} "
+                 f"(got {row.get('kind')!r})")
+            continue
+        raw_d = row.get("duration")
+        if not isinstance(raw_d, (int, float)) or isinstance(raw_d, bool) \
+                or raw_d != raw_d or raw_d <= 0:
+            fail("transition_duration",
+                 f"{label}: duration must be a number of seconds above 0")
+            continue
+        d = transition_duration(row, clip_length(clips[oi]), clip_length(clips[ii]),
+                                fps=film_fps(edit))
+        if d < TRANSITION_MIN - 1e-9:
+            fail("transition_duration",
+                 f"{label}: clips {oi + 1} and {ii + 1} are too short to "
+                 f"carry a transition between them")
+            continue
+        half = round(d / 2.0, 6)
+        res["duration"], res["half"] = d, half
+        short = []
+        # THE HANDLES ARE SOURCE SECONDS and the transition is film seconds:
+        # a retimed clip needs `speed` times as much take for the same half.
+        need_out = half * clip_speed(clips[oi])
+        need_in = half * clip_speed(clips[ii])
+        word = res["kind"].replace("_", " ")
+        tail = _spare_source(clips[oi], "tail")
+        if tail is None:
+            short.append(f"the source length of clip {oi + 1} is not known — "
+                         f"run Prepare so the panel can measure it")
+        elif tail + 1e-6 < need_out:
+            short.append(f"clip {oi + 1} has only {tail:.2f}s beyond its "
+                         f"out-point and the {word} needs {need_out:.2f}s "
+                         f"there — trim its tail in or shorten the transition")
+        head = _spare_source(clips[ii], "head")
+        if head is not None and head + 1e-6 < need_in:
+            short.append(f"clip {ii + 1} has only {head:.2f}s before its "
+                         f"in-point and the {word} needs {need_in:.2f}s "
+                         f"there — trim its head in or shorten the transition")
+        if short:
+            fail("transition_no_handles", f"{label}: " + "; ".join(short))
+            continue
+        out.append(res)
+    return out
+
+
+def transition_problems(edit) -> list[dict]:
+    """Only the transitions that cannot be rendered, with their sentences."""
+    return [t["problem"] for t in resolve_transitions(edit) if t.get("problem")]
+
+
 def validate_edit(edit) -> list[dict]:
     """Every reason this edit must not be written. Empty list == good.
 
@@ -1523,12 +1982,22 @@ def validate_edit(edit) -> list[dict]:
             if end <= start:
                 bad("clip_window", f"clip {i + 1}: end ({end}) must be after "
                                    f"start ({start})", i)
+            sp_raw = c.get("speed")
+            if sp_raw is not None:
+                if not isinstance(sp_raw, (int, float)) or isinstance(sp_raw, bool) \
+                        or sp_raw != sp_raw or sp_raw in (float("inf"), float("-inf")):
+                    bad("clip_speed", f"clip {i + 1}: speed must be a number", i)
+                elif not SPEED_MIN - 1e-9 <= float(sp_raw) <= SPEED_MAX + 1e-9:
+                    bad("clip_speed_range",
+                        f"clip {i + 1}: speed is {float(sp_raw):g}x — it must be "
+                        f"between {SPEED_MIN:g}x and {SPEED_MAX:g}x", i)
+            sp = clip_speed(c)
             if end > start and fe > fs \
-                    and abs((end - start) - (fe - fs)) > LENGTH_TOLERANCE:
+                    and abs((end - start) / sp - (fe - fs)) > LENGTH_TOLERANCE:
                 bad("clip_length_mismatch",
                     f"clip {i + 1}: the source window is {end - start:.3f}s "
-                    f"but its slot on the film is {fe - fs:.3f}s — nothing "
-                    f"plays at anything but 1x", i)
+                    f"at {sp:g}x but its slot on the film is {fe - fs:.3f}s — "
+                    f"a clip plays its window at its speed and nothing else", i)
             dur = c.get("duration")
             if isinstance(dur, (int, float)) and dur > 0 \
                     and end > float(dur) + 1e-3:
@@ -1551,6 +2020,25 @@ def validate_edit(edit) -> list[dict]:
                         f"clip {i + 1}: adjust.brightness is {float(b):+.3f} — "
                         f"it must be between {-BRIGHTNESS_LIMIT:+.1f} and "
                         f"{BRIGHTNESS_LIMIT:+.1f}", i)
+        fr = c.get("frame")
+        if fr is not None:
+            if not isinstance(fr, dict):
+                bad("clip_frame", f"clip {i + 1}: frame must be an object or absent", i)
+            elif kind == "slug" and any(fr.get(k) is not None for k in ("zoom", "x", "y")):
+                bad("clip_frame_kind", f"clip {i + 1}: black has nothing to reframe", i)
+            else:
+                for key, lo, hi in (("zoom", FRAME_ZOOM_MIN, FRAME_ZOOM_MAX),
+                                    ("x", 0.0, 1.0), ("y", 0.0, 1.0)):
+                    v = fr.get(key)
+                    if v is None:
+                        continue
+                    if not isinstance(v, (int, float)) or isinstance(v, bool) \
+                            or v != v or v in (float("inf"), float("-inf")):
+                        bad("clip_frame", f"clip {i + 1}: frame.{key} must be a number", i)
+                    elif not lo - 1e-9 <= float(v) <= hi + 1e-9:
+                        bad("clip_frame_range",
+                            f"clip {i + 1}: frame.{key} is {float(v):g} — it must be "
+                            f"between {lo:g} and {hi:g}", i)
         aud = c.get("audio")
         if aud is not None:
             # A STILL AND A SLUG HAVE NO SOUND TO SPLIT. Letting them carry the
@@ -1636,6 +2124,11 @@ def validate_edit(edit) -> list[dict]:
             elif c.get("mute") and kind != "video":
                 bad("clip_mute_kind",
                     f"clip {i + 1}: only a video clip has sound to mute", i)
+        if kind != "video" and c.get("speed") is not None \
+                and abs(_f(c.get("speed"), 1.0) - 1.0) > 1e-9:
+            bad("clip_speed_kind",
+                f"clip {i + 1}: only a video clip has a clock to run fast or "
+                f"slow", i)
         if c.get("source") not in ("auto", "human"):
             bad("clip_source", f"clip {i + 1}: source must be 'auto' or "
                                f"'human' (got {c.get('source')!r})", i)
@@ -1676,8 +2169,60 @@ def validate_edit(edit) -> list[dict]:
                 bad("overlay_window",
                     f"overlay {j + 1}: film_end ({ofe}) must be after "
                     f"film_start ({ofs})")
-            if overlay_kind(o) == "video" and not str(o.get("path") or ""):
+            okind = overlay_kind(o)
+            if okind == "video" and not str(o.get("path") or ""):
                 bad("overlay_path", f"overlay {j + 1}: needs a file")
+            if okind == "text":
+                # A TITLE IS ITS STRING. An empty one would render nothing
+                # and say nothing about why.
+                txt = o.get("text")
+                if not isinstance(txt, str) or not txt.strip():
+                    bad("overlay_text_empty",
+                        f"overlay {j + 1}: a title needs some text")
+                elif len(txt) > TEXT_MAX_CHARS:
+                    bad("overlay_text_long",
+                        f"overlay {j + 1}: a title is at most "
+                        f"{TEXT_MAX_CHARS} characters")
+                st = o.get("style")
+                if st is not None and not isinstance(st, dict):
+                    bad("overlay_text_style",
+                        f"overlay {j + 1}: style must be an object or absent")
+                elif isinstance(st, dict):
+                    for key in ("font_size", "x", "y", "box_opacity"):
+                        v = st.get(key)
+                        if v is None:
+                            continue
+                        if not isinstance(v, (int, float)) or isinstance(v, bool) \
+                                or v != v or v in (float("inf"), float("-inf")):
+                            bad("overlay_text_style",
+                                f"overlay {j + 1}: style.{key} must be a number")
+                    fs_v = st.get("font_size")
+                    if isinstance(fs_v, (int, float)) and not isinstance(fs_v, bool) \
+                            and not TEXT_FONT_SIZE_MIN <= fs_v <= TEXT_FONT_SIZE_MAX:
+                        bad("overlay_text_style_range",
+                            f"overlay {j + 1}: font_size is {fs_v:g} — it must be "
+                            f"between {TEXT_FONT_SIZE_MIN} and {TEXT_FONT_SIZE_MAX}")
+                    for key in ("x", "y", "box_opacity"):
+                        v = st.get(key)
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                                and not 0.0 <= v <= 1.0:
+                            bad("overlay_text_style_range",
+                                f"overlay {j + 1}: style.{key} must be between "
+                                f"0 and 1")
+                    if st.get("align") is not None \
+                            and str(st.get("align")).lower() not in TEXT_ALIGNS:
+                        bad("overlay_text_style",
+                            f"overlay {j + 1}: style.align must be one of "
+                            f"{', '.join(TEXT_ALIGNS)}")
+                    for key in ("color", "box_color"):
+                        v = st.get(key)
+                        if v is not None and _hex_colour(v, "") == "":
+                            bad("overlay_text_style",
+                                f"overlay {j + 1}: style.{key} must be a hex "
+                                f"colour like #ffcc00")
+                    if st.get("box") is not None and not isinstance(st.get("box"), bool):
+                        bad("overlay_text_style",
+                            f"overlay {j + 1}: style.box must be true or false")
             ofx = o.get("fx")
             if ofx is not None and not isinstance(ofx, dict):
                 bad("overlay_fx",
@@ -1703,6 +2248,22 @@ def validate_edit(edit) -> list[dict]:
                     f"overlays {a_i + 1} and {b_i + 1} overlap "
                     f"({a_s:.3f}-{a_e:.3f}s and {b_s:.3f}-{b_e:.3f}s) — one "
                     f"overlay lane can only show one of them")
+    # THE TRANSITIONS, each of which must own a real boundary and have the
+    # source handles to build it from. Every code here is an ERROR and none is
+    # in WARNING_CODES: a transition the render cannot honour is not a note,
+    # it is a film that would come out with a hard cut where a dissolve was
+    # promised — and the sentence says which side is short and by how much.
+    txr = edit.get("transitions") if isinstance(edit, dict) else None
+    if txr is not None and not isinstance(txr, list):
+        bad("transitions_shape", "transitions must be a list or absent")
+    elif isinstance(txr, list):
+        for n, t in enumerate(txr):
+            if not isinstance(t, dict):
+                bad("transition_shape", f"transition {n + 1}: must be an object")
+        for t in resolve_transitions(edit):
+            if t.get("problem"):
+                bad(t["problem"]["code"], t["problem"]["message"],
+                    t.get("out_index"))
     spans.sort()
     for (a_s, a_e, a_i), (b_s, b_e, b_i) in zip(spans, spans[1:]):
         if b_s < a_e - TOUCH_TOLERANCE:
@@ -1720,8 +2281,7 @@ def validate_edit(edit) -> list[dict]:
             continue
         w = clip_audio(c)
         if w["end"] > w["start"]:
-            asp.append((w["film_start"],
-                        w["film_start"] + (w["end"] - w["start"]), i))
+            asp.append((w["film_start"], w["film_start"] + w["len"], i))
     asp.sort()
     for (a_s, a_e, a_i), (b_s, b_e, b_i) in zip(asp, asp[1:]):
         if b_s < a_e - TOUCH_TOLERANCE:
@@ -1991,6 +2551,13 @@ def normalise_edit(edit: dict) -> dict:
             c["mute"] = True
         else:
             c.pop("mute", None)
+        # SPEED, same rule: 1x is the absence of the field, clamped on the way
+        # to disk so every output is handed a legal rate.
+        sp = clip_speed(c)
+        if kind == "video" and abs(sp - 1.0) > 1e-9:
+            c["speed"] = sp
+        else:
+            c.pop("speed", None)
         # NEUTRAL IS ABSENT here too, so a timeline nobody has put an effect on
         # is byte-identical to one from before effects existed. The values are
         # written back CLAMPED, so what is on disk is what all three outputs
@@ -2005,7 +2572,7 @@ def normalise_edit(edit: dict) -> dict:
         # way to disk so all three outputs read the same legal curve.
         if kind == "video":
             w = clip_audio(c)
-            ae = audio_effects(c, max(0.0, w["end"] - w["start"]))
+            ae = audio_effects(c, w["len"])
             akeep = {k: ae[k] for k in ("fade_in", "fade_out") if ae[k] > 1e-9}
             if ae["points"]:
                 akeep["points"] = ae["points"]
@@ -2033,6 +2600,12 @@ def normalise_edit(edit: dict) -> dict:
                 c["audio"]["linked"] = True
         elif c.get("audio") is not None:
             c.pop("audio", None)
+        # FRAMING, neutral-is-absent like everything else here, and written
+        # back clamped so all three outputs read the same window.
+        if kind != "slug" and isinstance(c.get("frame"), dict) and not clip_frame_is_neutral(c):
+            c["frame"] = clip_frame(c)
+        else:
+            c.pop("frame", None)
         adj = c.get("adjust")
         if isinstance(adj, dict):
             b = clip_brightness(c)
@@ -2063,7 +2636,25 @@ def normalise_edit(edit: dict) -> dict:
         for k in ("film_start", "film_end"):
             o[k] = round(_f(o.get(k)), 6)
         o["kind"] = overlay_kind(o)
-        if o["kind"] == "still":
+        if o["kind"] == "text":
+            # A TITLE IS ITS SLOT AND ITS STRING. No file, no source clock —
+            # the same synthesis a still gets — and the style is written back
+            # CLAMPED and only where it differs from the default, so a title
+            # left at the defaults carries no style at all.
+            o["start"] = 0.0
+            o["end"] = round(max(0.0, o["film_end"] - o["film_start"]), 6)
+            o["duration"] = None
+            o["path"] = None
+            o["proxy"] = None
+            tt = overlay_text(o)
+            o["text"] = tt["text"]
+            skeep = {k: v for k, v in tt["style"].items()
+                     if v != TEXT_STYLE_DEFAULTS[k]}
+            if skeep:
+                o["style"] = skeep
+            else:
+                o.pop("style", None)
+        elif o["kind"] == "still":
             # A still is its slot and nothing else — the same synthesis a
             # still CLIP gets, and the reason the trim handles can resize it.
             o["start"] = 0.0
@@ -2073,7 +2664,7 @@ def normalise_edit(edit: dict) -> dict:
             for k in ("start", "end"):
                 o[k] = round(_f(o.get(k)), 6)
         if not o.get("id"):
-            o["id"] = _clip_id(o.get("path"), _f(o.get("start")),
+            o["id"] = _clip_id(o.get("path") or o.get("text"), _f(o.get("start")),
                                _f(o.get("film_start")))
         if o.get("source") not in ("auto", "human"):
             o["source"] = "human"
@@ -2088,6 +2679,28 @@ def normalise_edit(edit: dict) -> dict:
         out["overlays"] = ovs
     else:
         out.pop("overlays", None)
+    # THE TRANSITIONS. Rounded, sorted by the boundary they sit on, ids
+    # invented where missing, and NOTHING ELSE decided: the duration on disk
+    # is the one the user asked for, and `transition_duration` clamps it on
+    # every read against whatever the neighbours are that day — writing the
+    # clamped number back would let one trim silently shorten a dissolve for
+    # good. An empty list is an absent key.
+    txs = []
+    for t in transition_items(out):
+        t = dict(t)
+        t["after_clip"] = str(t.get("after_clip") or "")
+        t["kind"] = str(t.get("kind") or "").strip().lower()
+        t["duration"] = round(_f(t.get("duration")), 6)
+        if not t.get("id"):
+            t["id"] = _clip_id(t["after_clip"], t["duration"], 0.0)
+        txs.append(t)
+    at = {r["id"]: r["at"] for r in resolve_transitions({"clips": clips,
+                                                         "transitions": txs})}
+    txs.sort(key=lambda t: (at.get(t["id"], float("inf")), t["id"]))
+    if txs:
+        out["transitions"] = txs
+    else:
+        out.pop("transitions", None)
     out.setdefault("board_id", "")
     # NEUTRAL IS ABSENT, the same rule `adjust` follows one block up. Dragging
     # a trim handle back to the end of the track must leave a document
@@ -2843,6 +3456,7 @@ def edit_to_cuts(edit: dict) -> list[dict]:
     reason this file exists.
     """
     out = []
+    by_id: dict[str, dict] = {}
     for c in (edit or {}).get("clips") or []:
         if not isinstance(c, dict):
             continue
@@ -2871,6 +3485,8 @@ def edit_to_cuts(edit: dict) -> list[dict]:
         b = clip_brightness(c)
         if abs(b) >= 1e-9:
             entry["adjust"] = {"brightness": round(b, 6)}
+        if kind != "slug" and not clip_frame_is_neutral(c):
+            entry["frame"] = clip_frame(c)
         if kind == "video":
             w = clip_audio(c)
             # Only a SPLIT clip says anything here, so a plan of ordinary cuts
@@ -2893,11 +3509,34 @@ def edit_to_cuts(edit: dict) -> list[dict]:
             entry["fx"] = fx
         if kind == "video":
             w = clip_audio(c)
-            gain = audio_gain_points(c, max(0.0, w["end"] - w["start"]))
+            # ON THE PLAYED CLOCK — see `audio_gain_points`.
+            gain = audio_gain_points(c, w["len"])
             if gain:
                 entry["gain"] = gain
+            # Only when it says something, like every other field here.
+            sp = clip_speed(c)
+            if abs(sp - 1.0) > 1e-9:
+                entry["speed"] = sp
         out.append(entry)
+        if c.get("id"):
+            by_id[str(c["id"])] = entry
     out.sort(key=lambda e: e["film_start"])
+    # THE TRANSITIONS RIDE ON THE ENTRIES THEY JOIN: `transition` on the
+    # outgoing entry, `tx_in` (the extra head, in seconds) on the incoming.
+    # Only a transition that resolved without a problem is stamped — one the
+    # validator refused cannot reach the render through a stale document, and
+    # `transition_problems` is what the render asks first.
+    for t in resolve_transitions(edit):
+        if t.get("problem"):
+            continue
+        a, b = by_id.get(t["after_clip"]), by_id.get(t["before_clip"])
+        if a is None or b is None:
+            continue
+        ia, ib = out.index(a), out.index(b)
+        if ib != ia + 1:
+            continue
+        a["transition"] = {"kind": t["kind"], "duration": t["duration"]}
+        b["tx_in"] = t["half"]
     return out
 
 
@@ -3191,12 +3830,16 @@ def _nle_segments(clips, *, probe=None) -> list[dict]:
             "start": start, "end": end,
             "film_start": fs, "film_end": fe,
             "brightness": clip_brightness(c),
+            "frame": clip_frame(c),
             "fx": clip_effects(c),
             "w": int(info.get("w") or 0), "h": int(info.get("h") or 0),
             "has_audio": bool(info.get("has_audio")),
-            "gain": audio_gain_points(
-                c, max(0.0, clip_audio(c)["end"] - clip_audio(c)["start"]))
+            "gain": audio_gain_points(c, clip_audio(c)["len"])
             if clip_kind(c) == "video" else [],
+            # Carried for the far side to read. The XML's in/out (source) and
+            # start/end (timeline) already disagree by exactly this ratio,
+            # which is how an FCP7 importer infers a speed change.
+            "speed": clip_speed(c),
             # Carried, never applied here: the export DISABLES the audio
             # clipitem rather than dropping it, so the editor on the far end
             # can see the decision and undo it.
@@ -3272,6 +3915,31 @@ def _fcp7_opacity(seg: dict, fps: int = NLE_FPS) -> str:
             "<parameter><parameterid>opacity</parameterid>"
             "<name>opacity</name><valuemin>0</valuemin><valuemax>100</valuemax>"
             f"{kf}</parameter></effect></filter>")
+
+
+def _fcp7_motion(seg: dict) -> str:
+    """The reframe as Basic Motion — scale and centre — or "" when neutral.
+
+    The same rule the opacity keyframes follow: the DECISION travels, not
+    baked pixels. Scale is percent; the centre is the layer's offset from the
+    frame's centre in frame widths/heights, which is `zoom * (0.5 - x)`: the
+    point of the source that should sit at the middle, moved there.
+    """
+    f = seg.get("frame") or {}
+    z = _f(f.get("zoom"), 1.0)
+    if abs(z - 1.0) < 1e-9:
+        return ""
+    cx = z * (0.5 - _f(f.get("x"), 0.5))
+    cy = z * (0.5 - _f(f.get("y"), 0.5))
+    return ("<filter><effect><name>Basic Motion</name><effectid>basic</effectid>"
+            "<effectcategory>motion</effectcategory>"
+            "<effecttype>motion</effecttype><mediatype>video</mediatype>"
+            "<parameter><parameterid>scale</parameterid><name>Scale</name>"
+            "<valuemin>0</valuemin><valuemax>1000</valuemax>"
+            f"<value>{z * 100.0:.2f}</value></parameter>"
+            "<parameter><parameterid>center</parameterid><name>Center</name>"
+            f"<value><horiz>{cx:.4f}</horiz><vert>{cy:.4f}</vert></value></parameter>"
+            "</effect></filter>")
 
 
 def _fcp7_rate(fps: int = NLE_FPS) -> str:
@@ -3368,6 +4036,7 @@ def fcp7_xml(segments, *, name: str, media: dict, width: int, height: int,
             f"<in>{f_in}</in><out>{f_out}</out>"
             f"{_fcp7_file(fid, seg, abs_media, fps=fps, declared=declared)}"
             f"<compositemode>normal</compositemode>"
+            f"{_fcp7_motion(seg)}"
             f"{_fcp7_opacity(seg, fps)}"
             f"</clipitem>")
         if seg["has_audio"]:
@@ -3553,6 +4222,20 @@ def ae_jsx(segments, *, name: str, media: dict, width: int, height: int,
         ]
         if abs(seg["brightness"]) >= 1e-9:
             lines.append("  bright(lay, %s);" % ae_b)
+        fr = seg.get("frame") or {}
+        z = _f(fr.get("zoom"), 1.0)
+        if abs(z - 1.0) >= 1e-9:
+            # THE REFRAME AS SCALE + POSITION, the same arithmetic the FCP7
+            # Basic Motion carries: the source point (x, y) is moved to the
+            # comp's centre and the layer magnified around it.
+            px = width / 2.0 + z * width * (0.5 - _f(fr.get("x"), 0.5))
+            py = height / 2.0 + z * height * (0.5 - _f(fr.get("y"), 0.5))
+            lines += [
+                "  lay.property('ADBE Transform Group').property('ADBE Scale')"
+                ".setValue([%.3f, %.3f]);" % (z * 100.0, z * 100.0),
+                "  lay.property('ADBE Transform Group').property('ADBE Position')"
+                ".setValue([%.3f, %.3f]);" % (px, py),
+            ]
         fx = seg.get("fx") or {}
         f_in, f_out = _f(fx.get("fade_in")), _f(fx.get("fade_out"))
         if f_in > 1e-9 or f_out > 1e-9:

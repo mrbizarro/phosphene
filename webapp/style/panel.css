@@ -34,6 +34,42 @@
       --t-base: 180ms cubic-bezier(.2,.8,.2,1);
       --t-slow: 240ms cubic-bezier(.2,.8,.2,1);
     }
+    /* LIGHT APPEARANCE. The same tokens, a paper palette: the panel is
+       written against --bg/--panel/--text/--muted/--border, so a second set
+       of values is most of a second theme. The overlays that were written as
+       white-with-alpha on navy are re-pointed below where they would vanish
+       on paper. Chosen from Settings → Appearance; `system` follows the OS. */
+    html[data-theme="light"] {
+      --bg: #f3f4f8; --bg-2: #e9ebf2; --panel: #ffffff; --panel-2: #f6f7fb;
+      --border: #d6dae6; --border-strong: #b9c0d4; --text: #151a2e; --muted: #5b6480;
+      --accent: #2563eb; --accent-bright: #1d4ed8; --accent-dim: rgba(37,99,235,0.14);
+      --success: #15803d; --warning: #b45309; --danger: #dc2626;
+      --shadow-1: 0 1px 2px rgba(20,26,46,0.10), 0 1px 0 rgba(255,255,255,0.6) inset;
+      --shadow-2: 0 8px 24px rgba(20,26,46,0.16);
+      color-scheme: light;
+    }
+    html[data-theme="light"] body { background: var(--bg); color: var(--text); }
+    html[data-theme="light"] .sbe-clip { background: linear-gradient(180deg, #ffffff, #f2f4fa); }
+
+    /* Light: the surfaces that were white-alpha on dark (invisible on white) */
+    html[data-theme="light"] .tabs button .badge { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    html[data-theme="light"] .card-chrome button, html[data-theme="light"] .card-chrome .card-btn { background: rgba(0,0,0,.06); color: var(--text); }
+    html[data-theme="light"] .card-chrome button:hover, html[data-theme="light"] .card-chrome .card-btn:hover { background: rgba(0,0,0,.12); }
+    html[data-theme="light"] .progress-bar { background: rgba(0,0,0,.08); }
+    html[data-theme="light"] #healthChip { background: rgba(0,0,0,.05); }
+    html[data-theme="light"] #healthChip:hover { background: rgba(0,0,0,.10); }
+    html[data-theme="light"] .phosphene-x-link:hover { color: var(--text); }
+    html[data-theme="light"] .sb-boardlist li .badge { background: rgba(0,0,0,.06); }
+    html[data-theme="light"] .ideo-fab-sw, html[data-theme="light"] .ideo-swatch { border-color: rgba(0,0,0,.22); }
+    html[data-theme="light"] .cz-summary:hover { background: rgba(0,0,0,.03); }
+    html[data-theme="light"] .lora-guide, html[data-theme="light"] .sb-still { background: #f4f5fa; }
+    html[data-theme="light"] .sbe-stage, html[data-theme="light"] .sbe-clip.is-slug { background: #0b0f1f; }
+    html[data-theme="light"] .sbe-grip { background: linear-gradient(90deg, rgba(20,26,46,0.10), transparent); }
+    html[data-theme="light"] .sbe-grip.r { background: linear-gradient(270deg, rgba(20,26,46,0.10), transparent); }
+    html[data-theme="light"] .sbe-cut { background: rgba(20,26,46,0.45); }
+    html[data-theme="light"] .sbe-ov { color: #4c1d95; }
+    html[data-theme="light"] .sbe-ruler u { color: rgba(20,26,46,0.75); background: rgba(20,26,46,0.10); }
+    html[data-theme="light"] .sbe-track.is-dropping { background: rgba(20,26,46,0.04); }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
 
@@ -2159,6 +2195,25 @@
       position: relative; height: 18px; border-bottom: 1px solid var(--border);
       color: var(--muted); font-size: var(--fs-2xs); user-select: none; cursor: pointer;
     }
+    /* THE SONG'S SECTIONS GET A ROW OF THEIR OWN above the ticks — the
+       first version was a 7px strip under the numerals and read as a stray
+       underline. 14px, a legible label, and a hue per kind so the arc is
+       readable at a glance: chorus violet, bridge blue, verse grey, the two
+       ends warm and cool. */
+    .sbe-ruler.has-sections { height: 32px; }
+    .sbe-ruler.has-sections i, .sbe-ruler.has-sections b { top: 14px; }
+    .sbe-ruler u {
+      position: absolute; top: 1px; height: 12px; text-decoration: none;
+      border-radius: 3px; overflow: hidden; white-space: nowrap;
+      font-size: 9px; line-height: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+      font-weight: 700; color: rgba(255,255,255,0.85); padding: 0 5px; pointer-events: auto;
+      background: rgba(255,255,255,0.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+    }
+    .sbe-ruler u.is-chorus { background: rgba(169,112,255,0.55); }
+    .sbe-ruler u.is-verse { background: rgba(255,255,255,0.16); }
+    .sbe-ruler u.is-bridge { background: rgba(100,180,255,0.40); }
+    .sbe-ruler u.is-intro { background: rgba(255,170,90,0.35); }
+    .sbe-ruler u.is-outro { background: rgba(90,200,220,0.30); }
     .sbe-ruler i {
       position: absolute; top: 0; bottom: 0; width: 1px;
       background: var(--border);
@@ -2222,6 +2277,39 @@
       object-fit: contain; pointer-events: none; display: none; z-index: 4;
     }
     .sbe-ov-layer.is-on { display: block; }
+    /* THE TITLE ON THE STAGE. Positioned by the same anchor the rasteriser
+       uses — `--tx-x/--tx-y` are fractions of the frame, `--tx-shift` is
+       the align's share of the text's own width — and sized by `--tx-size`,
+       which the painter derives from the stage's height exactly as the
+       render derives it from the frame's. The font stack is the same
+       family order `TITLE_FONT_CANDIDATES` resolves on disk. */
+    .sbe-ov-text {
+      position: absolute; left: var(--tx-left, 50%); top: var(--tx-y, 50%);
+      transform: translate(var(--tx-shift, -50%), -50%);
+      max-width: 96%; pointer-events: none; display: none; z-index: 5;
+      font-family: Arial, "Helvetica Neue", Helvetica, "Liberation Sans", sans-serif;
+      font-weight: 700; font-size: var(--tx-size, 32px); line-height: 1.25;
+      color: var(--tx-color, #fff); text-align: var(--tx-align, center);
+      white-space: pre-wrap; background: var(--tx-box, transparent);
+      padding: 0.4em 0.4em; box-decoration-break: clone;
+    }
+    .sbe-ov-text.is-on { display: block; }
+    /* A title on the lane: a violet "T" where a card shows its thumbnail. */
+    .sbe-ov.is-text { background: rgba(190,120,255,0.12); }
+    .sbe-ov-t {
+      display: inline-block; width: 16px; height: 16px; line-height: 16px;
+      margin-right: 5px; border-radius: 3px; text-align: center;
+      background: #a970ff; color: #14101c; font-weight: 800; font-size: 11px;
+      vertical-align: -3px;
+    }
+    .sbe-title-b { align-items: center; }
+    .sbe-title-text { flex: 1 1 100%; width: 100%; resize: vertical; min-height: 36px; font-size: var(--fs-xs); }
+    .sbe-swatch {
+      width: 26px; height: 20px; padding: 0; border: 1px solid var(--border-strong);
+      border-radius: var(--r-xs); background: transparent; cursor: pointer;
+    }
+    .sbe-title-pos input[type="range"] { width: 90px; }
+    .sbe-title-box { margin: 0; font-size: var(--fs-xs); }
     /* THE LANE THE HANDLE EXISTS FOR. 26px was a second reading of blocks you
        had already read; it is now a waveform with a level line and draggable
        points on it, and a point you cannot hit is a control you do not have.
@@ -2768,6 +2856,63 @@
       padding: 0 4px; overflow: hidden;
     }
     .sbe-gap:hover { border-color: var(--accent); color: var(--text); }
+    /* THE CUT, AS A HANDLE. A transition is a property of the boundary
+       between two clips, so the boundary is where it is found: a small mark
+       at the top of every cut, and — once a transition is on it — a band
+       the length of the transition, centred on the cut, drawn over both
+       grips. Nothing new below the track, nothing that reads as a lane. */
+    .sbe-cut {
+      position: absolute; top: 0; width: 12px; height: 12px; z-index: 8;
+      cursor: pointer; border-radius: 0 0 3px 3px;
+      background: rgba(255,255,255,0.42); opacity: 0.85;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.5);
+      transition: opacity var(--t-fast), background var(--t-fast);
+    }
+    .sbe-cut::before {
+      content: ''; position: absolute; inset: -6px -6px -4px;   /* a bigger target */
+    }
+    .sbe-track:hover .sbe-cut { opacity: 1; }
+    .sbe-cut:hover, .sbe-cut.is-sel { background: var(--accent); opacity: 1; }
+    .sbe-cut.is-sel { box-shadow: 0 0 0 1px var(--accent), 0 0 8px var(--accent); }
+    .sbe-cut.is-bad { background: var(--danger); opacity: 1; }
+    .sbe-cut.is-tx {
+      height: 14px; border-radius: 0 0 4px 4px; opacity: 0.95;
+      background: linear-gradient(90deg, transparent, var(--accent) 35%, var(--accent) 65%, transparent);
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: var(--fs-2xs); font-weight: 700; letter-spacing: 0.02em;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.6); white-space: nowrap; overflow: hidden;
+    }
+    .sbe-cut.is-tx.is-sel { background: var(--accent); }
+    .sbe-cut.is-tx.is-fade_black {
+      background: linear-gradient(90deg, transparent, #000 35%, #000 65%, transparent);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    .sbe-cut.is-tx.is-fade_black.is-sel { background: #000; box-shadow: 0 0 0 1px var(--accent), 0 0 8px var(--accent); }
+    .sbe-clip.is-retimed .sbe-cl-flag { color: var(--accent-bright); }
+    .sbe-frame-row input[type="range"] { width: 90px; }
+    /* A reframed layer must not spill past the stage: the stage clips. */
+    .sbe-stage { overflow: hidden; }
+    .sbe-speed-row .ghost-btn.sbe-speed-pill { padding: 1px 6px; font-size: var(--fs-2xs); }
+    .sbe-speed-row .ghost-btn.sbe-speed-pill.is-on { border-color: var(--accent); color: var(--accent-bright); }
+    .sbe-tx-kind { font-size: var(--fs-xs); padding: 2px 4px; }
+    .sbe-why.is-bad { color: var(--danger); }
+    /* The director's row on the storyboard brief: path and bars on one line,
+       and the Shots chips dimmed while a track is deciding the count. */
+    .outputs-search { width: 210px; max-width: 34%; font-size: var(--fs-xs); padding: 3px 10px; margin-left: 8px; border-radius: 999px; align-self: center; }
+    /* 5. the Clip section's buttons in even rows */
+    .sbe-sect-b .ghost-btn { flex: 0 0 auto; }
+    /* 7. a caption under each Deliver-as row */
+    .sbe-deliver-cap { display: block; font-size: var(--fs-2xs); color: var(--muted); margin: -2px 0 6px; }
+    .sbe-pop .sbe-deliver { display: flex; margin: 2px 0 4px; }
+    .sbe-pop .sbe-deliver .pill-btn { font-size: var(--fs-2xs); padding: 4px 6px; }
+    .sb-auto { margin: 4px 0 8px; font-size: var(--fs-xs); }
+    .sb-track-row { display: flex; gap: 8px; align-items: center; }
+    .sb-track-row .sb-input { flex: 1 1 auto; min-width: 0; }
+    .sb-track-bars { flex: 0 0 auto; width: auto; min-width: 150px; }
+    #sbLengthRow.is-standing-down { opacity: 0.45; pointer-events: none; }
+    /* `.cz-control` sets a display, which beats the UA's [hidden]; say it
+       explicitly or the per-window row shows under every pill. */
+    #windowsRow[hidden] { display: none !important; }
     .sbe-head-line {
       position: absolute; top: 0; bottom: 0; width: 2px; z-index: 30;
       background: var(--warning); pointer-events: none;
@@ -9802,3 +9947,45 @@
       color: var(--muted);
     }
     .h3-winhelp[hidden] { display: none !important; }
+
+
+/* ---- Storyboard: the anchor still on a shot card ---------------------------- */
+.sb-still { position: relative; margin: 6px 0 4px; border-radius: 8px; overflow: hidden;
+  background: var(--bg-2, #111); border: 1px solid var(--border); }
+.sb-still img { display: block; width: 100%; max-height: 120px; object-fit: cover; cursor: zoom-in; }
+.sb-still-tag { position: absolute; left: 6px; bottom: 6px; font-size: 10px; letter-spacing: .04em;
+  text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; }
+.sb-still-failed { padding: 8px; }
+.sb-still-failed .sb-still-tag { position: static; background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+
+/* ---- LoRA picker: updates + guides ----------------------------------------- */
+.badge-update { background: var(--accent, #8b5cf6); color: #fff; margin-left: 6px; }
+.lora-update-btn { color: var(--accent, #8b5cf6); }
+.lora-guide { margin: 8px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--bg-2, #111);
+  border: 1px solid var(--border); font-size: var(--fs-sm, 12px); line-height: 1.45; color: var(--muted); }
+.lora-guide-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+
+.sb-still.is-pending { padding: 10px 8px; display: flex; align-items: center; gap: 8px; }
+.sb-still.is-pending .sb-still-tag { position: static; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-bright, var(--accent)); }
+.sb-still-spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: sbStillSpin 1s linear infinite; }
+@keyframes sbStillSpin { to { transform: rotate(360deg); } }
+.sb-still-redo { position: absolute; right: 6px; top: 6px; }
+.sb-flag { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-sm, 12px); padding: 2px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-bright, var(--accent)); margin-left: 6px; }
+.ghost-btn.small { padding: 3px 9px; font-size: var(--fs-sm, 12px); }
+.lora-update-badge { cursor: pointer; }
+
+/* ---- One take ---------------------------------------------------------------- */
+.take-locked { opacity: .45; pointer-events: none; }
+.take-locked::after { content: ''; }
+#beatsRow { margin-top: 8px; }
+.take-estimate { margin-top: 6px; font-size: var(--fs-sm, 12px); color: var(--muted); min-height: 1.2em; }
+
+.sb-beats-label { margin-top: 8px; font-size: var(--fs-sm, 12px); color: var(--muted); }
+.sb-beats-label .sub { opacity: .8; margin-left: 6px; }
+.sb-beats { margin-top: 4px; }
+
+/* ---- Timeline gestures: ripple state ------------------------------------------ */
+.sbe-track.is-ripple .sbe-clip.is-drag { box-shadow: 0 0 0 2px var(--warning), var(--shadow-2); }
+.sbe-track.is-ripple::after { content: 'ripple · everything after slides'; position: absolute; right: 8px; top: 4px;
+  font-size: var(--fs-sm, 12px); color: var(--warning); pointer-events: none; z-index: 30; }

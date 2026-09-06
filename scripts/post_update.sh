@@ -182,6 +182,9 @@ require "the codec patch (without it every render encodes 4:2:0 - blocky faces)"
 # ltx-trainer went in with --no-deps above, so pyyaml/pydantic/tqdm/rich were
 # never resolved; the trainer subprocess dies at `import yaml` without them.
 ( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python 'pyyaml>=6.0' 'pydantic>=2.0' 'tqdm>=4.65' 'rich>=13.0' )
+# pywebpush signs the closed-tab completion alerts (Settings → Completion
+# alerts). Optional: the panel offers the button only when it imports.
+( cd "$ROOT/ltx-2-mlx" && uv pip install --python env/bin/python 'pywebpush>=2.0' )
 
 # ---- 6. Optional runtime packages -------------------------------------------
 # mlx-vlm --no-deps on purpose (its default deps fight our mflux/transformers/

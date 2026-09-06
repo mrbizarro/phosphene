@@ -615,6 +615,8 @@ async function openSettingsModal() {
   }
   const cur = _settingsCache.settings;
   const presets = _settingsCache.presets;
+  renderNotifyState(cur || {});
+  applyAppearance();
   // Render preset cards (Standard, Video production, Web, Custom).
   // Display order matches the typical user journey: most users want
   // Standard, video pros pick Video production, web preview folks pick Web.
@@ -709,6 +711,144 @@ async function openSettingsModal() {
   // maintainer key rows. Same has_X-boolean treatment as the other
   // secrets: the keys never come back from the server.
   renderAnalyticsState(cur);
+}
+
+// ---- Appearance ------------------------------------------------------------
+// A browser preference, not a panel setting: two people can look at the same
+// panel in two rooms. `system` re-applies live when the Mac switches.
+function appearanceGet() {
+  try { const v = localStorage.getItem('phos_appearance'); return (v === 'light' || v === 'system') ? v : 'dark'; }
+  catch (e) { return 'dark'; }
+}
+function applyAppearance(mode) {
+  const m = mode || appearanceGet();
+  const dark = m === 'dark' || (m === 'system' && !(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches));
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  // The server stamps this on <html> for the NEXT load so a light palette is
+  // painted first, not switched to after the modules run (cookie, one year).
+  try { document.cookie = 'phos_theme=' + (dark ? 'dark' : 'light') + ';path=/;max-age=31536000;samesite=lax'; } catch (e) {}
+  document.querySelectorAll('#appearanceGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.appearance === m));
+}
+function setAppearance(mode) {
+  try { localStorage.setItem('phos_appearance', mode); } catch (e) {}
+  applyAppearance(mode);
+}
+try {
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+      if (appearanceGet() === 'system') applyAppearance('system');
+    });
+  }
+} catch (e) {}
+
+// ---- Completion alerts -----------------------------------------------------
+// One switch, and one ask. The chime needs nothing; the browser notification
+// needs the person to allow it once, and the button says which state that is
+// in rather than asking on every render.
+function renderNotifyState(cur) {
+  const on = cur.notify_done !== false;
+  const badge = document.getElementById('notifyStateBadge');
+  const btn = document.getElementById('notifyToggleBtn');
+  const ask = document.getElementById('notifyAllowBtn');
+  const hint = document.getElementById('notifyHint');
+  if (badge) { badge.textContent = on ? 'ON' : 'OFF'; badge.className = 'spicy-state' + (on ? ' on' : ''); }
+  if (btn) btn.textContent = on ? 'Turn off' : 'Turn on';
+  const perm = (typeof window.Notification !== 'undefined') ? window.Notification.permission : 'unsupported';
+  if (ask) {
+    ask.hidden = !on || perm !== 'default';
+  }
+  if (hint) {
+    hint.textContent = !on ? 'No chime, no browser alert.'
+      : perm === 'granted' ? 'A chime in this tab, and a browser alert when the tab is in the background'
+          + (cur.push_available ? ' — and, once you turn it on below, even with the tab closed.' : '. Closed-tab alerts need an Update on this install.')
+      : perm === 'denied' ? 'A chime in this tab. Browser alerts are blocked for this site in the browser\'s own settings.'
+      : perm === 'unsupported' ? 'A chime in this tab.'
+      : 'A chime in this tab. Allow browser alerts to be told when the tab is in the background'
+          + (cur.push_available ? ', or even when it is closed.' : '.');
+  }
+  // PUSH, for a closed tab. Offered when the install can sign pushes and the
+  // browser can hold a subscription; the button says which state it is in.
+  const pb = document.getElementById('notifyPushBtn');
+  const pt = document.getElementById('notifyPushTestBtn');
+  const canPush = on && cur.push_available && ('serviceWorker' in navigator) && ('PushManager' in window) && perm !== 'denied';
+  if (pb) {
+    pb.hidden = !canPush;
+    if (canPush) {
+      pushSubscription().then(s => {
+        pb.textContent = s ? 'Stop closed-tab alerts in this browser' : 'Alert me here even when the tab is closed';
+        if (pt) pt.hidden = !s;
+      }).catch(() => {});
+    } else if (pt) pt.hidden = true;
+  }
+}
+async function toggleNotify() {
+  const cur = (_settingsCache && _settingsCache.settings) || {};
+  const target = !(cur.notify_done !== false);
+  const fd = new URLSearchParams();
+  fd.set('notify_done', target ? '1' : '0');
+  try {
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.settings) _settingsCache.settings = j.settings;
+    else if (_settingsCache && _settingsCache.settings) _settingsCache.settings.notify_done = target;
+  } catch (e) {}
+  if (target && typeof playDoneChime === 'function') playDoneChime(false);
+  renderNotifyState((_settingsCache && _settingsCache.settings) || {});
+  if (typeof phosToast === 'function') phosToast(target ? 'Completion alerts on — saved.' : 'Completion alerts off — saved.', { duration: 2500 });
+}
+// ---- Push: the alert that reaches a closed tab ---------------------------
+// The browser keeps a subscription for this origin; the panel signs pushes
+// with its own key. `pushToggle` subscribes or unsubscribes THIS browser.
+function _pushKeyBytes(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = window.atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+async function pushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  const reg = await navigator.serviceWorker.getRegistration('/');
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+async function pushToggle() {
+  try {
+    const have = await pushSubscription();
+    if (have) {
+      const fd = new URLSearchParams(); fd.set('endpoint', have.endpoint);
+      await fetch('/push/unsubscribe', { method: 'POST', body: fd });
+      await have.unsubscribe();
+      if (typeof phosToast === 'function') phosToast('This browser will no longer be alerted when closed.', { duration: 3000 });
+    } else {
+      const k = await (await fetch('/push/key')).json();
+      if (!k.ok) { if (typeof phosToast === 'function') phosToast('Closed-tab alerts are not available on this install yet — run Update.', { kind: 'danger' }); return; }
+      if (typeof window.Notification !== 'undefined' && window.Notification.permission !== 'granted') {
+        const p = await window.Notification.requestPermission();
+        if (p !== 'granted') { if (typeof phosToast === 'function') phosToast('The browser did not allow notifications.', {}); return; }
+      }
+      const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true,
+                                                    applicationServerKey: _pushKeyBytes(k.public_key) });
+      const fd = new URLSearchParams(); fd.set('subscription', JSON.stringify(sub));
+      const r = await (await fetch('/push/subscribe', { method: 'POST', body: fd })).json();
+      if (typeof phosToast === 'function') phosToast(r.ok ? 'Done — this browser will be alerted even when the tab is closed.' : (r.error || 'Could not turn it on.'), { duration: 4000 });
+    }
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('Closed-tab alerts could not be set up in this browser: ' + (e && e.message ? e.message : e), { kind: 'danger', duration: 6000 });
+  }
+  renderNotifyState((_settingsCache && _settingsCache.settings) || {});
+}
+async function pushTest() {
+  try {
+    const r = await (await fetch('/push/test', { method: 'POST' })).json();
+    if (typeof phosToast === 'function') phosToast(r.ok ? ('Sent to ' + r.sent + (r.sent === 1 ? ' browser.' : ' browsers.')) : (r.error || 'Nothing sent.'), { duration: 4000 });
+  } catch (e) {}
+}
+
+async function askNotifyPermission() {
+  try {
+    if (typeof window.Notification !== 'undefined') await window.Notification.requestPermission();
+  } catch (e) {}
+  renderNotifyState((_settingsCache && _settingsCache.settings) || {});
 }
 
 // ---- Anonymous usage analytics ---------------------------------------------
@@ -1192,6 +1332,9 @@ _applyHdrPillAvailability();
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  pushSubscription, pushToggle, pushTest,
+  appearanceGet, applyAppearance, setAppearance,
+  renderNotifyState, toggleNotify, askNotifyPermission,
   updateModelsCard, dismissModelsCard, applyTierGates, openTierModal,
   closeTierModal, openBugModal, closeBugModal, submitBugReport,
   openSettingsModal, toggleAnalytics, saveAnalyticsKey, clearAnalyticsKey,

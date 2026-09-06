@@ -46,6 +46,28 @@ class TestH3TurboResolver(unittest.TestCase):
         path.write_bytes(b"runner-layout fixture")
         return path
 
+    def test_v4_600_ema_is_preferred_when_present_and_runs_six_forwards(self):
+        v4 = self.put(P.H3_TURBO_V4_FILE)
+        self.put(P.H3_TURBO_LORA_FILE)
+        self.put(P.H3_TURBO_CKPT500_FILE)
+        resolved = P.h3_turbo_paths()
+        self.assertEqual(resolved["lora"], v4)
+        self.assertEqual(resolved["version"], "v4-600-EMA")
+        self.assertFalse(resolved["fallback"])
+        self.assertEqual(P.h3_turbo_argv(resolved), ["--lora", f"{v4}:1.0"])
+        self.assertEqual(P.h3_turbo_steps(resolved), 7)          # 6 forwards
+        self.assertEqual(P.h3_turbo_steps({"version": "v1.0"}), 4)
+        self.assertEqual(P.h3_turbo_steps({"version": "ckpt500-EMA"}), 4)
+
+    def test_the_managed_download_is_the_v4_adapter_from_its_author(self):
+        a = P._h3_turbo_asset()
+        self.assertEqual(a["file"], P.H3_TURBO_V4_FILE)
+        self.assertTrue(a["url"].startswith("https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/"))
+        self.assertEqual(a["sha256"], "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3")
+        self.assertEqual(a["bytes"], 779849816)
+        # the LightX2V release asset stays reachable by key
+        self.assertEqual(P._h3_turbo_asset("v1.0")["url"], P.H3_TURBO_ASSET_URL)
+
     def test_v1_is_preferred_when_all_three_exist(self):
         primary = self.put(P.H3_TURBO_LORA_FILE)
         self.put(P.H3_TURBO_FALLBACK_LORA_FILE)
@@ -122,9 +144,9 @@ class TestH3TurboInstallContract(unittest.TestCase):
         result = P._h3_install_turbo(logs.append, download_fn=fake_download)
         self.assertTrue(result["ok"])
         self.assertTrue(result["started"])
-        self.assertEqual(result["asset"], P.H3_TURBO_ASSET_URL)
-        self.assertEqual(result["sha256"], P.H3_TURBO_ASSET_SHA256)
-        self.assertEqual(result["bytes"], P.H3_TURBO_ASSET_BYTES)
+        self.assertEqual(result["asset"], P._h3_turbo_asset()["url"])
+        self.assertEqual(result["sha256"], P._h3_turbo_asset()["sha256"])
+        self.assertEqual(result["bytes"], P._h3_turbo_asset()["bytes"])
         self.assertTrue(started.wait(timeout=5))
         self.assertEqual(calls, [self.target])
 

@@ -3,6 +3,12 @@
 </p>
 
 <p align="center">
+  <img src="assets/the_commuter_hero.gif" alt="The Commuter — a 75-second one take made in Phosphene" width="100%">
+  <br>
+  <sub><b>The Commuter</b> — a 75-second one take, rendered overnight on one Mac at native 1344×768 with Hailuo H3 and the new One take control, from a single designed still. <a href="https://github.com/mrbizarro/phosphene/releases/latest">Watch the full film in the release</a>.</sub>
+</p>
+
+<p align="center">
   <strong>Generative video, image, and character training on your Mac.</strong><br>
   MLX. No PyTorch, no CUDA, no cloud, no API key.<br>
   <a href="https://x.com/PhospheneAI">@PhospheneAI</a> on X · <a href="https://github.com/mrbizarro/phosphene">github.com/mrbizarro/phosphene</a>
@@ -13,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.9.8.** One urgent fix: installing or updating Hailuo H3 failed at the "TAE draft decoder" step with "Repository Not Found" — the Hugging Face repo that file came from was deleted. It is now fetched from a pinned commit of the author's GitHub repo and verified by hash (thanks @macstephen on Pinokio). Includes v4.9.7 (better fleet telemetry) and v4.9.6 (H3 clips take their sidecars to Trash). Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.10.0.** One take (a clip up to two minutes on either engine, written as beats), Turbo on the community's v4 adapter, a timeline that trims and moves like an NLE, anchor stills and long shots on the Storyboard, LoRA guides and update checks, closed-tab alerts, a light theme — and *The Commuter*, a 75 s one take rendered overnight at native, as the release film. Includes the v4.9.6–v4.9.8 fixes. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

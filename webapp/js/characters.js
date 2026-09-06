@@ -2593,13 +2593,120 @@ function temporalModeAllowed() {
   const mode = document.getElementById('mode').value;
   return !_qualityUsesHq(q) && currentMode !== 'extend' && currentMode !== 'keyframe' && (mode === 't2v' || mode === 'i2v');
 }
+// ---- ONE TAKE ---------------------------------------------------------------
+// A length past a single clip plus one beat per five seconds. The server does
+// the arithmetic (make_job → take_plan); this only keeps the form honest: the
+// engine's own length pills lock while a take is on, the beats box prefills
+// from the prompt the first time, and the estimate comes from /take/estimate.
+const TAKE_CHOICES = [0, 30, 45, 60, 90, 120];
+function setTakeSeconds(s, beats) {
+  s = parseInt(s || 0, 10) || 0;
+  if (!TAKE_CHOICES.includes(s)) s = 0;
+  const hid = document.getElementById('take_seconds');
+  if (hid) hid.value = String(s);
+  document.querySelectorAll('#takeGroup .pill-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.take, 10) === s));
+  const row = document.getElementById('beatsRow');
+  if (row) row.hidden = !s;
+  ['h3LengthGroup', 'ltxLengthGroup', 'temporalGroup', 'windowsRow'].forEach(id => {
+    const g = document.getElementById(id);
+    if (g) g.classList.toggle('take-locked', !!s);
+  });
+  const ta = document.getElementById('beats_text');
+  if (s && ta) {
+    if (Array.isArray(beats)) ta.value = beats.join('\n');
+    else if (!ta.value.trim()) ta.value = takePrefill(s);
+    beatsInput();
+    takeRefresh();
+  } else {
+    const b = document.getElementById('beats');
+    if (b) b.value = '';
+  }
+  if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
+  if (typeof updateDerived === 'function') updateDerived();
+}
+// The first beats come from the prompt itself, one sentence each, so the box
+// is never empty — the user edits, they do not start from nothing.
+function takePrefill(s) {
+  const prompt = (document.getElementById('prompt') || {}).value || '';
+  const n = Math.max(1, Math.round(s / 5));
+  const sents = prompt.split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(sents[i] || '');
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.join('\n');
+}
+function beatsInput() {
+  const ta = document.getElementById('beats_text');
+  const out = document.getElementById('beats');
+  const hint = document.getElementById('beatsHint');
+  if (!ta || !out) return;
+  const lines = String(ta.value || '').split('\n').map(x => x.trim());
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  out.value = lines.length ? JSON.stringify(lines) : '';
+  const s = parseInt((document.getElementById('take_seconds') || {}).value || '0', 10) || 0;
+  const n = Math.round(s / 5);
+  if (hint && n) {
+    const filled = lines.filter(Boolean).length;
+    hint.textContent = `${n} beats of 5 s · ${filled} written` + (filled < n ? ' · a blank line holds the moment' : '') + (lines.length > n ? ` · the last ${lines.length - n} won't fit` : '');
+  }
+}
+let _takeRefreshSeq = 0;
+async function takeRefresh() {
+  const el = document.getElementById('takeEstimate');
+  const s = parseInt((document.getElementById('take_seconds') || {}).value || '0', 10) || 0;
+  if (!el || !s) return;
+  const engine = document.body.dataset.engine || 'ltx';
+  const quality = engine === 'h3'
+    ? ((document.getElementById('h3_quality') || {}).value || 'standard')
+    : ((document.getElementById('quality') || {}).value || 'balanced');
+  const seq = ++_takeRefreshSeq;
+  el.textContent = 'working out the time…';
+  try {
+    const r = await (await fetch(`/take/estimate?engine=${encodeURIComponent(engine)}&quality=${encodeURIComponent(quality)}&seconds=${s}`)).json();
+    if (seq !== _takeRefreshSeq) return;
+    if (!r.ok) { el.textContent = r.error || ''; return; }
+    const bits = [`${r.beats} beats`];
+    if (r.engine === 'h3') bits.push(`${r.parts} parts of 15 s that continue from each other`);
+    else bits.push('EXPERIMENTAL on LTX: the picture drifts across passes — use H3 for a take you will keep');
+    if (r.eta) bits.push(`about ${r.eta.replace(/^~/, '').replace(' · batch', '')} on this Mac`);
+    else if (r.engine === 'ltx') bits.push('about 7 min per 5 s at Quick on this Mac');
+    el.textContent = bits.join(' · ');
+  } catch (e) { if (seq === _takeRefreshSeq) el.textContent = ''; }
+}
+
 function setTemporalMode(t) {
   const allowed = temporalModeAllowed();
-  const v = (allowed && t === 'fps12_interp24') ? 'fps12_interp24' : 'native';
+  const v = (allowed && (t === 'fps12_interp24' || t === 'windows')) ? t : 'native';
   document.getElementById('temporal_mode').value = v;
   document.querySelectorAll('#temporalGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.temporal === v));
+  // The per-window prompts belong to ONE of the three answers.
+  const row = document.getElementById('windowsRow');
+  if (row) row.hidden = (v !== 'windows');
+  if (v === 'windows') windowPromptsInput();
   updateCustomizeSummary();
   updateDerived();
+}
+
+// One line per window on screen, a JSON array on the wire — the same shape
+// the H3 chain posts, so a curl and the form agree. The hint counts the
+// windows the current length needs (ltx_windows: 121-frame windows, 112 new
+// frames each) so the box says how many lines mean something.
+function windowPromptsInput() {
+  const ta = document.getElementById('window_prompts_text');
+  const out = document.getElementById('window_prompts');
+  const hint = document.getElementById('windowsHint');
+  if (!ta || !out) return;
+  const lines = String(ta.value || '').split('\n').map(s => s.trim());
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  out.value = lines.length ? JSON.stringify(lines) : '';
+  if (hint) {
+    const f = parseInt(document.getElementById('frames')?.value || '121', 10) || 121;
+    const n = f <= 121 ? 1 : 1 + Math.ceil((f - 121) / 112);
+    hint.textContent = n <= 1
+      ? 'this length fits one window — pick a longer clip'
+      : n + ' windows · one line per window · blank holds the last moment';
+  }
 }
 function setUpscale(u) {
   const v = ['off', 'fit_720p', 'x2'].includes(u) ? u : 'off';
@@ -2831,6 +2938,8 @@ document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick =
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  setTakeSeconds, takePrefill, beatsInput, takeRefresh,
+  windowPromptsInput,
   audioStudioInit, audioStudioDurationChanged, audioStudioEnhancePrompt, audioStudioGenerate,
   trainRecommendedPreset, trainUpdatePresetButtons, trainUpdatePresetNote, downloadSampleCharacter,
   charactersInit, charactersRenderChips, charactersOpenCompose, charactersBackToGrid,

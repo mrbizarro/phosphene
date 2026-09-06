@@ -82,3 +82,19 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.addEventListene
 // surfaces: the manual generate form, the Characters tab (LoRA pair +
 // prompt + ship), and Train (character LoRA training).
 
+
+// The completion-alert switch is read by the poller from the settings cache,
+// which used to be filled only when the Settings modal opened. One fetch at
+// boot; the modal refreshes it as before.
+(async () => {
+  try {
+    if (!globalThis._settingsCache) {
+      const r = await fetch('/settings');
+      if (r.ok) globalThis._settingsCache = await r.json();
+    }
+  } catch (e) {}
+})();
+
+// The appearance is applied at boot, before anyone looks — a stored "light"
+// that arrived after the first paint would flash the dark palette first.
+try { if (typeof applyAppearance === 'function') applyAppearance(); } catch (e) {}

@@ -317,9 +317,48 @@ function filteredMainOutputs() {
   } else {
     all = currentOutputs;
   }
-  if (mainOutputsFilter === 'all') return all;
-  if (mainOutputsFilter === 'photos') return all.filter(isPhotoOutputMain);
-  return all.filter(o => !isPhotoOutputMain(o));
+  if (mainOutputsFilter === 'photos') all = all.filter(isPhotoOutputMain);
+  else if (mainOutputsFilter !== 'all') all = all.filter(o => !isPhotoOutputMain(o));
+  return applyOutputsQuery(all);
+}
+
+// THE SEARCH. Every word typed must appear somewhere in the output's name
+// or its sidecar words (`q`, built server-side); order does not matter.
+// "aria 1280 turbo" finds the Aria clips rendered at 1280 wide on the turbo
+// tier, and nothing else.
+let _outputsQuery = '';
+function applyOutputsQuery(rows) {
+  const words = String(_outputsQuery || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return rows;
+  return rows.filter(o => {
+    const hay = (String(o.name || '') + ' ' + String(o.q || '')).toLowerCase();
+    return words.every(w => hay.indexOf(w) >= 0);
+  });
+}
+function setOutputsQuery(v) {
+  _outputsQuery = String(v || '');
+  // A search over what is on screen is a search over the newest 60 unless
+  // the older ones are in: pull them the first time a word is typed.
+  if (_outputsQuery && !window._showingAllOutputs && typeof outputsLoadAll === 'function') {
+    try { outputsLoadAll().then(() => { if (typeof renderCarousel === 'function') renderCarousel(); paintOutputsCount(); }); } catch (e) {}
+  }
+  if (typeof renderCarousel === 'function') renderCarousel();
+  paintOutputsCount();
+}
+// ONE FORMATTER for the header, derived from (query, chip, count) every
+// time — the review caught "Outputs · 1507" losing its word after a search
+// was cleared, and "0 photos" where "0 matches" was true.
+function outputsTitleText() {
+  const n = filteredMainOutputs().length;
+  const kind = mainOutputsFilter === 'all' ? '' : (' ' + mainOutputsFilter);
+  if (_outputsQuery) return 'Outputs · ' + n + ' match' + (n === 1 ? '' : 'es') + kind;
+  return 'Outputs · ' + n + (kind || (n === 1 ? ' output' : ' outputs'));
+}
+function outputsQueryText() { return _outputsQuery; }
+function paintOutputsCount() {
+  const t = document.getElementById('carouselTitle');
+  if (!t) return;
+  t.textContent = outputsTitleText();
 }
 
 // "Show all (N)" button handler — fetches the full unified gallery from
@@ -834,6 +873,7 @@ function _portalLoraPicker(dest) {
 Object.assign(globalThis, {
   applyTierTimes, setKeyframeMode, keyframeTimingSlots, renderKeyframeDynamicSlots,
   maybeScaleTouchedKeyframeTiming, syncKeyframeTiming, isPhotoOutputMain, filteredMainOutputs,
+  applyOutputsQuery, setOutputsQuery, paintOutputsCount, outputsTitleText, outputsQueryText,
   outputsLoadAll, _updateMainFilterChips, _maybeAutoLoadAllForEmptyFilter, setMainOutputsFilter,
   updateModelCredit, toggleAvoidRow, syncAvoidRowFromValue, ingredientsServed,
   _paintControlGenNote, defaultRemixMode, setMode, _portalLoraPicker,

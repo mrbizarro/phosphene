@@ -57,7 +57,9 @@ Add a job to the panel's queue. Returns immediately; the helper renders it async
 | `image` | path | I2V only. Absolute path to a reference PNG/JPG. **Required** — since v4.6.1 an omitted or empty `image` on `i2v` / `i2v_clean_audio` is refused at job start with a readable error instead of defaulting to `examples/reference.png`, a demo file no install has ever shipped (that default was the widest-spread render failure in the fleet: `image not found: <path>`, 35 events across 22 people in 14 days). `LTX_DEFAULT_IMAGE` still supplies a default when it points at a file that actually exists. |
 | `audio` | path | Optional audio reference. |
 | `label` | string | Optional UI label for the queue card. |
-| `temporal_mode` | `native` \| (tiled modes) | `native` for normal jobs. |
+| `temporal_mode` | `native` \| `fps12_interp24` \| `windows`. **`windows`** renders past one 121-frame window as a SEQUENCE — one `generate`, then one `extend` per later window on the kept tail of the last (`ltx_windows.py`: `stride = window - discard - overlap`, `count = 1 + ceil((total - window + discard) / stride)`), trimmed to the asked length. Needs the Q8 add-on and a tier that allows Extend; refused with a sentence otherwise. Stored on the job as `long_mode`. |
+| `window_prompts` | JSON array (or newline-separated) of one line per window; line 1 blank = the prompt; a later blank line holds the previous moment. Each later window's prompt is its line FIRST, then the continuation clause, then `Throughout: <window_invariants>.` — the H3 chain contract, and the lead-with-the-move rule. |
+| `window_invariants` | What must not change between windows (who, where, light, lens). Re-injected into every later window. |
 | `loras` | JSON-encoded array | See LoRA payload below. |
 
 **LoRA payload:** the `loras` field is a JSON-encoded array of `{path, strength}` objects. Stack as many as needed:
@@ -135,7 +137,31 @@ Submit multiple prompts as one batch.
 
 ## Status — poll job state
 
+### One take — `take_seconds` + `beats` on `POST /queue/add`
+
+A clip longer than a single pass, on either engine. `take_seconds` is one of
+30 / 45 / 60 / 90 / 120; `beats` is a JSON list (or newline text) with one
+prompt per five seconds — a blank beat holds the previous moment, extras are
+dropped. The take overrules the engine's own length field:
+
+| engine | what make_job does | worker |
+|---|---|---|
+| `ltx` | `long_mode=windows`, `frames = seconds·24+1`, `window_prompts = beats` | the windows chain (needs the Q8 pack) |
+| `h3` | `h3_length=15s`, parts of three beats | `run_take_job_inner`: one ordinary H3 render per part, each starting from the last frame of the one before (`--first-frame`), parts hidden from the gallery, joined into `<name>_take<seconds>s.mp4` with a sidecar carrying `take.{seconds,beats,parts}` |
+
+`params.take` on the job: `{seconds, beats, parts, frames, engine, beat_prompts}`.
+Load Params restores a take as a take.
+
+### `GET /take/estimate`
+
+`?engine=h3|ltx&quality=<engine quality key>&seconds=<take_seconds>` →
+`{ ok, seconds, beats, parts, engine, frames, minutes, eta, needs_q8 }`. Minutes
+come from the same cost model as every other estimate (H3: the measured 15 s
+cell × parts); `null` where this Mac has no number (LTX windows are unpriced).
+
 ### `GET /status`
+
+Every `outputs[]` row carries `q`: the output's searchable words, lower-cased, built from its sidecar in the listing pass that already reads it — prompt, label, mode, quality, engine, character, seed, `WxH`, `Nf`, LoRA file stems, the model directory name, the temporal mode and `windows`. The gallery's search box is a substring test over `name + q`; every typed word must match, and typing pulls the older outputs in so the search is over everything.
 
 Returns the full panel state.
 
@@ -222,6 +248,34 @@ Anything else is whatever the trainer called it, passed through verbatim.
 Callers should surface `weak` **before** a render is spent finding out, and should not decorate `unknown`.
 
 `GET /train/list` carries the same verdict plus **`adapter_advice`** — one sentence naming what to do about it, empty when the verdict is `ok` or `unknown`. It is hardware-aware: on a sub-64 GB Mac it does **not** say "train again on High", because that machine cannot reach the graded recipe (see the profile section below). The panel's Train tab renders it as a banner above the trained-character chips and in the finished job's history row; a verdict a user cannot act on is a measurement, not an answer (#62).
+
+### `GET /loras/updates`
+
+Asks CivitAI whether any installed LoRA with a `civitai_id` in its sidecar has a
+newer version (`modelVersions[0].id` ≠ the sidecar's `civitai_version_id`). One
+request per such LoRA; nothing is downloaded.
+
+```jsonc
+{ "ok": true, "checked": 3,
+  "items": [ { "path": "...", "name": "...", "current_version_id": 1, "latest_version_id": 2,
+               "latest_version_name": "v2", "published_at": "...", "base_model": "LTXV 2.3",
+               "download_url": "...",            // what /civitai/download takes
+               "meta": { ... } } ],             // the sidecar the download will write
+  "errors": [ { "path": "...", "error": "..." } ] }
+```
+
+Installing the update is the ordinary `POST /civitai/download` with that
+`download_url` + `meta`; the new file lands beside the old one, which stays
+until deleted.
+
+### `POST /loras/guide`
+
+Form: `path` (an installed LoRA from `GET /loras`). The planner model writes a
+one-paragraph guide — what the LoRA does, how to prompt it, a strength to start
+from, what it fights with — from the sidecar's own name / description / trigger
+words, and saves it in the sidecar under `guide`; `GET /loras` rows then carry
+`guide`. Refused with 409 while a render runs (the planner is a 12B model).
+Returns `{ ok, guide }`.
 
 ### `POST /loras/refresh`
 
@@ -485,7 +539,27 @@ A **board** is a film: a concept, a cast, locations, and a numbered shot list. E
 | `GET /storyboard/get?id=<bid>` | One board document. |
 | `GET /storyboard/films` | The assembled films on disk — player path, runtime, picture size, size on disk, when it was made. `list_outputs` globs `OUTPUT/*.mp4` and never descends, so without this the one thing the feature makes is the one thing the app cannot show you. |
 
+### Brief switches (on `plan`)
+
+| Field | Board key | Effect |
+|---|---|---|
+| `auto` | `auto` | after the plan: render every shot, cut, assemble — no more buttons |
+| `anchor_stills` | `anchor_stills` | before a text/character shot renders, an ordinary image job makes its first frame (`still_job_id` → `still`; the character's sheet is the reference through `qwen_edit_inline` when it exists) and the clip renders as **i2v · anchor** from it. A still that fails sets `still_error` and the shot renders unanchored, once |
+| `long_windows` | `long_windows` | an LTX shot longer than 121 frames renders as `temporal_mode=windows` (a chain on the Q8 dev transformer) with the board's style and the shot's location as `window_invariants`, instead of being cut to fit. Extend cannot re-inject an image per window, so an anchored long shot is anchored by its first window only |
+| `take_seconds` | `take_seconds` | **one take**: the film is one shot of 30 / 45 / 60 / 90 / 120 s. The planner writes one beat per 5 s (`_sb_take_concept`), the board keeps ONE shot with `beats` (`collapse_take`), the card shows the beats for editing, and `shot_to_job` posts `take_seconds` + `beats` — the Video tab's take, so the render is the same on both doors. `0` turns it off |
+
+Each field is patched only when sent; an absent field keeps the board's value.
+
+`POST /storyboard/restill` — form `id`, `n`, optional `pass`: forgets shot `n`'s
+still and the clip rendered from it, turns `anchor_stills` on if it was off,
+and renders that shot alone (the still first, then the clip from it). Same
+refusals as `render` (planning, already rendering).
+
 ### Write — `POST /storyboard/<action>`
+
+**The Director.** `plan` accepts `soundtrack` (an audio file on this Mac) and `bars_per_shot` (1/2/4, default 2). With a track the plan is a MUSIC VIDEO: `beat_map()` — the same fit the Editor's Prepare runs — turns the downbeats into slots of `bars_per_shot` bars, the shot count is the slot count (the `shots` chips stand down; capped at `STORYBOARD_MAX_SHOTS` with a note), the planner's brief carries the bpm, the slot length, an arc instruction and two laws (begin every description with the movement; no dialogue, the track replaces every clip's sound), and each planned shot's `duration_s` is its slot plus a one-second handle, with `slot: {start, end}` on the shot. **The song map decides how often.** `song_map()` (storyboard_edit) puts SECTIONS on the same bar grid — `{start, end, label, energy, brightness}` with labels intro / verse / chorus / bridge / outro from position, relative loudness and brightness — and `director_pacing()` turns `bars_per_shot` into a per-section stride: the chorus cuts twice as often, the intro and outro half as often. Each slot carries its `section`; the brief tells the planner which shots fall in which section and how hot it is; a track the map cannot read is cut at the base stride and the log says so. The board records `soundtrack: {path, bpm, bars_per_shot, total_sec, count, slots, sections}`, the Editor's first auto-cut uses that track when Prepare has not cached another — so the film opens already cut on the beat — and `GET /storyboard/edit` returns `sections` so the ruler can paint the arc. A bad path is a 400 before the planner runs; the planner stage `grid` is reported while the beat is read.
+
+**Auto.** `plan` accepts `auto=1`: when the plan lands the draft render of every shot starts on its own (`_sb_auto_after_plan`, once the planner has given the memory back), and when the render thread finishes with every shot rendered the film is cut (`_sbe_auto_edit` — on the beat when there is a track) and assembled by the same assembler Render uses (`_sb_auto_film`); the board records `auto_film`. A shot that did not render leaves the film waiting and the log says how many. Stop still stops the render; the cut and the film are the ordinary ones and can be re-cut afterwards.
 
 Form-encoded unless noted. `id` is the board id throughout.
 
@@ -563,7 +637,7 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 |---|---|---|
 | `prepare` | `id`, `music`, `target_seconds` | Build proxies + peaks. `400` if `music` is not a file. |
 | `add-clip` | `id`, `from`, `only`, `path`, `title`, `kind` | `kind` is `video` \| `still` \| `slug` — passing it is what stops an image landing as a video with no frames. |
-| `relink` | `id` | Re-point clips at files that moved. |
+| `relink` | `id`, `only` | Re-point clips at their finished (delivery) files. **A finished RETAKE is never part of that batch** — it is offered against its clip with `retake: true` in the payload's `relink` rows and adopted one clip at a time with `only=<clip id>`. |
 | `cancel` | `id` | Cancel the prepare job. |
 | `auto` | `id`, `music`, `target_seconds`, `min_shot`, `max_shot` | Re-run the machine's cut. Lands in the **automatic** lane. |
 | `save` | JSON `{id, edit, expect_revision?}` | See below. |
@@ -573,10 +647,10 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 | `discard-backup` | `id` | Throw it away. |
 | `version` | `id`, `label` | Name a version. **Naming is not saving** — no revision bump, no write to `edit.json`, nothing about the timeline changes, which is exactly why it is safe to press at any moment. |
 | `restore` | `id`, `file` | Restore a history entry. Refuses while the film renders. |
-| `render` | `id`, `out`, `music`, `music_mode` | Assemble the film. `music_mode` is `replace` \| `under`. |
+| `render` | `id`, `out`, `music`, `music_mode`, `format`, `size` | Assemble the film. `music_mode` is `replace` \| `under`. **Deliver as:** `format` is `h264` (default, the panel's preset) \| `hevc` (VideoToolbox, `hvc1`, about half the bytes) \| `prores` (422 HQ, 10-bit 4:2:2, PCM sound, a `.mov` no browser previews); `size` is `native` (as cut) \| `1080p` \| `2160p` — one Lanczos scale after the overlays, up only, never a crop, skipped when the cut is already that height. `finish` is `none` \| `grain` \| `heavy_grain` — moving film grain (`noise` t+u, strength 9 / 18) added AFTER the size so a 4K delivery gets 4K grain; a delivery-time treatment, never in the document, never in the preview or the export. A different delivery is a different file: `<slug>_film_hevc_1080p.mp4`, `<slug>_film_prores.mov`, `<slug>_film_1080p_grain.mp4`. The facts carry `deliver: {format, size, finish, label}`. |
 | `export-nle` | `id` | FCP7 XML + After Effects JSX + linked media. |
 | `reveal` | `id`, `what` | Show in Finder. |
-| `generate` | `id`, `prompt`, `duration`, `duration_s`, `film_start`, `pass`, `character_id`, `seed`, `title`, `engine`, `trigger` | Shoot a new clip straight into a slot. |
+| `generate` | `id`, `prompt`, `duration`, `duration_s`, `film_start`, `pass`, `character_id`, `seed`, `title`, `engine`, `trigger`, `retake_of` | Shoot a new clip straight into a slot. With `retake_of=<clip id>` it is a **retake**: the clip's own shot is CLONED (character, refs, location, engine) and only the prompt, the length and the seed change; the new shot carries `edit_slot.retake_of`, and when it renders the Editor offers it against that clip ("Use it" / "Keep the old one"). 400 if the clip is no longer on the timeline. |
 
 **`save` semantics.** `revision` is the **server's** counter, taken from disk, never from what the client remembered — a stale tab must not be able to wind it backwards. Pass `expect_revision` to find out you were overtaken instead of silently overwriting the other tab: mismatch returns **`409` with `conflict: true`** and the current revision. Validation errors come back as **all of them at once** (`errors: [...]`, `400`) with the file on disk untouched, so a client can highlight every bad clip in one pass instead of playing whack-a-mole.
 
@@ -610,6 +684,8 @@ The Editor is a **top-level workflow**, not a stage of the storyboard: engine-ag
 | `source` | `auto` \| `human`. |
 | `locked` | bool. |
 | `adjust` | `{brightness}`, an ffmpeg `eq=brightness` additive offset clamped to ±`BRIGHTNESS_LIMIT` (0.5). **Neutral is absent** — dragging the slider back to zero leaves a document identical to one that never had a slider. |
+| `frame` | `{zoom, x, y}` — a reframe. The picture is magnified `zoom` times (1–3) and the window is centred at the fraction (`x`, `y`) of the source. Render: a `crop` of the source's own pixels before the fit, so one string is right at every size; preview: a CSS scale about the same anchor (approximate); export: FCP7 Basic Motion (scale + centre) and AE scale + position. **Neutral is absent**; a slug has nothing to reframe. |
+| `speed` | Play rate, `SPEED_MIN`–`SPEED_MAX` (0.25–4.0), video only. The slot is `(end - start) / speed`, so the 1x rule above reads "at its speed". Picture is `setpts`, sound is `atempo` chained past ffmpeg's 0.5–2.0 window, and the sound's envelope (`afx`) stays on the strip's PLAYED clock — a keyframe at 2 s is still at 2 s of the strip after a retime. **Absent is 1x.** Never set automatically. |
 | `audio` | The split edit. See below. |
 
 #### `clip.audio` — the J-cut and the L-cut
@@ -625,6 +701,30 @@ Video clips only. Same three numbers as the picture, for the SOUND — so the so
 **The PRESENCE of the field is the switch, not the values in it.** Do not derive "linked" from `audio` equalling the picture window: unlinking writes the window the clip already has, so a clip the user had just unlinked would read as linked and refuse to be dragged. The toggle adds the object or deletes it; nothing else decides. `normalise_edit` rounds the field but **never removes it** for the same reason, and strips it entirely from a still or a slug.
 
 Audio windows may not overlap each other any more than the pictures may. This is still one video track and one music lane — a split edit is a butt join that lands somewhere else, not a mix.
+
+#### `transitions[]` — a typed object that owns a BOUNDARY
+
+```jsonc
+"transitions": [{"id": "t1", "after_clip": "<clip id>",
+                 "kind": "dissolve" | "fade_black", "duration": 0.5}]
+```
+
+A cross-dissolve is two clips in the same second, and the picture lane's one-clip-at-a-time rule (`clips_overlap`) is load-bearing — so a transition is **not** an overlap. It names the OUTGOING clip and sits on the cut between it and its successor in film order; one per boundary. **The clips' own `film_start`/`film_end` do not move** and the film stays exactly as long as the timeline says. The render pulls half the duration of extra tail from beyond the outgoing clip's out-point and half of extra head from before the incoming clip's in-point (source the trims left behind), splits the picture concat at the boundary and joins the two runs with `xfade` (`fade` / `fadeblack`) centred on the cut. The sound needs nothing new: it takes the lane path (`_sb_split_audio_plan`) exactly as a J-cut does.
+
+`duration` is clamped on every read (`transition_duration`) to `min(asked, half the shorter neighbour, 2.0 s)` and snapped to an even number of frames; the document keeps the number typed. A side with no spare material is refused — `transition_no_handles` names the side and the shortfall ("clip 2 has only 0.10s before its in-point and the dissolve needs 0.25s there"). Every transition code (`transitions_shape`, `transition_shape`, `transition_unknown_clip`, `transition_last_clip`, `transition_duplicate_boundary`, `transition_kind`, `transition_duration`, `transition_no_handles`) is an **error**; none is in `WARNING_CODES`. `render` refuses with the same sentence. A still and a slug have all the handles anybody could ask for.
+
+#### `overlays[]` — cards, mattes, and titles
+
+`kind` is `still` | `video` | `text`. An explicit `kind` wins; with none, the path's suffix decides (`.png`/`.webp`/`.tif` are stills), so every overlay written before titles existed reads as it did. A **title** is an overlay whose pixels the render draws:
+
+```jsonc
+{"id": "o1", "kind": "text", "text": "FIN", "film_start": 40.0, "film_end": 44.0,
+ "style": {"font_size": 96, "color": "#ffffff", "align": "center", "x": 0.5, "y": 0.8,
+           "box": true, "box_color": "#000000", "box_opacity": 0.5},
+ "fx": {"fade_in": 0.5, "fade_out": 0.5}}
+```
+
+`font_size` is px at a 1080-high frame and scales with the film; `x`/`y` are the anchor as fractions of the frame; `align` says which edge of the text sits on `x`. `overlay_text()` is the one accessor and the style is written only where it differs from the defaults. The font is a FILE — `LTX_TITLE_FONT`, else the first of `TITLE_FONT_CANDIDATES` present on the machine — verified before ffmpeg is built; with none, `render` answers 400 with a sentence rather than a film with a hole in it. The raster is a frame-sized RGBA PNG beside the film (`.titles/`) fed through the same overlay chain as an uploaded card, so a title inherits the lane's alpha, fades and z-order. Titles are drawn on the stage in the DOM at the same anchor and size; they do not travel in the NLE export (no path).
 
 #### `audio` — the soundtrack, as an object on the timeline
 
@@ -702,11 +802,34 @@ Shut down a ComfyUI process if Phosphene started one.
 
 Self-update against the GitHub repo.
 
+## Push alerts — the completion alert for a closed tab
+
+The in-tab chime and browser alert (Settings → Completion alerts) need the page
+open. Web Push does not: the browser keeps a subscription for this origin, the
+panel signs each message with a VAPID key pair it generates once
+(`state/vapid.json`), and the browser's push service wakes `/sw.js` to show the
+notification. No relay: the panel posts straight to the browser vendor. Offered
+only when `pywebpush` imports (`GET /settings` → `push_available`).
+
+| Route | What |
+|---|---|
+| `GET /sw.js` | the service worker, served from the root scope with `Service-Worker-Allowed: /` |
+| `GET /push/key` | `{ ok, available, public_key, subscriptions }` — the VAPID public key the browser subscribes with (503 when unavailable) |
+| `POST /push/subscribe` | form `subscription` = the `PushSubscription` JSON; one entry per endpoint |
+| `POST /push/unsubscribe` | form `endpoint` |
+| `POST /push/test` | sends "This is what a finished render will say." to every subscriber; `{ ok, sent }` |
+
+Every job that ends `done` or `failed` pushes `Phosphene — render done` /
+`— a render failed` with the job's label (or the first 60 characters of its
+prompt), off the GPU lock, only while `notify_done` is on. A subscription the
+vendor reports gone (404 / 410) is dropped.
+
 ### `POST /settings`
 
 | Field | Type | Note |
 |---|---|---|
 | (any setting key) | string | See `state/panel_settings.json` for the canonical set. |
+| `notify_done` | `1`/`0` | Completion alerts: a chime in the tab when a render finishes or fails, and a browser notification when the tab is in the background and the person has allowed them. Default on; `GET /settings` returns it. |
 
 ### `POST /prompt/enhance`
 

@@ -456,6 +456,8 @@ function setEngine(engine, opts) {
   // reads the engine this call actually settled on rather than the one that
   // was requested — a gate may have bounced it back to the built-in.
   try { _syncLoraPickerForEngine(); } catch (e) {}
+  // A take's estimate is per engine (parts on H3, a chain on LTX).
+  try { if (typeof takeRefresh === 'function') takeRefresh(); } catch (e) {}
   return target;
 }
 
@@ -825,6 +827,9 @@ function snapFramesTo8kPlus1() {
 }
 
 function updateDerived() {
+  // The per-window hint counts windows for the CURRENT length, so it has to
+  // move when the length does, not only when the pill is clicked.
+  if (typeof windowPromptsInput === 'function') { try { windowPromptsInput(); } catch (e) {} }
   const mode = document.getElementById('mode').value;
   const w = parseInt(document.getElementById('width').value || 0);
   const h = parseInt(document.getElementById('height').value || 0);
@@ -1699,6 +1704,65 @@ function friendlyJobError(raw) {
   return { friendly: 'Job failed.', hint: raw };
 }
 
+// ---- Completion alerts ------------------------------------------------------
+// A render is minutes long. When one finishes — or fails — the tab says so
+// with a short chime, and the browser says so when the tab is in the
+// background and notifications were allowed. Keyed on the history: a job id
+// that was not done on the previous poll and is now. The first poll of a
+// page load only records what is already done, so opening the panel is never
+// a burst of alerts for last night.
+let _doneSeen = null;
+function notifyJobsDone(s) {
+  const hist = Array.isArray(s && s.history) ? s.history : [];
+  const now = new Set();
+  for (const j of hist) if (j && j.id && (j.status === 'done' || j.status === 'failed')) now.add(j.id);
+  if (_doneSeen === null) { _doneSeen = now; return; }
+  const cur = (globalThis._settingsCache && _settingsCache.settings) || {};
+  const on = cur.notify_done !== false;
+  for (const j of hist) {
+    if (!j || !j.id || !now.has(j.id) || _doneSeen.has(j.id)) continue;
+    if (on) notifyOneJob(j);
+  }
+  _doneSeen = now;
+}
+function notifyOneJob(j) {
+  const failed = j.status === 'failed';
+  const what = (j.params && (j.params.label || j.params.preset_label)) ||
+               (j.params && j.params.prompt ? String(j.params.prompt).slice(0, 60) : '') ||
+               (j.params && j.params.mode) || 'a render';
+  playDoneChime(failed);
+  try {
+    if (document.hidden && typeof window.Notification !== 'undefined' && window.Notification.permission === 'granted') {
+      const n = new window.Notification(failed ? 'Phosphene — a render failed' : 'Phosphene — render done',
+                                 { body: what, tag: 'phos-' + j.id, silent: true });
+      n.onclick = () => { try { window.focus(); n.close(); } catch (e) {} };
+    }
+  } catch (e) {}
+}
+// Two short tones from the Web Audio API — no asset, no download, and a
+// falling pair for a failure so the ear knows without looking.
+let _chimeCtx = null;
+function playDoneChime(failed) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!_chimeCtx) _chimeCtx = new AC();
+    const ctx = _chimeCtx;
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+    const t0 = ctx.currentTime + 0.01;
+    const notes = failed ? [[440, 0], [330, 0.16]] : [[660, 0], [880, 0.14]];
+    for (const [f, dt] of notes) {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0 + dt);
+      g.gain.exponentialRampToValueAtTime(0.12, t0 + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.22);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + 0.25);
+    }
+  } catch (e) {}
+}
+
 async function poll() {
   // Reflect HDR-vs-character mutual exclusion every poll cycle. character_id
   // gets set from multiple code paths (manual chip click, load-params,
@@ -1712,6 +1776,7 @@ async function poll() {
   const url = '/status' + (filterMode === 'hidden' ? '?include_hidden=1' : '');
   try {
     s = await (await fetch(url)).json();
+    notifyJobsDone(s);
     _POLL_FAILS = 0;
     _setOfflineBanner(false);
   } catch (e) {
@@ -2380,10 +2445,8 @@ async function poll() {
   // cells. "Outputs · 23 photos" when Photos is active, plain "Outputs · N"
   // when All. Hidden override stays unchanged.
   const _visible = filteredMainOutputs();
-  const _kindLabel = mainOutputsFilter === 'all' ? '' : ` ${mainOutputsFilter}`;
   document.getElementById('carouselTitle').textContent =
-    filterMode === 'hidden' ? 'Hidden outputs'
-                            : `Outputs · ${_visible.length}${_kindLabel}`;
+    filterMode === 'hidden' ? 'Hidden outputs' : outputsTitleText();
 
   // "Show all (N)" button — reveal whenever the server reports more
   // outputs total than the polling fast path returned, and the user
@@ -2782,7 +2845,9 @@ function renderCarousel() {
   const el = document.getElementById('carousel');
   const visible = filteredMainOutputs();
   if (!visible.length) {
-    const msg = mainOutputsFilter === 'photos' ? 'No photo outputs yet.'
+    const q = (typeof outputsQueryText === 'function') ? outputsQueryText() : '';
+    const msg = q ? ('No matches for \u201c' + escapeHtml(q) + '\u201d.')
+              : mainOutputsFilter === 'photos' ? 'No photo outputs yet.'
               : mainOutputsFilter === 'videos' ? 'No video outputs yet.'
               : 'No outputs in this view yet.';
     el.innerHTML = `<div class="empty-msg">${msg}</div>`;
@@ -3446,6 +3511,10 @@ async function loadParams() {
     try { setI2vRefMode(p.i2v_reference_mode || 'anchor'); } catch (e) {}
   }
   if (p.temporal_mode) setTemporalMode(p.temporal_mode);
+  // A take restores as a take (length + beats), not as the fields it was
+  // turned into — those are derived, and would re-derive differently.
+  if (p.take && p.take.seconds && typeof setTakeSeconds === 'function') setTakeSeconds(p.take.seconds, p.take.beat_prompts || p.take.beats || null);
+  else if (typeof setTakeSeconds === 'function') setTakeSeconds(0);
   if (p.upscale) setUpscale(p.upscale);
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);
   document.getElementById('prompt').value = p.prompt || '';
@@ -4469,6 +4538,7 @@ document.getElementById('genForm').addEventListener('submit', async e => {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  notifyJobsDone, notifyOneJob, playDoneChime,
   h3FinishSetTier, h3FinishActive, setEngine, _syncEnginePromptTools,
   currentEngine, _syncEngineForMode, openH3InstallCard, closeH3InstallCard,
   enhancePrompt, applyAspect, applyQuality, updateDerived,

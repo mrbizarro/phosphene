@@ -91,6 +91,7 @@ import numpy as np
 __all__ = [
     "best_window", "beat_map", "snap", "plan_cut",
     "probe_media", "format_plan", "plan_total", "audio_span_for",
+    "song_map", "director_pacing", "SECTION_LABELS",
 ]
 
 
@@ -910,6 +911,167 @@ def beat_map(audio_path, *, meter: int = DEFAULT_METER, sr: int = AUDIO_SR,
                            for s in scored[1:4]],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# THE SONG MAP — sections and energy, ON THE BAR GRID
+# ---------------------------------------------------------------------------
+# A beat grid says WHERE to cut; it says nothing about how OFTEN. A music
+# video that cuts every two bars through the intro and every two bars through
+# the chorus reads as a metronome, and the Director had no way to know which
+# was which. This is the second axis: for every bar of the fitted grid, how
+# loud and how bright the track is, and from those a list of SECTIONS with a
+# label (intro / verse / chorus / bridge / outro) and an energy in 0..1.
+#
+# ALIGNED TO DOWNBEATS, deliberately. A section boundary that lands between
+# two bars is a boundary no cut can sit on; snapping the analysis to the bar
+# grid means every section edge IS a downbeat and the planner's slots can
+# begin exactly there. Labels are a heuristic — position plus relative energy
+# and brightness — and are reported as such: `energy` is the number the
+# pacing is derived from, the label is the word the planner is told.
+SECTION_LABELS = ("intro", "verse", "chorus", "bridge", "outro")
+SECTION_MIN_BARS = 4           # shorter than a phrase is a fill, not a section
+SECTION_STEP = 0.15            # the jump in combined level that opens one
+
+
+def _bar_features(x: np.ndarray, sr: int, downbeats: list[float],
+                  t0: float, duration: float) -> tuple[np.ndarray, np.ndarray]:
+    """Per-bar RMS and spectral centroid, both normalised to 0..1."""
+    edges = [max(0.0, float(b) - t0) for b in downbeats if t0 <= float(b) < t0 + duration]
+    if not edges:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+    edges.append(min(duration, edges[-1] + (edges[-1] - edges[-2] if len(edges) > 1 else duration)))
+    n_fft = 2048
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr).astype(np.float32)
+    rms, cent = [], []
+    for a, b in zip(edges, edges[1:]):
+        i0, i1 = int(a * sr), max(int(a * sr) + n_fft, int(b * sr))
+        seg = x[i0:i1]
+        if seg.size < n_fft:
+            seg = np.pad(seg, (0, n_fft - seg.size))
+        rms.append(float(np.sqrt(np.mean(seg.astype(np.float32) ** 2))))
+        # A handful of windows across the bar is all a centroid needs; a full
+        # spectrogram per bar would be a megabyte to learn one number.
+        steps = max(1, min(8, seg.size // n_fft))
+        cs = []
+        for k in range(steps):
+            j = k * (seg.size - n_fft) // max(1, steps - 1) if steps > 1 else 0
+            mag = np.abs(np.fft.rfft(seg[j:j + n_fft] * np.hanning(n_fft)))
+            tot = float(mag.sum())
+            cs.append(float((mag * freqs).sum() / tot) if tot > 1e-9 else 0.0)
+        cent.append(float(np.mean(cs)))
+    rms = np.asarray(rms, dtype=np.float32)
+    cent = np.asarray(cent, dtype=np.float32)
+    rms = rms / (float(rms.max()) + 1e-8)
+    cent = cent / (float(cent.max()) + 1e-8)
+    return rms, cent
+
+
+def _label_section(energy: float, brightness: float, mean_energy: float,
+                   idx: int, total: int) -> str:
+    first, last = idx == 0, idx == total - 1
+    high = energy > mean_energy * 1.2
+    low = energy < mean_energy * 0.6
+    if first and low:
+        return "intro"
+    if last and low:
+        return "outro"
+    if high and brightness > 0.5:
+        return "chorus"
+    if low:
+        return "bridge"
+    return "verse"
+
+
+def song_map(audio_path, beats: dict | None = None, *, sr: int = AUDIO_SR,
+             span: tuple[float, float] | None = None,
+             min_bars: int = SECTION_MIN_BARS, step: float = SECTION_STEP) -> dict:
+    """Sections and energy for a soundtrack, on its own bar grid.
+
+    Returns::
+
+        {"bpm", "bars": [{"n", "start", "end", "energy", "brightness"}],
+         "sections": [{"start", "end", "label", "energy", "bars": [i, j)}],
+         "mean_energy", "duration"}
+
+    `beats` is a `beat_map()` result to reuse (the Director already has one);
+    absent, it is computed here. A track with fewer than `2 * min_bars` bars
+    is ONE section labelled by its own energy, never an error — a jingle is
+    still cuttable.
+    """
+    b = beats if isinstance(beats, dict) and beats.get("downbeats") else beat_map(audio_path, sr=sr, span=span)
+    t0 = float((b.get("span") or [0.0])[0])
+    duration = float(b.get("duration") or 0.0)
+    x = _decode_pcm(audio_path, sr=sr, span=(t0, t0 + duration) if duration > 0 else span)
+    if duration <= 0:
+        duration = x.size / float(sr)
+    downs = [float(t) for t in (b.get("downbeats") or [])]
+    rms, cent = _bar_features(x, sr, downs, t0, duration)
+    n = int(rms.size)
+    bars = []
+    for i in range(n):
+        start = float(downs[i])
+        end = float(downs[i + 1]) if i + 1 < len(downs) else round(t0 + duration, 6)
+        bars.append({"n": i + 1, "start": round(start, 6), "end": round(end, 6),
+                     "energy": round(float(rms[i]), 4),
+                     "brightness": round(float(cent[i]), 4)})
+    out = {"bpm": b.get("bpm"), "bars": bars, "sections": [],
+           "mean_energy": round(float(rms.mean()), 4) if n else 0.0,
+           "duration": round(duration, 4)}
+    if n == 0:
+        return out
+    combined = 0.7 * rms + 0.3 * cent
+    bounds = [0]
+    if n >= 2 * min_bars:
+        # THE JUMP BETWEEN THE LAST `min_bars` AND THE NEXT `min_bars`, at
+        # every bar, and a boundary only where that jump PEAKS: a window that
+        # straddles a real edge crosses the threshold for several bars in a
+        # row, and taking the first crossing put the boundary a phrase early
+        # (and a second one a phrase late).
+        diff = np.zeros(n + 1, dtype=np.float32)
+        for i in range(min_bars, n - min_bars + 1):
+            left = float(combined[i - min_bars:i].mean())
+            right = float(combined[i:i + min_bars].mean())
+            diff[i] = abs(right - left)
+        for i in range(min_bars, n - min_bars + 1):
+            if diff[i] <= step or i - bounds[-1] < min_bars:
+                continue
+            lo, hi = max(0, i - min_bars + 1), min(n + 1, i + min_bars)
+            if diff[i] >= float(diff[lo:hi].max()) - 1e-9:
+                bounds.append(i)
+    bounds.append(n)
+    mean_e = float(rms.mean())
+    total = len(bounds) - 1
+    for k in range(total):
+        i, j = bounds[k], bounds[k + 1]
+        e = float(rms[i:j].mean())
+        br = float(cent[i:j].mean())
+        out["sections"].append({
+            "start": bars[i]["start"], "end": bars[j - 1]["end"],
+            "label": _label_section(e, br, mean_e, k, total),
+            "energy": round(e, 4), "brightness": round(br, 4),
+            "bars": [i, j],
+        })
+    return out
+
+
+# HOW OFTEN TO CUT, PER SECTION. `base` is the user's bars-per-shot; the
+# chorus cuts twice as often, the intro and the outro half as often, and a
+# bridge holds the base. The energy number breaks ties for an unlabelled
+# section: hotter than the track's mean cuts faster. Never below one bar.
+def director_pacing(label: str, energy: float, mean_energy: float,
+                    base: int = 2) -> int:
+    base = max(1, int(base))
+    lab = str(label or "").lower()
+    if lab == "chorus":
+        return max(1, base // 2)
+    if lab in ("intro", "outro"):
+        return base * 2
+    if lab == "bridge":
+        return base
+    if mean_energy > 0 and energy > mean_energy * 1.2:
+        return max(1, base // 2)
+    return base
 
 
 def audio_span_for(target_seconds: float | None) -> tuple[float, float] | None:

@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Writing for Phosphene</title>
+<style>
+  body{max-width:760px;margin:40px auto;padding:0 20px;font:16px/1.55 -apple-system,Helvetica,Arial,sans-serif;color:#151a2e;background:#f7f8fc}
+  h1{font-size:26px}h2{font-size:19px;margin-top:28px}li{margin:6px 0}
+  button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #b9c0d4;background:#fff;cursor:pointer}
+  @media(prefers-color-scheme:dark){body{background:#0b0e1a;color:#e8ecf7}button{background:#1a2036;color:#e8ecf7;border-color:#3d477a}}
+</style>
+<button id="copy">Copy this guide for your assistant</button>
+<div id="out"></div>
+<pre id="md" hidden>__GUIDE_MD__</pre>
+<script>
+  // The guide is docs/PROMPTING.md, verbatim, escaped into #md by the server.
+  // This turns its headings, bullets and paragraphs into elements; the copy
+  // button copies the markdown itself so an assistant gets the real text.
+  const md = document.getElementById('md').textContent;
+  const out = document.getElementById('out');
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\*(.+?)\*/g, '<i>$1</i>');
+  out.innerHTML = md.split(/\n\n+/).map((p) => {
+    const t = p.trim();
+    if (!t) return '';
+    if (t.startsWith('# ')) return '<h1>' + inline(t.slice(2)) + '</h1>';
+    if (t.startsWith('## ')) return '<h2>' + inline(t.slice(3)) + '</h2>';
+    if (t.startsWith('- ')) return '<ul>' + t.split('\n').filter(l => l.startsWith('- ')).map(l => '<li>' + inline(l.slice(2)) + '</li>').join('') + '</ul>';
+    return '<p>' + inline(t) + '</p>';
+  }).join('');
+  document.getElementById('copy').onclick = function () {
+    navigator.clipboard.writeText(md).then(() => { this.textContent = 'Copied — paste it into your assistant'; });
+  };
+</script>

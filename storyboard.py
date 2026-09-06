@@ -586,9 +586,12 @@ def validate_storyboard_detail(
                 n=n_for_ui, field="prompt")
 
         dur = s.get("duration_s")
-        if not isinstance(dur, (int, float)) or not (0 < float(dur) <= 60):
+        # A take shot is as long as the take (up to 2 min); every other shot
+        # is one clip and stops at 60.
+        _dur_cap = max(TAKE_SECONDS) if s.get("take_seconds") in TAKE_SECONDS else 60
+        if not isinstance(dur, (int, float)) or not (0 < float(dur) <= _dur_cap):
             add("bad_duration",
-                f"{where}: duration_s must be between 0 and 60 (got {dur!r})",
+                f"{where}: duration_s must be between 0 and {_dur_cap} (got {dur!r})",
                 n=n_for_ui, field="duration_s", duration_s=dur)
 
         refs = s.get("refs") or []
@@ -779,6 +782,18 @@ def shot_render_secs(shot: dict, policy_pass: dict, *, h3_cost=None) -> float:
     """
     dur = float(shot.get("duration_s") or 0)
     quality = policy_pass.get("quality", "balanced")
+    if shot.get("take_seconds") in TAKE_SECONDS and shot_engine(shot) == "h3":
+        # A take on H3 is parts of 15 s; price the parts, not the duration.
+        parts = -(-(int(shot["take_seconds"]) // TAKE_BEAT_SECONDS) // 3)
+        qk = h3_quality_for(quality)
+        got = None
+        if h3_cost is not None:
+            try:
+                got = h3_cost(qk, "15s")
+            except Exception:
+                got = None
+        per = float(got) if got else _H3_SECS_PER_VIDEO_SEC.get(qk, 109.0) * _H3_LENGTH_SECONDS["15s"]
+        return per * parts
     if shot_engine(shot) == "h3":
         lk = h3_length_for(dur)
         qk = h3_quality_for(quality)
@@ -1303,11 +1318,67 @@ CHARACTER_QUALITY_FOR_PASS: dict[str, str] = {
 }
 
 
+# ---- ONE TAKE on the board --------------------------------------------------
+# A film that is one shot: the planner writes one movement per five-second
+# beat (as it does for a soundtrack slot), and the board keeps ONE shot that
+# carries the beats. shot_to_job turns it into the panel's take fields, so the
+# render is the same take a person gets from the Video tab.
+TAKE_BEAT_SECONDS = 5
+TAKE_SECONDS = (30, 45, 60, 90, 120)
+
+
+def collapse_take(shots: list[dict], seconds: int) -> list[dict]:
+    """The planner's N beat-shots become ONE take shot: the first shot's
+    identity (mode, character, refs, title) with `beats` = every shot's own
+    prompt, padded to the take's beat count, `duration_s` = the take."""
+    beats_n = max(1, int(seconds) // TAKE_BEAT_SECONDS)
+    items = [s for s in (shots or []) if isinstance(s, dict)]
+    if not items:
+        return []
+    first = dict(items[0])
+    beats = [str(s.get("prompt") or "").strip() for s in items][:beats_n]
+    beats += [""] * (beats_n - len(beats))
+    first.update({
+        "n": 1,
+        "prompt": beats[0] or first.get("prompt") or "",
+        "beats": beats,
+        "take_seconds": int(seconds),
+        "duration_s": float(seconds),
+        "frames": int(seconds) * 24 + 1,
+        "title": first.get("title") or "One take",
+    })
+    for k in ("slot", "section"):
+        first.pop(k, None)
+    return [first]
+
+
+def shot_wants_still(shot: dict) -> bool:
+    """A shot an anchor still can start: text and character shots. Keyframe,
+    extend and a2v already start from media of their own."""
+    return isinstance(shot, dict) and str(shot.get("mode") or "text") in ("text", "character")
+
+
+def still_prompt(prompt: str) -> str:
+    """The shot prompt, re-aimed at ONE frame: camera moves and durations
+    describe a clip, a still needs the composition at the first instant."""
+    move = r"(push(es|ing)?( in)?|pull(s|ing)?( back| out)?|pan(s|ning)?|tilt(s|ing)?|track(s|ing)?|dolly(ing)?|orbit(s|ing)?|zoom(s|ing)?|crane(s)?|glide(s)?|drift(s)?|sweep(s)?|circle(s)?)"
+    # a clause that is about the camera moving, from its start to the next punctuation
+    p = re.sub(r"(,\s*)?(as\s+)?(the\s+|a\s+)?(camera|lens|shot|frame)\s+[^.,;]*?\b" + move + r"\b[^.,;]*", "", prompt, flags=re.I)
+    p = re.sub(r"(,\s*)?(slow(ly)?|smooth(ly)?|gentl[ey]|fast|quick(ly)?)?\s*\b" + move + r"\b\s+(in|out|up|down|left|right|across|around|forward|back)?[^.,;]*", "", p, flags=re.I)
+    p = re.sub(r"\s+([.,;])", r"\1", p)
+    p = re.sub(r"([.,;])\1+", r"\1", p)
+    p = re.sub(r",\s*\.", ".", p)
+    p = re.sub(r"\s{2,}", " ", p).strip(" ,;.")
+    return (p + ". The first frame of the shot, held still: the composition, framing and light exactly as the shot opens.").strip()
+
+
 def shot_to_job(shot: dict, policy_pass: dict, *,
                 board_id: str = "", board_title: str = "",
                 h3_available: bool = True,
                 engine_mode: str = DEFAULT_ENGINE_MODE,
                 h3_chain_prompts: bool = False,
+                long_windows: bool = False,
+                style: str = "",
                 locations: dict[str, dict] | None = None,
                 wardrobe: dict[str, str] | None = None) -> dict:
     """Translate one storyboard shot into the panel's ORDINARY job form fields.
@@ -1430,6 +1501,33 @@ def shot_to_job(shot: dict, policy_pass: dict, *,
     # identifies itself in the bottom pane with no bottom-pane code at all. `session_tag`
     # carries the provenance the badge and the gallery group on. Both keys are already in
     # make_job's allowlist — no allowlist edit, which is the point.
+    # ONE TAKE. The shot carries `take_seconds` + `beats`; the panel's make_job
+    # does the rest (LTX: the windows chain; H3: 15 s parts that continue).
+    if shot.get("take_seconds") in TAKE_SECONDS:
+        job["take_seconds"] = str(int(shot["take_seconds"]))
+        job["beats"] = json.dumps([str(b or "") for b in (shot.get("beats") or [])])
+        if engine != "h3":
+            job["frames"] = int(shot["take_seconds"]) * 24 + 1
+    # ANCHOR STILL. When the shot has a still, the video STARTS from it: the
+    # ordinary i2v path with the still as the image, anchored (the strict
+    # pin, not Inspire). LTX only — H3's i2v is a different contract.
+    if shot.get("still") and engine != "h3" and job["mode"] == "t2v":
+        job["mode"] = "i2v"
+        job["image"] = str(shot["still"])
+        job["i2v_reference_mode"] = "anchor"
+    # LONG WINDOWS. A shot longer than one LTX window (121 frames) renders as
+    # a chain of windows on the Q8 dev transformer rather than being cut to
+    # fit. One prompt per window: the shot's own prompt, with the board's
+    # style and the shot's location as the invariants every window repeats.
+    # Extend cannot re-inject an image per window, so an anchored long shot is
+    # anchored by its first window only — the still opens it, the chain
+    # carries it. See ltx_windows.py.
+    if long_windows and engine != "h3" and int(job.get("frames") or 0) > 121 \
+            and job["mode"] in ("t2v", "i2v"):
+        job["temporal_mode"] = "windows"
+        inv = [s for s in (style.strip(), str((shot.get("location") or "")).strip()) if s]
+        if inv:
+            job["window_invariants"] = "; ".join(inv)
     n = shot.get("n")
     if board_id and isinstance(n, int):
         job["session_tag"] = f"sb:{board_id}#{n}"

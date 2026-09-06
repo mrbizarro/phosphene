@@ -380,6 +380,87 @@ function onIngredientCharStrength(v) {
   if (field) field.value = String(v);
 }
 
+// ---- Updates from CivitAI -------------------------------------------------
+// `LORA_UPDATES` maps an installed LoRA's path to the newer version the
+// check found. The badge and the Update button read it; the install is the
+// same /civitai/download the browser tab uses, so the new file lands with a
+// sidecar and the picker learns it on the next refresh.
+const LORA_UPDATES = {};
+// The check is remembered per browser (with when it ran) so the badges
+// survive a reload; a new check replaces it.
+try {
+  const saved = JSON.parse(localStorage.getItem('phos_lora_updates') || 'null');
+  if (saved && saved.items && (Date.now() - (saved.at || 0)) < 7 * 86400e3) {
+    saved.items.forEach(it => { LORA_UPDATES[it.path] = it; });
+  }
+} catch (e) {}
+async function checkLoraUpdates() {
+  const btn = document.getElementById('loraUpdatesBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const r = await (await fetch('/loras/updates')).json();
+    Object.keys(LORA_UPDATES).forEach(k => delete LORA_UPDATES[k]);
+    (r.items || []).forEach(it => { LORA_UPDATES[it.path] = it; });
+    try { localStorage.setItem('phos_lora_updates', JSON.stringify({ at: Date.now(), items: r.items || [] })); } catch (e) {}
+    const n = (r.items || []).length;
+    if (typeof phosToast === 'function') {
+      phosToast(!r.checked ? 'No installed LoRA came from CivitAI, so there is nothing to check.'
+        : n ? `${n} LoRA${n > 1 ? 's have' : ' has'} a newer version on CivitAI — marked in the list.`
+        : `All ${r.checked} CivitAI LoRA${r.checked > 1 ? 's are' : ' is'} up to date.`
+        + ((r.errors || []).length ? ` ${r.errors.length} could not be checked.` : ''), { duration: 6000 });
+    }
+    renderLorasList();
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('CivitAI could not be reached.', { kind: 'danger' });
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Check for updates'; }
+  }
+}
+async function updateLora(path) {
+  const it = LORA_UPDATES[path];
+  if (!it) return;
+  if (typeof phosToast === 'function') phosToast(`Downloading ${it.name} · ${it.latest_version_name || 'new version'}…`, { duration: 5000 });
+  const fd = new URLSearchParams();
+  fd.set('download_url', it.download_url);
+  fd.set('meta', JSON.stringify(it.meta || {}));
+  try {
+    const r = await (await fetch('/civitai/download', { method: 'POST', body: fd })).json();
+    if (r.ok) {
+      delete LORA_UPDATES[path];
+      try { localStorage.setItem('phos_lora_updates', JSON.stringify({ at: Date.now(), items: Object.values(LORA_UPDATES) })); } catch (e) {}
+      if (typeof phosToast === 'function') phosToast(`${it.name} updated. The old file is still installed — delete it from the list when you are done comparing.`, { duration: 8000 });
+      await refreshLoras();
+    } else if (typeof phosToast === 'function') phosToast(r.error || 'The download failed.', { kind: 'danger', duration: 7000 });
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('The download failed.', { kind: 'danger' });
+  }
+}
+
+// ---- Guides -----------------------------------------------------------------
+// One paragraph per LoRA, written by the planner model from the sidecar
+// (name, description, trigger words, base model) and saved back into it.
+async function writeLoraGuide(path, btn) {
+  // Busy state on the button itself: the planner model loads for tens of
+  // seconds the first time, and a second click would queue a second write.
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = 'Writing…'; }
+  const fd = new URLSearchParams(); fd.set('path', path);
+  try {
+    const r = await (await fetch('/loras/guide', { method: 'POST', body: fd })).json();
+    if (r.ok) { await refreshLoras(); }
+    else if (typeof phosToast === 'function') phosToast(r.error || 'The guide could not be written.', { kind: 'danger', duration: 7000 });
+  } catch (e) {
+    if (typeof phosToast === 'function') phosToast('The guide could not be written.', { kind: 'danger' });
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = btn.dataset.label || 'Write a guide'; }
+  }
+}
+// Guides are refused while a render runs (the planner is a 12B model); say
+// so on the button instead of after the click.
+function _guideBusyAttrs() {
+  const busy = !!(globalThis.LAST_STATUS && globalThis.LAST_STATUS.current);
+  return busy ? 'disabled title="Wait for the render to finish — the guide is written by the planner model"' : '';
+}
+
 async function refreshLoras() {
   // Pull the FULL library (no mode filter) so _knownUserLoras keeps every
   // entry — that lets refreshLoras() also serve as the "deleted on disk"
@@ -480,6 +561,7 @@ function renderLorasList() {
       recommended_strength: ul.recommended_strength || 1.0,
       filename: ul.filename,
       civitai_url: ul.civitai_url,
+      guide: ul.guide || '',
       compatible_modes: ul.compatible_modes || ['unknown'],
       // Which engine DIRECTORY this file came from. Checked before
       // compatible_modes in the filter below, because 'unknown' is
@@ -753,6 +835,11 @@ function loraRowHtml(r, modeTag) {
     corner.push(`<button class="lora-icon-btn" type="button" title="Download the .safetensors file"
                          onclick="event.stopPropagation(); downloadLora(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></button>`);
   }
+  if (LORA_UPDATES[r.path]) {
+    const up = LORA_UPDATES[r.path];
+    corner.push(`<button class="lora-icon-btn lora-update-btn" type="button" title="Newer version on CivitAI: ${escapeHtml(up.latest_version_name || String(up.latest_version_id))} — download it"
+                         onclick="event.stopPropagation(); updateLora(${pathAttr})"><svg class="ph" aria-hidden="true"><use href="#ph-download-simple"/></svg></button>`);
+  }
   if (r.civitai_url) {
     corner.push(`<a class="lora-icon-btn" href="${escapeHtml(r.civitai_url)}" target="_blank" rel="noopener" title="Open on CivitAI" onclick="event.stopPropagation()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-square-out"/></svg></a>`);
   }
@@ -780,7 +867,7 @@ function loraRowHtml(r, modeTag) {
         <div class="lora-toggle-dot"></div>
         <div class="lora-text">
           <div class="lora-name" title="${pathHtml}">
-            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${r.kind === 'trained' ? '<span class="badge badge-trained" title="Trained in Phosphene’s Train Character workflow">Trained</span>' : ''}${familyBadges.join('')}
+            ${nameHtml}${r.kind === 'remote' ? '<span class="badge">HF</span>' : ''}${r.kind === 'trained' ? '<span class="badge badge-trained" title="Trained in Phosphene’s Train Character workflow">Trained</span>' : ''}${familyBadges.join('')}${LORA_UPDATES[r.path] ? `<button type="button" class="badge badge-update lora-update-badge" title="A newer version is on CivitAI — click to download it" onclick="event.stopPropagation(); updateLora(${pathAttr})">Update</button>` : ''}
           </div>
           <div class="lora-name-meta" title="${escapeHtml(trigs.join(', '))}">${escapeHtml(trigSummary)}</div>
         </div>
@@ -797,6 +884,13 @@ function loraRowHtml(r, modeTag) {
                  oninput="this.previousElementSibling.value = this.value; setLoraStrength(${pathAttr}, this.value)">
         </div>
         <div class="trigger-chips">${chipsHtml}</div>
+        ${(r.kind === 'user' || r.kind === 'trained') ? `
+        <div class="lora-guide-actions">
+          ${r.guide ? '' : `<button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">Write a guide</button>
+          <span class="muted small">What it does, how to prompt it, a strength to start from — written by the planner model from the LoRA's own notes.</span>`}
+        </div>
+        ${r.guide ? `<div class="lora-guide">${escapeHtml(r.guide)}
+          <div class="lora-guide-actions"><button type="button" class="ghost-btn small" ${_guideBusyAttrs()} onclick="event.stopPropagation(); writeLoraGuide(${pathAttr}, this)">Rewrite</button></div></div>` : ''}` : ''}
       </div>
     </div>`;
 }
@@ -1254,6 +1348,7 @@ function renderCharacterStrip() {
 // Inline handlers in the markup and the other files resolve these through
 // the global scope; everything NOT listed here is private to this module.
 Object.assign(globalThis, {
+  checkLoraUpdates, updateLora, writeLoraGuide,
   _currentLoraModeFilter, _syncLoraPickerForEngine, importH3Lora, renderH3LoraSlot,
   setH3LoraSlot, _serializeLoras, addLoraToActive, populateIngredientCharLoras,
   onIngredientCharChange, onIngredientCharStrength, refreshLoras, _loraGenerationCompatible,
