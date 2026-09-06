@@ -117,6 +117,19 @@
 > update (EditAnything → LTX 2.5 v2.0); `/loras/guide` wrote a real guide
 > (6.5 s).
 
+> **🚨 2026-09-06 — v4.9.8: H3 install/update broken for everyone by a deleted HF repo — fixed.**
+> `madebyollin/taeh3` on Hugging Face is gone (401/404); install_h3.js fetched
+> the 22 MB TAE draft decoder from it, so every H3 install and "Update Hailuo
+> H3" died at that step (Pinokio, @macstephen). New
+> `scripts/pinokio/h3_fetch_tae.py`: pinned GitHub commit of
+> madebyollin/taehv, size + sha256 verified, atomic, idempotent, HF fallback.
+> The LTX live-preview TAE was never at risk (mirrored on weights-ltx25-v1).
+> Lesson: any third-party download in the install path must be mirrored or
+> hash-pinned — HF repos vanish. #62: Piotr's clean-folder run still shows no
+> identity; sidecar shows base = LTX-2.3 Q8 (by design — trainer is 2.3-based
+> and adapters transfer, the sample character proves it); asked him for the
+> adapter file to test here.
+
 > **📈 2026-09-05 — v4.9.7: the fleet picture gets its blind spots filled (analytics only).**
 > `source` on every render event; `feature_used` (storyboard_plan/export,
 > editor_open/export, civitai_download, sample_character, train_start);

@@ -13,7 +13,7 @@
 
 </p>
 
-> **Current release: v4.9.7.** Better anonymous fleet telemetry, no new behaviour for you: renders now report which surface queued them (form, Batch, Storyboard, Characters, Image Studio, Retry), a handful of feature-use counts (Storyboard planning, the Editor, CivitAI, the sample character, a training start), whether the update pop-up was answered, and when the queue paused itself — all closed vocabularies, no text, same install id, same Settings toggle to turn it off (see docs/ANALYTICS.md). Also: the stats page shows complete weight-pack downloads instead of a per-file total. Includes v4.9.6 (H3 clips take their sidecars to Trash, #77). Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.9.8.** One urgent fix: installing or updating Hailuo H3 failed at the "TAE draft decoder" step with "Repository Not Found" — the Hugging Face repo that file came from was deleted. It is now fetched from a pinned commit of the author's GitHub repo and verified by hash (thanks @macstephen on Pinokio). Includes v4.9.7 (better fleet telemetry) and v4.9.6 (H3 clips take their sidecars to Trash). Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

@@ -283,7 +283,12 @@ module.exports = {
         },
         message: [
           "mkdir -p '{{cwd}}/mlx_models/hailuo-h3/models/tae'",
-          ".venv/bin/python -c \"from huggingface_hub import hf_hub_download; import shutil; p=hf_hub_download('madebyollin/taeh3','taeh3.safetensors'); shutil.copy(p, '{{cwd}}/mlx_models/hailuo-h3/models/tae/taeh3.safetensors'); print('TAE draft decoder ready')\""
+          // The HF repo this used to come from (madebyollin/taeh3) was deleted
+          // in 2026-09 and every H3 install died here with "Repository Not
+          // Found" (Pinokio, @macstephen). The script fetches the same bytes
+          // from a pinned commit of the author's GitHub repo, verifies the
+          // sha256, and keeps HF as a fallback.
+          ".venv/bin/python ../scripts/pinokio/h3_fetch_tae.py '{{cwd}}/mlx_models/hailuo-h3/models/tae/taeh3.safetensors'"
         ]
       }
     },
