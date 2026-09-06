@@ -89,6 +89,19 @@ ENHANCE_GEMMA_PATH = os.environ.get(
 )
 IDLE_TIMEOUT = int(os.environ.get("LTX_IDLE_TIMEOUT", "1800"))
 LOW_MEMORY = os.environ.get("LTX_LOW_MEMORY", "true").lower() in ("true", "1", "yes")
+# Low-RAM block streaming (v4.9.9): stream transformer blocks from disk instead
+# of holding the whole DiT resident. The panel sets this for small-memory Macs
+# (see HELPER_LOW_RAM_STREAM in mlx_ltx_panel.py). Slower per step, far
+# smaller peak — the difference between a 16 GB Mac finishing a clip and
+# being jetsam-killed. Renders that carry LoRAs keep the exact unfused
+# runtime branch and skip streaming (the streamer cannot carry per-block
+# adapters; the library refuses rather than silently fusing on a quantized
+# pack), so the flag is applied per pipeline, not blindly.
+LOW_RAM_STREAM = os.environ.get("LTX_LOW_RAM_STREAM", "0").lower() in ("true", "1", "yes")
+
+
+def _stream_for(loras) -> bool:
+    return bool(LOW_RAM_STREAM) and not loras
 MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() in ("1", "true", "yes", "on")
 
 # Y1.037 — VAE temporal-streaming decision.
@@ -569,7 +582,7 @@ _extend_lora_key: tuple | None = None
 _extend_dev_name: str | None = None
 
 
-def _lora_fingerprint(loras: list[dict] | None) -> tuple:
+def _lora_fingerprint_base(loras: list[dict] | None) -> tuple:
     """Stable hashable representation of a LoRA list. Order-insensitive
     so [{a,1},{b,2}] and [{b,2},{a,1}] hash to the same set — fusing
     is commutative."""
@@ -579,6 +592,13 @@ def _lora_fingerprint(loras: list[dict] | None) -> tuple:
         (str(l.get("path", "")), float(l.get("strength", 1.0)))
         for l in loras
     ))
+
+def _lora_fingerprint(loras: list[dict] | None) -> tuple:
+    """The pipeline cache key: the LoRA set AND whether this job streams
+    blocks (v4.9.9). A LoRA-free job after a LoRA job must not reuse a
+    pipeline built the other way round."""
+    return _lora_fingerprint_base(loras) + (("stream",) if _stream_for(loras) else ())
+
 
 
 def _resolve_lora_path(path: str) -> str:
@@ -1286,6 +1306,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                       "line": "Loading I2V pipeline (first job is the slow one)..."})
                 pipe = ImageToVideoPipeline(
                     model_dir=i2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                    low_ram_streaming=_stream_for(loras),
                 )
                 _attach_loras(pipe, loras)
                 _i2v_pipe = pipe
@@ -1312,6 +1333,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                       "line": f"Loading Extend pipeline (heavier — uses dev transformer at {ext_dir})..."})
                 pipe = ExtendPipeline(
                     model_dir=ext_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                    low_ram_streaming=_stream_for(loras),
                     dev_transformer=ext_dev,
                 )
                 _attach_loras(pipe, loras)
@@ -1335,6 +1357,7 @@ def get_pipe(kind: str, loras: list[dict] | None = None,
                   "line": "Loading T2V pipeline (first job is the slow one)..."})
             pipe = TextToVideoPipeline(
                 model_dir=t2v_dir, gemma_model_id=GEMMA_PATH, low_memory=LOW_MEMORY,
+                low_ram_streaming=_stream_for(loras),
             )
             _attach_loras(pipe, loras)
             _t2v_pipe = pipe
@@ -2648,6 +2671,16 @@ def apply_mlx_cache_policy() -> None:
         return
     try:
         import mlx.core as mx
+        if LOW_RAM_STREAM:
+            # Streaming only pays if freed block buffers actually leave the
+            # heap; a retained cache re-pins them. Keep the pipeline's own
+            # set_cache_limit(0) instead of re-asserting the fractional cap.
+            mx.set_cache_limit(0)
+            if not _MLX_CACHE_ANNOUNCED:
+                _MLX_CACHE_ANNOUNCED = True
+                emit({"event": "log",
+                      "line": "[mlx] low-RAM streaming: transformer blocks are read from disk as needed and the Metal cache is off — slower per step, far smaller peak."})
+            return
         mx.set_cache_limit(int(_MLX_CACHE_LIMIT))
     except Exception as exc:                          # noqa: BLE001
         if not _MLX_CACHE_ANNOUNCED:
@@ -2718,6 +2751,7 @@ emit({
     "gemma4_tower_supported": (
         importlib.util.find_spec("ltx_core_mlx.text_encoders.gemma.gemma4")
         is not None),
+    "low_ram_stream": bool(LOW_RAM_STREAM),
     "mlx_version": _RUNTIME_ENV.get("mlx"),
     "mlx_metal_version": _RUNTIME_ENV.get("mlx_metal"),
     # None when the policy is off (LTX_MLX_CACHE_GIB=off) — i.e. MLX's own

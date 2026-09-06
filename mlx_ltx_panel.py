@@ -247,6 +247,12 @@ STATS_HTML_FILE = ROOT / "panel_assets" / "stats.html"
 STATS_FETCHER = ROOT / "scripts" / "fetch_repo_stats.py"
 HELPER_IDLE_TIMEOUT = int(os.environ.get("LTX_HELPER_IDLE_TIMEOUT", "1800"))
 HELPER_LOW_MEMORY = os.environ.get("LTX_HELPER_LOW_MEMORY", "true")
+# Low-RAM block streaming (v4.9.9): on Macs with 24 GB or less the helper
+# streams transformer blocks from disk instead of holding the whole DiT
+# resident — the 16 GB installs were the ones dying of jetsam mid-render.
+# `LTX_LOW_RAM_STREAM=1|0` in the environment forces it either way (testing
+# on a big Mac, or opting out); otherwise it is decided by physical RAM.
+LOW_RAM_STREAM_RAM_GB = 24
 # Enhance is an interactive HTTP request, unlike renders that may legitimately
 # run for tens of minutes. Bound its helper wait below the UI/curl client's
 # 120-second ceiling so a silent helper still produces a JSON error response.
@@ -11618,6 +11624,19 @@ def _settings_set_internal(**kv) -> None:
         pass
 
 
+def low_ram_streaming_enabled() -> bool:
+    """Whether renders on this Mac stream transformer blocks from disk."""
+    forced = (os.environ.get("LTX_LOW_RAM_STREAM") or "").strip().lower()
+    if forced in ("1", "true", "yes"):
+        return True
+    if forced in ("0", "false", "no"):
+        return False
+    try:
+        return float(SYSTEM_RAM_GB or 0) <= LOW_RAM_STREAM_RAM_GB
+    except (TypeError, ValueError):
+        return False
+
+
 def _analytics_enabled() -> bool:
     """Master switch. Settings toggle (default ON), with an env kill-switch
     for users who want it off before the panel ever writes a settings file
@@ -13969,6 +13988,7 @@ class WarmHelper:
             env["LTX_ENHANCE_GEMMA"] = str(GEMMA)
             env["LTX_IDLE_TIMEOUT"] = str(HELPER_IDLE_TIMEOUT)
             env["LTX_LOW_MEMORY"] = HELPER_LOW_MEMORY
+            env["LTX_LOW_RAM_STREAM"] = "1" if low_ram_streaming_enabled() else "0"
             env["LTX_ENABLE_MODEL_UPSCALE"] = "1" if MODEL_UPSCALE_ENABLED else "0"
             # Output codec env vars sourced from panel settings. The patched
             # ffmpeg call inside ltx_core_mlx reads these at job time, so
@@ -14039,7 +14059,7 @@ class WarmHelper:
             self.ready_info = {
                 k: ready.get(k) for k in (
                     "ltx_version", "ltx_version_expected", "ltx_version_match",
-                    "model", "gemma", "low_memory",
+                    "model", "gemma", "low_memory", "low_ram_stream",
                     "mlx_version", "mlx_metal_version", "chip", "macos",
                     # THIS ALLOWLIST IS THE SEAM. A key the helper emits and
                     # this tuple does not name is dropped here, silently, and

@@ -506,3 +506,27 @@ class StepCountsNeverPadTheTable(unittest.TestCase):
         with unittest.mock.patch.object(P, "model_version", lambda *a, **k: {"id": "ltx25"}):
             P._clamp_stage_steps_to_tables(job)
         self.assertEqual((job["params"]["stage1_steps"], job["params"]["stage2_steps"]), (6, 2))
+
+
+class LowRamStreamingDecision(unittest.TestCase):
+    """v4.9.9: Macs with 24 GB or less stream transformer blocks from disk;
+    the environment can force either way for testing or opting out."""
+
+    def test_small_macs_stream_big_ones_do_not(self):
+        with unittest.mock.patch.dict(os.environ, {"LTX_LOW_RAM_STREAM": ""}):
+            with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 16.0):
+                self.assertTrue(P.low_ram_streaming_enabled())
+            with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 24.0):
+                self.assertTrue(P.low_ram_streaming_enabled())
+            with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 32.0):
+                self.assertFalse(P.low_ram_streaming_enabled())
+            with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 64.0):
+                self.assertFalse(P.low_ram_streaming_enabled())
+
+    def test_environment_forces_either_way(self):
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 64.0):
+            with unittest.mock.patch.dict(os.environ, {"LTX_LOW_RAM_STREAM": "1"}):
+                self.assertTrue(P.low_ram_streaming_enabled())
+        with unittest.mock.patch.object(P, "SYSTEM_RAM_GB", 16.0):
+            with unittest.mock.patch.dict(os.environ, {"LTX_LOW_RAM_STREAM": "0"}):
+                self.assertFalse(P.low_ram_streaming_enabled())

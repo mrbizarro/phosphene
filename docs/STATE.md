@@ -1,5 +1,31 @@
 # Phosphene — project state, history, open work
 
+> **🪶 2026-09-06 — low-RAM block streaming for ≤24 GB Macs (on dev, rides the next release).**
+> The vendored engine already had `low_ram_streaming` (BlockStreamer); the
+> helper never used it. Now `LTX_LOW_RAM_STREAM` (panel sets it when
+> SYSTEM_RAM_GB ≤ 24; env forces either way) → t2v/i2v/extend pipelines get
+> `low_ram_streaming=_stream_for(loras)`; LoRA jobs keep the exact unfused
+> branch (the streamer cannot carry per-block adapters; the library refuses
+> rather than fusing lossily on a quantized pack); the pipeline cache key
+> carries the decision; apply_mlx_cache_policy keeps the Metal cache at 0
+> while streaming; /status reports `low_ram_stream`. **Measured (64 GB Mac,
+> forced on, Q4 Balanced i2v 1024×576×121, seed 4242):** denoise peak
+> 16.13 → 13.77 GiB, active between phases 10.58 → 1.04 GiB, wall 141 →
+> 151 s, frames bit-identical (framemd5) at 768×432×49 and 1024×576×121.
+> `test_low_ram_stream.py`. RELEASE NOTE for whoever cuts 4.10.x next: "Macs
+> with 24 GB or less stream the video model from disk during a render —
+> peak memory 16.1 → 13.8 GB on a heavy Image render, ~7% slower, frames
+> identical; renders with a LoRA/character keep the previous path."
+> **AdaLN dedupe (upstream ltx-2-mlx #86/#119/#121) PARKED:** cherry-picked
+> cleanly onto our fork (local branch `adaln-dedupe-0152` in ltx-2-mlx; 17
+> upstream tests + 971 fork tests pass) and proven bitwise-identical on both
+> canvases, but ZERO measured gain on our lane (142 vs 144 s, same peak) —
+> our 2.5 i2v pins the reference by sample re-composition, not per-token
+> timesteps, so there is nothing to dedupe. Revisit with the full rebase
+> onto upstream 0.15.x (push to fork refused: a cherry-pick touches
+> .github/workflows; token lacks `workflow` scope). Landscape research:
+> ~/AI/projects/phosphene/notes/ltx25_landscape_2026-09-06.md.
+
 > **🚀 2026-09-06 — v4.10.0 ships.** Everything on this branch since v4.9.5
 > goes public as one release: Editor v2 (transitions, speed, titles, the
 > Director + song map, retake, completion alerts, deliver-as, duplicate,

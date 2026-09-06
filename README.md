@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.1.** Continuity for one-takes: the light is locked in every beat, each part is measured, and a part whose light drifts is retaken once on its own. One take (a clip up to two minutes on either engine, written as beats), Turbo on the community's v4 adapter, a timeline that trims and moves like an NLE, anchor stills and long shots on the Storyboard, LoRA guides and update checks, closed-tab alerts, a light theme — and *The Commuter*, a 75 s one take rendered overnight at native, as the release film. Includes the v4.9.6–v4.9.8 fixes. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.10.2.** Macs with 24 GB of memory or less now stream the video model's blocks from disk during a render instead of holding the whole model resident. Measured on a 1024×576, 121-frame Image render: peak Metal memory 16.1 → 13.8 GB, only 1 GB held between phases instead of 10.6, about 7% slower, frames bit-identical — the margin that separates a 16 GB Mac finishing a clip from being killed mid-render. Renders that carry a LoRA or a trained character keep the exact previous path. `LTX_LOW_RAM_STREAM=1|0` in the environment forces it either way. Includes v4.10.1 (continuity for one-takes) and v4.10.0 (One take, Turbo v4, the NLE timeline, anchor stills). Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 
