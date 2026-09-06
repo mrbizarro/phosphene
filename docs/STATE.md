@@ -11,6 +11,13 @@
 > with a copy button; the planner's take brief carries the night's rules
 > (a scene change or a reveal is a beat of its own, a settle before it); H3
 > native exports are no longer shrunk to 720p by default.
+> **Same morning, continuity.** The Commuter turned from night to grey day
+> inside part 2 and back. `take_light_lock` reads the time of day and
+> weather out of the prompt and appends one continuity sentence to every
+> beat (both engines); `take_drift` measures mean luma first-vs-last frame
+> per part and the runner retakes a drifting part once (lock doubled, seed
+> +101), keeping the steadier clip and hiding the other; the planner brief
+> states the light once and forbids a beat that implies another hour.
 
 > **🎬 2026-09-05 — Editor v2 on dev/beta, UNRELEASED: speed, titles, transitions, the Director, sliding windows.**
 > From the long-form editing brief (the measured gaps only, built our way).

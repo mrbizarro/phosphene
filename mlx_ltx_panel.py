@@ -15178,6 +15178,82 @@ def take_beats(raw, n: int) -> list[str]:
     return items + [""] * (n - len(items))
 
 
+# CONTINUITY (2026-09-06). In The Commuter, beat 5 was night, beat 6 turned to
+# grey daylight, beat 7 was night again — inside ONE part, at a window
+# boundary. The engine carries only the last frame between windows; the words
+# carry the rest, and a beat that says "neon flickering to life" reads as dusk
+# unless something holds the time of day. Two layers:
+#   1. `take_light_lock` reads the time of day and weather out of the prompt's
+#      own words and appends one imperative sentence to every beat.
+#   2. `take_drift` measures the light between a part's first and last frame;
+#      a jump past TAKE_DRIFT_MAX makes the runner retake that part once, with
+#      the lock doubled and a fresh seed, and keep the steadier of the two.
+_TOD_WORDS = (("night", "night"), ("midnight", "night"), ("dusk", "dusk"), ("twilight", "dusk"),
+              ("blue hour", "blue hour"), ("golden hour", "golden hour"), ("sunset", "sunset"),
+              ("dawn", "dawn"), ("sunrise", "dawn"), ("noon", "midday"), ("midday", "midday"),
+              ("daylight", "day"), ("afternoon", "afternoon"), ("morning", "morning"))
+_WEATHER_WORDS = ("rain", "drizzle", "storm", "snow", "fog", "mist", "overcast", "clear sky", "sunny")
+TAKE_DRIFT_MAX = 0.28          # |Δ mean luma| between a part's first and last frame, 0..1
+# A blank beat means "hold": H3's runner refuses an empty window prompt, so
+# on H3 a blank beat is spelled out (LTX's windows chain holds on its own).
+TAKE_HOLD = "Nothing new begins: the settled state of the previous moment continues."
+TAKE_DRIFT_SAMPLE_SEC = 0.25   # how far in from each end the frames are read
+
+
+def take_light_lock(prompt: str) -> str:
+    """One sentence that holds the light. Reads the time of day and the weather
+    from the prompt's own words; when neither is named it still forbids a
+    change, because a take that never says "night" still must not turn to day
+    between two windows."""
+    p = (prompt or "").lower()
+    tod = next((v for k, v in _TOD_WORDS if k in p), None)
+    weather = next((w for w in _WEATHER_WORDS if w in p), None)
+    if tod and weather:
+        what = f"it is still {tod} and still {weather}"
+    elif tod:
+        what = f"it is still {tod}"
+    elif weather:
+        what = f"it is still {weather}"
+    else:
+        what = "the time of day and the weather are exactly as before"
+    return (f"Continuity: {what}; the sky, the light, the shadows and the palette "
+            f"stay exactly as they were in the previous moment — no change of time "
+            f"of day, weather or season.")
+
+
+def take_frame_light(path, at_sec: float) -> tuple[float, float] | None:
+    """(mean luma 0..1, warmth = mean R − mean B, −1..1) of one frame."""
+    try:
+        raw = subprocess.run([str(FFMPEG), "-loglevel", "error", "-ss", f"{max(0.0, at_sec):.3f}",
+                              "-i", str(path), "-frames:v", "1", "-vf", "scale=64:36", "-f", "rawvideo",
+                              "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=60).stdout
+        if len(raw) < 64 * 36 * 3:
+            return None
+        px = list(raw)
+        r = sum(px[0::3]) / (len(px) / 3); g = sum(px[1::3]) / (len(px) / 3); b = sum(px[2::3]) / (len(px) / 3)
+        luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        return (luma, (r - b) / 255.0)
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def take_drift(path, duration: float | None = None) -> dict:
+    """How far the light moved across one clip: first frame vs last frame."""
+    if duration is None:
+        try:
+            duration = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                             "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=30).stdout.strip())
+        except Exception:                                          # noqa: BLE001
+            duration = 0.0
+    a = take_frame_light(path, TAKE_DRIFT_SAMPLE_SEC)
+    b = take_frame_light(path, max(TAKE_DRIFT_SAMPLE_SEC, float(duration or 0) - TAKE_DRIFT_SAMPLE_SEC))
+    if not a or not b:
+        return {"ok": False, "delta": 0.0}
+    return {"ok": True, "luma_first": round(a[0], 3), "luma_last": round(b[0], 3),
+            "warmth_first": round(a[1], 3), "warmth_last": round(b[1], 3),
+            "delta": round(abs(b[0] - a[0]), 3), "drifted": abs(b[0] - a[0]) > TAKE_DRIFT_MAX}
+
+
 def take_estimate_minutes(engine: str, quality: str, seconds) -> float | None:
     """Wall clock for the whole take, from the same cost model every other
     estimate uses. None when this Mac has no number for it (LTX windows are
@@ -15917,7 +15993,10 @@ def _sb_take_concept(concept: str, seconds: int) -> str:
             f"(the face, the person waiting) is the whole of its beat, nothing else "
             f"in it; the beat before a change or a reveal slows down; every other "
             f"beat has something new enter the frame within its first second. "
-            f"Name the sound in every beat.")
+            f"Name the sound in every beat. State the time of day and the weather "
+            f"ONCE, in the first beat, and keep them for the whole take; never let a "
+            f"beat imply a different hour (no 'dawn breaks', no 'neon comes on' unless "
+            f"it is already dark) — the light must not change between beats.")
 
 
 def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
@@ -19868,11 +19947,19 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         if _take is None:
             push(f"take_seconds={_take_secs_raw!r} is not one of {TAKE_SECONDS} — rendering a normal clip")
         else:
-            _take["beat_prompts"] = take_beats(f("beats", ""), _take["beats"])
+            _lock = take_light_lock(f("prompt", ""))
+            _take["beat_prompts"] = [(b + " " + _lock) if b else b
+                                     for b in take_beats(f("beats", ""), _take["beats"])]
+            _take["light_lock"] = _lock
             if _take["engine"] == "h3":
+                # A take is 15 s parts whatever the form said; without a quality
+                # the tier composer fell back to draft_3s and every part became
+                # ONE window — the lock and the beats were all there, in a 3 s clip.
                 form["h3_length"] = [TAKE_H3_PART_LENGTH]
+                if not h3_compose_tier(f("h3_quality", ""), TAKE_H3_PART_LENGTH):
+                    form["h3_quality"] = ["draft"]
                 form["h3_chain_prompts"] = [json.dumps(
-                    [_take["beat_prompts"][i] for i in _take["parts"][0]])]
+                    [_take["beat_prompts"][i] or (TAKE_HOLD + " " + _lock) for i in _take["parts"][0]])]
             else:
                 form["temporal_mode"] = ["windows"]
                 form["frames"] = [str(_take["frames"])]
@@ -23075,9 +23162,8 @@ def run_take_job_inner(job: dict) -> None:
     for k, idxs in enumerate(parts):
         if job.get("cancel_requested"):
             raise RuntimeError("stopped between parts")
-        chain = [beats[i] if i < len(beats) else "" for i in idxs]
-        if not chain[0]:
-            chain[0] = p.get("prompt") or ""
+        lock0 = take.get("light_lock") or take_light_lock(p.get("prompt") or "")
+        chain = [(beats[i] if i < len(beats) else "") or (TAKE_HOLD + " " + lock0) for i in idxs]
         child_params = dict(p)
         child_params.update({
             "take": None,
@@ -23097,6 +23183,41 @@ def run_take_job_inner(job: dict) -> None:
         out = child.get("output_path")
         if not out or not Path(out).is_file():
             raise RuntimeError(f"part {k + 1} produced no clip")
+        # CONTINUITY CHECK: did the light move across this part? One retake
+        # with the lock said twice and a fresh seed; keep the steadier clip.
+        drift = take_drift(out)
+        if drift.get("drifted") and not job.get("cancel_requested"):
+            push(f"[take] part {k + 1}: the light drifted (luma {drift['luma_first']} → "
+                 f"{drift['luma_last']}) — retaking it once with the continuity lock doubled")
+            lock = take.get("light_lock") or take_light_lock(p.get("prompt") or "")
+            retry_params = dict(child_params)
+            retry_params["h3_chain_prompts"] = [(c + " " + lock) if c else c for c in chain]
+            retry_params["prompt"] = retry_params["h3_chain_prompts"][0]
+            try:
+                retry_params["seed"] = str(int(retry_params.get("seed") or 0) + 101)
+            except (TypeError, ValueError):
+                retry_params["seed"] = "-1"
+            retry = {"id": f"{job['id']}-p{k + 1}r", "params": retry_params,
+                     "status": "running", "created_at": job.get("created_at")}
+            run_h3_job_inner(retry)
+            out2 = retry.get("output_path")
+            d2 = take_drift(out2) if out2 and Path(out2).is_file() else {"delta": 9.0}
+            if d2.get("delta", 9.0) < drift["delta"]:
+                push(f"[take] part {k + 1}: the retake holds the light better "
+                     f"(Δ {d2.get('delta')} vs {drift['delta']}) — using it")
+                try:
+                    set_hidden(str(out), True)
+                except Exception:                                  # noqa: BLE001
+                    pass
+                out = out2
+            else:
+                push(f"[take] part {k + 1}: the retake did not help (Δ {d2.get('delta')}) — keeping the first")
+                if out2:
+                    try:
+                        set_hidden(str(out2), True)
+                    except Exception:                              # noqa: BLE001
+                        pass
+        job.setdefault("take_drift", []).append(drift)
         outs.append(out)
         # Parts are working files: kept, hidden from the gallery. The take is
         # the output.

@@ -10,6 +10,7 @@ Copy this whole page into your own assistant (ChatGPT, Claude, Codex) and ask it
 - **Settle before the turn.** The beat before a scene change or a reveal should slow down; the model needs a moment to land before it can pivot.
 - **Repeat the invariants every beat.** The subject's look, the camera position, the palette, the sound. The engine only remembers the last frame; the words carry the rest. Phosphene prepends your style block to every beat for you.
 - **Something new every second.** A near miss, an object entering, a light change. A beat that describes a mood and no event reads as a still.
+- **Lock the light.** Say the time of day and the weather once, in the first beat, and never imply another hour later ("neon comes on", "dawn breaks"). Phosphene appends a continuity sentence to every beat and measures each part; a part whose light drifts is retaken once on its own.
 - **Sound is part of the shot.** Say what we hear: footsteps, a band from a doorway, rain on an awning. Without sound cues the audio is near-silent ambience.
 
 ## Start from a still

@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.10.0.** One take (a clip up to two minutes on either engine, written as beats), Turbo on the community's v4 adapter, a timeline that trims and moves like an NLE, anchor stills and long shots on the Storyboard, LoRA guides and update checks, closed-tab alerts, a light theme — and *The Commuter*, a 75 s one take rendered overnight at native, as the release film. Includes the v4.9.6–v4.9.8 fixes. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
+> **Current release: v4.10.1.** Continuity for one-takes: the light is locked in every beat, each part is measured, and a part whose light drifts is retaken once on its own. One take (a clip up to two minutes on either engine, written as beats), Turbo on the community's v4 adapter, a timeline that trims and moves like an NLE, anchor stills and long shots on the Storyboard, LoRA guides and update checks, closed-tab alerts, a light theme — and *The Commuter*, a 75 s one take rendered overnight at native, as the release film. Includes the v4.9.6–v4.9.8 fixes. Full notes on the [releases page](https://github.com/mrbizarro/phosphene/releases).
 
 ## Overview
 

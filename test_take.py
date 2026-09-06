@@ -33,9 +33,9 @@ def test_make_job_h3_take_forces_15s_parts_and_first_chain():
                     "take_seconds": "60", "beats": json.dumps([f"b{i}" for i in range(12)]),
                     "h3_quality": "high", "h3_length": "3s"})
     q = j["params"]
-    assert q["h3_length"] == "15s" and q["h3_chain_prompts"] == ["b0", "b1", "b2"]
+    assert q["h3_length"] == "15s" and [c.split(" Continuity")[0] for c in q["h3_chain_prompts"]] == ["b0", "b1", "b2"]
     assert q["take"]["seconds"] == 60 and q["take"]["engine"] == "h3"
-    assert q["take"]["beat_prompts"][11] == "b11"
+    assert q["take"]["beat_prompts"][11].startswith("b11 Continuity")
 
 
 def test_make_job_ltx_take_is_the_windows_chain():
@@ -43,7 +43,7 @@ def test_make_job_ltx_take_is_the_windows_chain():
                     "take_seconds": "30", "beats": "one\ntwo\n"})
     q = j["params"]
     assert q["long_mode"] == "windows" and q["frames"] == 721
-    assert q["window_prompts"][:3] == ["one", "two", ""]
+    assert [w.split(" Continuity")[0] for w in q["window_prompts"][:3]] == ["one", "two", ""]
     assert q["take"]["engine"] == "ltx"
 
 
@@ -85,18 +85,19 @@ def test_take_runner_chains_parts_and_joins(tmp_path, monkeypatch):
         (out_dir / f"{child['id']}.mp4.json").write_text(json.dumps({"width": 64, "height": 64, "seed": 5}))
         child["output_path"] = str(out)
     monkeypatch.setattr(p, "run_h3_job_inner", fake_h3)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
     j = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "a hen skates", "take_seconds": "30",
                     "beats": json.dumps(["b1", "b2", "b3", "b4", "b5", "b6"]), "preset_label": "ride"})
     p.run_take_job_inner(j)
     assert len(seen) == 2
-    assert seen[0]["mode"] == "t2v" and seen[0]["h3_chain_prompts"] == ["b1", "b2", "b3"]
-    assert seen[1]["mode"] == "i2v" and seen[1]["h3_chain_prompts"] == ["b4", "b5", "b6"]
+    assert seen[0]["mode"] == "t2v" and [c.split(" Continuity")[0] for c in seen[0]["h3_chain_prompts"]] == ["b1", "b2", "b3"]
+    assert seen[1]["mode"] == "i2v" and [c.split(" Continuity")[0] for c in seen[1]["h3_chain_prompts"]] == ["b4", "b5", "b6"]
     assert Path(seen[1]["image"]).is_file()          # the last frame of part 1
     assert seen[1]["take"] is None                   # a part is not a take
     final = Path(j["output_path"])
     assert final.is_file() and final.name.endswith("_take30s.mp4")
     side = json.loads(final.with_suffix(final.suffix + ".json").read_text())
-    assert side["take"]["seconds"] == 30 and side["take"]["beats"][5] == "b6"
+    assert side["take"]["seconds"] == 30 and side["take"]["beats"][5].startswith("b6")
     assert len(side["take"]["parts"]) == 2 and side["width"] == 64
     assert [f for f, flag in hidden if flag] == side["take"]["parts"]
 
@@ -168,3 +169,60 @@ def test_take_shot_is_priced_by_parts_and_validates():
 def test_take_concept_asks_for_beats_that_never_cut():
     c = p._sb_take_concept("a hen skateboards through the city", 60)
     assert "12 beats" in c and "never cuts" in c and "a hen skateboards" in c
+
+
+# ---- continuity: the light lock and the drift retake ---------------------------
+def test_light_lock_reads_time_and_weather_from_the_prompt():
+    assert "still night" in p.take_light_lock("A hen skates through the city at night in the rain") 
+    assert "still rain" in p.take_light_lock("A hen skates through the city at night in the rain")
+    assert "exactly as before" in p.take_light_lock("A hen skates")
+    q = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "Broadway at night", "take_seconds": "30",
+                    "beats": json.dumps(["a", "", "c", "d", "e", "f"])})["params"]
+    assert q["take"]["beat_prompts"][0].endswith("season.") and "still night" in q["take"]["beat_prompts"][0]
+    assert q["take"]["beat_prompts"][1] == ""                      # a blank beat still holds
+    assert q["h3_chain_prompts"][0].startswith("a Continuity:")
+    assert q["h3_chain_prompts"][1].startswith(p.TAKE_HOLD)          # ...spelled out for H3's runner
+
+
+def _lit_clip(path: Path, first: str, last: str) -> None:
+    # two-second clip whose colour goes from `first` to `last` (a light drift)
+    subprocess.run([str(p.FFMPEG), "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"color=c={first}:s=64x64:d=1:r=24",
+                    "-f", "lavfi", "-i", f"color=c={last}:s=64x64:d=1:r=24", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a", "-t", "2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)], check=True)
+
+
+def test_drift_metric_sees_a_night_to_day_jump(tmp_path):
+    _lit_clip(tmp_path / "steady.mp4", "0x202020", "0x242424")
+    _lit_clip(tmp_path / "jump.mp4", "0x202020", "0xd0d0d0")
+    assert p.take_drift(tmp_path / "steady.mp4")["drifted"] is False
+    d = p.take_drift(tmp_path / "jump.mp4")
+    assert d["drifted"] is True and d["delta"] > p.TAKE_DRIFT_MAX
+
+
+def test_take_runner_retakes_a_drifting_part_once_and_keeps_the_steadier(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    hidden = []
+    monkeypatch.setattr(p, "set_hidden", lambda path, flag: hidden.append(path))
+    calls = []
+
+    def fake_h3(child):
+        calls.append(child["id"])
+        out = out_dir / f"{child['id']}.mp4"
+        if child["id"].endswith("-p1"):
+            _lit_clip(out, "0x202020", "0xd0d0d0")                 # part 1 drifts
+        else:
+            _lit_clip(out, "0x202020", "0x262626")                 # the retake and part 2 hold
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_h3_job_inner", fake_h3)
+    j = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "Broadway at night", "take_seconds": "30",
+                    "beats": json.dumps(["b1", "b2", "b3", "b4", "b5", "b6"])})
+    p.run_take_job_inner(j)
+    assert calls == [f"{j['id']}-p1", f"{j['id']}-p1r", f"{j['id']}-p2"]
+    side = json.loads(Path(j["output_path"]).with_suffix(".mp4.json").read_text())
+    assert side["take"]["parts"][0].endswith("-p1r.mp4")            # the steadier retake is part 1
+    assert str(out_dir / f"{j['id']}-p1.mp4") in hidden               # the drifting one is hidden
+    assert j["take_drift"][0]["drifted"] is True
