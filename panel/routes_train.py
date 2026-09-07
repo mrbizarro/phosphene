@@ -177,6 +177,10 @@ def post_train_start(h, path, qs, ctype) -> None:
     train_job_id = (form.get("train_job_id", [""])[0] or "").strip()
     if not train_job_id:
         h._json({"error": "train_job_id required"}, 400); return
+    if float(P.SYSTEM_RAM_GB or 0) and float(P.SYSTEM_RAM_GB) < P.TRAIN_MIN_RAM_GB:
+        h._json({"error": f"Training needs at least {P.TRAIN_MIN_RAM_GB} GB of memory; this Mac has "
+                          f"{float(P.SYSTEM_RAM_GB):.0f} GB. On this machine the trainer runs out of memory "
+                          f"before it finishes."}, 409); return
     try:
         train_job_id = P._safe_job_id(train_job_id)
     except ValueError as e:

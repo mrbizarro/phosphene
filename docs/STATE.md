@@ -1,5 +1,38 @@
 # Phosphene — project state, history, open work
 
+> **🚀 2026-09-07 — v4.11.1 ships: the fleet fixes** (chip-scaled estimates,
+> Control gate, HiDream fallback, training floor, image pre-flight frees the
+> helper). Carries 4.11.0.
+
+> **🔬 2026-09-07 — fleet study after v4.11.0 (on dev).** Queried PostHog by
+> version, mode, engine, chip and RAM. Findings and what was done:
+> **(1) Estimates ignored the chip** — fleet medians for the same tier: LTX
+> Balanced 121f M5 Max 60 s … M4 Max 180 … M4 Pro 300 … M1 Pro 600 … M2/M3
+> 900; H3 draft_5s M5 Max 120 … M4 Max 300 … M4 Pro/M3 Max 600 … M1 Max 900,
+> H3 standard_10s on an M4 Pro 2400 vs 600. Every chip promised the M4 Max
+> number ("~30 s left" for forty minutes, the report that started this).
+> `HW_SPEED_FACTOR_LTX/H3` + `_hw_speed_factor()` scale `ltx_estimate_minutes`
+> and `h3_estimate_minutes` (so every chip, Speed pill, take estimate and
+> Storyboard price follow); `PHOSPHENE_SPEED_FACTOR` overrides;
+> `test_fleet_calibration.py`. **(2) Control queued with no clip** (seven
+> installs, "control video not found: ''") — client gate beside the Image one.
+> **(3) HiDream still reachable** from a saved pick / Load Params on installs
+> without its venv (5 installs, 4.8.1 → 4.11.0) — the queue path now falls
+> back to Auto with a log line (`_hidream_available`). **(4) Training on
+> 16 GB Macs**: 10 failures to 1 success — `/train/start` refuses below
+> `TRAIN_MIN_RAM_GB = 24` with the reason. **(5) `image_ram` refusals**: 46 of
+> 70 on 32 GB Macs — the idle video helper was holding the memory; the image
+> pre-flight now releases it and measures again before refusing.
+> **Not bugs (noise to know about):** the 7-day error-rate tile (23 %) and the
+> 16 GB "67 % failure" are ONE 4.9.3 install with a broken model dir (380
+> failures: "model incomplete / Missing 262 parameters / no safetensors"); one
+> install's FLUX.2-klein download stuck at 4.6 GB for days (disk); watchdog
+> kills scattered 1–5 per install on old versions; "H3 render exited with code
+> 1" clusters on 4.9.3/4.9.4 (stale engine packs). 4.11.0 after one day: 30
+> installs, 56 renders, 7 failures, none new. H3 dense 10 s tiers run 50–60 min
+> at p50 on M4 Pro (memory-bound chain) — the chip factor covers the chip,
+> not the RAM tier; a RAM-aware H3 factor is the next step if it recurs.
+
 > **🚀 2026-09-07 — v4.11.0 ships: One Shot.** The mode chip + panel, LTX
 > one shots by last-frame handoff (proven on a 40 s bar conversation:
 > four 10 s parts, same people, same room, camera moving), the planner's

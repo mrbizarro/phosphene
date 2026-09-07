@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.11.0.** **One Shot** is its own way of making video: a continuous shot of 30 s to 2 min that never cuts, next to Text, Character and Image — pick a length, write one line per 5 seconds, add a start frame if you like, keep the light locked, and see the real time for your Mac. LTX one shots hold together now (parts that continue from the last frame, like Hailuo H3's), and the Storyboard planner can place a One Shot inside a film. Also in this line: LTX Upscale, Extend fixed, LoRAs stack on Hailuo H3. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.11.1.** Time estimates now follow your chip (an M4 Pro or M1 Max renders two to four times slower than the M4 Max the numbers were measured on; an M5 Max or M3 Ultra much faster). Control asks for a clip before it queues, a saved HiDream pick falls back to Auto instead of failing, training says no on Macs under 24 GB, and the image pre-flight frees the idle video helper before refusing a 32 GB Mac. Includes 4.11.0: **One Shot** as its own mode, LTX one shots that hold together, the planner placing a One Shot inside a film. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

@@ -4423,6 +4423,14 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     reenable();
     return;
   }
+  // Same class of silent failure for Control: seven installs queued it with
+  // no clip and got "control video not found" as a red card (fleet, 2026-09-07).
+  if (_modeNow === 'control' && !String(fd.get('control_video_path') || '').trim()) {
+    alert('Control needs a clip to follow — pick one in the Control video picker, '
+        + 'or switch to Text mode.');
+    reenable();
+    return;
+  }
 
   // Safety net: if the prompt mentions a trigger word from a LoRA the user
   // has installed but NOT toggled active for this render, ask before

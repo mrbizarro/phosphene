@@ -1920,6 +1920,11 @@ TRAIN_TYPES = ("character", "style")
 
 # Dataset rules.
 TRAIN_MIN_IMAGES = 15
+# Fleet, 7 days to 2026-09-07: on 16 GB Macs training exited with code 1 ten
+# times for one success (four installs). The trainer holds the Q4 base plus
+# the adapter and its optimizer state; below this much memory it does not
+# finish, so /train/start says so before the first step instead of after it.
+TRAIN_MIN_RAM_GB = 24
 # Soft cap on the per-character dataset size. The old 50-image limit
 # was a friendly-default-misread-as-hard-rule — many users wanted to
 # train against 80-200 photos for richer identity capture, and the
@@ -8118,6 +8123,63 @@ def _h3_fixed_seconds(w: int, h: int, window_frames: int) -> float:
     return H3_LOAD_SEC + H3_DECODE_SEC_PER_PX_FRAME * int(w) * int(h) * int(window_frames)
 
 
+# Render speed by chip CLASS relative to the M4 Max every estimate in this file
+# was measured on. Fleet medians of wall_sec_bucket for the same tier and frame
+# count (PostHog, 30 days to 2026-09-07, n >= 10 per cell): LTX Balanced 121f —
+# M5 Max 60 s, M3 Ultra 90, M5 Pro/M2 Ultra 120, M1 Ultra 150, M2 Max/M4 Max
+# 180, M3 Max 210, M5 240, M1 Max/M4 Pro 300, M4 420, M3 Pro 510, M1 Pro 600,
+# M1 750, M2/M3 900. H3 draft_5s — M5 Max/M5 Pro/M3 Ultra 120, M4 Max/M2 Ultra
+# 300, M1 Ultra 420, M4 Pro/M3 Max 600, M1 Max 900. Before this table an M4 Pro
+# was promised the M4 Max number and saw "~30 s left" for forty minutes.
+# Unknown chips price as an M4 Max (factor 1.0), as before.
+HW_SPEED_FACTOR_LTX = {
+    "M5 Max": 0.35, "M3 Ultra": 0.5, "M5 Pro": 0.65, "M2 Ultra": 0.7, "M1 Ultra": 0.85,
+    "M2 Max": 1.0, "M4 Max": 1.0, "M3 Max": 1.2, "M5": 1.35, "M1 Max": 1.7, "M4 Pro": 1.7,
+    "M4": 2.3, "M3 Pro": 2.8, "M2 Pro": 2.8, "M1 Pro": 3.3, "M1": 4.2, "M2": 5.0, "M3": 5.0,
+}
+HW_SPEED_FACTOR_H3 = {**HW_SPEED_FACTOR_LTX,
+    "M5 Max": 0.4, "M5 Pro": 0.6, "M3 Ultra": 0.7, "M2 Ultra": 1.0, "M1 Ultra": 1.4,
+    "M4 Pro": 2.0, "M3 Max": 2.0, "M1 Max": 3.0}
+
+
+def _hw_speed_factor(engine: str = "ltx") -> float:
+    """How many times slower than an M4 Max this Mac renders on `engine`.
+    Env `PHOSPHENE_SPEED_FACTOR` overrides (a number), for tests and for a
+    user whose machine the table misjudges."""
+    raw = (os.environ.get("PHOSPHENE_SPEED_FACTOR") or "").strip()
+    if raw:
+        try:
+            return max(0.05, float(raw))
+        except ValueError:
+            pass
+    table = HW_SPEED_FACTOR_H3 if engine == "h3" else HW_SPEED_FACTOR_LTX
+    return float(table.get(_hw_chip_family(), 1.0))
+
+
+_HW_CHIP_FAMILY: str | None = None
+
+
+def _hw_chip_family() -> str:
+    """'Apple M4 Max' -> 'M4 Max'; read once. Lives ahead of the tier tables
+    because they are priced at import, before the analytics module's own
+    reader is defined."""
+    global _HW_CHIP_FAMILY
+    if _HW_CHIP_FAMILY is None:
+        fam = "unknown"
+        try:
+            brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                                   capture_output=True, text=True, timeout=3).stdout.strip()
+            m = re.search(r"Apple (M\d+)(?: (Pro|Max|Ultra))?", brand)
+            if m:
+                fam = m.group(1) + (f" {m.group(2)}" if m.group(2) else "")
+        except Exception:                                          # noqa: BLE001
+            pass
+        _HW_CHIP_FAMILY = fam
+    return _HW_CHIP_FAMILY
+
+
+
+
 def h3_estimate_minutes(w: int, h: int, window_frames: int, windows: int,
                         forwards: int) -> float:
     """Wall clock, in minutes, for a render of this exact shape. The one function
@@ -8129,7 +8191,7 @@ def h3_estimate_minutes(w: int, h: int, window_frames: int, windows: int,
     rows = _h3_packed_rows(w, h, window_frames)
     per_fwd = _h3_forward_seconds(rows)
     fixed = _h3_fixed_seconds(w, h, window_frames)
-    return (windows * max(0, int(forwards)) * per_fwd + windows * fixed) / 60.0
+    return (windows * max(0, int(forwards)) * per_fwd + windows * fixed) / 60.0 * _hw_speed_factor("h3")
 
 
 def _fmt_eta(minutes: float) -> str:
@@ -8676,7 +8738,7 @@ def ltx_estimate_minutes(w: int, h: int, frames: int,
                + max(0, int(stage2_steps)) * max(1, int(stage2_evals))
                * _ltx_forward_seconds(s2))
     fixed = LTX_LOAD_SEC + LTX_DECODE_SEC_PER_PX_FRAME * int(w) * int(h) * int(frames)
-    return (denoise + fixed) / 60.0
+    return (denoise + fixed) / 60.0 * _hw_speed_factor("ltx")
 
 
 # END-TO-END WALL CLOCKS actually observed, keyed
@@ -12306,6 +12368,16 @@ def _analytics_chip_family() -> str:
         pass
     _CHIP_FAMILY_CACHE = family
     return family
+
+
+def _hidream_available() -> bool:
+    """Whether the HiDream lab venv exists on this install. It never ships by
+    default; a saved engine pick that names it must fall back, not fail."""
+    try:
+        probe = agent_image_engine.ImageEngineConfig(kind="hidream")
+        return bool(agent_image_engine._resolve_hidream_python(probe))
+    except Exception:                                              # noqa: BLE001
+        return False
 
 
 def _qwen_pack_available() -> bool:
@@ -20477,6 +20549,13 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         except (TypeError, ValueError):
             seed = -1
         engine_override = (f("engine_override", "auto") or "auto").lower()
+        # HiDream is hidden from the dropdown (v3.0.3) but a saved pick or a
+        # Load Params of an old sidecar still names it; on the ~all installs
+        # without its venv every such job died with "HiDream venv python not
+        # found" (fleet: 4.8.1 → 4.11.0, five installs). Fall back, say so.
+        if engine_override.startswith("hidream") and not _hidream_available():
+            push(f"[image] {engine_override} is not installed on this Mac — rendering with Auto instead.")
+            engine_override = "auto"
         aspect = f("aspect", "16:9") or "16:9"
         # refs comes as a JSON-encoded list (e.g. '["panel_uploads/foo.png"]').
         # Plain form fields can't carry a list cleanly; the panel JS already
@@ -21648,6 +21727,23 @@ def _preflight_image_job(cfg, *, engine_override: str = "auto") -> None:
             f"{total_gb:.0f} GB. Pick Auto (the 4B FLUX engine, fits here) "
             f"or a lighter preset."
         )
+    if free_gb < need_gb and HELPER.is_alive():
+        # The video helper keeps its pipelines warm between jobs; on a 32 GB
+        # Mac that is most of the memory an image engine needs, and the fleet
+        # showed 46 of 70 image_ram refusals landing on exactly that class of
+        # machine. The queue runs one job at a time, so while an image job is
+        # here the helper is idle by construction: let it go, measure again.
+        push(f"[preflight] {free_gb:.1f} GB free of {need_gb:.0f} needed — releasing the idle video helper first")
+        try:
+            HELPER.kill()
+            time.sleep(2.0)
+        except Exception:                                          # noqa: BLE001
+            pass
+        mem = get_memory()
+        total_gb = float(mem.get("total_gb") or total_gb)
+        used_gb = float(mem.get("used_gb") or used_gb)
+        free_gb = max(0.0, total_gb - used_gb)
+        push(f"[preflight] {free_gb:.1f} GB free after releasing the helper")
     if free_gb < need_gb:
         raise RenderRefused(
             "image_ram",
