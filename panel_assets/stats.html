@@ -753,6 +753,7 @@
       white-space: normal; word-break: break-word;
     }
     .dist-row.is-err .fill { background: rgba(248, 81, 73, 0.14); }
+    .dist-row .n small.sub { font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 4px; }
     .dist-row .n {
       font-family: var(--ph-font-mono); font-variant-numeric: tabular-nums;
       font-weight: 700; color: var(--muted); font-size: 11px;
@@ -991,6 +992,10 @@
                control that can never work), not an engine bug. -->
           <h3>Refused <span class="count-pill" id="usage-refusals-count">0</span></h3>
           <ul class="dist-list" id="usage-refusals"></ul>
+        </div>
+        <div class="dist-col">
+          <h3>Failures by version <span class="hint">last 7 days · failed renders, share of that version's renders, installs that hit one</span></h3>
+          <ul class="dist-list" id="usage-failures-by-version"></ul>
         </div>
         <div class="dist-col">
           <h3>Versions</h3>
@@ -2559,10 +2564,11 @@
       const label = r[nameKey];
       const shown = (label === null || label === undefined || label === '')
         ? 'unknown' : String(label);
+      const sub = (opts && typeof opts.sub === 'function') ? (opts.sub(r) || '') : '';
       return `<li class="dist-row${cls}">
         <span class="fill" style="width:${pct}%"></span>
         <span class="name" title="${escapeAttr(shown)}">${escapeHtml(shown)}</span>
-        <span class="n">${fmt(r.count)}</span>
+        <span class="n">${fmt(r.count)}${sub ? `<small class="sub"> ${escapeHtml(sub)}</small>` : ''}</span>
       </li>`;
     }).join('');
   }
@@ -2647,7 +2653,13 @@
     const errs = Array.isArray(u.top_errors) ? u.top_errors : [];
     const errCount = $('#usage-errors-count');
     if (errCount) errCount.textContent = fmt(errs.reduce((a, r) => a + (Number(r.count) || 0), 0));
-    paintDist('#usage-errors', errs, 'signature', { err: true });
+    // Ranked by installs, not events: one install retrying a broken model dir
+    // 400 times a week is one problem, not the fleet's biggest.
+    paintDist('#usage-errors', errs, 'signature', { err: true,
+      sub: r => (r.people === null || r.people === undefined) ? '' : `· ${fmt(r.people)} install${Number(r.people) === 1 ? '' : 's'}` });
+    const fbv = Array.isArray(u.failures_by_version) ? u.failures_by_version : [];
+    paintDist('#usage-failures-by-version', fbv, 'version', { err: true,
+      sub: r => `failed · ${r.pct}% of ${fmt((Number(r.failed) || 0) + (Number(r.ok) || 0))} · ${fmt(r.people)} install${Number(r.people) === 1 ? '' : 's'}` });
     const refs2 = Array.isArray(u.top_refusals) ? u.top_refusals : [];
     const refCount = $('#usage-refusals-count');
     if (refCount) refCount.textContent = fmt(refs2.reduce((a, r) => a + (Number(r.count) || 0), 0));

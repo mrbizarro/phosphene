@@ -2629,8 +2629,13 @@ function setTakeSeconds(s, beats) {
   });
   const ta = document.getElementById('beats_text');
   if (s && ta) {
+    // Only an explicit list (Load Params, the Storyboard) fills the box.
+    // It used to prefill from the prompt on its own, which put ONE written
+    // beat and five blank holds in front of a user who had only typed a
+    // prompt — half a shot of prompt, half of hold. An empty box now means
+    // "the prompt carries the whole shot" (make_job), and the Split button
+    // is the deliberate way to start from the prompt's sentences.
     if (Array.isArray(beats)) ta.value = beats.join('\n');
-    else if (!ta.value.trim()) ta.value = takePrefill(s);
     beatsInput();
     takeRefresh();
   } else {
@@ -2642,8 +2647,7 @@ function setTakeSeconds(s, beats) {
   if (typeof updateCustomizeSummary === 'function') updateCustomizeSummary();
   if (typeof updateDerived === 'function') updateDerived();
 }
-// The first beats come from the prompt itself, one sentence each, so the box
-// is never empty — the user edits, they do not start from nothing.
+// The prompt's sentences, one per beat — the Split button's starting point.
 function takePrefill(s) {
   const prompt = (document.getElementById('prompt') || {}).value || '';
   const n = Math.max(1, Math.round(s / 5));

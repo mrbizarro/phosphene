@@ -638,6 +638,16 @@ def _resolve_lora_path(path: str) -> str:
         ) from exc
     try:
         repo_dir = snapshot_download(repo_id=p, allow_patterns=["*.safetensors"])
+    except (ValueError, OSError) as exc:
+        # huggingface_hub's HFValidationError is a ValueError: "Repo id must be
+        # in the form 'repo_name' or 'namespace/repo_name'". A user never typed
+        # an id — the value is a LoRA path that no longer resolves (moved,
+        # renamed, a relative path with a space). Name the file, not the rule.
+        if type(exc).__name__ in ("HFValidationError",) or "Repo id must be" in str(exc):
+            raise FileNotFoundError(
+                f"LoRA file not found: {p} — it is not on disk and it is not a Hugging Face "
+                f"repo id. It was probably moved or deleted after it was picked; pick it again.") from exc
+        raise
     except GatedRepoError as exc:
         # Most Lightricks LoRAs are gated — they require accepting a
         # license on the model page AND an HF token authenticated with

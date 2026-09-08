@@ -173,6 +173,19 @@
 > shitty on the faces" — and the two-character experiment (bizarrotrn +
 > eltrumpo at one table, Q8 Pro, camera lock) is the first render on this code.
 
+> **🚀 2026-09-08 — v4.12.2 ships: the morning's field reports.** The beats box no
+> longer prefills from the prompt (one written beat + five holds was the half-state
+> behind the field report); `h3_build_q8.sh` validates the Q8 pack in a fresh
+> process and writes `.built_ok` only after (#78: SIGKILL during the quantizer's own
+> in-process `load_dit` on a 36 GB Mac, marker already written, retry said "already
+> built"); `steps > 8` on the distilled schedule is refused up front (fleet: "cannot
+> thin a 9-point schedule up to 16 steps" on 4.11.1); the H3 runner pre-flights
+> ffmpeg; a LoRA path HF rejects as an id is "LoRA file not found"; the fleet
+> `top_errors` tile ranks by installs (one 4.9.3 install with a broken model dir
+> was 438 of the week's failures) and a `failures_by_version` tile shows each
+> version's failure share. Validated LIVE on a scratch panel with the browser
+> (One Shot: prompt → 30 s → Generate → six beats of the prompt in the queued job).
+
 > **🚀 2026-09-08 — v4.12.1 ships: a One Shot with no beats is the prompt.** A first-day
 > field report: a long prompt, an empty beats box, and every window rendered the
 > hold sentence ("Nothing new begins…") — a 30 s clip about nothing, on H3 too.

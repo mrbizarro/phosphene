@@ -13331,10 +13331,23 @@ _USAGE_FLEET_QUERIES = {
         "SELECT event, count() AS c FROM events "
         "WHERE event IN ('render_completed', 'render_failed') "
         "AND timestamp > now() - INTERVAL 14 DAY GROUP BY event",
+    # By INSTALLS first, then by events. Ordered by events alone the tile was
+    # owned by one 4.9.3 install with a broken model dir retrying 438 times in
+    # a week (160 + 121 + 72 events of three signatures, one distinct_id each)
+    # while the errors many people hit sat below the fold (2026-09-08).
     "top_errors":
-        "SELECT properties['error_signature'] AS sig, count() AS c FROM events "
+        "SELECT properties['error_signature'] AS sig, count() AS c, "
+        "count(DISTINCT distinct_id) AS people FROM events "
         "WHERE event = 'render_failed' AND timestamp > now() - INTERVAL 7 DAY "
-        "GROUP BY sig ORDER BY c DESC LIMIT 5",
+        "GROUP BY sig ORDER BY people DESC, c DESC LIMIT 8",
+    # Failure rate per version, so a release that fails more than the one before
+    # it is visible the day it ships, and a storm from one install reads as one.
+    "failures_by_version":
+        "SELECT properties['version'] AS v, countIf(event = 'render_failed') AS failed, "
+        "countIf(event = 'render_completed') AS ok, count(DISTINCT distinct_id) AS people "
+        "FROM events "
+        "WHERE event IN ('render_failed', 'render_completed') "
+        "AND timestamp > now() - INTERVAL 7 DAY GROUP BY v ORDER BY failed DESC LIMIT 12",
     # Refusals are a SEPARATE event, which is why none of the queries above
     # needed an `error_class != 'refused'` clause bolted on. That was the
     # deciding argument for a new event name over a new class: an exclusion
@@ -13518,9 +13531,16 @@ def _usage_fleet_report() -> dict | None:
                          for r in (res.get("boots_by_day") or [])
                          if isinstance(r, (list, tuple)) and len(r) >= 2],
         "engines": engines,
-        "top_errors": [{"signature": str(r[0] or "unknown error"), "count": int(r[1])}
+        "top_errors": [{"signature": str(r[0] or "unknown error"), "count": int(r[1]),
+                        "people": int(r[2]) if len(r) > 2 and r[2] is not None else None}
                        for r in (res.get("top_errors") or [])
                        if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "failures_by_version": [{"version": str(r[0] or "unknown"), "failed": int(r[1] or 0),
+                                 "ok": int(r[2] or 0), "people": int(r[3] or 0),
+                                 "count": int(r[1] or 0),
+                                 "pct": round(100.0 * int(r[1] or 0) / max(1, int(r[1] or 0) + int(r[2] or 0)), 1)}
+                                for r in (res.get("failures_by_version") or [])
+                                if isinstance(r, (list, tuple)) and len(r) >= 4],
         "top_refusals": refusals,
         "versions": [{"version": str(r[0] or "unknown"), "count": int(r[1])}
                      for r in (res.get("versions") or [])
@@ -23162,6 +23182,17 @@ def run_h3_job_inner(job: dict) -> None:
     helper respawns lazily on the next LTX job (WarmHelper._ensure), so this
     costs one cold start and nothing else.
     """
+    # ffmpeg pre-flight. The runner pipes raw RGB into `ffmpeg` from PATH and
+    # the panel prepends its own ffmpeg dir — but when none of the ladder's
+    # candidates exists that dir is the last-resort guess, and the render dies
+    # after the whole denoise with "ffmpeg not found on PATH; use save_frames()
+    # instead" (fleet, 4.11.1). Say it before spending the minutes.
+    if not Path(FFMPEG).is_file():
+        raise RuntimeError(
+            f"ffmpeg is not installed where Phosphene looks for it ({FFMPEG}). Pinokio "
+            "ships it at ~/pinokio/bin/ffmpeg-env/bin/ffmpeg — reinstall Phosphene from "
+            "the Pinokio sidebar, or set LTX_FFMPEG to your ffmpeg binary.")
+
     p = job["params"]
     mode = (p.get("mode") or "t2v").strip().lower()
     paths = h3_paths()
@@ -24498,6 +24529,17 @@ def run_job_inner(job: dict) -> None:
             "the output (this is what you saw last run). Use steps=8 for standard "
             "renders, or pick Quality=Quick for a faster smaller-resolution render at "
             "the same 8 steps."
+        )
+    # ...and MORE than 8 is not a quality knob either: the distilled sigma table
+    # has 9 points, so the helper dies minutes in with "cannot thin a 9-point
+    # schedule (8 steps) up to 16 steps" (fleet, 4.11.1: i2v at 9 and 16 steps).
+    # Refuse here, at no cost, and say where more steps actually live.
+    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control", "upscale") and not ltx_quality_uses_hq(quality) and int(p.get("steps", 8)) > 8:
+        raise RuntimeError(
+            f"steps={p.get('steps')} is above the 8-step distilled schedule: the Q4 "
+            "distilled model has a fixed 9-point sigma table and cannot take more "
+            "steps. Use steps=8 here, or pick Quality=High for the two-stage "
+            "pipeline, which is where more steps buy quality."
         )
 
     if p["stop_comfy"]:

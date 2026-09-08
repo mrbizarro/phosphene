@@ -59,3 +59,28 @@ class TheFallbackIsLoud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheMarkerMeansValidated(unittest.TestCase):
+    """#78: on a 36 GB Mac the quantizer is SIGKILLed during its own in-process
+    validation after writing a valid pack, and the old marker (quant_config.json,
+    written before that validation) made the retry say "already built"."""
+    def setUp(self):
+        self.src = BUILD_SH.read_text()
+
+    def test_validation_runs_in_its_own_process(self):
+        self.assertIn("validate_pack_fresh", self.src)
+        self.assertIn("load_dit(sys.argv[1]", self.src)
+
+    def test_marker_written_only_after_validation(self):
+        self.assertIn('.built_ok', self.src)
+        # the marker is created inside the branch that follows a successful validation
+        self.assertRegex(self.src, r'validate_pack_fresh; then\s*\n\s*: > "\$PACK/\.built_ok"')
+
+    def test_idempotence_checks_the_shards_not_just_the_config(self):
+        self.assertIn("pack_shards_present", self.src)
+        self.assertIn("model.safetensors.index.json", self.src)
+        self.assertRegex(self.src, r'\[ -f "\$PACK/\.built_ok" \] && pack_shards_present')
+
+    def test_a_pack_that_fails_validation_is_rebuilt_next_time(self):
+        self.assertIn('rm -f "$PACK/quant_config.json" "$PACK/.built_ok"', self.src)

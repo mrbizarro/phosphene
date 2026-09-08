@@ -15,8 +15,9 @@
 #         the pack there and this script used to build it somewhere else
 #         entirely, so the build "succeeded" and the engine stayed bf16.
 #
-# SEMANTICS: unchanged — one shell, no `set -e`, exit code from the last
-# command. Idempotent: the pack's own quant_config.json gates the re-run.
+# SEMANTICS: one shell, no `set -e`, exit code from the last command.
+# Idempotent: `.built_ok` (written after a fresh-process validation) plus the
+# shards the index names gate the re-run — see the block above the build.
 #
 # WHY IT MATTERS: the Q8 pack halves the render peak (25.63 vs 42.8 GiB
 # measured), which is what puts H3 in reach of a 36 GB Mac at all — and the
@@ -84,9 +85,59 @@ SRC="$LAYOUT/$DIT_REL"
 # The default's weights must be installable wherever the default applies;
 # 22 GB of disk and ~5 min is the price of the halving the release notes
 # promised. Idempotent via the pack's own quant_config.json, as before.
-if [ -f "$PACK/quant_config.json" ]; then
+# VALIDATE IN A FRESH PROCESS, AND MARK ONLY AFTER. quantize_stream.py writes
+# quant_config.json and THEN validates by loading the whole Q8 tree in the same
+# process that still holds the mmap-backed bf16 source and the quantization
+# intermediates — on a 36 GB Mac macOS SIGKILLs it right there, after every
+# shard is on disk and valid (#78: "Killed: 9 … quantize_stream.py", while a
+# clean `load_dit()` of the same pack takes 3.6 s). And because the marker
+# was already written, the retry said "already built" over a pack that never
+# reported success. So: the marker is `.built_ok`, written by THIS script only
+# after `load_dit()` succeeds in its own process; a pack with shards but no
+# marker is validated (never rebuilt) before it is trusted; a pack whose index
+# names a shard that is missing is rebuilt.
+pack_shards_present() {
+  # every shard the index names exists and is non-empty
+  [ -f "$PACK/model.safetensors.index.json" ] || return 1
+  .venv/bin/python - "$PACK" <<'PY'
+import json, os, sys
+pack = sys.argv[1]
+idx = json.load(open(os.path.join(pack, "model.safetensors.index.json")))
+names = sorted(set(idx.get("weight_map", {}).values()))
+ok = bool(names) and all(os.path.getsize(os.path.join(pack, n)) > 0 for n in names if os.path.exists(os.path.join(pack, n))) \
+     and all(os.path.exists(os.path.join(pack, n)) for n in names)
+sys.exit(0 if ok else 1)
+PY
+}
+validate_pack_fresh() {
+  # load_dit() in a process that holds nothing else — the validation the
+  # quantizer's own process could not survive on the 36 GB floor
+  echo '=== Validating the Q8 engine in a fresh process ==='
+  .venv/bin/python - "$PACK" <<'PY'
+import sys, time
+from minimax_h3_mlx.load import load_dit
+t0 = time.time()
+load_dit(sys.argv[1], verbose=False)
+print(f"LOAD OK - pack valid ({time.time() - t0:.1f}s)", flush=True)
+PY
+}
+if [ -f "$PACK/.built_ok" ] && pack_shards_present; then
   echo 'Q8 engine already built - skipping'
 else
-  echo '=== Building the reduced-RAM Q8 engine (~5 min, one time) ==='
-  .venv/bin/python scripts/quantize_stream.py --src "$SRC" --out "$PACK"
+  if [ -f "$PACK/quant_config.json" ] && pack_shards_present; then
+    echo 'Q8 engine shards are on disk but were never validated - validating instead of rebuilding'
+  else
+    echo '=== Building the reduced-RAM Q8 engine (~5 min, one time) ==='
+    rm -f "$PACK/.built_ok"
+    .venv/bin/python scripts/quantize_stream.py --src "$SRC" --out "$PACK"
+    echo "quantizer exit $? (a kill during its own final validation is recovered below)"
+  fi
+  if pack_shards_present && validate_pack_fresh; then
+    : > "$PACK/.built_ok"
+    echo 'Q8 engine built and validated'
+  else
+    rm -f "$PACK/quant_config.json" "$PACK/.built_ok"
+    echo 'WARN: the Q8 pack did not validate - it will be rebuilt on the next Install / Update'
+    exit 1
+  fi
 fi
