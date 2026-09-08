@@ -3633,6 +3633,9 @@ async function loadParams() {
     if (typeof setTakeRetake === 'function') {
       setTakeRetake(p.take.retake === false ? 'off' : 'on');
     }
+    // The camera line, as written once for the whole shot (take.camera).
+    const _camEl = document.getElementById('take_camera');
+    if (_camEl) _camEl.value = p.take.camera || '';
   } else if (typeof setTakeSeconds === 'function') setTakeSeconds(0);
   if (p.upscale) setUpscale(p.upscale);
   if (p.upscale_method) setUpscaleMethod(p.upscale_method);

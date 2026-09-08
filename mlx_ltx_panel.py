@@ -15924,6 +15924,170 @@ def take_light_lock(prompt: str) -> str:
             f"of day, weather or season.")
 
 
+def take_camera_lock(camera: str, continuing: bool) -> str:
+    """One sentence that holds the CAMERA across a join.
+
+    The handoff anchors the picture (the previous part's last frame) but not
+    the motion: the next part starts from a still and picks its own move, so
+    every functional one shot showed the seam — the camera changing direction,
+    or stopping and starting again, exactly at the join (owner, 2026-09-07:
+    "if we are doing a pan left or going behind his head, in the next shot we
+    need to continue in the same direction and speed"). `camera` is the one
+    move the user wrote for the whole shot (may be empty); `continuing` is
+    True for every part after the first. With no camera written, the first
+    part gets nothing and every later part still gets the generic lock — the
+    seam is there whether or not the user named the move.
+    """
+    cam = (camera or "").strip().rstrip(".")
+    if continuing:
+        move = (f"the camera is already moving — {cam} — and continues" if cam
+                else "the camera continues the movement of the previous moment")
+        return (f"The same continuous shot, no cut: {move} in the same direction at the "
+                f"same steady speed; it does not stop, pause, restart or change direction.")
+    if not cam:
+        return ""
+    return (f"Camera: {cam}. One steady, continuous move at one speed for the whole "
+            f"shot; the camera never stops and never changes direction.")
+
+
+def take_speech_end(path, thresh: float = 0.02, pad: float = 0.4) -> float | None:
+    """Seconds into `path` where speech last stops, plus `pad`; None when the clip
+    carries no speech.
+
+    Why this exists (2026-09-07, measured): a continuation part is anchored on
+    the previous part's LAST frame, and after a spoken line that frame is a
+    closed, silent mouth — the model then will not lip-sync the next line at
+    all (voice plays as voiceover; mouth-vs-voice correlation 0.20 against 0.33
+    for a first part). Anchored on a frame where the mouth is still speaking,
+    the next part syncs (0.33). So the runner can hand off from the frame where
+    the line ends instead of the frame where the part ends. Audio RMS over 40 ms
+    blocks; the threshold is the larger of `thresh` and a quarter of the peak so
+    a quiet mix still registers. `pad` keeps the last syllable's decay: 0.12 s
+    clipped it audibly (owner: "it got cut in the middle").
+    """
+    try:
+        raw = subprocess.run([str(FFMPEG), "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1",
+                              "-ar", "16000", "-f", "s16le", "-"], capture_output=True, check=True, timeout=120).stdout
+    except Exception:                                              # noqa: BLE001
+        return None
+    import array, math
+    a = array.array("h"); a.frombytes(raw[: len(raw) - len(raw) % 2])
+    blk = 640
+    if len(a) < blk:
+        return None
+    rms = [math.sqrt(sum(x * x for x in a[i:i + blk]) / blk) / 32768.0 for i in range(0, len(a) - blk + 1, blk)]
+    t = max(thresh, 0.25 * max(rms))
+    last = None
+    for i, v in enumerate(rms):
+        if v >= t:
+            last = i
+    if last is None:
+        return None
+    return (last + 1) * blk / 16000.0 + pad
+
+
+TAKE_LIPSYNC_MIN = 0.20   # mouth-opening vs voice correlation under which a spoken part is retaken
+TAKE_LIPSYNC_RETAKES = 2  # how many fresh-seed retakes a failing part gets before the best clip is kept
+TAKE_TALKING_BACK = 0.2   # seconds before the line ends where the handoff frame is taken (mouth still mid-word)
+
+
+def take_handoff_points(path, back: float = TAKE_TALKING_BACK) -> tuple[float, float] | None:
+    """(picture_cut, sound_cut) for a speech handoff, or None when the clip carries no speech.
+
+    The picture is cut `back` seconds BEFORE the line ends, on a frame where the
+    mouth is still mid-word — the next part is anchored on that frame, and only a
+    talking anchor gives it a chance to lip-sync (measured 2026-09-07: mid-word
+    anchor +0.54 and +0.47, pause-end anchor +0.15, closed mouth −0.15 to −0.01).
+    The sound is cut where the line really ends (plus the decay pad), so the last
+    word is heard whole: the runner mixes that tail over the next part's opening
+    silence — a J-cut — instead of clipping the syllable (owner: "it got cut in
+    the middle").
+    """
+    end = take_speech_end(path)
+    if end is None:
+        return None
+    pad = take_speech_end.__defaults__[1]
+    cut = max(0.0, end - pad - back)
+    return (round(cut, 3), round(end, 3))
+
+
+def take_expects_speech(params: dict, beats: list[str] | None = None) -> bool:
+    """Whether a take part is expected to carry a spoken line — the only case the
+    lip-sync gate may judge. A character job speaks with its own voice; a plain
+    job speaks when a beat quotes a line. An aerial flight has neither, and the
+    cascade face box still finds a "face" in a cityscape: on 2026-09-08 the gate
+    scored an EX ALTO flight +0.15 and retook a 47-minute part for lip-sync on a
+    shot with no mouth in it."""
+    if (params.get("character_id") or "").strip():
+        return True
+    text = " ".join([str(params.get("prompt") or "")] + [str(b) for b in (beats or [])])
+    return bool(re.search(r'[“"][^”"]{2,}[”"]', text))
+
+
+def take_lipsync_score(path) -> float | None:
+    """How well the mouth follows the voice in one clip, or None when there is
+    no face or no speech to judge (or cv2 is not importable).
+
+    The face is found once a second with OpenCV's frontal cascade; inside the
+    lower third of the face box, the fraction of pixels darker than the box's
+    own median minus 40 is how open the mouth is. That series and the audio
+    RMS are correlated over the speaking frames at lags −6..+6 frames; the
+    best value is returned. Calibrated 2026-09-07 against the owner's ear on
+    the Bizarro one shots: parts judged fine +0.29/+0.39/+0.41, parts judged
+    voiceover +0.17/−0.13/+0.19. A first part rendered at the same settings
+    came out +0.41 and −0.27 on two lines, so a part's sync is not something
+    the prompt can guarantee — it has to be measured, and retaken.
+    """
+    try:
+        import cv2  # noqa: F401
+        import numpy as np
+    except Exception:                                              # noqa: BLE001
+        return None
+    try:
+        casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        cap = cv2.VideoCapture(str(path)); fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        opens = []; box = None; i = 0
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+            if box is None or i % int(fps) == 0:
+                f = casc.detectMultiScale(g, 1.1, 5, minSize=(80, 80))
+                if len(f):
+                    box = max(f, key=lambda b: b[2] * b[3])
+            if box is None:
+                opens.append(float("nan")); i += 1; continue
+            x, y, w, h = box
+            roi = g[y + int(h * 0.62):y + h, x + int(w * 0.25):x + int(w * 0.75)]
+            opens.append(float((roi < (np.median(roi) - 40)).mean())); i += 1
+        n = len(opens)
+        if n < 48:
+            return None
+        o = np.array(opens); o = np.where(np.isnan(o), np.nanmean(o), o)
+        if not np.isfinite(o).all():
+            return None
+        raw = subprocess.run([str(FFMPEG), "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000",
+                              "-f", "s16le", "-"], capture_output=True, check=True, timeout=120).stdout
+        a = np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0; spf = int(16000 / fps)
+        rms = np.array([np.sqrt(np.mean(a[j * spf:(j + 1) * spf] ** 2) + 1e-12) if len(a[j * spf:(j + 1) * spf]) else 0.0
+                        for j in range(n)])
+        k = np.ones(3) / 3; m = np.convolve(o, k, "same"); r = np.convolve(rms, k, "same")
+        sp = r > max(0.02, float(np.percentile(rms, 55)))
+        if sp.sum() < 24:
+            return None
+        best = None
+        for lag in range(-6, 7):
+            x_ = m[lag:][sp[:n - lag]] if lag >= 0 else m[:n + lag][sp[-lag:]]
+            y_ = r[:n - lag][sp[:n - lag]] if lag >= 0 else r[-lag:][sp[-lag:]]
+            if len(x_) >= 24 and x_.std() > 1e-6 and y_.std() > 1e-6:
+                c = float(np.corrcoef(x_, y_)[0, 1])
+                best = c if best is None else max(best, c)
+        return best
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
 def take_frame_light(path, at_sec: float) -> tuple[float, float] | None:
     """(mean luma 0..1, warmth = mean R − mean B, −1..1) of one frame."""
     try:
@@ -16711,7 +16875,25 @@ def _sb_take_concept(concept: str, seconds: int) -> str:
             f"Name the sound in every beat. State the time of day and the weather "
             f"ONCE, in the first beat, and keep them for the whole take; never let a "
             f"beat imply a different hour (no 'dawn breaks', no 'neon comes on' unless "
-            f"it is already dark) — the light must not change between beats.")
+            f"it is already dark) — the light must not change between beats. "
+            f"When two characters speak: give each an unmistakable look AND voice in "
+            f"the first beat (build, the colour they wear, one vocal trait each — deep "
+            f"and slow, thin and quick), let ONE of them speak per beat, and say that "
+            f"the other listens with its mouth closed; two look-alike speakers get "
+            f"their lines swapped or spoken in unison. A beat names ONLY who should "
+            f"be in the picture — whoever it names is composed into its frame, and "
+            f"'only A is in the frame' does not remove a B the same beat describes — "
+            f"so to show one speaker at a time, mention one character and nothing "
+            f"about the other, and introduce the second one in the beat where it "
+            f"enters. A spoken beat holds ONE line of at most seven words — speech "
+            f"runs about two and a half words a second and a longer line spills "
+            f"past the beat as voice over a closed mouth — with the silence after it "
+            f"WRITTEN ('then he is silent, his mouth settles closed, and only the "
+            f"wind is heard'), and the first line arrives after a silent look, never "
+            f"on the first frame. The staging that works: a long table with one speaker at each "
+            f"end and one slow lateral track along it — A alone in frame for its "
+            f"lines, a silent beat of empty table as A slides out, B entering alone "
+            f"at the far end for its answer.")
 
 
 def _sb_plan_thread(board_id: str, brief: dict, previous: dict | None) -> None:
@@ -20677,6 +20859,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                                      for b in take_beats(f("beats", ""), _take["beats"])]
             _take["light_lock"] = _lock
             _take["retake"] = f("take_retake", "on").strip().lower() not in ("off", "0", "false", "no")
+            # The camera, once, for the whole shot (take_camera_lock).
+            _take["camera"] = f("take_camera", "").strip()[:240]
+            # Where a part hands off: its last frame ("last", the default) or the
+            # frame where its speech ends ("speech") — see take_speech_end.
+            _take["handoff"] = ("speech" if f("take_handoff", "last").strip().lower() == "speech" else "last")
             if _take["engine"] == "h3":
                 # A take is 15 s parts whatever the form said; without a quality
                 # the tier composer fell back to draft_3s and every part became
@@ -23977,6 +24164,7 @@ def run_take_job_inner(job: dict) -> None:
     take_dir.mkdir(parents=True, exist_ok=True)
     ff = str(FFMPEG)
     outs: list[str] = []
+    tail_wav: str | None = None   # speech handoff: the previous part's last word, mixed over this part's head
     last_png: str | None = None
     # The continuity lock: "" when the user switched it off (then blank beats
     # hold with TAKE_HOLD alone and a retake does not double anything).
@@ -24003,6 +24191,13 @@ def run_take_job_inner(job: dict) -> None:
             "label": f"{label or 'one shot'} · part {k + 1} of {n_parts}",
             "open_when_done": False,
         })
+        # THE CAMERA CROSSES THE JOIN. The lead sentence goes first in the
+        # part's prompt (the first window's, on H3): the move is already in
+        # progress at this part's first frame, same direction, same speed.
+        lead = take_camera_lock(take.get("camera") or "", continuing=(k > 0))
+        chain = list(chain)
+        if lead:
+            chain[0] = (lead + " " + (chain[0] or "")).strip()
         if last_png:
             cp["mode"] = "i2v"
             cp["image"] = last_png
@@ -24081,6 +24276,46 @@ def run_take_job_inner(job: dict) -> None:
             push(f"[take] part {k + 1}: the light drifted (luma {drift.get('luma_first')} → "
                  f"{drift.get('luma_last')}) — retakes are off, keeping it")
         job.setdefault("take_drift", []).append(drift)
+        # LIP-SYNC GATE: a spoken part whose mouth does not follow its voice is
+        # retaken once with a fresh seed, and the better-scoring clip is kept.
+        # Measured 2026-09-07: identical settings gave +0.41 on one line and
+        # −0.27 on the next, so this is not something the words can secure.
+        ls = take_lipsync_score(out) if take_expects_speech(p, chain) else None
+        if ls is not None:
+            push(f"[take] part {k + 1}: lip-sync {ls:+.2f}" + ("" if ls >= TAKE_LIPSYNC_MIN else
+                 f" — under {TAKE_LIPSYNC_MIN:.2f}, the voice is not on his mouth"))
+        attempt = 0
+        while (ls is not None and ls < TAKE_LIPSYNC_MIN and retake_allowed
+               and attempt < TAKE_LIPSYNC_RETAKES and not job.get("cancel_requested")):
+            attempt += 1
+            push(f"[take] part {k + 1}: retaking it for lip-sync with a fresh seed "
+                 f"({attempt} of {TAKE_LIPSYNC_RETAKES})")
+            ls_params = _child_params(k, idxs, chain)
+            try:
+                ls_params["seed"] = str(int(ls_params.get("seed") or 0) + 211 * attempt)
+            except (TypeError, ValueError):
+                ls_params["seed"] = "-1"
+            ls_retry = {"id": f"{job['id']}-p{k + 1}l" + (str(attempt) if attempt > 1 else ""),
+                        "params": ls_params, "status": "running",
+                        "created_at": job.get("created_at"), "started_ts": time.time()}
+            render_part(ls_retry)
+            out3 = ls_retry.get("output_path")
+            ls2 = take_lipsync_score(out3) if out3 and Path(out3).is_file() else None
+            if ls2 is not None and ls2 > ls:
+                push(f"[take] part {k + 1}: the retake syncs better ({ls2:+.2f} vs {ls:+.2f}) — using it")
+                try:
+                    set_hidden(str(out), True)
+                except Exception:                                  # noqa: BLE001
+                    pass
+                out, ls = out3, ls2
+            else:
+                push(f"[take] part {k + 1}: the retake did not sync better ({ls2}) — keeping the earlier one")
+                if out3:
+                    try:
+                        set_hidden(str(out3), True)
+                    except Exception:                              # noqa: BLE001
+                        pass
+        job.setdefault("take_lipsync", []).append(ls)
         outs.append(out)
         # Parts are working files: kept, hidden from the gallery. The one shot
         # is the output.
@@ -24088,6 +24323,45 @@ def run_take_job_inner(job: dict) -> None:
             set_hidden(str(out), True)
         except Exception:                                          # noqa: BLE001
             pass
+        if take.get("handoff") == "speech" and tail_wav and Path(tail_wav).is_file():
+            # The previous part's last word finishes over this part's opening
+            # silence (a J-cut): its sound tail is mixed onto the head of this
+            # clip, at level, before this clip is cut or anchored.
+            led = str(take_dir / f"part{k + 1}_lead.mp4")
+            subprocess.run([ff, "-loglevel", "error", "-y", "-i", out, "-i", tail_wav,
+                            "-filter_complex", "[1:a]apad[t];[0:a][t]amix=inputs=2:duration=first:normalize=0[a]",
+                            "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", led],
+                           check=True)
+            outs[-1] = led
+            out = led
+        tail_wav = None
+        if take.get("handoff") == "speech" and k + 1 < n_parts:
+            # Hand off on a TALKING frame, not where the part ends: the picture
+            # is cut a moment before the line ends (the mouth still mid-word,
+            # the only anchor measured to carry the voice onto the next part's
+            # mouth), the sound runs to the end of the line, and the silent tail
+            # after it is dropped. The last part keeps its written silence.
+            pts = take_handoff_points(out)
+            if pts is not None:
+                cut, end = pts
+                try:
+                    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                                "-of", "csv=p=0", out], capture_output=True, text=True, timeout=30).stdout.strip())
+                except Exception:                                  # noqa: BLE001
+                    dur = 0.0
+                if dur and 0.5 < cut < end <= dur:
+                    trimmed = str(take_dir / f"part{k + 1}_speech.mp4")
+                    subprocess.run([ff, "-loglevel", "error", "-y", "-i", out, "-t", f"{cut:.3f}",
+                                    "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
+                                    "-c:a", "aac", "-b:a", "192k", trimmed], check=True)
+                    tail = str(take_dir / f"part{k + 1}_tail.wav")
+                    subprocess.run([ff, "-loglevel", "error", "-y", "-ss", f"{cut:.3f}", "-to", f"{end:.3f}",
+                                    "-i", out, "-vn", "-c:a", "pcm_s16le", tail], check=True)
+                    push(f"[take] part {k + 1}: hands off at {cut:.1f} s on a talking frame; the last word "
+                         f"finishes over the next part ({dur - end:.1f} s of silent tail dropped)")
+                    outs[-1] = trimmed
+                    out = trimmed
+                    tail_wav = tail
         last_png = str(take_dir / f"part{k + 1}_last.png")
         subprocess.run([ff, "-loglevel", "error", "-y", "-sseof", "-0.05", "-i", out,
                         "-frames:v", "1", "-update", "1", last_png], check=True)
@@ -24115,7 +24389,9 @@ def run_take_job_inner(job: dict) -> None:
                  "beats_per_part": take.get("beats_per_part")
                  or (TAKE_H3_BEATS_PER_PART if engine == "h3" else TAKE_LTX_BEATS_PER_PART),
                  "part_frames": take.get("part_frames"),
-                 "light_lock": lock, "retake": retake_allowed},
+                 "light_lock": lock, "retake": retake_allowed,
+                 "camera": take.get("camera") or "",
+                 "handoff": take.get("handoff") or "last"},
         "temporal_mode": "native", "long_mode": "native", "window_prompts": [],
     })
     if engine == "h3":

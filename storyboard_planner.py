@@ -270,6 +270,11 @@ L6  DIALOGUE lives inside <d>[English] ...</d> and nowhere else. The speaker, th
     and their delivery are described OUTSIDE the tag. Immediately after the tag, stop the
     mouth: "his jaw ceases speaking motion and his mouth settles closed". One or two short
     sentences per 5 s. If a shot has no dialogue, it has no <d> at all.
+    A SHOT THAT CARRIES A LINE FRAMES ONLY THE SPEAKER. The engine moves every mouth in
+    frame to whatever voice plays, so a listener in the same frame mouths the line too or
+    speaks it in unison. Give the listener its own shot (a reaction, a cutaway); never two
+    faces in frame while a line plays, and never ask for the listener's back - that adds a
+    third body.
 L7  MUSIC IS INSTRUMENTATION, not mood. "Sparse piano at a slow tempo, joined by low
     strings that swell and cut out" - never "epic", "emotional", "uplifting". "N/A" is the
     correct value when there is no score, and is the right answer most of the time.
@@ -457,6 +462,22 @@ How to write one. The shot object keeps every key above and adds exactly two:
                   in the first beat, and never change them - no 'dawn breaks', no lights
                   coming on. Every beat starts exactly where the one before it ends: no
                   new angle, no jump in time.
+                  When TWO characters speak: give each an unmistakable look AND voice in
+                  the first beat (build, robe or jacket colour, one vocal trait each - deep
+                  and slow, thin and quick), let ONE of them speak per beat, and say that
+                  the other listens with its mouth closed. Two look-alike speakers make
+                  the engine give a line to the wrong mouth, or to both at once.
+                  A beat names ONLY who should be in the picture: whoever a beat names
+                  is composed into its frame, "only A is in the frame" does not remove a
+                  B the same beat describes, and asking for B's back adds a third body.
+                  To show one speaker at a time, write a beat that mentions one
+                  character and nothing about the other, and introduce the second one
+                  in the beat where it enters.
+                  The staging that works for two speakers: a long table with one at
+                  each end and one slow lateral track along it - speaker A alone in
+                  frame for its lines, a silent beat of empty table as A slides out,
+                  speaker B entering alone at the far end for its answer. Never both
+                  in frame while either speaks.
 "description" is the whole take in one paragraph; "duration_s" equals "take_seconds".
 Every other shot in the film has NEITHER key.
 

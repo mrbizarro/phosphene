@@ -1153,6 +1153,19 @@
                 oninput="beatsInput()"
                 placeholder="she pushes off down the sunlit avenue&#10;a van sweeps past, pigeons burst up ahead&#10;she drops off the kerb into the road&#10;…"></textarea>
             </div>
+            <!-- The camera, once, for the whole shot. The handoff anchors the
+                 picture between parts but not the motion; this line is carried
+                 into every part's prompt so the move continues in the same
+                 direction at the same speed across the join (take_camera_lock).
+                 Left blank, later parts still get the generic continuity line. -->
+            <div class="oneshot-camera" id="oneshotCamera">
+              <div class="qs-label h3-axis-label">
+                <span class="qs-name">Camera</span>
+                <span class="qs-meta">optional · one move for the whole shot, its direction and speed — every part continues it</span>
+              </div>
+              <input type="text" name="take_camera" id="take_camera" class="sb-input" maxlength="240" autocomplete="off" spellcheck="false"
+                     placeholder="a slow, steady clockwise arc around the table at eye level, wide to close">
+            </div>
             <!-- Start frame (optional). The SAME hidden `image` field as
                  Image mode, through the same /upload path (pickerUploadFile),
                  so when it is set the hidden #mode becomes i2v and the shot

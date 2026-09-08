@@ -2908,6 +2908,8 @@
     .sb-auto { margin: 4px 0 8px; font-size: var(--fs-xs); }
     .sb-track-row { display: flex; gap: 8px; align-items: center; }
     .sb-track-row .sb-input { flex: 1 1 auto; min-width: 0; }
+    /* One Shot: the camera line, one move for the whole shot (take_camera_lock). */
+    .oneshot-camera .sb-input { width: 100%; box-sizing: border-box; font-size: var(--fs-sm); }
     .sb-track-bars { flex: 0 0 auto; width: auto; min-width: 150px; }
     #sbLengthRow.is-standing-down { opacity: 0.45; pointer-events: none; }
     /* `.cz-control` sets a display, which beats the UA's [hidden]; say it

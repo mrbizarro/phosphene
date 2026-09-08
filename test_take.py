@@ -161,7 +161,10 @@ def test_take_runner_chains_parts_and_joins(tmp_path, monkeypatch):
     p.run_take_job_inner(j)
     assert len(seen) == 2
     assert seen[0]["mode"] == "t2v" and [c.split(" Continuity")[0] for c in seen[0]["h3_chain_prompts"]] == ["b1", "b2", "b3"]
-    assert seen[1]["mode"] == "i2v" and [c.split(" Continuity")[0] for c in seen[1]["h3_chain_prompts"]] == ["b4", "b5", "b6"]
+    # part 2's first window opens on the camera lock (the join), then its beat
+    assert seen[1]["mode"] == "i2v"
+    assert seen[1]["h3_chain_prompts"][0].startswith(p.take_camera_lock("", True))
+    assert [c.split(" Continuity")[0].split(" ")[-1] for c in seen[1]["h3_chain_prompts"]] == ["b4", "b5", "b6"]
     assert Path(seen[1]["image"]).is_file()          # the last frame of part 1
     assert seen[1]["take"] is None                   # a part is not a take
     final = Path(j["output_path"])
@@ -220,10 +223,13 @@ def test_ltx_take_runner_chains_parts_by_last_frame_handoff(tmp_path, monkeypatc
     for k in (1, 2, 3, 4):
         assert seen[k]["mode"] == "i2v" and seen[k]["i2v_reference_mode"] == "anchor"
         assert Path(seen[k]["image"]).is_file() and seen[k]["image"].endswith(f"part{k}_last.png")
-    assert seen[1]["prompt"].split(" Continuity")[0] == "b3"
+    # every later part opens on the camera lock, then its own beats
+    assert seen[1]["prompt"].startswith(p.take_camera_lock("", True))
+    assert seen[1]["prompt"].split(" Continuity")[0].endswith(" b3")
     assert p.TAKE_HOLD in seen[1]["prompt"]                      # the blank 4th beat holds
     assert seen[4]["frames"] == 121                               # the one-beat tail
-    assert seen[4]["prompt"].split(" Continuity")[0] == "b9"
+    assert seen[4]["prompt"].startswith(p.take_camera_lock("", True))
+    assert seen[4]["prompt"].split(" Continuity")[0].endswith(" b9")
     for c in seen:                                                # never the windows chain
         assert c["long_mode"] == "native" and c["temporal_mode"] == "native"
         assert c["window_prompts"] == [] and c["h3_chain_prompts"] == []
@@ -335,6 +341,13 @@ def test_take_shot_is_priced_by_parts_and_validates():
 def test_take_concept_asks_for_beats_that_never_cut():
     c = p._sb_take_concept("a hen skateboards through the city", 60)
     assert "12 beats" in c and "never cuts" in c and "a hen skateboards" in c
+    # two speakers: unmistakable, one per beat, the other silent (the aliens' unison lines)
+    assert "ONE of them speak per beat" in c and "mouth closed" in c and "unmistakable look AND voice" in c
+    # whoever a beat names is in its picture (the long-table takes, 2026-09-07)
+    assert "names ONLY who should be in the picture" in c and "introduce the second one in the beat where it enters" in c
+    assert "long table with one speaker at each end" in c and "B entering alone" in c
+    # the word budget and the written silence (voice over a closed mouth, 2026-09-07)
+    assert "at most seven words" in c and "silence after it" in c and "silent look" in c
 
 
 # ---- continuity: the light lock and the drift retake ---------------------------
@@ -392,3 +405,223 @@ def test_take_runner_retakes_a_drifting_part_once_and_keeps_the_steadier(tmp_pat
     assert side["take"]["parts"][0].endswith("-p1r.mp4")            # the steadier retake is part 1
     assert str(out_dir / f"{j['id']}-p1.mp4") in hidden               # the drifting one is hidden
     assert j["take_drift"][0]["drifted"] is True
+
+
+def test_camera_lock_holds_direction_and_speed_across_the_join():
+    # No camera written: part 1 gets nothing, every later part the generic lock.
+    assert p.take_camera_lock("", False) == ""
+    generic = p.take_camera_lock("", True)
+    assert generic.startswith("The same continuous shot, no cut:")
+    assert "continues the movement of the previous moment" in generic
+    assert "same direction at the same steady speed" in generic and "change direction" in generic
+    # A camera written once is carried into every part, first and later.
+    first = p.take_camera_lock("a slow clockwise arc around the table.", False)
+    assert first.startswith("Camera: a slow clockwise arc around the table.")
+    assert "never stops and never changes direction" in first
+    later = p.take_camera_lock("a slow clockwise arc around the table", True)
+    assert "already moving — a slow clockwise arc around the table — and continues" in later
+
+
+def test_ltx_take_parts_open_on_the_camera_lock(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    seen = []
+
+    def fake_ltx(child):
+        seen.append(dict(child["params"]))
+        out = out_dir / f"{child['id']}.mp4"; _tiny_clip(out, "red")
+        (out_dir / f"{child['id']}.mp4.json").write_text(json.dumps({"image": child["params"].get("image")}))
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_job_inner", fake_ltx)
+    cam = "a slow, steady clockwise arc around the table at eye level"
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "two men at a table", "take_seconds": "30",
+                    "beats": json.dumps(["b1", "b2", "b3", "b4", "b5", "b6"]), "take_camera": cam})
+    assert j["params"]["take"]["camera"] == cam
+    p.run_take_job_inner(j)
+    assert seen[0]["prompt"].startswith(f"Camera: {cam}.")            # part 1: the move, named once
+    assert " b1" in seen[0]["prompt"] and " b2" in seen[0]["prompt"]
+    for c in seen[1:]:                                                # every later part: already moving
+        assert c["prompt"].startswith("The same continuous shot, no cut: the camera is already moving — " + cam)
+    side = json.loads(Path(j["output_path"]).with_suffix(".mp4.json").read_text())
+    assert side["take"]["camera"] == cam
+
+
+def test_h3_take_first_window_of_each_part_carries_the_camera_lock(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    seen = []
+
+    def fake_h3(child):
+        seen.append(dict(child["params"]))
+        out = out_dir / f"{child['id']}.mp4"; _tiny_clip(out, "red")
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_h3_job_inner", fake_h3)
+    j = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "x", "take_seconds": "30",
+                    "beats": json.dumps(["b1", "b2", "b3", "b4", "b5", "b6"])})
+    p.run_take_job_inner(j)
+    assert len(seen) == 2
+    assert not seen[0]["h3_chain_prompts"][0].startswith("The same continuous shot")   # no camera: part 1 as written
+    assert seen[1]["h3_chain_prompts"][0].startswith("The same continuous shot, no cut: the camera continues")
+    assert seen[1]["h3_chain_prompts"][1].split(" Continuity")[0] == "b5"                # later windows untouched
+
+
+def test_speech_end_finds_where_the_line_stops(tmp_path):
+    # 3 s clip: a 1 kHz tone for the first 1.4 s, then silence. Speech ends at ~1.4 s (+ pad).
+    out = tmp_path / "tone.mp4"
+    subprocess.run([str(p.FFMPEG), "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=24:d=3",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:duration=1.4",
+                    "-filter_complex", "[1:a]apad=whole_dur=3[a]", "-map", "0:v", "-map", "[a]",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(out)], check=True)
+    end = p.take_speech_end(out)
+    assert end is not None and 1.6 <= end <= 2.1, end
+    silent = tmp_path / "silent.mp4"
+    subprocess.run([str(p.FFMPEG), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=24:d=2",
+                    "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(silent)], check=True)
+    assert p.take_speech_end(silent) is None
+
+
+def test_make_job_records_the_handoff_mode():
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "x", "take_seconds": "30", "take_handoff": "speech"})
+    assert j["params"]["take"]["handoff"] == "speech"
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "x", "take_seconds": "30"})
+    assert j["params"]["take"]["handoff"] == "last"
+
+
+def test_take_runner_retakes_a_part_whose_mouth_does_not_follow_its_voice(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    scores = iter([-0.2, 0.4, 0.5, 0.5])            # part 1 fails then its retake passes; parts 2, 3 pass
+    monkeypatch.setattr(p, "take_lipsync_score", lambda path: next(scores))
+    seen = []
+
+    def fake_ltx(child):
+        seen.append((child["id"], child["params"].get("seed")))
+        out = out_dir / f"{child['id']}.mp4"; _tiny_clip(out, "red")
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_job_inner", fake_ltx)
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": 'He says: "Hello."', "take_seconds": "30", "seed": "7"})
+    p.run_take_job_inner(j)
+    ids = [i for i, _ in seen]
+    assert ids == [f"{j['id']}-p1", f"{j['id']}-p1l", f"{j['id']}-p2", f"{j['id']}-p3"]
+    assert seen[1][1] == str(7 + 211)                            # a fresh seed for the retake
+    side = json.loads(Path(j["output_path"]).with_suffix(".mp4.json").read_text())
+    assert side["take"]["parts"][0].endswith("-p1l.mp4")          # the better-syncing clip is the one kept
+    assert j["take_lipsync"] == [0.4, 0.5, 0.5]                    # the score of the clip that was kept
+
+
+def _tone_clip(path: Path, seconds: float = 3.0, tone: float = 1.4) -> None:
+    """`seconds` of grey picture with a 1 kHz tone for the first `tone` seconds, then silence."""
+    subprocess.run([str(p.FFMPEG), "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", f"color=c=gray:s=64x64:r=24:d={seconds}",
+                    "-f", "lavfi", "-i", f"sine=frequency=1000:duration={tone}",
+                    "-filter_complex", f"[1:a]apad=whole_dur={seconds}[a]", "-map", "0:v", "-map", "[a]",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)], check=True)
+
+
+def _dur(path) -> float:
+    return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                 str(path)], capture_output=True, text=True).stdout.strip())
+
+
+def test_handoff_points_cut_the_picture_before_the_line_ends_and_the_sound_after(tmp_path):
+    out = tmp_path / "tone.mp4"; _tone_clip(out)
+    cut, end = p.take_handoff_points(out)
+    assert 1.6 <= end <= 2.1, end                                    # the line ends at ~1.4 s + the decay pad
+    assert abs((end - cut) - (0.4 + p.TAKE_TALKING_BACK)) < 0.05      # the picture is cut on a talking frame
+    assert cut < 1.4 < end                                            # ...while the tone is still sounding
+    silent = tmp_path / "silent.mp4"
+    subprocess.run([str(p.FFMPEG), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=24:d=2",
+                    "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(silent)], check=True)
+    assert p.take_handoff_points(silent) is None
+
+
+def test_ltx_take_speech_handoff_is_a_j_cut(tmp_path, monkeypatch):
+    """Every part but the last is cut on a talking frame; its last word is carried over the next part."""
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    monkeypatch.setattr(p, "take_lipsync_score", lambda path: 0.5)
+
+    def fake_ltx(child):
+        out = out_dir / f"{child['id']}.mp4"; _tone_clip(out)
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_job_inner", fake_ltx)
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "x", "take_seconds": "30", "take_handoff": "speech"})
+    p.run_take_job_inner(j)
+    take_dir = tmp_path / "state" / "take" / j["id"]
+    side = json.loads(Path(j["output_path"]).with_suffix(".mp4.json").read_text())
+    parts = side["take"]["parts"]
+    assert [Path(x).name for x in parts] == ["part1_speech.mp4", "part2_speech.mp4", "part3_lead.mp4"]
+    cut, end = p.take_handoff_points(out_dir / f"{j['id']}-p1.mp4")
+    assert abs(_dur(parts[0]) - cut) < 0.1                          # picture stops on the talking frame
+    assert abs(_dur(take_dir / "part1_tail.wav") - (end - cut)) < 0.1   # the rest of the word travels on
+    assert abs(_dur(parts[2]) - 3.0) < 0.1                          # the last part keeps its silence
+    assert _dur(j["output_path"]) < 3 * 3.0                         # the silent tails of parts 1–2 are gone
+
+
+def test_take_runner_gives_a_failing_part_two_retakes_and_keeps_the_best(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    scores = iter([-0.2, 0.1, 0.05, 0.5, 0.5])       # part 1 fails twice more; the middle attempt is the best
+    monkeypatch.setattr(p, "take_lipsync_score", lambda path: next(scores))
+    seen = []
+
+    def fake_ltx(child):
+        seen.append((child["id"], child["params"].get("seed")))
+        out = out_dir / f"{child['id']}.mp4"; _tiny_clip(out, "red")
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_job_inner", fake_ltx)
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": 'He says: "Hello."', "take_seconds": "30", "seed": "7"})
+    p.run_take_job_inner(j)
+    assert [i for i, _ in seen] == [f"{j['id']}-p1", f"{j['id']}-p1l", f"{j['id']}-p1l2", f"{j['id']}-p2", f"{j['id']}-p3"]
+    assert [s for _, s in seen][:3] == ["7", str(7 + 211), str(7 + 422)]
+    side = json.loads(Path(j["output_path"]).with_suffix(".mp4.json").read_text())
+    assert side["take"]["parts"][0].endswith("-p1l.mp4")            # 0.1 beat −0.2 and 0.05
+    assert j["take_lipsync"] == [0.1, 0.5, 0.5]
+
+
+def test_lipsync_gate_only_judges_parts_that_speak(tmp_path, monkeypatch):
+    """A flight with no character and no quoted line is never scored or retaken for lip-sync."""
+    assert p.take_expects_speech({"character_id": "bizarrotrn", "prompt": "x"}) is True
+    assert p.take_expects_speech({"prompt": 'He says: "Hello."'}) is True
+    assert p.take_expects_speech({"prompt": "aerial flight"}, ['He looks up and says, deadpan: "No."']) is True
+    assert p.take_expects_speech({"prompt": "dr0nesh0t aerial over the city"}, ["The roof slides away beneath."]) is False
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    monkeypatch.setattr(p, "OUTPUT", out_dir)
+    monkeypatch.setattr(p, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(p, "set_hidden", lambda *a: None)
+    monkeypatch.setattr(p, "take_drift", lambda *a, **k: {"ok": True, "delta": 0.0, "drifted": False})
+    monkeypatch.setattr(p, "take_lipsync_score", lambda path: -0.9)     # would fail every part if consulted
+    seen = []
+
+    def fake_ltx(child):
+        seen.append(child["id"])
+        out = out_dir / f"{child['id']}.mp4"; _tiny_clip(out, "red")
+        (out_dir / f"{child['id']}.mp4.json").write_text("{}")
+        child["output_path"] = str(out)
+    monkeypatch.setattr(p, "run_job_inner", fake_ltx)
+    j = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "aerial flight over the city", "take_seconds": "30", "seed": "7"})
+    p.run_take_job_inner(j)
+    assert seen == [f"{j['id']}-p1", f"{j['id']}-p2", f"{j['id']}-p3"]     # no -p1l: nothing was retaken
+    assert j["take_lipsync"] == [None, None, None]

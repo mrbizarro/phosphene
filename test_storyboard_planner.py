@@ -1883,3 +1883,13 @@ class TestGeographyParser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def test_planner_rules_frame_only_the_speaker_while_a_line_plays():
+    # Measured 2026-09-07: two faces in frame during a line -> both mouths move (unison), or
+    # the wrong mouth; "the listener's back to the camera" added a third body.
+    text = P.RULES if hasattr(P, "RULES") else "\n".join(
+        v for k, v in vars(P).items() if isinstance(v, str) and "DIALOGUE lives inside" in v)
+    assert "A SHOT THAT CARRIES A LINE FRAMES ONLY THE SPEAKER" in text
+    assert "never two" in text and "faces in frame while a line plays" in text
+    assert "never ask for the listener's back" in text

@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.11.1.** Time estimates now follow your chip (an M4 Pro or M1 Max renders two to four times slower than the M4 Max the numbers were measured on; an M5 Max or M3 Ultra much faster). Control asks for a clip before it queues, a saved HiDream pick falls back to Auto instead of failing, training says no on Macs under 24 GB, and the image pre-flight frees the idle video helper before refusing a 32 GB Mac. Includes 4.11.0: **One Shot** as its own mode, LTX one shots that hold together, the planner placing a One Shot inside a film. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.12.0.** A One Shot with a talking character now keeps the voice on the mouth across the joins: each part hands off on a frame where the character is still mid-word, the last word carries over the next part, every spoken part is measured for lip-sync and retaken up to twice, and the joined clip no longer drifts its sound ahead of the picture. Dialogue between two characters has a recipe that works (one face on screen at a time, a shot that carries a line frames only the speaker), written up in `docs/LTX_DIALOGUE.md`. Includes 4.11.x. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

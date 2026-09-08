@@ -1,5 +1,184 @@
 # Phosphene — project state, history, open work
 
+> **🎙️ 2026-09-07, evening — the handoff is a J-cut, and audio-first is out.**
+> Two questions from the owner. (1) *Can he keep talking through a cut?* Yes,
+> when the next part is anchored on a frame where his mouth is mid-word:
+> a head-of-part + continuation joined on such a frame scores +0.54 on the
+> mouth-vs-voice meter and reads as one uninterrupted line. It is necessary,
+> not sufficient: repeats on a second source part gave +0.15 (pause-end
+> anchor, mouth opening) and −0.09 (mid-phrase word gap), and first parts at
+> identical settings gave +0.41 / +0.25 / +0.15 / −0.15. (2) *Generate the
+> voice first and drive the picture from it?* No: A2V on Q8 Pro with the face
+> and voice models, fed a clean 10 s line of his own voice, anchored on his
+> frame and free, came out as voiceover both times (r −0.06; the mouth barely
+> moves). Shipped from that (`e8695b9`): `take_handoff=speech` now cuts the
+> PICTURE `TAKE_TALKING_BACK` = 0.2 s before the line ends and the SOUND at the
+> line end + pad, saving the tail as `part{k}_tail.wav` and mixing it
+> (`amix normalize=0`) over the head of the next part (`part{k+1}_lead.mp4`)
+> — the last word is heard whole and the next part is anchored on a talking
+> frame; the last part keeps its written silence; the lip-sync gate allows
+> `TAKE_LIPSYNC_RETAKES` = 2 fresh-seed retakes (`-pNl`, `-pNl2`) and records
+> the kept clip's score. `take_handoff_points()`; `test_take.py` 31. A2V's
+> input contract, learned the hard way: the audio must be exactly the clip's
+> length (241 f ↔ 10.0417 s) or the helper dies in `broadcast_shapes`.
+
+> **🎙️ 2026-09-07 — a talking one shot: what it took to make the mouth carry the voice.**
+> On the Bizarro monologue the owner heard every continuation part as
+> "a voiceover instead of him talking". Measured, in order: (1) 10–14-word
+> lines in 5 s beats overran the beat and the audio was cut at the part
+> boundary → one real line per 10 s part, silence written after it;
+> (2) the i2v continuation is anchored on the previous part's LAST frame,
+> after a line a closed silent mouth, and on that frame the model will not
+> lip-sync (mouth-opening-vs-voice r −0.15 / +0.20) while on a frame from
+> mid-word it does (+0.47) → `take_handoff=speech`: `take_speech_end()` finds
+> where the line stops (audio RMS, 0.4 s pad — 0.12 clipped the last
+> syllable), the part is trimmed there and the next part anchors on that
+> talking frame; (3) even a first part at identical settings came out +0.41 on
+> one line and −0.27 on the next → `take_lipsync_score()` (cv2 cascade face
+> box, dark-pixel mouth opening vs audio RMS, lags ±6; calibrated on the
+> owner's ear: fine +0.29/+0.39/+0.41, voiceover +0.17/−0.13/+0.19) gates
+> every spoken part and `TAKE_LIPSYNC_MIN = 0.20` retakes it once with a fresh
+> seed, keeping the better; `job["take_lipsync"]` records each. Also: the
+> character renders on Q8 Pro (the graded recipe; High 720p repainted the
+> face — "the quality is shit"), dialogue must not contain cut/edit/shot/scene
+> (the model rendered dissolves while he said "no cuts"), and exposure drift
+> inside i2v parts (137→178) is held flat by `scripts/join_smooth.py
+> --hold-exposure`. Tests: `test_take.py` 28. The owner's next question — generate
+> the voice first and drive the picture from it (A2V) — is queued as two
+> experiments behind the take. Camera plan for a one shot now changes INSIDE
+> parts (push-in, a sudden tilt, an orbit), never at a join.
+
+> **📚 2026-09-07 — research: how LTX wants two characters to talk (`docs/LTX_DIALOGUE.md`).**
+> The long-table one shot read as "two different tables, the character
+> changes in the middle" — three separate generations of a scene the model
+> never saw whole. Lightricks' own guides say dialogue-heavy scenes are
+> written screenplay-style as a MULTI-SHOT prompt inside one generation (2.5
+> native multi-shot): name the cut, re-establish the shot, re-identify each
+> character with the same words, state what the sound does across the cut,
+> add "Preserve … across every shot"; one speaker per line, short, the
+> speaker and delivery before the quote, "lip sync", the face before the
+> line. Multi-face lip-sync is an OPEN Lightricks issue (#395) — the field's
+> fixes are all one speaking face per generation. Continuity across
+> generations in the field uses ~3 s (73 frames) of context, colour matching
+> and audio blending, not one frame — the One Shot's handoff is the source of
+> its seams and its drift. A 10 s High-720p multi-shot proof of the recipe
+> (A's line, a hard cut, B's answer, same table) RENDERED and holds: one face
+> per shot, one room, one pair, a clean cut at 5 s —
+> `mlx_outputs/ltx_multishot_dialogue_aliens_10s_high720p.mp4`. Next: the
+> planner should write dialogue scenes as multi-shot prompts (docs/LTX_DIALOGUE.md §4).
+
+> **🎭 2026-09-07 — two speakers without a shared mouth: the staging that works, measured.**
+> The owner heard both aliens speak in unison even after they were made
+> unmistakable (look, colour, voice, one line per beat, "the other keeps its
+> mouth closed"): LTX lip-syncs EVERY mouth in frame to whatever voice plays,
+> and words do not hold a mouth still. Eight renders in a day found the rule
+> and the staging. Rule: whoever a beat names is in its picture — "only A is
+> in the frame" does not remove a B the same beat describes (v5), and
+> "over B's shoulder, back to camera" adds a THIRD body (v4). Staging (v8,
+> High 720p, `mlx_outputs/ltx_oneshot_aliens_debate_one_face_at_a_time_30s_
+> high720p.mp4`): a long table, one speaker at each end, one lateral track —
+> A alone in frame for its lines, a silent empty-table beat as A slides out,
+> B entering alone at the far end for its answer; never two mouths on screen.
+> Composition was iterated with six 5 s Balanced probes (two seeds × three
+> wordings, ~2 min each) after five 15-minute High-720p part-1 attempts —
+> the cheap loop the guide already prescribed. The dialogue became an
+> argument (the atom before bread / prayers to a flown-through sky; "every
+> species said that about its neighbours… wait for the songs"). The joins
+> still carry the speed step (slow speech parts, a fast empty-table glide) —
+> the structural seam of last-frame handoff, unchanged by this. Planner block,
+> `_sb_take_concept` and docs/PROMPTING.md carry the rule and the staging.
+
+> **🗣️ 2026-09-07 — two speakers: the lines landed on the wrong mouth.** On the
+> aliens take the owner heard the right alien answer itself and both speak a
+> line in unison: two identical speakers give the joint audio nothing to bind
+> a line to. The rule is now in the planner's One Shot block, in
+> `_sb_take_concept` and in docs/PROMPTING.md: unmistakable look AND voice
+> for each (build, the colour they wear, one vocal trait), ONE speaker per
+> beat, the other listening with its mouth closed (`test_take.py`). The take
+> was re-rendered that way (tall in violet, deep and slow; short in grey, thin
+> and quick) — `mlx_outputs/ltx_oneshot_aliens_at_dinner_v3_two_voices_30s_
+> high720p.mp4` — and the ear test is the owner's. `scripts/speaker_check.py`
+> (per-beat face motion per side during speech) reproduced the fault on the
+> first clip but measures heads, not mouths: a flag for listening, not a grade.
+
+> **👽 2026-09-07 — the aliens-at-dinner one shot, and what the H3 extender repo teaches.**
+> The Bizarro-and-robot clip was judged terrible (dark Q8 Pro pass, the robot
+> never held its cup, goggles and voice bled across characters, too much
+> hand business for an engine that is bad at physics). The replacement is
+> two plain characters and dialogue that carries the scene: two aliens at a
+> candle-lit table discussing humans in detached wonder, 30 s, **High 720p**
+> (Q8 two-stage, 1280×704 native, no upscale, no LoRAs), one slow push-in
+> as the Camera line. v1 came out too dark and too wide and was stopped after
+> part 1; v2 lit the faces and framed them medium. Its joins measure clean —
+> the camera is near-static (0.02 px/frame) on both sides, so there is nothing
+> to stop and restart — and the push-in accumulates across all three parts.
+> `mlx_outputs/ltx_oneshot_aliens_at_dinner_30s_high720p.mp4`.
+> **The owner's repo pointer** (pmhaidn/ComfyUI-Minimax-H3-Extender, GPLv3):
+> it pins the LAST 5 or 22 frames of the previous clip as a head Guide in the
+> next generation (plus tail audio), trims them, and polishes the join with a
+> one-frame optical-flow warp and a 24-frame colour seam-fade. The polish is
+> re-implemented in `scripts/join_smooth.py` (4.6 s for 30 s of 720p; proven
+> on both clips, changes nothing measurable on a multi-second stall/burst —
+> as its code predicts). The cure is the motion handoff: for H3 it is engine
+> work in the hailuo-mlx codex (the runner has first-frame chaining only);
+> for LTX the untested variant is `retake.py`'s `extend_from_video` with a
+> SHORT source (the last 9–25 frames), trimmed — the 121-frame windows chain
+> that went to mush is not the same experiment. `scripts/seam_motion.py` now
+> calls a join with (near-)static camera on both sides clean.
+
+> **📐 2026-09-07 — the seam is structural: measured before and after the camera lock.**
+> `seam_motion.py` (scratch; mean dense optical flow one second before vs one
+> second after each join) on the old 40 s bar one shot: 10 s speed ×2.3
+> (stop/restart), 20 s 86° direction change, 30 s 149° reversal — exactly
+> what the owner sees. On the new 30 s Bizarro-and-robot one shot rendered
+> WITH the camera lock in every part: 10 s ×6.3 and 96°, 20 s ×24. The lock
+> changed nothing at the joins, because the cause is not the words: every
+> 10 s LTX part decays to a standstill in its last ~3 s (0.1 → 0.02 px/frame)
+> and every i2v part lurches from rest in its first ~2 s (0.35). A still frame
+> cannot be told to start at speed. What could: hand off from a frame that is
+> still moving (overlapping parts, trimming the dead tail — at the cost of
+> beat content), slow the burst in post, or continuation with real motion
+> context at the engine level. The metric itself is worth keeping — a
+> `take_seam` beside `take_drift`, logged per join — but a retake would not
+> fix a systematic decay, so it is a report, not a trigger.
+
+> **🧪 2026-09-07 — measured: one identity LoRA paints every face in the frame.**
+> The owner asked for a viral one shot — Bizarro and a Trump-like figure at one
+> table. Three Q8 Pro renders at one seed, graded by eye: `bizarrotrn` +
+> `eltrumpo` fused together → both men have Bizarro's face; `bizarrotrn` alone
+> with the other man described in text → a second Bizarro; `eltrumpo` alone →
+> the faces stay distinct only because that adapter is weak. Weight-level
+> fusion has no spatial control in the MLX port, so a character scene holds
+> ONE human face (docs/PROMPTING.md says so now); the example became Bizarro
+> and a white robot with a visor. Not a prompt problem — do not spend Q8
+> minutes on two-face LoRA scenes.
+
+> **🎥 2026-09-07 (dev) — One Shot: the camera crosses the join.** The owner
+> can see every seam in a one shot: "either the camera suddenly changes
+> direction or it suddenly stops and starts again… if we are doing a pan left
+> or going behind his head, in the next shot we need to continue in the same
+> direction and speed." The handoff anchors the PICTURE (last frame) between
+> parts, never the MOTION — each i2v part starts from a still and picks its
+> own move. Now `take_camera` (optional, one move for the whole shot, a text
+> field in the One Shot panel) is carried into every part by
+> `take_camera_lock()`: part 1 opens on "Camera: …; one steady move at one
+> speed, never stops, never changes direction", every later part on "the same
+> continuous shot, no cut: the camera is already moving — … — and continues in
+> the same direction at the same steady speed; it does not stop, pause, restart
+> or change direction" (the first window's prompt on H3). Left blank, later
+> parts still get the generic sentence — the seam is there whether or not the
+> move was named. Sidecar `take.camera`, Load Params restores it, API.md row,
+> `test_take.py` 25. Also recorded: LTX examples render on the Q8 tier only —
+> the 40 s bar one shot at Q4 was "pretty decent, but the quality is really
+> shitty on the faces" — and the two-character experiment (bizarrotrn +
+> eltrumpo at one table, Q8 Pro, camera lock) is the first render on this code.
+
+> **🚀 2026-09-08 — v4.12.0 ships: the talking one shot.** `take_handoff=speech` as a
+> J-cut (picture cut on a talking frame, the last word mixed over the next part),
+> the lip-sync gate with two retakes that only judges parts meant to speak, the
+> join without audio drift, the two-speaker staging rules in the planner, and
+> `docs/LTX_DIALOGUE.md`. Carries 4.11.x.
+
 > **🚀 2026-09-07 — v4.11.1 ships: the fleet fixes** (chip-scaled estimates,
 > Control gate, HiDream fallback, training floor, image pre-flight frees the
 > helper). Carries 4.11.0.
