@@ -142,7 +142,9 @@ Submit multiple prompts as one batch.
 A clip longer than a single pass, on either engine. `take_seconds` is one of
 30 / 45 / 60 / 90 / 120; `beats` is a JSON list (or newline text) with one
 prompt per five seconds — a blank beat holds the previous moment, extras are
-dropped. The take overrules the engine's own length field. On BOTH engines it
+dropped. **No beats at all** (the field absent, empty, or only blank lines) means the
+`prompt` is every beat: the shot is the prompt sustained for the whole take. Before
+4.12.1 that case rendered every window as the hold sentence — a take about nothing. The take overrules the engine's own length field. On BOTH engines it
 renders as PARTS chained by last-frame handoff — `run_take_job_inner` runs one
 ordinary render per part, each starting from the last frame of the one before
 (i2v, anchored), hides the parts from the gallery and joins them into

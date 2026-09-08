@@ -625,3 +625,22 @@ def test_lipsync_gate_only_judges_parts_that_speak(tmp_path, monkeypatch):
     p.run_take_job_inner(j)
     assert seen == [f"{j['id']}-p1", f"{j['id']}-p2", f"{j['id']}-p3"]     # no -p1l: nothing was retaken
     assert j["take_lipsync"] == [None, None, None]
+
+
+def test_take_with_no_beats_is_the_prompt_in_every_window():
+    """A prompt and an empty beats box is a take OF THE PROMPT, on both engines —
+    not six windows of the hold sentence (field report, 2026-09-08)."""
+    for beats in ("", json.dumps([]), json.dumps(["", "", ""]), "\n\n"):
+        q = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "A hen skates down Broadway at night.",
+                        "take_seconds": "30", "beats": beats})["params"]
+        assert len(q["take"]["beat_prompts"]) == 6
+        assert all(b.startswith("A hen skates down Broadway at night.") for b in q["take"]["beat_prompts"]), beats
+        assert all(c.startswith("A hen skates") for c in q["h3_chain_prompts"]), beats
+        assert not any(p.TAKE_HOLD in c for c in q["h3_chain_prompts"])
+    q = p.make_job({"mode": "t2v", "engine": "ltx", "prompt": "A hen skates down Broadway at night.", "take_seconds": "30"})["params"]
+    assert all(b.startswith("A hen skates") for b in q["take"]["beat_prompts"])
+    # some beats written: the blanks still hold, as before
+    q = p.make_job({"mode": "t2v", "engine": "h3", "prompt": "A hen skates.", "take_seconds": "30",
+                    "beats": json.dumps(["she pushes off", "", "a van sweeps past"])})["params"]
+    assert q["h3_chain_prompts"][0].startswith("she pushes off") and q["h3_chain_prompts"][1].startswith(p.TAKE_HOLD)
+    assert "nothing new" not in p.TAKE_HOLD.lower()                # the hold names what continues, not what does not

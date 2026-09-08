@@ -173,6 +173,12 @@
 > shitty on the faces" — and the two-character experiment (bizarrotrn +
 > eltrumpo at one table, Q8 Pro, camera lock) is the first render on this code.
 
+> **🚀 2026-09-08 — v4.12.1 ships: a One Shot with no beats is the prompt.** A first-day
+> field report: a long prompt, an empty beats box, and every window rendered the
+> hold sentence ("Nothing new begins…") — a 30 s clip about nothing, on H3 too.
+> `make_job` now makes the prompt every beat when none is written; `TAKE_HOLD`
+> names what continues; the beats hint says when the prompt carries the shot.
+
 > **🚀 2026-09-08 — v4.12.0 ships: the talking one shot.** `take_handoff=speech` as a
 > J-cut (picture cut on a talking frame, the last word mixed over the next part),
 > the lip-sync gate with two retakes that only judges parts meant to speak, the

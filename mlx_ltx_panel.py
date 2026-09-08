@@ -15899,7 +15899,11 @@ _WEATHER_WORDS = ("rain", "drizzle", "storm", "snow", "fog", "mist", "overcast",
 TAKE_DRIFT_MAX = 0.28          # |Δ mean luma| between a part's first and last frame, 0..1
 # A blank beat means "hold": H3's runner refuses an empty window prompt, so
 # on H3 a blank beat is spelled out (LTX's windows chain holds on its own).
-TAKE_HOLD = "Nothing new begins: the settled state of the previous moment continues."
+# The old sentence was "Nothing new begins: the settled state of the previous
+# moment continues." — and H3 rendered exactly that, a clip about nothing
+# (field report, 2026-09-08: "this is what a video about 'nothing new' looks
+# like"). A hold must name what continues, not what does not.
+TAKE_HOLD = "The scene continues exactly as it was: the same subject, the same motion, the same light, carrying on."
 TAKE_DRIFT_SAMPLE_SEC = 0.25   # how far in from each end the frames are read
 
 
@@ -20855,8 +20859,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         else:
             _lock_on = f("take_light_lock", "on").strip().lower() not in ("off", "0", "false", "no")
             _lock = take_light_lock(f("prompt", "")) if _lock_on else ""
+            _beats_written = take_beats(f("beats", ""), _take["beats"])
+            if not any(_beats_written):
+                # No beat written: the PROMPT is the shot, in every window. Before
+                # this a plain prompt with an empty beats box rendered every
+                # window as the hold sentence — a 30 s take about "nothing new"
+                # (field report, 2026-09-08). Blank beats still hold, but only
+                # when the user wrote some beats and left the others blank.
+                _beats_written = [f("prompt", "").strip()] * _take["beats"]
             _take["beat_prompts"] = [(b + " " + _lock) if (b and _lock) else b
-                                     for b in take_beats(f("beats", ""), _take["beats"])]
+                                     for b in _beats_written]
             _take["light_lock"] = _lock
             _take["retake"] = f("take_retake", "on").strip().lower() not in ("off", "0", "false", "no")
             # The camera, once, for the whole shot (take_camera_lock).

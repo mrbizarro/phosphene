@@ -19,7 +19,7 @@
 
 </p>
 
-> **Current release: v4.12.0.** A One Shot with a talking character now keeps the voice on the mouth across the joins: each part hands off on a frame where the character is still mid-word, the last word carries over the next part, every spoken part is measured for lip-sync and retaken up to twice, and the joined clip no longer drifts its sound ahead of the picture. Dialogue between two characters has a recipe that works (one face on screen at a time, a shot that carries a line frames only the speaker), written up in `docs/LTX_DIALOGUE.md`. Includes 4.11.x. Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
+> **Current release: v4.12.1.** A One Shot with no beats written is a One Shot of the prompt, sustained for the whole take (it used to render the hold sentence, a clip about nothing). Includes 4.12.0: a One Shot with a talking character keeps the voice on the mouth across the joins, every spoken part is measured and retaken, the joined clip no longer drifts its sound, and two characters can talk (`docs/LTX_DIALOGUE.md`). Full notes on the [releases page](https://github.com/mrbizarro/Phosphene/releases).
 
 ## Overview
 

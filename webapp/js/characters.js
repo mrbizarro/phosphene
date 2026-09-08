@@ -2677,9 +2677,14 @@ function beatsInput() {
   if (hint && n) {
     const filled = lines.filter(Boolean).length;
     const extra = lines.length - n;
-    hint.textContent = `${n} lines of 5 s · ${filled} written`
-      + (filled < n ? ' · leave a line blank to hold on the scene' : '')
-      + (extra > 0 ? ` · ${extra} extra line${extra === 1 ? '' : 's'} will be dropped` : '');
+    // Zero written is not an error: the prompt is the whole shot. Say so,
+    // because a box that reads "0 written" next to a Generate button looks
+    // like something the user forgot (field report, 2026-09-08).
+    hint.textContent = filled === 0
+      ? `${n} lines of 5 s · none written — the prompt carries the whole shot; write a line to direct a moment`
+      : `${n} lines of 5 s · ${filled} written`
+        + (filled < n ? ' · leave a line blank to hold on the scene' : '')
+        + (extra > 0 ? ` · ${extra} extra line${extra === 1 ? '' : 's'} will be dropped` : '');
   }
 }
 let _takeRefreshSeq = 0;
